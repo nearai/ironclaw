@@ -285,14 +285,16 @@ async fn provisions_once_per_user_and_runs_ephemeral_workers_per_command() {
         .find(|call| call.args.starts_with(&["sandbox".into(), "create".into()]))
         .expect("sandbox create invocation");
     assert_pair(&create.args, "--idle-timeout-minutes", "5");
+    assert!(create.args.iter().any(|arg| arg == "--private-network"));
     let model_runs = model_container_runs(&invocations);
     assert_eq!(model_runs.len(), 2);
     for run in model_runs {
         assert!(
             run.args
-                .windows(3)
-                .any(|args| args == ["docker", "run", "--rm"])
+                .iter()
+                .any(|arg| arg == RAILWAY_MANAGED_EGRESS_WRAPPER)
         );
+        assert!(run.args.iter().any(|arg| arg == "--rm"));
         assert!(!run.args.iter().any(|arg| arg == "-d"));
         assert!(!run.args.iter().any(|arg| arg == "--detach"));
         assert!(!run.args.iter().any(|arg| arg == "--restart"));
@@ -629,7 +631,7 @@ async fn accepts_production_shell_mount_metadata_without_materializing_it() {
 }
 
 #[tokio::test]
-async fn ephemeral_worker_defaults_to_networkless_and_hardened() {
+async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
     let cli = Arc::new(FakeRailwayCli::new());
     let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
     transport
@@ -638,8 +640,9 @@ async fn ephemeral_worker_defaults_to_networkless_and_hardened() {
         .unwrap();
     let invocations = cli.invocations().await;
     let argv = &model_container_runs(&invocations)[0].args;
-    assert_pair(argv, "--network", "none");
-    assert_pair(argv, "--env", "IRONCLAW_REBORN_NETWORK_MODE=disabled");
+
+    assert!(argv.iter().any(|arg| arg == RAILWAY_MANAGED_EGRESS_WRAPPER));
+    assert!(argv.iter().any(|arg| arg == &config().proxy_image));
     assert!(argv.contains(&"--read-only".to_string()));
     assert_pair(argv, "--user", WORKER_USER);
     assert_pair(argv, "--cap-drop", "ALL");
@@ -649,24 +652,97 @@ async fn ephemeral_worker_defaults_to_networkless_and_hardened() {
     assert_pair(argv, "--cpus", "1.0");
     assert_pair(argv, "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m");
     assert_pair(argv, "--log-driver", "json-file");
-    assert!(
-        argv.windows(2)
-            .any(|pair| pair == ["--log-opt", "max-size=1m"])
-    );
-    assert!(
-        argv.windows(2)
-            .any(|pair| pair == ["--log-opt", "max-file=1"])
-    );
     assert!(argv.contains(&"--rm".to_string()));
     assert!(!argv.contains(&"-d".to_string()));
     assert!(!argv.iter().any(|arg| arg.contains("docker.sock")));
+    assert!(RAILWAY_MANAGED_EGRESS_WRAPPER.contains("proxy_url=\"http://${proxy_ip}:3128\""));
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains("chmod 644 \"$invocation_path\""),
+        "the capability-dropped proxy must be able to read attribution metadata across a host UID boundary"
+    );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER
+            .contains("\"$proxy_image\" -config /run/ironclaw-proxy/proxy.yaml")
+    );
+    assert!(RAILWAY_MANAGED_EGRESS_WRAPPER.contains("upstream=ironclaw-reborn-upstream"));
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains("docker network connect \"$upstream\" \"$proxy\"")
+    );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains("if ! drain_proxy_audit; then")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER
+                .contains("leaving prior proxy for retry\" >&2\n  exit 1"),
+        "proxy audit capture failure must abort before the prior proxy is removed"
+    );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER
+            .contains("docker logs --timestamps --since \"$cursor\" \"$proxy\"")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER.contains("awk -v c=\"$cursor\" '$1 > c'")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER
+                .contains("last_record=$(tail -n 1 \"$audit_capture\" | cut -d' ' -f1)"),
+        "repeated drains must use an exclusive record-timestamp cursor so audit entries are not duplicated"
+    );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains(
+            "proxy_matches=$(docker ps --all --filter \"name=^/${proxy}$\" --format '{{.Names}}') || return 1"
+        ) && RAILWAY_MANAGED_EGRESS_WRAPPER.contains("[ -z \"$proxy_matches\" ] || return 1"),
+        "inspect failures must be treated as absence only after a successful exact-name listing"
+    );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER
+            .contains("tail -c 4194304 \"$audit_capture\" > \"$audit_append\"")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER
+                .contains("for audit_file in \"$material\"/audit/proxy.log*; do")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER
+                .contains("if [ \"$audit_total\" -gt 268435456 ]; then"),
+        "Railway audit append must fail closed before aggregate retained evidence exceeds 256 MiB"
+    );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains(
+            "gateway_mode=$(docker network inspect --format '{{index .Options \"com.docker.network.bridge.gateway_mode_ipv4\"}}' \"$network\")"
+        ) && RAILWAY_MANAGED_EGRESS_WRAPPER
+            .contains("[ \"$internal\" != true ] || [ \"$gateway_mode\" != isolated ]"),
+        "reused Railway private networks must be validated for isolated gateway mode"
+    );
+    assert!(
+        !RAILWAY_MANAGED_EGRESS_WRAPPER.contains("exec docker run")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER.contains("worker_status=$?")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER.contains("exit \"$worker_status\""),
+        "the wrapper must regain control after the worker to drain the current invocation's audit"
+    );
+    assert!(
+        RAILWAY_MANAGED_EGRESS_WRAPPER.contains(
+            "proxy audit capture failed after command exit\" >&2\n  exit 1\nfi\nexit \"$worker_status\""
+        ),
+        "a final audit capture failure must override a successful worker status"
+    );
+    assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("network connect bridge"));
+    assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("ca_path"));
+    assert!(!RAILWAY_MANAGED_EGRESS_WRAPPER.contains("SSL_CERT_FILE"));
+}
+
+#[test]
+fn railway_proxy_config_is_fail_closed_and_has_no_management_listener() {
+    let config = config();
+    assert!(config.proxy_config_template.contains("name: allowlist"));
+    assert!(
+        config
+            .proxy_config_template
+            .contains("upstream_deny_cidrs:")
+    );
+    assert!(config.proxy_config_template.contains("mode: \"sni-only\""));
+    assert!(
+        config
+            .proxy_config_template
+            .contains("X-Ironclaw-Invocation-Id")
+    );
+    assert!(!config.proxy_config_template.contains("management:"));
 }
 
 #[tokio::test]
-async fn explicit_direct_network_omits_network_none_without_weakening_worker_hardening() {
+async fn managed_proxy_has_no_direct_network_escape_hatch() {
     let cli = Arc::new(FakeRailwayCli::new());
-    let transport =
-        RailwayPreviewSandboxTransport::with_cli(config().with_network_enabled(), cli.clone());
+    let transport = RailwayPreviewSandboxTransport::with_cli(config(), cli.clone());
     transport
         .run_command(request("tenant", "user", "true"))
         .await
@@ -674,16 +750,21 @@ async fn explicit_direct_network_omits_network_none_without_weakening_worker_har
     let invocations = cli.invocations().await;
     let argv = &model_container_runs(&invocations)[0].args;
 
-    assert!(
-        !argv.iter().any(|argument| argument == "--network"),
-        "direct mode must leave Docker's configured network enabled"
-    );
-    assert_pair(argv, "--env", "IRONCLAW_REBORN_NETWORK_MODE=direct");
-    assert!(argv.contains(&"--read-only".to_string()));
-    assert_pair(argv, "--user", WORKER_USER);
-    assert_pair(argv, "--cap-drop", "ALL");
-    assert_pair(argv, "--security-opt", "no-new-privileges:true");
-    assert!(!argv.iter().any(|arg| arg.contains("docker.sock")));
+    assert!(argv.iter().any(|arg| arg == RAILWAY_MANAGED_EGRESS_WRAPPER));
+    assert!(RAILWAY_MANAGED_EGRESS_WRAPPER.contains("docker run \\\n  --network \"$network\""));
+    for forbidden in [
+        "--network host",
+        "--network bridge",
+        "--net host",
+        "--net bridge",
+        "--add-host",
+        "network connect bridge",
+    ] {
+        assert!(
+            !RAILWAY_MANAGED_EGRESS_WRAPPER.contains(forbidden),
+            "managed proxy wrapper exposes forbidden network argument {forbidden}"
+        );
+    }
 }
 
 #[tokio::test]

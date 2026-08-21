@@ -32,6 +32,18 @@ async fn docker_worker_image(
     Some((image, serial))
 }
 
+async fn docker_worker_and_proxy_images(
+    test_name: &str,
+) -> Option<(String, tokio::sync::MutexGuard<'static, ()>)> {
+    let ready = docker_worker_image(test_name).await?;
+    let proxy_image = docker_gate::configured_sandbox_proxy_image();
+    if !docker_gate::docker_image_available(&proxy_image) {
+        eprintln!("SKIP: {test_name} — proxy image {proxy_image:?} is not present");
+        return None;
+    }
+    Some(ready)
+}
+
 async fn wait_for_host_path(path: &std::path::Path, timeout: Duration) {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
@@ -48,7 +60,8 @@ mod extra;
 
 #[tokio::test]
 async fn user_container_reuses_state_across_threads_and_isolates_other_users_and_tenants() {
-    let Some((_image, _serial)) = docker_worker_image("user container reuse test").await else {
+    let Some((_image, _serial)) = docker_worker_and_proxy_images("user container reuse test").await
+    else {
         return;
     };
     let primary = TestScope::unique("reuse");
@@ -67,7 +80,9 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
         other_tenant.clone(),
     ]);
     let transport = RebornScopedSandboxCommandTransport::connect(
-        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces")).with_network_enabled(),
+        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces"))
+            .with_managed_egress_proxy()
+            .expect("managed egress policy is valid"),
     )
     .await
     .expect("Docker transport connects");
@@ -92,9 +107,8 @@ async fn user_container_reuses_state_across_threads_and_isolates_other_users_and
                  assert forbidden_env.isdisjoint(os.environ)\n\
                  root = next(line.split() for line in Path('/proc/mounts').read_text().splitlines() if line.split()[1] == '/')\n\
                  assert 'ro' in root[3].split(',')\n\
-                 routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]\n\
-                 assert any(route[1] == '00000000' for route in routes)\n\
-                 assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'\n\
+                 assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'brokered'\n\
+                 assert os.environ['HTTPS_PROXY'].startswith('http://')\n\
                  Path('/workspace/state.txt').write_text('{workspace_marker}')\n\
                  Path('/tmp/user-state.txt').write_text('{ephemeral_marker}')\n\
                  print('LOCAL_DOCKER_SANDBOX_OK')\n\

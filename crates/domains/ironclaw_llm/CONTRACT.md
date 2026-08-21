@@ -371,11 +371,12 @@ capture-server tests in both files.
 - **System messages** are extracted into the rig-core `preamble` field (concatenated with newlines if multiple).
 - **Tool call IDs** are generated (`generated_tool_call_{seed}`) if the provider returns empty/whitespace IDs.
 - **Tool name normalization**: strips `proxy_` prefix if it matches a known tool (handles some proxy implementations).
+- **OpenAI-compatible reasoning-only responses**: rig-core 0.36 `reasoning_content` is preserved separately from assistant text by both plain and tool-capable non-streaming completions.
 - **OpenAI uses Chat Completions API** (`completions_api()`), not the newer Responses API — the Responses API path panics when tool results are sent back (rig-core doesn't thread `call_id` through `ToolCall`).
 
 ## Streaming Support
 
-`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Native streaming is enabled only where IronClaw can observe an authoritative terminal event: NEAR AI, Anthropic OAuth, and Codex Responses. Rig-backed OpenAI Chat Completions and Anthropic API-key providers retain the buffered trait fallback because rig-core 0.33 synthesizes its final response after EOF, so IronClaw cannot distinguish completion from truncation. Other unvalidated providers also remain buffered, including custom OpenAI-compatible endpoints, Gemini OAuth, GitHub Copilot, Bedrock, and Rig-backed Ollama, DeepSeek, OpenRouter, and native Gemini.
+`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Native streaming is enabled only where IronClaw can observe an authoritative terminal event: NEAR AI, Anthropic OAuth, and Codex Responses. Rig-backed OpenAI Chat Completions and Anthropic API-key providers retain the buffered trait fallback because rig-core 0.36 synthesizes its final response after EOF, so IronClaw cannot distinguish completion from truncation. Other unvalidated providers also remain buffered, including custom OpenAI-compatible endpoints, Gemini OAuth, GitHub Copilot, Bedrock, and Rig-backed Ollama, DeepSeek, OpenRouter, and native Gemini.
 
 Text deltas are advisory UI progress; the returned response remains authoritative for text, tool calls, finish reason, reasoning artifacts, and usage. Provider decorators must forward both streaming methods. Retry or failover must not append a replacement after visible partial text unless the sink advertises atomic text-replacement support. The response cache bypasses lookup for streaming calls because a stored response cannot reproduce provider deltas honestly.
 

@@ -125,7 +125,7 @@ async fn production_backend_projects_user_sandbox_shell_constraints() {
     assert_eq!(shell.mounts, CapabilityMountProfile::Ambient);
     assert_eq!(
         shell.network,
-        CapabilityNetworkProfile::SandboxDirectPreview
+        CapabilityNetworkProfile::SandboxManagedEgress
     );
 }
 

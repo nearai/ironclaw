@@ -18,6 +18,10 @@ pub(crate) use ironclaw_sandbox::sandbox_process::{
     USER_SANDBOX_LABEL_IMAGE as LABEL_IMAGE,
     USER_SANDBOX_LABEL_SECURITY_POSTURE as LABEL_SECURITY_POSTURE,
     USER_SANDBOX_LABEL_TENANT as LABEL_TENANT, USER_SANDBOX_LABEL_USER as LABEL_USER,
+    USER_SANDBOX_NETWORK_LABEL_TENANT as NETWORK_LABEL_TENANT,
+    USER_SANDBOX_NETWORK_LABEL_USER as NETWORK_LABEL_USER,
+    USER_SANDBOX_PROXY_LABEL_TENANT as PROXY_LABEL_TENANT,
+    USER_SANDBOX_PROXY_LABEL_USER as PROXY_LABEL_USER,
 };
 
 pub(crate) fn scope(tenant: &str, user: &str, project: &str, thread: &str) -> ResourceScope {
@@ -97,6 +101,7 @@ pub(crate) struct DockerCleanup {
     identities: Vec<ContainerIdentity>,
     pub(crate) container_ids: HashSet<String>,
     image_tags: Vec<String>,
+    network_ids: HashSet<String>,
 }
 
 impl DockerCleanup {
@@ -113,6 +118,7 @@ impl DockerCleanup {
                 .collect(),
             container_ids: HashSet::new(),
             image_tags: Vec::new(),
+            network_ids: HashSet::new(),
         }
     }
 
@@ -147,35 +153,32 @@ impl DockerCleanup {
 impl Drop for DockerCleanup {
     fn drop(&mut self) {
         for identity in &self.identities {
-            let tenant = format!("{LABEL_TENANT}={}", identity.tenant);
-            let user = format!("{LABEL_USER}={}", identity.user);
-            let tenant_filter = format!("label={tenant}");
-            let user_filter = format!("label={user}");
-            if let Ok(output) = Command::new("docker")
-                .args([
-                    "container",
-                    "list",
-                    "--all",
-                    "--quiet",
-                    "--filter",
-                    tenant_filter.as_str(),
-                    "--filter",
-                    user_filter.as_str(),
-                ])
-                .output()
-                && output.status.success()
-            {
-                self.container_ids.extend(
-                    String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .map(str::to_string),
-                );
-            }
+            self.container_ids.extend(docker_resource_ids(
+                &["container", "list", "--all"],
+                LABEL_TENANT,
+                LABEL_USER,
+                identity,
+            ));
+            self.container_ids.extend(docker_resource_ids(
+                &["container", "list", "--all"],
+                PROXY_LABEL_TENANT,
+                PROXY_LABEL_USER,
+                identity,
+            ));
+            self.network_ids.extend(docker_resource_ids(
+                &["network", "list"],
+                NETWORK_LABEL_TENANT,
+                NETWORK_LABEL_USER,
+                identity,
+            ));
         }
         for id in &self.container_ids {
             let _ = Command::new("docker")
                 .args(["container", "rm", "--force", id])
                 .output();
+        }
+        for id in &self.network_ids {
+            let _ = Command::new("docker").args(["network", "rm", id]).output();
         }
         for image in &self.image_tags {
             let _ = Command::new("docker")
@@ -183,6 +186,36 @@ impl Drop for DockerCleanup {
                 .output();
         }
     }
+}
+
+fn docker_resource_ids(
+    resource_args: &[&str],
+    tenant_label: &str,
+    user_label: &str,
+    identity: &ContainerIdentity,
+) -> Vec<String> {
+    let tenant_filter = format!("label={tenant_label}={}", identity.tenant);
+    let user_filter = format!("label={user_label}={}", identity.user);
+    let Ok(output) = Command::new("docker")
+        .args(resource_args)
+        .args([
+            "--quiet",
+            "--filter",
+            tenant_filter.as_str(),
+            "--filter",
+            user_filter.as_str(),
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) fn docker_command(args: &[&str]) -> std::process::Output {

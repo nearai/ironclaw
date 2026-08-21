@@ -626,9 +626,9 @@ async fn gateway_coalesces_late_system_messages_before_provider_call() {
 }
 
 #[tokio::test]
-async fn gateway_preserves_text_only_provider_reasoning() {
+async fn gateway_preserves_reasoning_only_plain_response() {
     let provider = Arc::new(RecordingLlmProvider::reply_with_reasoning(
-        "assistant response",
+        "",
         "text-only reasoning",
     ));
     let gateway = LlmProviderModelGateway::with_provider_identity(
@@ -647,6 +647,11 @@ async fn gateway_preserves_text_only_provider_reasoning() {
         response.safe_reasoning_deltas,
         vec!["text-only reasoning".to_string()]
     );
+    assert_eq!(response.safe_text_deltas, vec![String::new()]);
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert!(reply.content.is_empty());
 }
 
 #[tokio::test]
@@ -750,6 +755,43 @@ async fn gateway_cleans_legacy_tool_marker_from_tool_capable_stop_reply() {
         panic!("expected assistant reply");
     };
     assert_eq!(reply.content, "Finished.");
+}
+
+#[tokio::test]
+async fn gateway_preserves_reasoning_only_tool_capable_stop_response() {
+    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
+        content: None,
+        tool_calls: Vec::new(),
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::Stop,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: Some("tool-capable reasoning".to_string()),
+        reasoning_details: None,
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.safe_reasoning_deltas,
+        vec!["tool-capable reasoning".to_string()]
+    );
+    assert_eq!(response.safe_text_deltas, vec![String::new()]);
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert!(reply.content.is_empty());
 }
 
 #[tokio::test]

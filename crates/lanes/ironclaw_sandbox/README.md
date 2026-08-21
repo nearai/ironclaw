@@ -52,6 +52,10 @@ posture no longer matches. A per-user creation gate converges concurrent first
 calls on one container. Active-exec accounting prevents the idle sweeper from
 stopping it until all commands finish. The sweeper stops an inactive container;
 the next command adopts and restarts it.
+For managed egress, idle suspension removes the proxy and its upstream network
+but retains the stopped worker's private network. This keeps the proxy DNS
+endpoint stable and preserves container-local state on wake. Final retention
+cleanup removes the stopped container and private network together.
 
 One IronClaw process owns a local Docker workspace root at a time. The
 transport acquires a transport-local advisory owner lock on the workspace root
@@ -79,10 +83,26 @@ inner worker container for each command because Railway does not preserve inner
 mount namespaces across outer exec calls. It does not use the persistent local
 Docker-container lifecycle above.
 
-**Step 2 egress limitation:** the current sandbox deployment profiles still
-enable direct worker network access. Shell traffic does not yet pass through the
-planned authenticated per-user proxy, allowlist, or credential-injection path.
-That mediation is deferred to #7732 Step 2.
+Sandbox deployment profiles use managed per-user egress. Worker containers
+join an internal Docker network with isolated gateway mode, so the Docker host
+has no bridge endpoint on that subnet. A dedicated `ironsh/iron-proxy` sidecar
+joins that private network and a host-scoped shared
+upstream network. Its DNS and proxy listeners bind only to the private-network
+address, so other proxies on the shared network cannot use its allowlist or
+attribution identity. The proxy applies the configured hostname allowlist,
+rejects private-address destinations, preserves end-to-end TLS with SNI
+inspection, and writes a request audit trail correlated to the capability
+invocation. Before any managed proxy container is removed — idle suspension,
+retention, recycling, rollback, or orphan reconciliation — its structured
+request audit log is drained into a bounded per-proxy file under the
+managed-egress `audit/` directory, so egress evidence survives the container.
+The local runtime resolves the proxy by immutable digest and pulls
+an absent public image before startup. Workers address the proxy by its stable
+per-user container name; transient Docker subnet addresses do not enter the
+persistent worker's compatibility stamp. Railway preview sandboxes retain a
+dedicated two-network shape inside Railway's private outer sandbox. Ad hoc
+transports remain fail-closed on `--network none` unless they receive an
+explicit host broker or managed-egress binding.
 
 ## Depends on / consumed by
 
