@@ -20,6 +20,7 @@ mod prepared_context;
 mod service;
 mod stored_message;
 mod structured_finalization;
+mod subagent_result;
 mod summary_artifacts;
 mod title;
 mod tool_result_records;
@@ -82,6 +83,7 @@ pub use ironclaw_common::{AttachmentKind, AttachmentRef};
 // in the door's own vocabulary rather than reaching past it into `ironclaw_llm`.
 pub use ironclaw_llm::agent_message;
 pub use service::SessionThreadService;
+pub use subagent_result::FramedSubagentText;
 pub use tool_result_reference::{
     ProviderToolCallReferenceEnvelope, ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope,
     ToolResultSafeSummary,

@@ -79,10 +79,10 @@ use crate::{
     AppendToolResultReferenceRequest, BoundedThreadMessageSnapshot, BoundedThreadMessages,
     BoundedThreadMessagesRequest, CapabilityDisplayPreviewEnvelope, ContextMessage,
     ContextMessages, ContextWindow, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
-    EnsureThreadRequest, InboundMessageReplayMetadata, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    PublishStructuredFinalizationMessageRequest, PutStructuredFinalizationRequest,
+    EnsureThreadRequest, FramedSubagentText, InboundMessageReplayMetadata,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, PublishStructuredFinalizationMessageRequest, PutStructuredFinalizationRequest,
     PutToolResultRecordRequest, ReadStructuredFinalizationRequest, ReadToolResultRecordRequest,
     RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, SessionThreadService, StructuredFinalizationRecord, SummaryArtifact,
@@ -2189,8 +2189,10 @@ where
         let message_id = pending_idempotency
             .map(|record| record.message_id)
             .unwrap_or_else(ThreadMessageId::new);
-        let (content_text, attachments) = content.into_parts();
-        crate::contract::validate_attachment_refs(&attachments)?;
+        // Already framed by construction: `FramedSubagentText` has no
+        // constructor but `frame`, so no caller can land raw child text in a
+        // row the model reads at its system role.
+        let content_text = content.into_string();
         let now = Utc::now();
         let mut message = ThreadMessageRecord {
             message_id,
@@ -2210,7 +2212,7 @@ where
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some(content_text),
-            attachments,
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         let claim = InboundIdempotencyRecord {
@@ -4018,7 +4020,7 @@ fn subagent_acceptance_fingerprint(
         thread_id: &'a ThreadId,
         source_binding_id: &'a str,
         external_event_id: &'a str,
-        content: &'a MessageContent,
+        content: &'a FramedSubagentText,
     }
 
     let payload = serde_json::to_vec(&FingerprintInput {

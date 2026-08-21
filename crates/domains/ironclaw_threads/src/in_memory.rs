@@ -340,11 +340,10 @@ impl SessionThreadService for InMemorySessionThreadService {
 
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let message_id = ThreadMessageId::new();
-        // Validate the payload before mutating any thread state, exactly as
-        // the inbound door does: a rejected attachment must not burn a
-        // sequence or bump the activity stamp.
-        let (content_text, attachments) = request.content.into_parts();
-        crate::contract::validate_attachment_refs(&attachments)?;
+        // Already framed by construction: `FramedSubagentText` has no
+        // constructor but `frame`, so no caller can land raw child text in a
+        // row the model reads at its system role.
+        let content_text = request.content.into_string();
         let sequence = thread.next_sequence;
         thread.next_sequence += 1;
         let now = Utc::now();
@@ -367,7 +366,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             tool_result_ref: None,
             tool_result_provider_call: None,
             content: Some(content_text),
-            attachments,
+            attachments: Vec::new(),
             redaction_ref: None,
         };
         crate::contract::validate_new_message_timestamps(&message, "subagent result")?;

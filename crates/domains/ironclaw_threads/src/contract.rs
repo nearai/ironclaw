@@ -420,7 +420,18 @@ pub struct AcceptSubagentResultRequest {
     pub source_binding_id: String,
     /// `{child_run_id}` — the acceptance identity's event half.
     pub external_event_id: String,
-    pub content: MessageContent,
+    /// The child's output, already framed as untrusted.
+    ///
+    /// Not [`MessageContent`]: this row is persisted as
+    /// [`MessageKind::System`] and a system-kind row reaches the model's
+    /// *system* role, so raw child text here would promote an injected child
+    /// instruction into host authority. [`FramedSubagentText`] can only be
+    /// built by framing ([`FramedSubagentText::frame`](crate::FramedSubagentText::frame)),
+    /// which makes that state
+    /// unrepresentable instead of leaving it to every future caller to
+    /// remember. Attachments are deliberately absent — a delivered child
+    /// result is text (§2.7 `SpawnedChildRunPayload`).
+    pub content: crate::subagent_result::FramedSubagentText,
 }
 
 /// The durable row a [`AcceptSubagentResultRequest`] landed on.

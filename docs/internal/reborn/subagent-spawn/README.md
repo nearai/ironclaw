@@ -655,6 +655,15 @@ Things no slice may break; each is enforced or pinned today.
   creates and wires.
 - **Untrusted child text.** Delivered child content is framed and
   sanitized (§2.3); raw child transcripts are human-only surfaces (R7).
+  The transcript-delivery half of that is enforced by *type*, not by caller
+  convention: `AcceptSubagentResultRequest.content` is
+  `ironclaw_threads::FramedSubagentText`, whose only constructor
+  (`FramedSubagentText::frame`) applies the frame — the row lands
+  `MessageKind::System`, which reaches the model's system role
+  (`ironclaw_loop_host::model_role_for_kind` →
+  `HostManagedModelMessageRole::System` → `ChatMessage::system` → the
+  provider's top-level `system` field), so raw child text there would read as
+  host authority.
 - **Autonomous wakes are capped.** Every `activate` carries provenance; the
   streak cap refuses runaway `System`-wake chains. The `ParentAgent` budget
   ships with `subagent_extend` in R6 (§6) — until then no production path
