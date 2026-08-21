@@ -122,6 +122,22 @@ impl ProcessJournalCommitObserver for FailingProcessObserver {
     }
 }
 
+struct CountingFailingProcessObserver {
+    attempts: AtomicUsize,
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for CountingFailingProcessObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "counting-failing-process-observer"
+    }
+
+    async fn observe_process_commit(&self, _commit: ProcessJournalCommit) -> Result<(), String> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        Err("permanent observer failure".to_string())
+    }
+}
+
 struct FailOnceProcessObserver {
     attempts: AtomicUsize,
 }
@@ -2267,7 +2283,11 @@ async fn observer_replays_when_a_second_writer_leaves_a_cursor_gap() {
 }
 
 fn observer_cursor_path() -> ScopedPath {
-    let digest = blake3::hash(b"recording-process-observer").to_hex();
+    observer_cursor_path_for("recording-process-observer")
+}
+
+fn observer_cursor_path_for(observer_id: &str) -> ScopedPath {
+    let digest = blake3::hash(observer_id.as_bytes()).to_hex();
     ScopedPath::new(format!("/processes/materialized/observer-cursor/{digest}"))
         .expect("cursor path")
 }
@@ -2350,6 +2370,62 @@ async fn observer_failure_retries_until_durable_cursor_is_acknowledged() {
         .expect("subscribe after acknowledged replay");
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(after_restart.attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn permanent_observer_failure_exhausts_replay_without_acknowledging_cursor() {
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id: ProcessId::new(),
+            process_kind: ProcessKind::Internal,
+            scope: scope(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: None,
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("submit before observer registration");
+
+    let observer = Arc::new(CountingFailingProcessObserver {
+        attempts: AtomicUsize::new(0),
+    });
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe permanently failing observer");
+
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let exhausted_attempts = observer.attempts.load(Ordering::SeqCst);
+    assert_eq!(
+        exhausted_attempts, 9,
+        "the initial registration delivery plus eight replay attempts must exhaust the budget"
+    );
+    assert_eq!(
+        read_observer_cursor(
+            &filesystem,
+            &observer_cursor_path_for(observer.process_observer_id()),
+        )
+        .await,
+        None,
+        "exhausting retries must preserve the unacknowledged durable cursor"
+    );
+
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert_eq!(
+        observer.attempts.load(Ordering::SeqCst),
+        exhausted_attempts,
+        "a permanently failing observer must not keep retrying forever"
+    );
 }
 
 #[tokio::test]

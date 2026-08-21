@@ -1766,9 +1766,45 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
     )
     .await;
     register_delivery_targets(&restarted);
-    tokio::time::sleep(Duration::from_millis(300)).await;
     let restarted_surface = restarted.product_surface(None).expect("restarted surface");
-    let replayed_page = restarted_surface
+    let replayed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let replayed_page = restarted_surface
+                .query(
+                    caller.clone(),
+                    ProductSurfaceQueryRequest {
+                        view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                        input: json!({ "limit": 10 }),
+                        cursor: None,
+                        limit: None,
+                    },
+                )
+                .await
+                .expect("query Inbox while observer replay settles");
+            let replayed: ProductListNotificationsResponse = serde_json::from_value(
+                replayed_page
+                    .items
+                    .into_iter()
+                    .next()
+                    .expect("replayed notification payload"),
+            )
+            .expect("decode replayed Inbox");
+            if replayed.notifications.len() >= record_count_before_restart {
+                break replayed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("observer replay reaches the pre-restart notification count");
+    assert_eq!(
+        replayed.notifications.len(),
+        record_count_before_restart,
+        "restart/replay must not add a second record under an already-existing id"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let settled_page = restarted_surface
         .query(
             caller,
             ProductSurfaceQueryRequest {
@@ -1779,22 +1815,22 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
             },
         )
         .await
-        .expect("query Inbox after observer replay");
-    let replayed: ProductListNotificationsResponse = serde_json::from_value(
-        replayed_page
+        .expect("query Inbox after observer replay settles");
+    let settled: ProductListNotificationsResponse = serde_json::from_value(
+        settled_page
             .items
             .into_iter()
             .next()
-            .expect("replayed notification payload"),
+            .expect("settled notification payload"),
     )
-    .expect("decode replayed Inbox");
+    .expect("decode settled Inbox");
     assert_eq!(
-        replayed.notifications.len(),
+        settled.notifications.len(),
         record_count_before_restart,
-        "restart/replay must not add a second record under an already-existing id"
+        "restart/replay must remain at the pre-restart count after a settle window"
     );
     assert_eq!(
-        replayed
+        settled
             .notifications
             .iter()
             .map(|notification| notification.id.clone())
