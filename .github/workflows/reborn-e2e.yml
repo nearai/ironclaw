@@ -131,10 +131,6 @@ jobs:
     if: needs.changes.outputs.has_e2e_scope == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    env:
-      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
@@ -151,12 +147,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
+        uses: ./.github/actions/setup-rust
+        with:
+          mold: true
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -193,7 +186,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: ./.github/actions/setup-rust
 
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm

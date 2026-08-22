@@ -971,6 +971,14 @@ SCCACHE_SETUP_ACTION = ".github/actions/setup-sccache-dist/action.yml"
 SCCACHE_INSTALL_STEP = "Install sccache"
 SCCACHE_CONFIGURE_STEP = "Configure OVH sccache"
 SCCACHE_FALLBACK_STEP = "Fall back to local compilation"
+SETUP_RUST_ACTION = ".github/actions/setup-rust/action.yml"
+RUSTUP_TOOLCHAIN_PIN_STEP = "Pin the resolved toolchain for the rest of this job"
+MOLD_INSTALL_STEP = "Install mold and clang"
+MOLD_EXPORT_STEP = "Export mold RUSTFLAGS"
+# The one canonical mold invocation; a job's own env may append extra flags
+# after it (the nightly lanes add -Zcrate-attr=...), but this prefix is the
+# only place it may be written out — everywhere else must go through here.
+MOLD_RUSTFLAGS = "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
 
 # One `- name:` step heading. The scan is bounded to its own step because the
 # neighbouring `Check all-target lints` legitimately passes `--tests
@@ -1075,6 +1083,146 @@ def validate_sccache_setup_action(text: str) -> list[str]:
         )
 
     return errors
+
+
+def validate_setup_rust_action(text: str | None) -> list[str]:
+    """The setup-rust composite must actually pin RUSTUP_TOOLCHAIN and mold.
+
+    Contract: every job that installs Rust through this composite gets a
+    RUSTUP_TOOLCHAIN export naming exactly the toolchain dtolnay/rust-toolchain
+    just installed (steps.install.outputs.name — not a second, possibly wrong,
+    guess at the resolved version), and mold's install/verify/RUSTFLAGS steps
+    are gated on Linux so `mold: true` is safe to pass on any runner OS.
+    """
+    if text is None:
+        return [f"{SETUP_RUST_ACTION}: could not read the composite action file"]
+    errors: list[str] = []
+    pin_step = step_body(text, RUSTUP_TOOLCHAIN_PIN_STEP)
+    if pin_step is None:
+        errors.append(
+            f"{SETUP_RUST_ACTION}: missing the {RUSTUP_TOOLCHAIN_PIN_STEP!r} step"
+        )
+    elif "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" not in pin_step:
+        errors.append(
+            f"{SETUP_RUST_ACTION}: {RUSTUP_TOOLCHAIN_PIN_STEP!r} must export "
+            "RUSTUP_TOOLCHAIN from steps.install.outputs.name, or a job's "
+            "cargo invocations can drift from what this step actually installed"
+        )
+    for step_name in (MOLD_INSTALL_STEP, MOLD_EXPORT_STEP):
+        body = step_body(text, step_name)
+        if body is None:
+            errors.append(f"{SETUP_RUST_ACTION}: missing the {step_name!r} step")
+            continue
+        if "runner.os == 'Linux'" not in body:
+            errors.append(
+                f"{SETUP_RUST_ACTION}: {step_name!r} must gate on "
+                "runner.os == 'Linux' so mold: true is safe on any runner"
+            )
+    export_step = step_body(text, MOLD_EXPORT_STEP)
+    if export_step is not None and MOLD_RUSTFLAGS not in export_step:
+        errors.append(
+            f"{SETUP_RUST_ACTION}: {MOLD_EXPORT_STEP!r} must export the "
+            f"canonical mold RUSTFLAGS prefix '{MOLD_RUSTFLAGS}'"
+        )
+    return errors
+
+
+DTOLNAY_ACTION = "dtolnay/rust-toolchain@"
+
+
+def validate_no_direct_dtolnay_usage(workflows: dict[str, str]) -> list[str]:
+    """Every workflow must install Rust through .github/actions/setup-rust.
+
+    A negative substring check, not a per-site window scan: this is what
+    T1's earlier per-input-drift design collapsed to once every job routes
+    through one composite. Also forbids re-writing out the canonical mold
+    RUSTFLAGS prefix by hand anywhere a workflow's own env block might set
+    it — the composite is the only place that string may appear.
+    """
+    errors: list[str] = []
+    for path, text in workflows.items():
+        if DTOLNAY_ACTION in text:
+            errors.append(
+                f"{path}: calls {DTOLNAY_ACTION!r} directly — install Rust "
+                "through .github/actions/setup-rust instead"
+            )
+        if MOLD_RUSTFLAGS in text:
+            errors.append(
+                f"{path}: writes out the canonical mold RUSTFLAGS prefix "
+                f"'{MOLD_RUSTFLAGS}' directly — pass mold: true to "
+                ".github/actions/setup-rust instead, which prepends it onto "
+                "this job's existing RUSTFLAGS"
+            )
+    return errors
+
+
+SETUP_RUST_USES = "uses: ./.github/actions/setup-rust"
+JOB_ENV_RUSTFLAGS = re.compile(r"^ {6}RUSTFLAGS:", re.MULTILINE)
+
+
+def validate_no_job_env_rustflags_with_setup_rust(
+    workflows: dict[str, str],
+) -> list[str]:
+    """A job installing Rust via the composite must not set its own RUSTFLAGS.
+
+    GitHub re-applies a job-level `env:` mapping to every step of that job,
+    on top of whatever earlier steps wrote to $GITHUB_ENV. So a job-level
+    `RUSTFLAGS:` shadows the composite's export for the rest of the job and
+    silently drops the mold linker flags — a slower build, never a red
+    check, which is exactly the drift class this action exists to remove.
+    Jobs pass their extra flags through the composite's `extra_rustflags`
+    input instead, so one place composes the final value.
+    """
+
+    errors: list[str] = []
+    for path, text in workflows.items():
+        if SETUP_RUST_USES not in text:
+            continue
+        headings = list(JOB_HEADING.finditer(text))
+        for index, heading in enumerate(headings):
+            start = heading.start()
+            end = (
+                headings[index + 1].start()
+                if index + 1 < len(headings)
+                else len(text)
+            )
+            block = text[start:end]
+            if SETUP_RUST_USES not in block:
+                continue
+            if JOB_ENV_RUSTFLAGS.search(block):
+                errors.append(
+                    f"{path}: job {heading.group('name')!r} sets a job-level "
+                    "RUSTFLAGS env key while installing Rust through "
+                    ".github/actions/setup-rust — job env shadows the "
+                    "composite's $GITHUB_ENV write and drops the mold linker "
+                    "flags; pass them as the composite's extra_rustflags "
+                    "input instead"
+                )
+    return errors
+
+
+def validate_toolchain_pin_sync(root: Path = ROOT) -> list[str]:
+    """rust-toolchain.toml and the composite's default must name one version."""
+    try:
+        file_text = (root / "rust-toolchain.toml").read_text(encoding="utf-8")
+    except OSError:
+        return ["rust-toolchain.toml: missing (single source of truth for the CI toolchain)"]
+    channel_match = re.search(r'^channel = "(\d+\.\d+\.\d+)"$', file_text, re.MULTILINE)
+    if channel_match is None:
+        return ['rust-toolchain.toml: channel must be an exact stable version ("X.Y.Z")']
+    channel = channel_match.group(1)
+    try:
+        action_text = (root / SETUP_RUST_ACTION).read_text(encoding="utf-8")
+    except OSError:
+        return [f"{SETUP_RUST_ACTION}: missing"]
+    default_match = re.search(r'default:\s*"([^"]+)"', action_text)
+    if default_match is None or default_match.group(1) != channel:
+        found = default_match.group(1) if default_match else "<none>"
+        return [
+            f"{SETUP_RUST_ACTION}: toolchain input default {found!r} != "
+            f"rust-toolchain.toml channel {channel!r}"
+        ]
+    return []
 
 
 def job_body(text: str, job_name: str) -> str | None:
@@ -1791,6 +1939,14 @@ def validate_workflow_texts(
         errors.append(f"{SCCACHE_SETUP_ACTION}: could not read action: {error}")
     else:
         errors.extend(validate_sccache_setup_action(sccache_action))
+    try:
+        setup_rust_action = (root / SETUP_RUST_ACTION).read_text(encoding="utf-8")
+    except OSError:
+        setup_rust_action = None
+    errors.extend(validate_setup_rust_action(setup_rust_action))
+    errors.extend(validate_no_direct_dtolnay_usage(workflows))
+    errors.extend(validate_no_job_env_rustflags_with_setup_rust(workflows))
+    errors.extend(validate_toolchain_pin_sync(root))
     return errors
 
 

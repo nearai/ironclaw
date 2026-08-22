@@ -1,0 +1,120 @@
+name: Setup Rust
+description: >-
+  Install the Rust toolchain (pinned by default to the same version as
+  rust-toolchain.toml — see the `toolchain` input), optionally the mold
+  linker, and pin RUSTUP_TOOLCHAIN for the rest of this job so it can never
+  silently drift from what this step actually installed.
+
+# Why RUSTUP_TOOLCHAIN: dtolnay/rust-toolchain only runs `rustup default`,
+# which rust-toolchain.toml would otherwise outrank for every in-repo cargo
+# invocation (rustup precedence: RUSTUP_TOOLCHAIN env > directory override >
+# rust-toolchain.toml file > `rustup default`). Exporting the toolchain this
+# step actually resolved — via the action's own `outputs.name`, not a
+# second guess at it — makes that drift structurally impossible, for a
+# pinned stable lane and a nightly lane alike. No lane needs special-casing.
+#
+# Why one place for mold: mold's apt-install/verify/RUSTFLAGS-export used to
+# be copy-pasted per job (8 install sites, 2 "verify" blocks, 4 written-out
+# copies of the linker RUSTFLAGS string across reborn-tests.yml and
+# reborn-e2e.yml). One `mold: true` input replaces all of that.
+
+inputs:
+  toolchain:
+    description: >-
+      Toolchain spec passed through to dtolnay/rust-toolchain. Defaults to
+      the same version pinned in rust-toolchain.toml — bump both together;
+      scripts/ci/ws12_workflow_contracts.py fails the build if they drift.
+      Pass an explicit value (e.g. nightly-2025-11-01) for a lane that
+      intentionally does not track the pinned stable toolchain.
+    required: false
+    default: "1.98.0"
+  components:
+    description: Comma-separated rustup components, passed through.
+    required: false
+    default: ""
+  targets:
+    description: Comma-separated target triples, passed through.
+    required: false
+    default: ""
+  mold:
+    description: >-
+      Install mold+clang, verify the linker actually links, and export the
+      canonical mold RUSTFLAGS prefix. Linux-only (a no-op elsewhere).
+      Defaults to false: most jobs in this repo do not link with mold; the
+      handful that do pass `mold: true` explicitly.
+    required: false
+    default: "false"
+  extra_rustflags:
+    description: >-
+      Extra RUSTFLAGS this job needs (e.g. the nightly `-Zcrate-attr=...`
+      the coverage and crate-bucket lanes compile with). Pass them HERE, not
+      as a job-level `env: RUSTFLAGS:` — a job-level env key is re-applied
+      to every step and therefore shadows what this action writes to
+      $GITHUB_ENV, silently dropping the mold linker flags. Routing them
+      through this input keeps one owner for the final value;
+      scripts/ci/ws12_workflow_contracts.py fails any job that pairs
+      setup-rust with its own RUSTFLAGS env key.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust
+      id: install
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    - name: Pin the resolved toolchain for the rest of this job
+      shell: bash
+      run: |
+        echo "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" >> "$GITHUB_ENV"
+
+    - name: Install mold and clang
+      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}
+      shell: bash
+      run: |
+        scripts/ci/install-ci-apt-packages.sh clang mold
+        test -x /usr/bin/mold
+
+    - name: Verify mold linker is active
+      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}
+      shell: bash
+      run: |
+        clang_output=$(echo 'int main(void) { return 0; }' \
+          | clang --ld-path=/usr/bin/mold -Wl,--version -x c - -o /tmp/clang-mold-check 2>&1)
+        grep -qi mold <<< "$clang_output"
+        printf 'fn main() { println!("mold-link-ok"); }\n' > /tmp/mold-link-check.rs
+        rustc /tmp/mold-link-check.rs \
+          -C linker=clang \
+          -C link-arg=--ld-path=/usr/bin/mold \
+          -o /tmp/mold-link-check
+        test "$(/tmp/mold-link-check)" = "mold-link-ok"
+
+    - name: Export mold RUSTFLAGS
+      if: >-
+        ${{ (inputs.mold == 'true' && runner.os == 'Linux')
+            || inputs.extra_rustflags != '' }}
+      shell: bash
+      env:
+        MOLD_RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
+        USE_MOLD: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}
+        EXTRA_RUSTFLAGS: ${{ inputs.extra_rustflags }}
+      run: |
+        # Compose the whole value here so exactly one place owns it. Order:
+        # mold linker flags, then the job's extra flags, then anything an
+        # earlier step already exported. A job-level `env: RUSTFLAGS:` would
+        # shadow this write for every later step (job env is re-applied per
+        # step, on top of $GITHUB_ENV), which is why jobs pass their flags
+        # through `extra_rustflags` instead and ws12 enforces it.
+        flags=""
+        if [[ "${USE_MOLD}" == "true" ]]; then
+          flags="${MOLD_RUSTFLAGS}"
+        fi
+        if [[ -n "${EXTRA_RUSTFLAGS}" ]]; then
+          flags="${flags:+${flags} }${EXTRA_RUSTFLAGS}"
+        fi
+        echo "RUSTFLAGS=${flags}${RUSTFLAGS:+ ${RUSTFLAGS}}" >> "$GITHUB_ENV"

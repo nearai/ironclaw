@@ -595,7 +595,10 @@ REPO_CONFIG_TEST_OWNERS = {
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
-SHARED_REBORN_ACTION_PREFIXES = (".github/actions/setup-sccache-dist/",)
+SHARED_REBORN_ACTION_PREFIXES = (
+    ".github/actions/setup-sccache-dist/",
+    ".github/actions/setup-rust/",
+)
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -921,10 +924,12 @@ def build_plan(
             nextest_config_changed = True
             continue
         if path.startswith(SHARED_REBORN_ACTION_PREFIXES):
-            # Every `Tests (Reborn)` job installs the compiler cache through
-            # this local action. No narrow lane can exercise a change to it
-            # safely, so use the exhaustive plan just as we do for shared
-            # nextest configuration. Keep other `.github/actions/**` paths
+            # Every `Tests (Reborn)` job installs the compiler cache
+            # (setup-sccache-dist) or the Rust toolchain itself
+            # (setup-rust) through one of these local actions. No narrow
+            # lane can exercise a change to either safely, so use the
+            # exhaustive plan just as we do for shared nextest
+            # configuration. Keep other `.github/actions/**` paths
             # fail-closed until their consumers are mapped deliberately.
             shared_reborn_action_changed = True
             continue
@@ -1239,7 +1244,7 @@ def build_plan(
         )
     if shared_reborn_action_changed:
         return _full_plan(
-            "shared sccache action changed; this PR runs the exhaustive plan",
+            "shared reborn action changed; this PR runs the exhaustive plan",
             canonical_packages,
         )
 

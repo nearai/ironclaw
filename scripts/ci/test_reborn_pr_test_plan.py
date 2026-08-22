@@ -1014,13 +1014,37 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "full")
         self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
         self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
-        self.assertIn("shared sccache action changed", plan["reasons"][0])
+        self.assertIn("shared reborn action changed", plan["reasons"][0])
 
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan(
                 "pull_request",
                 [
                     ".github/actions/setup-sccache-dist/action.yml",
+                    ".github/actions/some-undecided-action/action.yml",
+                ],
+            )
+
+    def test_shared_setup_rust_action_widens_to_exhaustive_plan(self) -> None:
+        """The shared setup-rust action installs Rust for every Reborn test lane.
+
+        Regression for the T1 CI-expedite landing: every `Tests (Reborn)` job
+        now installs Rust through `.github/actions/setup-rust` instead of a
+        bare `dtolnay/rust-toolchain` step, but the planner's fail-closed arm
+        for `.github/actions/**` had no rule for it — failing `Detect Reborn
+        test scope` on the very PR that introduced the composite.
+        """
+        plan = self.plan("pull_request", [".github/actions/setup-rust/action.yml"])
+        self.assertEqual(plan["mode"], "full")
+        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
+        self.assertIn("shared reborn action changed", plan["reasons"][0])
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                [
+                    ".github/actions/setup-rust/action.yml",
                     ".github/actions/some-undecided-action/action.yml",
                 ],
             )

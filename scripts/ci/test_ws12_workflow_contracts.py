@@ -20,6 +20,7 @@ from ws12_workflow_contracts import (
     NIGHTLY_DEEP_CI_WORKFLOW,
     PLATFORM_WORKFLOW,
     REQUIRED_MARKERS,
+    SETUP_RUST_ACTION,
     STEP_HEADING,
     STRESS_WORKFLOW,
     WEBUI_FRONTEND_CRATE,
@@ -35,7 +36,11 @@ from ws12_workflow_contracts import (
     validate_e2e_scope_filters,
     validate_libsql_scripted_memory_job,
     validate_postgres_scripted_parity,
+    validate_no_direct_dtolnay_usage,
+    validate_no_job_env_rustflags_with_setup_rust,
     validate_production_lint_targets,
+    validate_setup_rust_action,
+    validate_toolchain_pin_sync,
     validate_windows_webui_install_shell,
     validate_webui_frontend_sites,
     validate_workflow_texts,
@@ -45,6 +50,180 @@ ROOT = Path(__file__).resolve().parents[2]
 SCCACHE_SETUP_ACTION = (
     ROOT / ".github" / "actions" / "setup-sccache-dist" / "action.yml"
 )
+
+
+class SetupRustActionContractTests(unittest.TestCase):
+    """The setup-rust composite must actually pin RUSTUP_TOOLCHAIN and mold."""
+
+    OK = (
+        "runs:\n"
+        "  using: composite\n"
+        "  steps:\n"
+        "    - name: Install Rust\n"
+        "      id: install\n"
+        "      uses: dtolnay/rust-toolchain@abc123 # stable\n"
+        "      with:\n"
+        "        toolchain: ${{ inputs.toolchain }}\n"
+        "    - name: Pin the resolved toolchain for the rest of this job\n"
+        "      shell: bash\n"
+        "      run: |\n"
+        '        echo "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" >> "$GITHUB_ENV"\n'
+        "    - name: Install mold and clang\n"
+        "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+        "      shell: bash\n"
+        "      run: scripts/ci/install-ci-apt-packages.sh clang mold\n"
+        "    - name: Export mold RUSTFLAGS\n"
+        "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+        "      shell: bash\n"
+        "      run: |\n"
+        '        echo "RUSTFLAGS=-C linker=clang -C link-arg=--ld-path=/usr/bin/mold ${RUSTFLAGS:-}" >> "$GITHUB_ENV"\n'
+    )
+
+    def test_missing_action_file_fails(self):
+        errors = validate_setup_rust_action(None)
+        self.assertTrue(any("could not read" in e for e in errors))
+
+    def test_missing_rustup_toolchain_pin_fails(self):
+        bad = self.OK.replace(
+            'echo "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" >> "$GITHUB_ENV"\n',
+            "",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(any("RUSTUP_TOOLCHAIN" in e for e in errors))
+
+    def test_missing_mold_linux_guard_fails(self):
+        bad = self.OK.replace(
+            "if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n      shell: bash\n      run: scripts/ci/install-ci-apt-packages.sh clang mold\n",
+            "shell: bash\n      run: scripts/ci/install-ci-apt-packages.sh clang mold\n",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(any("Linux" in e for e in errors))
+
+    def test_ok_passes(self):
+        self.assertEqual([], validate_setup_rust_action(self.OK))
+
+
+class DirectDtolnayUsageForbiddenTests(unittest.TestCase):
+    """Every workflow must install Rust through the setup-rust composite."""
+
+    def test_direct_dtolnay_call_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "      - uses: dtolnay/rust-toolchain@abc123 # stable\n"
+            )
+        }
+        errors = validate_no_direct_dtolnay_usage(workflows)
+        self.assertTrue(any("x.yml" in e for e in errors))
+
+    def test_composite_call_passes(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "      - uses: ./.github/actions/setup-rust\n"
+            )
+        }
+        self.assertEqual([], validate_no_direct_dtolnay_usage(workflows))
+
+    def test_bare_mold_rustflags_string_outside_composite_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                'RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"\n'
+            )
+        }
+        errors = validate_no_direct_dtolnay_usage(workflows)
+        self.assertTrue(any("mold" in e.lower() for e in errors))
+
+
+class JobEnvRustflagsShadowingTests(unittest.TestCase):
+    """A setup-rust job may not declare its own RUSTFLAGS env key.
+
+    Job env is re-applied to every step on top of $GITHUB_ENV, so such a key
+    silently shadows the composite's mold export — slower builds, never a
+    red check. The flags belong in the composite's extra_rustflags input.
+    """
+
+    SETUP_RUST_JOB = (
+        "  crate-tests:\n"
+        "    env:\n"
+        '      RUSTC_BOOTSTRAP: "1"\n'
+        "    steps:\n"
+        "      - uses: ./.github/actions/setup-rust\n"
+        "        with:\n"
+        "          mold: true\n"
+    )
+
+    def test_job_level_rustflags_alongside_setup_rust_fails(self):
+        shadowing = self.SETUP_RUST_JOB.replace(
+            '      RUSTC_BOOTSTRAP: "1"\n',
+            '      RUSTC_BOOTSTRAP: "1"\n      RUSTFLAGS: "-Zcrate-attr=x"\n',
+        )
+        errors = validate_no_job_env_rustflags_with_setup_rust(
+            {".github/workflows/x.yml": shadowing}
+        )
+        self.assertTrue(any("crate-tests" in e for e in errors), errors)
+
+    def test_extra_rustflags_input_passes(self):
+        passing = self.SETUP_RUST_JOB + '          extra_rustflags: "-Zcrate-attr=x"\n'
+        self.assertEqual(
+            [],
+            validate_no_job_env_rustflags_with_setup_rust(
+                {".github/workflows/x.yml": passing}
+            ),
+        )
+
+    def test_rustflags_in_a_job_that_does_not_use_setup_rust_is_allowed(self):
+        other = (
+            "  docs:\n"
+            "    env:\n"
+            '      RUSTFLAGS: "-Zcrate-attr=x"\n'
+            "    steps:\n"
+            "      - run: echo hi\n"
+        )
+        self.assertEqual(
+            [],
+            validate_no_job_env_rustflags_with_setup_rust(
+                {".github/workflows/x.yml": other}
+            ),
+        )
+
+    def test_live_workflows_are_clean(self):
+        workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.assertEqual(
+            [], validate_no_job_env_rustflags_with_setup_rust(workflows)
+        )
+
+
+class ToolchainPinSyncTests(unittest.TestCase):
+    """rust-toolchain.toml and the composite's default must name one version."""
+
+    def _root(self, toolchain_text: str | None, action_text: str | None) -> Path:
+        tmp = Path(tempfile.mkdtemp())
+        if toolchain_text is not None:
+            (tmp / "rust-toolchain.toml").write_text(toolchain_text)
+        action_dir = tmp / ".github" / "actions" / "setup-rust"
+        action_dir.mkdir(parents=True)
+        if action_text is not None:
+            (action_dir / "action.yml").write_text(action_text)
+        return tmp
+
+    ACTION_OK = (
+        "inputs:\n"
+        "  toolchain:\n"
+        "    default: \"1.98.0\"\n"
+    )
+    FILE_OK = '[toolchain]\nchannel = "1.98.0"\ncomponents = ["clippy", "rustfmt"]\n'
+
+    def test_missing_file_fails(self):
+        errors = validate_toolchain_pin_sync(self._root(None, self.ACTION_OK))
+        self.assertTrue(any("rust-toolchain.toml" in e for e in errors))
+
+    def test_mismatched_default_fails(self):
+        action = self.ACTION_OK.replace("1.98.0", "1.97.0")
+        errors = validate_toolchain_pin_sync(self._root(self.FILE_OK, action))
+        self.assertTrue(any("1.97.0" in e for e in errors))
+
+    def test_matching_default_passes(self):
+        errors = validate_toolchain_pin_sync(self._root(self.FILE_OK, self.ACTION_OK))
+        self.assertEqual([], errors)
 
 
 class SccacheSetupActionContractTests(unittest.TestCase):
