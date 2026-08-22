@@ -127,6 +127,8 @@ registerPack("de", {
   "chat.oobe.action.openThread": "View in thread",
   "chat.oobe.action.generate": "Suggest something for me",
   "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.action.refresh": "Refresh suggestions",
+  "chat.oobe.action.connect": "Connect tools",
   "chat.oobe.status.starting": "Starting\u2026",
   "chat.oobe.status.generating": "Finding things I can do for you\u2026",
   "chat.oobe.status.generateFailed": "Couldn\u2019t generate suggestions",
