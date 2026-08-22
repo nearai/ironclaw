@@ -101,10 +101,17 @@ export function SuggestedTaskSurface({
             <div className="ml-auto -my-0.5 flex shrink-0 items-center gap-1 self-start">
               <Link
                 to={EXTENSIONS_ROUTE}
+                aria-label={t("chat.oobe.action.connect")}
+                title={t("chat.oobe.action.connect")}
                 className="flex h-6 items-center gap-1 rounded-[6px] px-1.5 text-[11px] font-medium text-[var(--v2-text-faint)] transition-colors hover:text-[var(--v2-text-strong)]"
               >
                 <Icon name="plug" className="h-3.5 w-3.5" />
-                {t("chat.oobe.action.connect")}
+                {/* Label drops below `sm`: three controls plus the label wrap
+                    the heading onto a second line at 375px. The icon keeps its
+                    accessible name via aria-label/title. */}
+                <span className="hidden sm:inline">
+                  {t("chat.oobe.action.connect")}
+                </span>
               </Link>
               <button
                 type="button"

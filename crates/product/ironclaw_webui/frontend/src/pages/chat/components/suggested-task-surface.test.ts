@@ -296,6 +296,10 @@ test("the drawer offers a connect entry into the extensions surface", () => {
   );
   assert.ok(connect, "the drawer links to the connect surface client-side");
   assert.ok(JSON.stringify(tree).includes("chat.oobe.action.connect"));
+  // The header label is hidden below `sm` (three controls plus the label wrap
+  // the heading at 375px), so the accessible name has to come from the
+  // attribute rather than the text node.
+  assert.equal(connect.props["aria-label"], "chat.oobe.action.connect");
 });
 
 test("the empty CTA pairs generate with the connect entry, generate first", () => {
