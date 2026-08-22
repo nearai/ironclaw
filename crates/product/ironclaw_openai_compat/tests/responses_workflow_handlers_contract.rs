@@ -1953,7 +1953,7 @@ async fn responses_idempotency_replay_retries_tool_registration_after_partial_cr
 }
 
 #[tokio::test]
-async fn streamed_responses_with_external_tools_registers_specs_after_submit() {
+async fn streamed_responses_with_external_tools_are_rejected_before_submit() {
     let workflow = Arc::new(FakeProductSurface::new());
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(RecordingExternalToolResume::default());
@@ -1984,13 +1984,13 @@ async fn streamed_responses_with_external_tools_registers_specs_after_submit() {
         .await
         .expect("stream response");
 
-    assert_eq!(response.status(), http::StatusCode::OK);
-    assert_eq!(workflow.accepted_count(), 1);
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["param"], "tools");
+    assert_eq!(workflow.accepted_count(), 0);
     let registered = store.registered.lock().expect("registered lock");
-    assert_eq!(registered.len(), 1);
-    assert!(!registered[0].0.is_empty(), "run ref must be bound");
-    assert_eq!(registered[0].1.len(), 1);
-    assert_eq!(registered[0].1[0].name, "get_weather");
+    assert!(registered.is_empty());
     assert!(resume.resumed.lock().expect("resumed lock").is_empty());
 }
 

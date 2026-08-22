@@ -174,8 +174,11 @@ slice:
   submit a typed ProductSurface cancel action for authorized, bound response
   refs. Unauthorized and nonexistent refs stay indistinguishable at the API
   boundary.
-- Request `tools` / `tool_choice` remain unsupported in this slice, except that
-  an empty `tools: []` is treated like an omitted field.
+- Client-supplied function `tools` are supported only by the non-streaming
+  external-tool flow when composition wires its tool ports. `stream: true`
+  with a nonempty `tools` array is rejected with a stable `400` before a
+  response ref, thread, or run is created; an empty `tools: []` is treated
+  like an omitted field.
 - Client-controlled Responses input is serialized as a structured
   `openai_compat.responses_input.v1` JSON payload inside `UserMessagePayload`
   text so CR/LF-delimited role spoofing cannot create synthetic transcript

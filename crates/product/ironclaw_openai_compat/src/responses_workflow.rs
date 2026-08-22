@@ -377,11 +377,11 @@ impl OpenAiResponsesWorkflow {
         idempotency_key: Option<OpenAiCompatIdempotencyKey>,
         surface: OpenAiCompatRouteSurface,
     ) -> Result<Response, OpenAiCompatHttpError> {
+        self.validate_responses_stream_request(&request)?;
         let projection_streamer = self
             .projection_streamer
             .clone()
             .ok_or_else(OpenAiCompatHttpError::not_wired)?;
-        self.validate_responses_stream_request(&request)?;
 
         let previous_mapping = if let Some(previous_response_id) = &request.previous_response_id {
             Some(
@@ -841,6 +841,19 @@ impl OpenAiResponsesWorkflow {
         if !request.stream.unwrap_or(false) {
             return Err(OpenAiCompatHttpError::invalid_request(Some(
                 "stream".to_string(),
+            )));
+        }
+        // The stream translator only carries text and terminal status today; it
+        // cannot surface a parked external-tool call for the client to resume.
+        // Reject before reserving the response ref or submitting a turn, so an
+        // unsupported request cannot leave a run holding the thread lock.
+        if request
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty())
+        {
+            return Err(OpenAiCompatHttpError::invalid_request(Some(
+                "tools".to_string(),
             )));
         }
         if self.external_tools_enabled() {
