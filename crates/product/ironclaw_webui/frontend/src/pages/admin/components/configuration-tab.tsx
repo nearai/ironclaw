@@ -2,6 +2,7 @@
 import React from "react";
 import { Button } from "../../../design-system/button";
 import { Input } from "../../../design-system/input";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import { Panel } from "../../../design-system/primitives";
 import { clientActionId } from "../../../lib/api";
 import { useT } from "../../../lib/i18n";
@@ -14,7 +15,11 @@ export function AdminConfigurationTab() {
     return <div className="v2-skeleton h-48 rounded-xl" aria-label={t("admin.configuration.loading")} />;
   }
   if (state.query.error) {
-    return <p className="text-sm text-red-200" role="alert">{t("admin.configuration.loadFailed")}</p>;
+    return (
+      <InlineNotice tone="danger" role="alert">
+        {t("admin.configuration.loadFailed")}
+      </InlineNotice>
+    );
   }
   return (
     <section className="space-y-5" data-testid="admin-configuration-page">
@@ -169,15 +174,19 @@ export function ConfigurationGroup({ group, state }) {
             );
           })}
         </div>
-        <div className="mt-5 flex items-center gap-3">
+        <div className="mt-5 space-y-3">
           <Button type="submit" size="sm" loading={isSaving} disabled={state.isSaving}>
             {t("admin.configuration.save")}
           </Button>
-          {saved && <span className="text-sm text-signal" role="status">{t("admin.configuration.saved")}</span>}
+          {saved && (
+            <InlineNotice tone="success" role="status">
+              {t("admin.configuration.saved")}
+            </InlineNotice>
+          )}
           {state.saveError && state.savingGroupId === group.group_id && (
-            <span className="text-sm text-red-200" role="alert">
+            <InlineNotice tone="danger" role="alert">
               {t(configurationSaveErrorMessageKey(state.saveError))}
-            </span>
+            </InlineNotice>
           )}
         </div>
       </form>

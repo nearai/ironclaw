@@ -5,6 +5,7 @@ import { Panel, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { Icon } from "../../../design-system/icons";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import {
@@ -42,25 +43,23 @@ function TokenBanner({ token, onDismiss }) {
   };
 
   return (
-    <div className="rounded-xl border border-signal/30 bg-signal/10 p-4 sm:p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-iron-100">{t("admin.users.tokenCreated")}</p>
-          <p className="mt-1 text-xs text-iron-300">{t("admin.users.tokenCreatedDesc")}</p>
-          <div className="mt-3 flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-md border border-iron-700 bg-iron-800/70 px-3 py-2 font-mono text-xs text-iron-100">
-              {token}
-            </code>
-            <Button variant="secondary" onClick={handleCopy}>
-              {copied ? t("admin.users.copied") : t("admin.users.copy")}
-            </Button>
-          </div>
-        </div>
-        <button onClick={onDismiss} className="text-iron-300 hover:text-iron-100">
-          <Icon name="close" className="h-4 w-4" />
-        </button>
+    <InlineNotice
+      tone="success"
+      role="status"
+      onDismiss={onDismiss}
+      dismissLabel={t("common.dismiss")}
+    >
+      <p className="font-semibold text-iron-100">{t("admin.users.tokenCreated")}</p>
+      <p className="mt-1 text-xs text-iron-300">{t("admin.users.tokenCreatedDesc")}</p>
+      <div className="mt-3 flex items-center gap-2">
+        <code className="min-w-0 flex-1 truncate rounded-md border border-iron-700 bg-iron-800/70 px-3 py-2 font-mono text-xs text-iron-100">
+          {token}
+        </code>
+        <Button variant="secondary" onClick={handleCopy}>
+          {copied ? t("admin.users.copied") : t("admin.users.copy")}
+        </Button>
       </div>
-    </div>
+    </InlineNotice>
   );
 }
 
@@ -367,9 +366,14 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
         </div>
 
         {actionError && (
-          <p className="mb-4 text-sm text-red-200" role="alert" data-testid="admin-user-action-error">
+          <InlineNotice
+            className="mb-4"
+            tone="danger"
+            role="alert"
+            data-testid="admin-user-action-error"
+          >
             {adminUserActionErrorMessage(actionError, t)}
-          </p>
+          </InlineNotice>
         )}
 
         {filtered.length === 0

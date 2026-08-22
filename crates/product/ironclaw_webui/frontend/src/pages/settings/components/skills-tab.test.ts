@@ -32,16 +32,18 @@ function componentProps(root, component) {
   return props;
 }
 
-function createHarness() {
+function createHarness({ queryError = null, removeResult = { success: true } } = {}) {
   const hookValues = [];
   let hookCursor = 0;
   const removeCalls = [];
   function ConfirmDialog() {}
+  function InlineNotice() {}
   function SkillCard() {}
   const context = {
     Button() {},
     Card() {},
     ConfirmDialog,
+    InlineNotice,
     React: {
       useCallback: (fn) => fn,
       useState: (initial) => {
@@ -69,13 +71,13 @@ function createHarness() {
         source_kind: "installed",
         can_delete: true,
       }],
-      query: { isLoading: false, error: null },
+      query: { isLoading: false, error: queryError },
       autoActivateLearned: true,
       fetchSkillContent: () => {},
       installSkill: () => {},
       removeSkill: async (name) => {
         removeCalls.push(name);
-        return { success: true };
+        return removeResult;
       },
       updateSkill: () => {},
       setSkillAutoActivate: () => {},
@@ -91,12 +93,14 @@ function createHarness() {
   };
   const exports = runVmModuleForTest(
     "./skills-tab.tsx",
-    ["SkillsTab", "SkillGroup"],
+    ["SkillsTab", "SkillActionResult", "SkillGroup"],
     context,
     import.meta.url
   );
   return {
     ConfirmDialog,
+    InlineNotice,
+    SkillActionResult: exports.SkillActionResult,
     SkillGroup: exports.SkillGroup,
     removeCalls,
     render() {
@@ -147,3 +151,49 @@ test("SkillsTab removes a skill only after confirming the shared dialog", async 
   [dialog] = componentProps(rendered, harness.ConfirmDialog);
   assert.equal(dialog.open, false);
 });
+
+test("SkillsTab renders query failures through a danger alert notice", () => {
+  const harness = createHarness({ queryError: new Error("offline") });
+  const rendered = harness.render();
+  const [notice] = componentProps(rendered, harness.InlineNotice);
+
+  assert.ok(notice, "expected query errors to render InlineNotice");
+  assert.equal(notice.tone, "danger");
+  assert.equal(notice.role, "alert");
+  assert.equal(notice["data-testid"], "skills-load-error");
+});
+
+for (const scenario of [
+  {
+    name: "failed",
+    removeResult: { success: false, message: "remove denied" },
+    tone: "danger",
+    role: "alert",
+  },
+  {
+    name: "successful",
+    removeResult: { success: true, message: "skill removed" },
+    tone: "success",
+    role: "status",
+  },
+]) {
+  test(`SkillsTab renders a ${scenario.name} action result with semantic notice props`, async () => {
+    const harness = createHarness({ removeResult: scenario.removeResult });
+    let rendered = harness.render();
+
+    componentProps(rendered, harness.SkillGroup)[0].onRemove("markdown-helper");
+    rendered = harness.render();
+    const [dialog] = componentProps(rendered, harness.ConfirmDialog);
+    await dialog.onConfirm();
+
+    rendered = harness.render();
+    const [resultProps] = componentProps(rendered, harness.SkillActionResult);
+    assert.ok(resultProps, "expected SkillsTab to render SkillActionResult");
+    const result = harness.SkillActionResult(resultProps);
+    const [notice] = componentProps(result, harness.InlineNotice);
+    assert.ok(notice, "expected action results to render InlineNotice");
+    assert.equal(notice.tone, scenario.tone);
+    assert.equal(notice.role, scenario.role);
+    assert.equal(notice["data-testid"], "skill-action-result");
+  });
+}

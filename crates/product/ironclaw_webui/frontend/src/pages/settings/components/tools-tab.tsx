@@ -1,6 +1,7 @@
 import { Badge } from "../../../design-system/badge";
 import { Card } from "../../../design-system/card";
 import { Icon } from "../../../design-system/icons";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import {
   SelectMenu,
   type SelectMenuOption,
@@ -205,11 +206,9 @@ export function ToolsTab({
           savedKeys={savedKeys}
           isLoading={isLoading}
         />
-        <Card padding="md">
-          <p className="text-sm text-[var(--v2-danger-text)]">
-            {t("tools.failedLoad", { message: query.error.message })}
-          </p>
-        </Card>
+        <InlineNotice tone="danger" role="alert">
+          {t("tools.failedLoad", { message: query.error.message })}
+        </InlineNotice>
       </div>
     );
   }
@@ -238,12 +237,9 @@ export function ToolsTab({
 
       {permissionError &&
       (
-        <div
-          className="rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
-          role="alert"
-        >
+        <InlineNotice tone="danger" role="alert">
           {t("error.saveFailed", { message: permissionError.message })}
-        </div>
+        </InlineNotice>
       )}
 
       {searchQuery &&

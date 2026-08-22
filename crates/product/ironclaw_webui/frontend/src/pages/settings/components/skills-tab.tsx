@@ -3,6 +3,7 @@ import React from "react";
 import { Card } from "../../../design-system/card";
 import { Button } from "../../../design-system/button";
 import { ConfirmDialog } from "../../../design-system/confirm-dialog";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import { useT } from "../../../lib/i18n";
 import { useSkills } from "../hooks/useSkills";
 import { matchesSearch } from "../lib/settings-search";
@@ -121,9 +122,9 @@ export function SkillsTab({ searchQuery = "" }) {
     );
   } else if (query.error) {
     body = (
-      <Card padding="md">
-          <p className="text-sm text-[var(--v2-danger-text)]">{t("skills.failedLoad", { message: query.error.message })}</p>
-        </Card>
+      <InlineNotice tone="danger" role="alert" data-testid="skills-load-error">
+        {t("skills.failedLoad", { message: query.error.message })}
+      </InlineNotice>
     );
   } else {
     const filteredSkills = skills.filter((skill) =>
@@ -302,13 +303,12 @@ function groupSkills(skills) {
 function SkillActionResult({ error, result }) {
   if (!error && !result) return null;
   return (
-    <div
+    <InlineNotice
       data-testid="skill-action-result"
-      className={error
-        ? "rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-        : "rounded-xl border border-[color-mix(in_srgb,var(--v2-positive-text)_35%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] px-4 py-3 text-sm text-[var(--v2-positive-text)]"}
+      tone={error ? "danger" : "success"}
+      role={error ? "alert" : "status"}
     >
       {error || result}
-    </div>
+    </InlineNotice>
   );
 }
