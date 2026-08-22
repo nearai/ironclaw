@@ -32,11 +32,28 @@ The workbench, catalog, governance doc, and agent rules are **written and review
 
 ## 3. Non-negotiable invariants
 
-1. **Native M3X** — realized with React + Tailwind + `--v2-*`; never `<md-*>` Lit web components or a parallel framework.
-2. **Token-driven** — no hardcoded hex/px in components; add tokens (light **and** dark) in `app.css`.
+**These are the target state, and the bar for new and touched code from now on — not a description of the tree today.** Two of them are already met (1, 5); invariant 2 is not, and the gap is measured in §3.1 rather than asserted away. Nothing here may be relaxed to accommodate the gap; the gap is closed by the phase named against it.
+
+1. **Native M3X** — realized with React + Tailwind + `--v2-*`; never `<md-*>` Lit web components or a parallel framework. *(Holds today.)*
+2. **Token-driven** — no hardcoded hex/px in components; add tokens (light **and** dark) in `app.css`. *(**Not met today** — see §3.1. Binding on new and touched components immediately; the existing backlog migrates in Phase 3.)*
 3. **Story-per-component** — every primitive/composite/component with meaningful states has a colocated `*.stories.tsx`; changes are reviewed in Storybook and covered by `pnpm test:storybook`.
 4. **Accessibility bar** — WCAG AA contrast, preserved `aria-*`, keyboard/focus, light+dark parity.
-5. **Motion policy** — expressive motion is opt-in and `prefers-reduced-motion`-gated.
+5. **Motion policy** — expressive motion is opt-in and `prefers-reduced-motion`-gated. *(Holds today — the five standing exceptions in §2.1 are each reduced-motion-suppressed.)*
+
+### 3.1 The token invariant's current gap (`CURRENT`, measured against `origin/main`)
+
+Invariant 2 is stated as a target because the tree does not meet it. Measured under `crates/product/ironclaw_webui/frontend/src/`:
+
+| Violation | Count |
+|---|---|
+| Files using arbitrary pixel classes (`text-[13px]`, `rounded-[13px]`, …) | **93** |
+| Total occurrences of those classes | **347** |
+| Of those files, ones inside `design-system/` — the primitive layer the invariant most directly governs | **9** |
+| `.tsx` files carrying a hardcoded 6-digit hex | **4** |
+
+This includes the component family this package names as the governance pilot: `pages/chat/components/suggested-task-card.tsx` uses `rounded-[13px]`, `text-[13px]`, `text-[11px]` and `text-[10.5px]`. It is *colour*-conformant already — every colour on it is a `var(--v2-*)` reference — so the gap is dimensional, not chromatic, which is why Phase 3's type/space/radius scales are what close it.
+
+**Consequence for the pilot claim:** the OOBE card family is the pilot *subject*, not a conformant exemplar. It demonstrates the governance loop (catalogued, story-tested, judged against `DESIGN.md`); it does not yet demonstrate invariant 2, and this package does not claim it does. Migration is Phase 3 work, tracked in CHECKLIST WS3.
 
 ## 4. Alternatives considered
 

@@ -28,6 +28,7 @@
 - [ ] M3 → `--v2-*` token *values* land in `app.css` (light + dark)
 - [ ] ⚠ Token values land **before** any component restyle
 - [ ] Primitives/composites reskinned against new tokens; each story + `CssCheck` + a11y green
+- [ ] **Invariant 2 gap closed** (PROPOSAL §3.1) — the 347 arbitrary pixel classes across 93 files migrated to the type/space/radius scales and the 4 hardcoded hexes retired; `design-system/` (9 files) and the OOBE pilot card go first, and a lint or grep gate keeps the count from regrowing
 - [ ] **Safeguards (§7.0)** — fonts self-hosted with a tested system-fallback stack + `font-display: swap`; token *names* unchanged (values only); the whole phase revertable by a single PR revert with no residue
 
 ## WS4 — Agentic components & interactions (Phase 4) · [Epic #7782](README.md#epic-ownership-canonical)

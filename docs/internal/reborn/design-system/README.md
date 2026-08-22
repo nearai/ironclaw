@@ -30,7 +30,7 @@ It deliberately follows two benchmarks: the **APDD governance kit** (an *externa
 
 ## The layer map
 
-Where the design system sits in the frontend, and what governs/catalogs it. **Every node below is relative to `crates/product/ironclaw_webui/frontend/src/`**:
+Where the design system sits in the frontend, and what governs/catalogs it. **The five stacked nodes are relative to `crates/product/ironclaw_webui/frontend/src/`**; the two governance/catalog nodes are not paths under it — `DESIGN.md` lands at `crates/product/ironclaw_webui/frontend/DESIGN.md`, `.claude/rules/design-system.md` at the repository root, and the Storybook node names catalog sections rather than a directory:
 
 ```mermaid
 flowchart TD
