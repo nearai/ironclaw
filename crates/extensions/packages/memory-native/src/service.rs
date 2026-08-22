@@ -57,13 +57,30 @@ pub const MEMORY_GUIDANCE_DOC_REF: &str = "prompts/memory-guidance.md";
 /// system prompt by composition while this provider is the bound one (#7185).
 pub const MEMORY_GUIDANCE: &str = include_str!("../prompts/memory-guidance.md");
 
-/// This package's guidance asset table: every `[memory].guidance_doc` ref its
-/// own manifest may declare, paired with the text it names. The host resolves
-/// a bound provider's declared ref against exactly this table — generically,
-/// not by naming this package's constants in a host-side match — so a
-/// manifest ref this table does not carry is a manifest/asset desync, not a
-/// silently dropped guidance.
-pub const MEMORY_GUIDANCE_ASSETS: &[(&str, &str)] = &[(MEMORY_GUIDANCE_DOC_REF, MEMORY_GUIDANCE)];
+/// The `[memory].scheduled_ops` pass prompt ref this package's manifest
+/// declares, paired with the text it names.
+///
+/// The instruction for this provider's own upkeep pass: re-read the standing
+/// memory document, merge what says the same thing, resolve what has been
+/// superseded, and report. It describes THIS provider's document shape and
+/// names THIS provider's tools, so it ships beside the manifest that declares
+/// the pass rather than in the product tier that runs it — the same reason
+/// [`MEMORY_GUIDANCE_DOC_REF`] lives here.
+pub const MEMORY_CURATION_PASS_PROMPT_REF: &str = "prompts/memory_curation.md";
+
+/// Text named by [`MEMORY_CURATION_PASS_PROMPT_REF`].
+pub const MEMORY_CURATION_PASS_PROMPT: &str = include_str!("../prompts/memory_curation.md");
+
+/// This package's `[memory]` asset table: every asset ref its own manifest may
+/// declare — the `guidance_doc`, and each `scheduled_ops` pass prompt — paired
+/// with the text it names. The host resolves a bound provider's declared refs
+/// against exactly this table — generically, not by naming this package's
+/// constants in a host-side match — so a manifest ref this table does not
+/// carry is a manifest/asset desync, not a silently dropped asset.
+pub const MEMORY_ASSETS: &[(&str, &str)] = &[
+    (MEMORY_GUIDANCE_DOC_REF, MEMORY_GUIDANCE),
+    (MEMORY_CURATION_PASS_PROMPT_REF, MEMORY_CURATION_PASS_PROMPT),
+];
 
 const MEMORY_PATH: &str = "MEMORY.md";
 const HEARTBEAT_PATH: &str = "HEARTBEAT.md";

@@ -1408,12 +1408,20 @@ impl RebornIntegrationGroupBuilder {
             // C-HOOKS / E-HOOK-INFRA: per-run hook dispatcher builder factory
             // (Some only when `hook_dispatcher_builder_factory()` was set).
             hook_dispatcher_builder_factory: self.hook_dispatcher_builder_factory,
-            // E-MEMORY / #7276: the same assembly production performs — the
-            // curation hook over an `UnboundTurnService` built from this
-            // runtime's own thread service and coordinator. `None` unless
-            // `with_memory_curation_interval()` was called AND a memory
+            // E-MEMORY / #7276 / #7664: the same assembly production performs —
+            // the scheduled-op hook over an `UnboundTurnService` built from this
+            // runtime's own thread service and coordinator, driven by the BOUND
+            // PROVIDER'S OWN DECLARATION. The harness resolves that declaration
+            // (and its prompt asset) exactly as production does, from the
+            // host-bundled native provider's manifest bundle; the group's
+            // interval is the operator override of the declared cadence. `None`
+            // unless `with_memory_curation_interval()` was called AND a memory
             // provider is bound (see the gate above), so every other group is
             // behavior-identical.
+            // Opt-in matches production exactly (owner decision, 2026-08-22):
+            // a declaration ARMS upkeep, the configured interval ENABLES it. A
+            // group that binds native memory without an interval schedules
+            // nothing — the same dormant-armed state a default deployment has.
             after_turn_hook_wiring: memory_curation_interval_turns.map(|interval_turns| {
                 Box::new(
                     move |deps: ironclaw_turn_runner::runtime::AfterTurnHookDeps| {
@@ -1423,9 +1431,30 @@ impl RebornIntegrationGroupBuilder {
                             deps.thread_scope.agent_id,
                             deps.thread_scope.project_id,
                         ));
-                        ironclaw_assistant::memory_curation::after_turn_curation_dispatcher_factory(
+                        let bundle =
+                            ironclaw_host_runtime::memory_native_extension::native_memory_provider_bundle()
+                                .map_err(|error| {
+                                    format!("the native memory provider bundle must load: {error}")
+                                })?;
+                        let trigger =
+                            ironclaw_extension_contracts::memory::MemoryScheduledTrigger::AfterTurn;
+                        let declared = bundle.lifecycle.scheduled_op(trigger).ok_or_else(|| {
+                            "the native memory provider must declare an after_turn scheduled op"
+                                .to_string()
+                        })?;
+                        let prompt = bundle
+                            .scheduled_pass_prompts
+                            .iter()
+                            .find(|(candidate, _)| *candidate == trigger)
+                            .map(|(_, prompt)| prompt.as_str())
+                            .ok_or_else(|| {
+                                "the declared after_turn pass prompt must resolve".to_string()
+                            })?;
+                        ironclaw_assistant::memory_scheduled_ops::after_turn_scheduled_op_dispatcher_factory(
                             submitter,
-                            interval_turns,
+                            declared,
+                            prompt,
+                            Some(interval_turns),
                         )
                     },
                 ) as ironclaw_turn_runner::runtime::AfterTurnHookWiring

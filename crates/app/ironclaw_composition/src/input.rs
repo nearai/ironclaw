@@ -225,9 +225,11 @@ pub struct RebornHostBindings {
     /// build-time wiring can construct and register it. Selection stays in the
     /// binding policy; this only carries the chosen provider's connection.
     pub(crate) memory_provider_connection: Mem0ConnectionConfig,
-    /// Interval, in completed user turns, between periodic memory-curation
-    /// passes (issue #7276). `None` — the default, and the value every existing
-    /// deployment resolves — means the curation hook is never registered.
+    /// Deployment override of the interval, in completed user turns, between
+    /// the bound memory provider's declared after-turn upkeep passes (#7276 /
+    /// #7664). `None` — the default — means that provider's own declared
+    /// cadence applies; a provider that declares no op schedules nothing
+    /// either way.
     pub(crate) memory_curation_interval_turns: Option<NonZeroU32>,
 }
 
@@ -420,19 +422,18 @@ impl RebornHostBindings {
         self
     }
 
-    /// Enable periodic memory curation at the given interval, in completed
-    /// turns (issue #7276). Resolved by the CLI from
-    /// `[memory].curation_interval_turns`; leaving it unset keeps the hook
-    /// unregistered, which is what every deployment that predates the key
-    /// gets. Curation is disabled by NOT calling this, never by passing a
-    /// sentinel interval — which `NonZeroU32` makes unrepresentable rather
-    /// than merely discouraged.
+    /// Override the bound memory provider's DECLARED upkeep cadence with this
+    /// interval, in completed turns (#7276 / #7664). Resolved by the CLI from
+    /// `[memory].curation_interval_turns`; leaving it unset lets the
+    /// provider's declaration decide. Never a sentinel interval — `NonZeroU32`
+    /// makes that unrepresentable rather than merely discouraged, and the
+    /// runtime build refuses an override below the contract's cost floor.
     pub fn with_memory_curation_interval_turns(mut self, interval_turns: NonZeroU32) -> Self {
         self.memory_curation_interval_turns = Some(interval_turns);
         self
     }
 
-    /// The configured curation interval, if any. Read once at runtime build,
+    /// The configured interval override, if any. Read once at runtime build,
     /// before this input is consumed by the substrate assembly.
     pub(crate) fn memory_curation_interval_turns(&self) -> Option<NonZeroU32> {
         self.memory_curation_interval_turns
