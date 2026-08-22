@@ -1,6 +1,6 @@
 # IronClaw WebUI Design System — Storybook + Catalog (Executive Overview)
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phase 1) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phases 2–3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** three Epics — see [Epic ownership](#epic-ownership-canonical) below
 
 **Documents:** [PROPOSAL.md](PROPOSAL.md) — the case, decisions & dependencies · [PLAN.md](PLAN.md) — phased execution · [CHECKLIST.md](CHECKLIST.md) — definition of done · [explorer.html](explorer.html) — self-contained interactive review aid (schematics + phase map; also published as a [claude.ai artifact](https://claude.ai/code/artifact/371a2622-054c-404a-8992-f110e1fa3d5a))
 

@@ -1,12 +1,12 @@
 # Proposed: Storybook + Design-System Catalog for the IronClaw WebUI
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phase 1) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phases 2–3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5) · **Benchmarks:** the APDD governance kit (external, not vendored — evaluated in-repo at [`docs/internal/apdd-governance-kit/`](https://github.com/nearai/ironclaw/pull/7255), PR #7255, *not yet on `main`*) · [`docs/internal/reborn/target-architecture/`](../target-architecture/PROPOSAL.md) (PR #6918)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** three Epics — [ownership table](README.md#epic-ownership-canonical) · **Benchmarks:** the APDD governance kit (external, not vendored — evaluated in-repo at [`docs/internal/apdd-governance-kit/`](https://github.com/nearai/ironclaw/pull/7255), PR #7255, *not yet on `main`*) · [`docs/internal/reborn/target-architecture/`](../target-architecture/PROPOSAL.md) (PR #6918)
 
 ## 1. Executive decision
 
 Adopt a **governed, catalogued design system** for the IronClaw WebUI and evolve it toward an **AI/agentic-first UX** in five predefined phases. Realize the design language — **Material 3 Expressive (M3X)** — **natively** with the existing React 19 + Tailwind v4 primitives; do **not** adopt Material Web components or a parallel/third-party design-system framework. `DESIGN.md` and the Storybook catalog are the source of truth; the token architecture (`data-theme` + `--v2-*`) is kept.
 
-Phases 1–2 are in flight (PR #7750 in review; the Phase-2 changeset preserved on #7042). Phase 1 is tracked by Epic #7038; Phases 2–3 by #7781 (superseding the closed #7733); Phases 4–5 by #7782. This proposal freezes the framing, records the decisions, and — most importantly — **names the dependencies of Phases 3–5 with a proposed implementation for each** (§7).
+Phases 1–2 are in flight (PR #7750 in review; the Phase-2 changeset preserved on #7042). Ownership of each phase is the [canonical table in README.md](README.md#epic-ownership-canonical). This proposal freezes the framing, records the decisions, and — most importantly — **names the dependencies of Phases 3–5 with a proposed implementation for each** (§7).
 
 ## 2. Current-state evidence
 
@@ -186,4 +186,4 @@ Every path below is stated with where it actually resolves, so nothing in this p
 - Phase 1 artifacts (Storybook config + ~33 stories under `crates/product/ironclaw_webui/frontend/`) — [PR #7750](https://github.com/nearai/ironclaw/pull/7750), open.
 - Phase 2 artifacts — `crates/product/ironclaw_webui/frontend/DESIGN.md`, `.claude/rules/design-system.md`, and a `crates/product/ironclaw_webui/frontend/src/design-system/README.md` pointer — [issue #7042](https://github.com/nearai/ironclaw/issues/7042); changeset preserved from closed #7043, fresh PR to follow #7750.
 
-**Tracking:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phase 1), [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phases 2–3), [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5); this package is PR #7257. Closed and superseded: PRs #7039, #7043; Epic #7733 (→ #7781).
+**Tracking:** three Epics — the phase→Epic mapping is the [canonical table in README.md](README.md#epic-ownership-canonical) and is not restated here. This package is PR #7257. Closed and superseded: PRs #7039, #7043; Epic #7733 (→ #7781).

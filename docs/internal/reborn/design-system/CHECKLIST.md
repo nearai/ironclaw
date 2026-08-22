@@ -1,6 +1,6 @@
 # Design System — Completion Checklist
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phase 1) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phases 2–3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** three Epics — [ownership table](README.md#epic-ownership-canonical)
 
 **Definition of done:** when every box below is checked, the governed, agentic-first WebUI design system is fully realized. A checked box means **landed on `main`**, with the landing PR named inline. `⚠` marks a blocking prerequisite; `[decision]` marks an item gated on a named human call.
 

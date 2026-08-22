@@ -1,6 +1,6 @@
 # Design System — Execution Plan (Phased)
 
-**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** Epics [#7038](https://github.com/nearai/ironclaw/issues/7038) (Phase 1) · [#7781](https://github.com/nearai/ironclaw/issues/7781) (Phases 2–3) · [#7782](https://github.com/nearai/ironclaw/issues/7782) (Phases 4–5)
+**Status:** Proposal, under review · **Authored against:** `origin/main` @ `d3791e0f8` · **Tracks:** three Epics — [ownership table](README.md#epic-ownership-canonical)
 
 This is the **when and how**; [CHECKLIST.md](CHECKLIST.md) is the **what** (definition of done); [PROPOSAL.md](PROPOSAL.md) is the frozen decision record. The five phases are **predefined** and executed in order; each phase heading links its owning Epic into the canonical table in [README.md](README.md#epic-ownership-canonical). Nothing here is sacred except the ordering constraints marked **⚠**.
 
@@ -18,18 +18,11 @@ This is the **when and how**; [CHECKLIST.md](CHECKLIST.md) is the **what** (defi
 ```mermaid
 flowchart LR
   P1["Phase 1 · Storybook · #7750"] --> P2["Phase 2 · DESIGN.md · #7042"] --> P3["Phase 3 · Theme & reskin"] --> P4["Phase 4 · Interactions"] --> P5["Phase 5 · IA"]
-  subgraph E1["Epic #7038"]
-    P1
-  end
-  subgraph E2["Epic #7781"]
-    P2
-    P3
-  end
-  subgraph E3["Epic #7782"]
-    P4
-    P5
-  end
 ```
+
+*The diagram shows sequencing only. Which Epic carries which phase is in the
+[canonical table](README.md#epic-ownership-canonical) — it is deliberately not
+redrawn here, so the grouping cannot drift out of step with it.*
 
 ## Phase 1 — Storybook integration (PR #7750 — in review) · [Epic #7038](README.md#epic-ownership-canonical)
 *Stand up the workbench + catalog.* Storybook 10 (react-vite, pnpm), wired to `app.css` + light/dark toolbar; ~33 stories in five categories; vitest split (`pnpm test` node-only, `pnpm test:storybook` in Chromium); addon-mcp.
@@ -74,5 +67,5 @@ flowchart LR
 ## Coordination notes
 - This is a **docs-only** PR; it changes no code. It references the open Phase-1/2 PRs by number, and adds one cross-link to the OOBE package (PROPOSAL §9).
 - **Design governance has one owner: this package** (PROPOSAL §9). OOBE's D-F6 contributes its card family as a pilot; it does not stand up a second `DESIGN.md`, token set, or workbench.
-- Each phase is tracked under [its owning Epic](README.md#epic-ownership-canonical), with per-phase sub-issues (e.g. #7042) spun up as work starts. Epic #7733 covered the same Phases 2–3 scope and is closed as superseded by #7781.
+- Each phase is tracked under [its owning Epic](README.md#epic-ownership-canonical), with per-phase sub-issues (e.g. #7042) spun up as work starts. The closed Epic #7733 is recorded as superseded in that table.
 - The APDD-kit evaluation (`docs/internal/apdd-governance-kit/`, [PR #7255](https://github.com/nearai/ironclaw/pull/7255) — open, not yet on `main`) is a sibling initiative that motivated this design-governance track; the two do not depend on each other.
