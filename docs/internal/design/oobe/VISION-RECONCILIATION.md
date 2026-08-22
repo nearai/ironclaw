@@ -202,8 +202,14 @@ Consequences:
    "Suggested for you · approve to run, or tweak first" header, docked close to the composer.
    *Refinement not done:* true border-merge flush with the composer (kept as a rounded frame
    with a tight gap to avoid touching the shipped `ChatInput`).
+10. ✅ **Refresh + connect entry** (issue #7815, F1/F2) — the drawer header carries a refresh
+   control (re-runs `generate`; disabled while one is in flight) and a `/extensions` entry,
+   and the empty/failed CTA rows pair generate/retry with the same connect entry. Refresh is
+   honestly a refresh, not "more": the backend generation is replace-only until it gains an
+   additive top-up transition. This is the route *entry* only — slice 8's batched-OAuth panel
+   is still not built, and connect stays decoupled from the cards (§3.1).
 
-Slices 1–6 and 9 are **built** on #6994. The remaining Vision follow-ups (not built), tracked
+Slices 1–6, 9, and 10 are **built** (1–6/9 on #6994). The remaining Vision follow-ups (not built), tracked
 here for the design review:
 
 - **Live card status (slice 7)** — needs the bound-run event subscription.
