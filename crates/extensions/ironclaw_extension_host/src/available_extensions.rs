@@ -1580,6 +1580,23 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
     }
 
     #[test]
+    fn bundled_xquik_extension_matches_x_data_search_terms() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+
+        for query in ["xquik", "twitter", "tweet"] {
+            let ids = catalog
+                .search(query)
+                .map(|package| package.package_ref.id.as_str().to_string())
+                .collect::<BTreeSet<_>>();
+
+            assert!(
+                ids.contains("xquik"),
+                "{query} should discover the Xquik hosted-MCP package; got {ids:?}"
+            );
+        }
+    }
+
+    #[test]
     fn admin_configuration_projection_includes_uninstalled_bundled_packages() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let uses = catalog.admin_configuration_uses();
