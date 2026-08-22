@@ -59,8 +59,8 @@ One card set exists per `(tenant_id, user_id)`; a new generation **clears the pr
 Cards are bounded to **1–5** items (`schemas/suggestions.output.v1.json`), with
 `title` ≤ 80, `description` ≤ 240, `suggested_prompt` ≤ 2000 characters.
 
-The routes are **not** feature-flagged server-side, so the frontend `oobe_suggestions`
-flag remains the rollout gate.
+The routes and the frontend suggestion surface are **always on**. The surface remains
+lazy-loaded so its card and icon code does not add to the eager `/chat` bundle.
 
 ---
 
@@ -174,7 +174,7 @@ Consequences:
 |---|---|---|
 | `SuggestedTaskCard` (presentational) | `DEMO_TASKS` → `GET /suggestions` + generate/poll | `resolveConnectExtension` + tests |
 | `SuggestedTaskSurface` shell | Approve → `POST /{id}/start` → `onSelectThread(thread_id)` | `unconnected` card state |
-| `oobe_suggestions` flag (routes are unflagged) | Dismiss → `DELETE /{id}` | `ConfigureModal` wiring *from the card* |
+| Always-on suggestion surface (routes are unflagged) | Dismiss → `DELETE /{id}` | `ConfigureModal` wiring *from the card* |
 | Lazy-load + bundle discipline | `SuggestedTask` type → `RebornSuggestion` shape | `chat.oobe.connectUnavailable` (11 locales) |
 | `NearProcessIndicator` render-prop | Card status derived from the bound `run_id` | `connectedIds` state |
 | vm-harness test conventions | | `approvePrompt` / `automationPrompt` / `app` fields |

@@ -1,12 +1,10 @@
 import React from "react";
-import { useOobeSuggestionsEnabled } from "../../../app/auth";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { ChatInput } from "./chat-input";
 import { NearProcessIndicator } from "./near-process-indicator";
 
-// The OOBE suggestion surface is gated off by default (see
-// suggested-task-surface.tsx), and even when it renders, its cards/icons/
+// The OOBE suggestion surface is always available, but its cards/icons/
 // NearProcessIndicator import weight has no business padding every /chat
 // page load — so it loads as its own chunk instead, the same pattern
 // message-bubble.tsx uses for CommandResult/AttachmentPreviewModal.
@@ -52,14 +50,13 @@ export function EmptyState({
   onCancel,
 }) {
   const t = useT();
-  const oobeSuggestionsEnabled = useOobeSuggestionsEnabled();
   // Section-level drawer visibility (distinct from per-card dismiss, which the
   // surface owns): "open" shows the drawer; "dismissed" hides it and shows the
   // in-composer "Show suggestions" pill to restore it; "gone" hides both.
   const [drawerState, setDrawerState] = React.useState<
     "open" | "dismissed" | "gone"
   >("open");
-  const showRestorePill = oobeSuggestionsEnabled && drawerState === "dismissed";
+  const showRestorePill = drawerState === "dismissed";
   const suggestions = [
     {
       icon: "tool",
@@ -95,18 +92,16 @@ export function EmptyState({
         </p>
       </div>
 
-      {oobeSuggestionsEnabled && (
-        <React.Suspense fallback={null}>
-          <SuggestedTaskSurface
-            onOpenThread={onOpenThread}
-            renderRunningIndicator={renderRunningIndicator}
-            hidden={drawerState !== "open"}
-            onClose={() => setDrawerState("dismissed")}
-          />
-        </React.Suspense>
-      )}
+      <React.Suspense fallback={null}>
+        <SuggestedTaskSurface
+          onOpenThread={onOpenThread}
+          renderRunningIndicator={renderRunningIndicator}
+          hidden={drawerState !== "open"}
+          onClose={() => setDrawerState("dismissed")}
+        />
+      </React.Suspense>
 
-      <div className={`relative ${oobeSuggestionsEnabled ? "mt-3" : "mt-9"} w-full max-w-5xl`}>
+      <div className="relative mt-3 w-full max-w-5xl">
         <ChatInput
           onSend={onSend}
           commands={commands}
