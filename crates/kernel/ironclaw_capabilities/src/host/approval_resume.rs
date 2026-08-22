@@ -185,7 +185,7 @@ where
             });
         }
 
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+        let Some(base_descriptor) = self.registry.get_capability(&request.capability_id) else {
             fail_invocation_if_configured(
                 Some(invocation_state),
                 &scope,
@@ -196,6 +196,22 @@ where
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id,
             });
+        };
+        let descriptor = match self
+            .enrich_invocation_descriptor(base_descriptor, &request.capability_id, &request.input)
+            .await
+        {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                fail_invocation_if_configured(
+                    Some(invocation_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
+                return Err(error);
+            }
         };
 
         let Some(lease) = matching_approval_lease(
@@ -237,7 +253,7 @@ where
             estimate: request.estimate,
             input: request.input,
             authorized_context,
-            descriptor,
+            descriptor: &descriptor,
             lease_state: ResumedLeaseState::PendingClaim(PendingClaimAfterAuth {
                 leases: capability_leases,
                 grant_id,

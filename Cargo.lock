@@ -5086,6 +5086,7 @@ dependencies = [
  "libc",
  "rcgen",
  "rust_decimal_macros",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",

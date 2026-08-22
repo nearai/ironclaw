@@ -1550,6 +1550,38 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_webui/frontend/src/i18n/zh-CN.ts",
         "telegram",
     ),
+    // Issue #7732 deliberate carve-out: `builtin.shell` recognizes only the
+    // GitHub CLI so credentials stay behind the existing authorization and
+    // one-shot obligation path. Do not generalize this into a CLI credential
+    // framework; delete these entries if the package gains an owned surface.
+    (
+        "crates/kernel/ironclaw_capabilities/src/host/authorize.rs",
+        "api.github.com",
+    ),
+    (
+        "crates/kernel/ironclaw_capabilities/src/host/authorize.rs",
+        "github",
+    ),
+    (
+        "crates/kernel/ironclaw_host_runtime/src/first_party_tools/shell.rs",
+        "github",
+    ),
+    (
+        "crates/kernel/ironclaw_host_runtime/src/first_party_tools/shell_core.rs",
+        "github",
+    ),
+    (
+        "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
+        "api.github.com",
+    ),
+    (
+        "crates/kernel/ironclaw_host_runtime/src/process_port.rs",
+        "github",
+    ),
+    (
+        "crates/kernel/ironclaw_host_runtime/src/services.rs",
+        "github",
+    ),
 ];
 
 /// WS0 baseline for the extension-specificity allowlist (target-architecture
@@ -1695,7 +1727,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // named doc-comment examples on the retired `DispatchError::Wasm` variant;
 // deleting the variant deleted the examples, so the now-stale allowlist
 // entries were deleted too.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 110;
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 117;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///

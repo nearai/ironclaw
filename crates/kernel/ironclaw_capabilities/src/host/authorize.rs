@@ -8,7 +8,9 @@
 use ironclaw_host_api::{
     Timestamp,
     authorized::{AuthorizeResult, Authorized, CapabilityAuthorizer},
-    capability::{CapabilityDescriptor, PermissionMode},
+    capability::{
+        CapabilityDescriptor, EffectKind, PermissionMode, RuntimeCredentialRequirementSource,
+    },
     decision::{Decision, DenyReason},
     dispatch::{CapabilityDispatcher, DispatchAuthRequirement},
     ids::{ActivityId, CapabilityId, DenyRef, GateRef},
@@ -16,6 +18,7 @@ use ironclaw_host_api::{
     lane::RuntimeLane,
     resolution::{Blocked, GateWaypoint},
     resource::ResourceEstimate,
+    runtime_policy::ProcessBackendKind,
     scope::ExecutionContext,
 };
 use ironclaw_processes::ProcessInvocationStart;
@@ -66,6 +69,79 @@ where
                 error,
             )),
         }
+    }
+    pub(super) async fn enrich_invocation_descriptor(
+        &self,
+        descriptor: &CapabilityDescriptor,
+        capability_id: &CapabilityId,
+        input: &serde_json::Value,
+    ) -> Result<CapabilityDescriptor, CapabilityInvocationError> {
+        let command = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let direct_github_command = command
+            .split_whitespace()
+            .next()
+            .is_some_and(|executable| executable.rsplit('/').next() == Some("gh"));
+        if self.runtime_policy.process_backend != ProcessBackendKind::UserSandbox
+            || capability_id.as_str() != "builtin.shell"
+            || !direct_github_command
+        {
+            return Ok(descriptor.clone());
+        }
+
+        let mut matched = None;
+        for declared in self
+            .registry
+            .capabilities()
+            .flat_map(|candidate| candidate.runtime_credentials.iter())
+        {
+            let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } =
+                &declared.source
+            else {
+                continue;
+            };
+            if declared.handle.as_str() != "github_runtime_token"
+                || provider.as_str() != "github"
+                || !declared
+                    .audience
+                    .host_pattern
+                    .eq_ignore_ascii_case("api.github.com")
+                || !declared.required
+            {
+                continue;
+            }
+            if matched
+                .as_ref()
+                .is_some_and(|existing| existing != declared)
+            {
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::PolicyDenied,
+                    detail: Some(
+                        "GitHub runtime credential has conflicting api.github.com declarations"
+                            .to_string(),
+                    ),
+                });
+            }
+            matched = Some(declared.clone());
+        }
+        let credential = matched.ok_or_else(|| CapabilityInvocationError::AuthorizationDenied {
+            capability: capability_id.clone(),
+            reason: DenyReason::PolicyDenied,
+            detail: Some(
+                "GitHub CLI requires the installed GitHub credential declaration".to_string(),
+            ),
+        })?;
+
+        let mut descriptor = descriptor.clone();
+        if !descriptor.effects.contains(&EffectKind::UseSecret) {
+            descriptor.effects.push(EffectKind::UseSecret);
+        }
+        descriptor.runtime_credentials.push(credential);
+        Ok(descriptor)
     }
 
     /// Persistent-approval fold (§5.2.7/§5.3.2): a prior scoped approval may
@@ -194,12 +270,15 @@ where
         // fingerprint above nor `invocation_state.start` below needs the descriptor, so
         // hoisting this lookup is safe; everything from `start` onward keeps its
         // original order (the credential pre-flight still runs after `start`).
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+        let Some(base_descriptor) = self.registry.get_capability(&request.capability_id) else {
             debug!("capability invocation failed before authorization: unknown capability");
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id.clone(),
             });
         };
+        let descriptor = self
+            .enrich_invocation_descriptor(base_descriptor, &request.capability_id, &request.input)
+            .await?;
 
         if let Some(invocation_state) = self.invocation_state {
             invocation_state
@@ -233,7 +312,7 @@ where
                 return Err(error);
             }
         };
-        if let Err(error) = self.enforce_runtime_policy(descriptor) {
+        if let Err(error) = self.enforce_runtime_policy(&descriptor) {
             apply_invocation_state_transition_if_configured(
                 self.invocation_state,
                 &scope,
@@ -287,7 +366,7 @@ where
         let frozen_deadline = self
             .apply_persistent_approval(
                 &mut authorize_context,
-                descriptor,
+                &descriptor,
                 &request.capability_id,
                 &request.estimate,
                 &trust_decision,
@@ -299,7 +378,7 @@ where
             .authorizer
             .authorize_dispatch_with_trust(
                 &authorize_context,
-                descriptor,
+                &descriptor,
                 &request.estimate,
                 &trust_decision,
             )
@@ -347,7 +426,7 @@ where
                     &request.capability_id,
                     &request.estimate,
                     &request.input,
-                    descriptor,
+                    &descriptor,
                     &obligation_outcome,
                     frozen_deadline,
                 );

@@ -330,6 +330,20 @@ fn split_shell_segments(cmd: &str) -> Vec<&str> {
     segments
 }
 
+pub(super) fn github_direct_argv(command: &str) -> Option<Vec<String>> {
+    let segments = split_shell_segments(command);
+    if segments.len() != 1
+        || !redirect_targets(command, '<').is_empty()
+        || !redirect_targets(command, '>').is_empty()
+    {
+        return None;
+    }
+    let argv = shell_words(command);
+    let executable = argv.first()?;
+    let executable = executable.rsplit('/').next().unwrap_or(executable);
+    executable.eq_ignore_ascii_case("gh").then_some(argv)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellQuote {
     None,
@@ -478,6 +492,21 @@ fn expand_tilde(token: &str) -> PathBuf {
         return home.join(rest);
     }
     PathBuf::from(token)
+}
+#[test]
+fn github_direct_argv_preserves_arguments_without_shell_interpretation() {
+    assert_eq!(
+        github_direct_argv("gh api repos/nearai/ironclaw --jq '.name'"),
+        Some(vec![
+            "gh".to_string(),
+            "api".to_string(),
+            "repos/nearai/ironclaw".to_string(),
+            "--jq".to_string(),
+            ".name".to_string(),
+        ])
+    );
+    assert!(github_direct_argv("gh pr list | cat").is_none());
+    assert!(github_direct_argv("echo gh pr list").is_none());
 }
 
 fn truncate_for_error(s: &str) -> String {

@@ -27,9 +27,9 @@ the point of the crate.
   credentialed-run phases stay separate.
 - Execution machinery: `RebornScopedSandboxCommandTransport` (implements the
   `ironclaw_host_api::process::SandboxCommandTransport` port — contracts
-  vocabulary this lane implements and the kernel consumes),
-  `RebornSandboxConfig`, the broker/firewall/CA/identity types
-  (`sandbox_process`).
+  vocabulary this lane implements and the kernel consumes), direct executable
+  plus argument-vector dispatch, invocation cancellation, `RebornSandboxConfig`,
+  and the broker/firewall/CA/identity types (`sandbox_process`).
 - Script lane: `ScriptRuntime`, `ScriptExecutor`/`ScriptBackend`,
   `DockerScriptBackend`, `ScriptRuntimeHttpAdapter`, normalized
   request/result/error types (`script`).
@@ -122,9 +122,11 @@ explicit host broker or managed-egress binding.
 
 - **Typed plans only:** no raw container flags, host paths, environment
   inheritance, or secret material through plan input (`plan`/`validation`).
-- **Credential firewall as a staging chokepoint:** an invocation consumes only
-  the credential it was already entitled to; consumers see yes/no, never
-  material. The per-tenant CA root key never touches disk and is never
+- **Credential firewall as a staging chokepoint:** the capability kernel derives
+  each invocation's credential authority from active extension declarations,
+  then stages only handle-bound material for the sandbox transport. The command
+  receives a placeholder; only the private proxy can replace it for the approved
+  host and header. The per-tenant CA root key never touches disk and is never
   serialized to a caller.
 - **Fail closed on missing containment:** a served multi-user deployment must
   never resolve to an unsandboxed host-process backend; a missing backend

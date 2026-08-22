@@ -14,7 +14,7 @@ use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityRequest, process_output::saved_output_filename,
 };
 use ironclaw_host_api::process::{
-    CommandExecutionRequest, RuntimeProcessError, SavedCommandOutput,
+    CommandExecutionRequest, DirectSandboxCommandRequest, RuntimeProcessError, SavedCommandOutput,
     SavedCommandOutputSanitization,
 };
 
@@ -78,19 +78,45 @@ pub(super) async fn dispatch(
         ));
     }
     shell_core::validate_command(&parsed.command, false).map_err(shell_error)?;
-    let output = request
+    let direct_argv = request
         .services
         .process
-        .run_command(CommandExecutionRequest {
-            scope: request.scope.clone(),
-            mounts: request.mounts.clone(),
-            command: parsed.command,
-            workdir: parsed.workdir,
-            timeout_secs: parsed.timeout_secs,
-            extra_env: parsed.extra_env,
-        })
-        .await
-        .map_err(process_error)?;
+        .supports_credentialed_direct_command()
+        .then(|| shell_core::github_direct_argv(&parsed.command))
+        .flatten();
+    let output = if let Some(mut argv) = direct_argv {
+        let executable = argv.remove(0);
+        request
+            .services
+            .process
+            .run_credentialed_direct_command(
+                DirectSandboxCommandRequest {
+                    scope: request.scope.clone(),
+                    mounts: request.mounts.clone(),
+                    executable,
+                    args: argv,
+                    workdir: parsed.workdir,
+                    timeout_secs: parsed.timeout_secs,
+                    extra_env: parsed.extra_env,
+                },
+                Vec::new(),
+            )
+            .await
+    } else {
+        request
+            .services
+            .process
+            .run_command(CommandExecutionRequest {
+                scope: request.scope.clone(),
+                mounts: request.mounts.clone(),
+                command: parsed.command,
+                workdir: parsed.workdir,
+                timeout_secs: parsed.timeout_secs,
+                extra_env: parsed.extra_env,
+            })
+            .await
+    }
+    .map_err(process_error)?;
 
     let saved_output_path =
         publish_saved_output_for_file_read(request, output.saved_output.as_ref()).await?;

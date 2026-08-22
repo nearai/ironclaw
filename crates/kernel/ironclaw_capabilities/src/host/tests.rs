@@ -307,7 +307,42 @@ input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
 "#;
 
-fn echo_registry() -> ExtensionRegistry {
+const GITHUB_MANIFEST_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "github"
+name = "GitHub"
+version = "0.1.0"
+description = "GitHub credential fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "github.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "github.test"
+description = "GitHub credential fixture"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/github/test.input.v1.json"
+output_schema_ref = "schemas/github/test.output.v1.json"
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "github_runtime_token"
+source = { type = "product_auth_account", provider = "github" }
+audience = { scheme = "https", host_pattern = "api.github.com" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+required = true
+"#;
+
+fn registry_from_manifest(manifest_toml: &str, root: &str) -> ExtensionRegistry {
     use ironclaw_extension_registry::{
         CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
         HostApiContractRegistry, ManifestSource,
@@ -320,20 +355,21 @@ fn echo_registry() -> ExtensionRegistry {
         ))
         .expect("register capability provider contract");
     let manifest = ExtensionManifest::parse(
-        ECHO_MANIFEST_FIXTURE,
+        manifest_toml,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
         &contracts,
     )
     .unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/echo").unwrap(),
-    )
-    .unwrap();
+    let package =
+        ExtensionPackage::from_manifest(manifest, VirtualPath::new(root).unwrap()).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn echo_registry() -> ExtensionRegistry {
+    registry_from_manifest(ECHO_MANIFEST_FIXTURE, "/system/extensions/echo")
 }
 
 fn allow_request() -> InvocationInput {
@@ -408,6 +444,68 @@ fn permissive_runtime_policy() -> EffectiveRuntimePolicy {
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::LocalMinimal,
     }
+}
+
+#[tokio::test]
+async fn sandbox_github_shell_enrichment_uses_declared_credential_only() {
+    use ironclaw_host_api::{
+        capability::EffectKind,
+        runtime_policy::{ProcessBackendKind, RuntimeProfile},
+    };
+
+    let registry = registry_from_manifest(GITHUB_MANIFEST_FIXTURE, "/system/extensions/github");
+    let dispatcher =
+        ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|request, _| {
+            Err(DispatchError::UnknownCapability {
+                capability: request.invocation.capability.clone(),
+            })
+        });
+    let authorizer = AllowAuthorizer;
+    let trust_policy = StaticTrustPolicy;
+    let mut runtime_policy = permissive_runtime_policy();
+    runtime_policy.requested_profile = RuntimeProfile::HostedSafe;
+    runtime_policy.resolved_profile = RuntimeProfile::HostedSafe;
+    runtime_policy.process_backend = ProcessBackendKind::UserSandbox;
+    let policy_facts = SatisfiedPolicyFacts;
+    let host = CapabilityHost::new(
+        &registry,
+        &dispatcher,
+        &authorizer,
+        &trust_policy,
+        &runtime_policy,
+        &policy_facts,
+    );
+    let shell_id = CapabilityId::new("builtin.shell").unwrap();
+    let mut descriptor = registry
+        .get_capability(&CapabilityId::new("github.test").unwrap())
+        .unwrap()
+        .clone();
+    descriptor.runtime_credentials.clear();
+
+    let enriched = host
+        .enrich_invocation_descriptor(
+            &descriptor,
+            &shell_id,
+            &serde_json::json!({ "command": "gh pr list" }),
+        )
+        .await
+        .unwrap();
+    assert!(enriched.effects.contains(&EffectKind::UseSecret));
+    assert_eq!(enriched.runtime_credentials.len(), 1);
+    assert_eq!(
+        enriched.runtime_credentials[0].handle.as_str(),
+        "github_runtime_token"
+    );
+
+    let unchanged = host
+        .enrich_invocation_descriptor(
+            &descriptor,
+            &shell_id,
+            &serde_json::json!({ "command": "git status" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged, descriptor);
 }
 
 // The Allow decision seals an `Authorized` whose lane is resolved from the

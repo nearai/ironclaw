@@ -6,15 +6,20 @@
 //! existing local-host behavior behind an explicit port without changing
 //! placement semantics.
 
-use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_host_api::process::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+use ironclaw_host_api::{
+    ids::{CapabilityId, SecretHandle},
+    process::{
+        CommandExecutionOutput, CommandExecutionRequest, DirectSandboxCommandRequest,
+        RuntimeProcessError, SandboxCommandCredential, SandboxCommandTransport,
+    },
+    resource::ResourceScope,
 };
-use ironclaw_host_api::resource::ResourceScope;
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
+use secrecy::ExposeSecret;
 use tokio::process::Command;
 
 use crate::process_aliases::{
@@ -73,6 +78,20 @@ pub trait RuntimeProcessPort: Send + Sync {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
+
+    async fn run_credentialed_direct_command(
+        &self,
+        _request: DirectSandboxCommandRequest,
+        _credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        Err(RuntimeProcessError::ExecutionFailed(
+            "process port does not support credentialed direct-argv execution".to_string(),
+        ))
+    }
+
+    fn supports_credentialed_direct_command(&self) -> bool {
+        false
+    }
 }
 
 /// Tenant-isolated process port backed by a sandbox command transport.
@@ -116,6 +135,102 @@ impl RuntimeProcessPort for UserSandboxProcessPort {
         output.output = truncate_output(&output.output);
         output.sandboxed = true;
         Ok(output)
+    }
+
+    async fn run_credentialed_direct_command(
+        &self,
+        request: DirectSandboxCommandRequest,
+        credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        let mut output = self
+            .transport
+            .run_credentialed_direct_command(request, credentials)
+            .await?;
+        output.output = truncate_output(&output.output);
+        output.sandboxed = true;
+        Ok(output)
+    }
+
+    fn supports_credentialed_direct_command(&self) -> bool {
+        true
+    }
+}
+
+/// Consumes the one-shot GitHub credential staged by the normal capability
+/// obligation path and converts it to a sandbox placeholder binding.
+#[derive(Clone)]
+pub(crate) struct StagedGithubProcessPort {
+    inner: Arc<dyn RuntimeProcessPort>,
+    secret_injection_store: Arc<crate::obligations::RuntimeSecretInjectionStore>,
+}
+
+impl StagedGithubProcessPort {
+    pub(crate) fn new(
+        inner: Arc<dyn RuntimeProcessPort>,
+        secret_injection_store: Arc<crate::obligations::RuntimeSecretInjectionStore>,
+    ) -> Self {
+        Self {
+            inner,
+            secret_injection_store,
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeProcessPort for StagedGithubProcessPort {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        self.inner.run_command(request).await
+    }
+
+    fn supports_credentialed_direct_command(&self) -> bool {
+        self.inner.supports_credentialed_direct_command()
+    }
+
+    async fn run_credentialed_direct_command(
+        &self,
+        mut request: DirectSandboxCommandRequest,
+        credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        if !credentials.is_empty() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "caller-supplied sandbox credentials are forbidden".to_string(),
+            ));
+        }
+        let capability_id = CapabilityId::new(crate::SHELL_CAPABILITY_ID)
+            .map_err(|error| RuntimeProcessError::ExecutionFailed(error.to_string()))?;
+        let handle = SecretHandle::new("github_runtime_token")
+            .map_err(|error| RuntimeProcessError::ExecutionFailed(error.to_string()))?;
+        let material = self
+            .secret_injection_store
+            .take(&request.scope, &capability_id, &handle)
+            .map_err(|_| {
+                RuntimeProcessError::ExecutionFailed(
+                    "GitHub credential staging is unavailable".to_string(),
+                )
+            })?
+            .ok_or_else(|| {
+                RuntimeProcessError::ExecutionFailed(
+                    "GitHub credential was not staged for this invocation".to_string(),
+                )
+            })?;
+        let placeholder = format!("ironclaw-github-{}", uuid::Uuid::new_v4().simple());
+        request
+            .extra_env
+            .insert("GH_TOKEN".to_string(), placeholder.clone());
+        let credential = SandboxCommandCredential::new(
+            "GH_TOKEN".to_string(),
+            placeholder,
+            "api.github.com".to_string(),
+            "authorization".to_string(),
+            Some("Bearer ".to_string()),
+            material.expose_secret().to_string(),
+        );
+        self.inner
+            .run_credentialed_direct_command(request, vec![credential])
+            .await
     }
 }
 
@@ -375,6 +490,7 @@ mod tests {
     #[derive(Debug)]
     struct RecordingSandboxTransport {
         requests: Mutex<Vec<CommandExecutionRequest>>,
+        direct_requests: Mutex<Vec<(DirectSandboxCommandRequest, Vec<String>)>>,
         output: String,
     }
 
@@ -382,6 +498,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
+                direct_requests: Mutex::new(Vec::new()),
                 output: "echo sandbox".to_string(),
             }
         }
@@ -400,6 +517,28 @@ mod tests {
             request: CommandExecutionRequest,
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
             self.requests.lock().unwrap().push(request);
+            Ok(CommandExecutionOutput {
+                output: self.output.clone(),
+                saved_output: None,
+                exit_code: 0,
+                sandboxed: false,
+                duration: Duration::from_millis(3),
+            })
+        }
+
+        async fn run_credentialed_direct_command(
+            &self,
+            request: DirectSandboxCommandRequest,
+            credentials: Vec<SandboxCommandCredential>,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            let secrets = credentials
+                .iter()
+                .map(|credential| credential.expose_secret().to_string())
+                .collect();
+            self.direct_requests
+                .lock()
+                .unwrap()
+                .push((request, secrets));
             Ok(CommandExecutionOutput {
                 output: self.output.clone(),
                 saved_output: None,
@@ -432,6 +571,51 @@ mod tests {
                 request.timeout_secs.unwrap_or_default(),
             )))
         }
+    }
+
+    #[tokio::test]
+    async fn staged_github_process_port_exposes_only_placeholder_to_command() {
+        use ironclaw_secrets::SecretMaterial;
+
+        let transport = Arc::new(RecordingSandboxTransport::default());
+        let sandbox_port: Arc<dyn RuntimeProcessPort> =
+            Arc::new(UserSandboxProcessPort::new(transport.clone()));
+        let store = Arc::new(crate::obligations::RuntimeSecretInjectionStore::new());
+        let scope = ResourceScope::system();
+        let capability_id = CapabilityId::new(crate::SHELL_CAPABILITY_ID).unwrap();
+        let handle = SecretHandle::new("github_runtime_token").unwrap();
+        store
+            .insert(
+                &scope,
+                &capability_id,
+                &handle,
+                SecretMaterial::from("ghp_real_token"),
+            )
+            .unwrap();
+        let port = StagedGithubProcessPort::new(sandbox_port, store);
+
+        port.run_credentialed_direct_command(
+            DirectSandboxCommandRequest {
+                scope,
+                mounts: None,
+                executable: "gh".to_string(),
+                args: vec!["pr".to_string(), "list".to_string()],
+                workdir: None,
+                timeout_secs: Some(10),
+                extra_env: HashMap::new(),
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let requests = transport.direct_requests.lock().unwrap();
+        let (request, secrets) = &requests[0];
+        assert_eq!(request.executable, "gh");
+        assert_eq!(secrets, &["ghp_real_token"]);
+        let placeholder = request.extra_env.get("GH_TOKEN").unwrap();
+        assert_ne!(placeholder, "ghp_real_token");
+        assert!(placeholder.starts_with("ironclaw-github-"));
     }
 
     #[tokio::test]
@@ -523,6 +707,7 @@ mod tests {
     async fn user_sandbox_process_port_truncates_transport_output() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport {
             requests: Mutex::new(Vec::new()),
+            direct_requests: Mutex::new(Vec::new()),
             output: "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1),
         });
         let port = UserSandboxProcessPort::new(transport);
