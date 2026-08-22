@@ -39,7 +39,7 @@
 - [ ] ⚠ Depends on WS3 tokens
 
 ## WS5 — Information architecture (Phase 5) · [Epic #7782](README.md#epic-ownership-canonical)
-- [ ] Navigation/routes/page structure reshaped (`app/routes.ts`, `pages/`, sidebar / `gateway-layout`)
+- [ ] Navigation/routes/page structure reshaped — `src/app/routes.ts`, `src/pages/`, the sidebar, `src/layout/gateway-layout.tsx` (relative to `crates/product/ironclaw_webui/frontend/`)
 - [ ] M3X navigation-rail pattern adopted where it fits; multi-channel parity preserved
 - [ ] Critical user journeys (chat, approvals, projects, settings) verified unbroken
 

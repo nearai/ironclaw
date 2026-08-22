@@ -46,7 +46,7 @@ The workbench, catalog, governance doc, and agent rules are **written and review
 
 ## 5. The design system, as governed
 
-`DESIGN.md` is the constitution; it maps cleanly onto the APDD-kit 5-tier taxonomy:
+`DESIGN.md` is the constitution; it maps cleanly onto the APDD-kit 5-tier taxonomy. **Every home below is relative to `crates/product/ironclaw_webui/frontend/src/`**:
 
 | APDD tier | IronClaw home |
 |---|---|

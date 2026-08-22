@@ -30,7 +30,7 @@ It deliberately follows two benchmarks: the **APDD governance kit** (an *externa
 
 ## The layer map
 
-Where the design system sits in the frontend, and what governs/catalogs it:
+Where the design system sits in the frontend, and what governs/catalogs it. **Every node below is relative to `crates/product/ironclaw_webui/frontend/src/`**:
 
 ```mermaid
 flowchart TD

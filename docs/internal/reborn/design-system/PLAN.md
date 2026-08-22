@@ -53,7 +53,7 @@ redrawn here, so the grouping cannot drift out of step with it.*
 
 ## Phase 5 — Information architecture · [Epic #7782](README.md#epic-ownership-canonical)
 *Reshape navigation/routes/page structure to foreground agentic workflows.*
-- Revisit `app/routes.ts`, `pages/`, sidebar / `gateway-layout`; adopt the M3X navigation-rail pattern where it fits; ensure multi-channel parity.
+- Revisit `src/app/routes.ts`, `src/pages/`, the sidebar and `src/layout/gateway-layout.tsx` (paths relative to `crates/product/ironclaw_webui/frontend/`); adopt the M3X navigation-rail pattern where it fits; ensure multi-channel parity.
 **Milestone:** IA restructured; CUJs (chat, approvals, projects, settings) verified unbroken.
 
 ## Suggested next PRs (concrete, in order)
