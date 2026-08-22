@@ -42,16 +42,17 @@ The workbench, catalog, governance doc, and agent rules are **written and review
 
 ### 3.1 The token invariant's current gap (`CURRENT`, measured against `origin/main`)
 
-Invariant 2 is stated as a target because the tree does not meet it. Measured under `crates/product/ironclaw_webui/frontend/src/`:
+Invariant 2 is stated as a target because the tree does not meet it. Measured under `crates/product/ironclaw_webui/frontend/src/`, **production components only — `*.test.*` excluded**, since the invariant governs components rather than fixtures. Every row gives files *and* occurrences in the same unit:
 
-| Violation | Count |
-|---|---|
-| Files using arbitrary pixel classes (`text-[13px]`, `rounded-[13px]`, …) | **93** |
-| Total occurrences of those classes | **347** |
-| Of those files, ones inside `design-system/` — the primitive layer the invariant most directly governs | **9** |
-| `.tsx` files carrying a hardcoded 6-digit hex | **4** |
+| Violation | Files | Occurrences |
+|---|---:|---:|
+| Arbitrary pixel classes (`text-[13px]`, `rounded-[13px]`, …) | **91** | **345** |
+| …of which inside `design-system/` — the primitive layer the invariant most directly governs | **8** | **38** |
+| Hardcoded 6-digit hex in `.tsx` | **3** | **10** |
 
-This includes the component family this package names as the governance pilot: `pages/chat/components/suggested-task-card.tsx` uses `rounded-[13px]`, `text-[13px]`, `text-[11px]` and `text-[10.5px]`. It is *colour*-conformant already — every colour on it is a `var(--v2-*)` reference — so the gap is dimensional, not chromatic, which is why Phase 3's type/space/radius scales are what close it.
+*(Counting test files too would read 93/347 and 4/13; the migration targets production components, so the table states those.)*
+
+This includes the component family this package names as the governance pilot: `pages/chat/components/suggested-task-card.tsx` carries 5 arbitrary pixel classes (`rounded-[13px]`, `rounded-[6px]`, `text-[13px]`, `text-[11px]`, `text-[10.5px]`). It is *colour*-conformant already — every colour on it is a `var(--v2-*)` reference — so the gap is dimensional, not chromatic, which is why Phase 3's type/space/radius scales are what close it.
 
 **Consequence for the pilot claim:** the OOBE card family is the pilot *subject*, not a conformant exemplar. It demonstrates the governance loop (catalogued, story-tested, judged against `DESIGN.md`); it does not yet demonstrate invariant 2, and this package does not claim it does. Migration is Phase 3 work, tracked in CHECKLIST WS3.
 
