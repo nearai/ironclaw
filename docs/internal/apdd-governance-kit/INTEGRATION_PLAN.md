@@ -17,7 +17,7 @@ renamed later.
 
 | Step | Action | Target |
 |---|---|---|
-| 0.1 | Decide **`DESIGN.md` location**. Recommendation: **`docs/internal/design/DESIGN.md`** — under the `internal/` tree already fenced by `.mintignore`, so it versions with the code and stays out of the public docs site, consistent with IronClaw's "new internal docs live under `docs/internal/`" rule. **Do not** use `docs/design/DESIGN.md`: an unfenced `.md` under `docs/` (not in `docs.json` nav or marked `hidden:`) gets published. Alternative: repo-root `DESIGN.md` if the team treats it as a peer of `CLAUDE.md`/`AGENTS.md` (root files are boundary-exempt). Either way, add a one-line pointer from CLAUDE.md. | — |
+| 0.1 | Decide **`DESIGN.md` location**. Recommendation: **`docs/internal/design/DESIGN.md`** — under the `internal/` tree already fenced by `.mintignore`, so it versions with the code and stays out of the public docs site, consistent with IronClaw's "new internal docs live under `docs/internal/`" rule. **Do not** use `docs/design/DESIGN.md`: an unfenced `.md` under `docs/` (not in `docs.json` nav or marked `hidden:`) gets published. Alternative: repo-root `DESIGN.md` if the team treats it as a peer of `CLAUDE.md`/`AGENTS.md` (root files are boundary-exempt). Either way, add a one-line pointer from CLAUDE.md. **Note the wrinkle:** `docs/internal/design/` already exists but holds *dated per-change* design docs (`YYYY-MM-DD-<slug>-design.md`); a standing constitution is a different kind of artifact in that folder, which is part of why repo-root remains a live alternative. | — |
 | 0.2 | Decide **feature-docs home** for WebUI features: recommend `docs/internal/features/<slug>/` (distinct from the dated `docs/internal/plans/`), or the lightweight `FEATURE.md` tier. | — |
 | 0.3 | Decide **token prefix** and confirm the design-system substitutions (React, Tailwind v4 CSS-config, `ironclaw` prefix). | `src/design-system/` |
 | 0.4 | Confirm **skip list** (backend MVVM rules, kit CI/hooks, N/A modules) with reviewers. | — |
@@ -111,7 +111,7 @@ regression if Phase 2 proved its worth.
 
 | Step | Action | Target |
 |---|---|---|
-| 4.1 | Catalog real CUJs in `CRITICAL_FLOWS.md`: onboarding/pairing, a chat turn end-to-end, extension auth (Slack/Telegram/Gmail), automation/job run, notification delivery — each with hot-path files + a smoke checklist. Cross-reference existing e2e/Playwright coverage. | `docs/internal/qa/CRITICAL_FLOWS.md` |
+| 4.1 | Catalog real CUJs in `CRITICAL_FLOWS.md`: onboarding/pairing, a chat turn end-to-end, extension auth (Slack/Telegram/Gmail), automation/job run, notification delivery — each with hot-path files + a smoke checklist. Cross-reference existing e2e/Playwright coverage. `docs/internal/qa/` already exists and already holds a coverage map (`telegram-coverage-map.md`), so this is a sibling in an established home, not a new tree. | `docs/internal/qa/CRITICAL_FLOWS.md` |
 | 4.2 | Add `.claude/rules/critical-flows.md` with `paths:` = the hot-path files, requiring the matching CUJ be run/considered before "done." | `.claude/rules/` |
 | 4.3 | Map each CUJ to its existing automated coverage (`reborn-e2e`, `reborn-playwright`) and flag any CUJ with no automation as a coverage gap. | `docs/internal/qa/CRITICAL_FLOWS.md` |
 | 4.4 | *(Optional)* Add **Chromatic** visual regression for Storybook stories if Phase 2 adoption is healthy and the CI budget allows. | `.storybook/` + CI |
@@ -235,7 +235,7 @@ the backstop.
 
 ## Open questions for reviewers
 
-1. **`DESIGN.md` at `docs/internal/design/` (recommended) or repo-root** (as a `CLAUDE.md`/`AGENTS.md` peer)? `docs/design/` is ruled out by the publication boundary — an unfenced `docs/` page would be published.
+1. **`DESIGN.md` at `docs/internal/design/` (recommended) or repo-root** (as a `CLAUDE.md`/`AGENTS.md` peer)? `docs/design/` is ruled out by the publication boundary — an unfenced `docs/` page would be published. Weigh that `docs/internal/design/` currently collects dated per-change design docs, whereas `DESIGN.md` is a standing document that UI work is measured against.
 2. **Feature-docs home** — `docs/internal/features/<slug>/` vs. folding into `docs/internal/plans/`?
 3. **Chromatic** — is a paid visual-regression service in scope, or stay on the
    free Vitest/a11y subset?
