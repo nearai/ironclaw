@@ -19,7 +19,7 @@
 1. **D-F5 carousel gate** ⚠ — the guard for when the carousel returns. Gate the landing carousel behind DEV / a feature flag (or an empty-projection read) so it never exposes mock "done for you" cards to real users. The earlier prototype's *ungated* mock path is exactly what got it rolled back — the first implementation PR that re-adds the carousel must ship it gated.
 2. **Contract reconciliation — ✅ done in this PR.** [AUTOMATION-TASKS-CONTRACT.md](AUTOMATION-TASKS-CONTRACT.md) now reflects the post-#6918 family-folder names: event log `ironclaw_event_log` + durable store `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `crates/product/ironclaw_assistant`; routes in `crates/product/ironclaw_webui/src/webui_v2/` (confirmed current). Docs-only.
 3. **Decision round #1** `[decision]` — close PROPOSAL §10 items 2 (suggestion producer) and 4 (carousel gating). One thread each. *(Item 5, the DESIGN.md pilot, is settled — see below.)*
-4. **D-F6 — nothing to seed here.** `DESIGN.md` and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PROPOSAL §5.6); OOBE's contribution is its card taxonomy + a11y floors, offered into that program's `DESIGN.md` (#7042) rather than a local draft.
+4. **D-F6 — nothing to seed here.** `DESIGN.md` and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PROPOSAL §5.6); OOBE's contribution is its card taxonomy + a11y floors, offered into that program's `DESIGN.md` (the Phase-2 work tracked by issue #7042, under Epic #7781) rather than a local draft.
 
 *Exit criteria: the carousel-gate approach decided; contract reconciled (done); §10.2/§10.4 decided (§10.5 settled — governance owned elsewhere). (Implementation is landing behind an off-by-default flag; the docs remain mergeable.)*
 
@@ -55,7 +55,7 @@
 
 ## Phase F5 — Design track pilot (D-F6) — optional, parallel
 
-*Runs alongside F1–F4. ✎ **2026-08-21:** `DESIGN.md`, tokens and the Storybook workbench are **not** built here — they are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257; Phase 1 = #7750, Phase 2 = #7042). What is left in F5 is OOBE's pilot contribution (PROPOSAL §5.6).*
+*Runs alongside F1–F4. ✎ **2026-08-21:** `DESIGN.md`, tokens and the Storybook workbench are **not** built here — they are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257; Phase 1 under Epic #7038 as PR #7750 · Phases 2–3 under Epic #7781, issue #7042 tracking the Phase-2 `DESIGN.md` work). What is left in F5 is OOBE's pilot contribution (PROPOSAL §5.6).*
 
 - Contribute the OOBE card taxonomy + a11y floors **into** that program's `DESIGN.md` rather than seeding a parallel one.
 - Add stories for the pure Tier-2/3 card components (card, action bar, drawer, mode pill) to the Phase-1 catalog once it lands: smoke play test + token/CSS check + one story per state (PROPOSAL §8.3).

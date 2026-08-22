@@ -37,7 +37,7 @@ flowchart LR
 **Note:** originally PR #7039 — closed and recreated as **#7750**, clean and non-stacked off current `main`.
 
 ## Phase 2 — DESIGN.md governance & guidelines (issue #7042) · [Epic #7781](README.md#epic-ownership-canonical)
-*Make the design system governed.* `DESIGN.md` (M3X spec + IronClaw appendix), Storybook `Design/Guidelines` page, `.claude/rules/design-system.md`, `CLAUDE.md` Module Specs pointer.
+*Make the design system governed.* `DESIGN.md` (M3X spec + IronClaw appendix) and a Storybook `Design/Guidelines` page. **Precedence:** `AGENTS.md` is the canonical, tool-neutral agent contract — `DESIGN.md` is reachable from it, and `.claude/rules/design-system.md` plus the `CLAUDE.md` Module Specs pointer are Claude-specific adapters that *supplement* it, never replace or restate it.
 **Milestone:** source of truth + agent rules in place; build-storybook green.
 **⚠ Ordering:** the original #7043 was stacked on #7039; both were closed for the resulting merge tangle. Merge **#7750** first, then land the Phase-2 changeset as a fresh PR off `main` (PROPOSAL §7.6).
 
@@ -55,7 +55,7 @@ flowchart LR
 - Resolve the **animation approach** (reduced-motion-gated) and **MSW** for network-story happy-paths (PROPOSAL §7.2, §7.5).
 - Build the agentic components (composer toolbar, FAB speed-dial, chat bubbles, agent-activity/reasoning cards, branded progress, connected button groups); each ships with stories + play coverage.
 **Milestone:** agentic component set catalogued + story-tested; motion honors `prefers-reduced-motion`.
-**Exit criteria (safeguards, PROPOSAL §7.0):** MSW proven absent from the production bundle by an asserted check; motion opt-in per component with a static fallback on both reduced-motion and library-load failure; the `app.css` policy line usable as an independent kill switch.
+**Exit criteria (safeguards, PROPOSAL §7.0):** the production artifact asserted to contain neither `mockServiceWorker.js` nor an `msw` chunk (the worker never enters `public/` — PROPOSAL §7.2); motion opt-in per component, off via the single shared disabled-motion signal specified in PROPOSAL §7.5 — which cancels JS RAF loops, not just CSS — with the static baseline covered by caller-level tests.
 **⚠ Ordering:** depends on Phase 3 tokens.
 
 ## Phase 5 — Information architecture · [Epic #7782](README.md#epic-ownership-canonical)

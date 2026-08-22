@@ -56,7 +56,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done. Every code box imp
 
 *✎ 2026-08-21: `DESIGN.md`, tokens and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257) — OOBE contributes the pilot, not the governance (PROPOSAL §5.6).*
 
-- [ ] OOBE card taxonomy + a11y floors contributed **into** that program's `DESIGN.md` (#7042) — no parallel constitution seeded here.
+- [ ] OOBE card taxonomy + a11y floors contributed **into** that program's `DESIGN.md` (Phase-2 work, issue #7042 under Epic #7781) — no parallel constitution seeded here.
 - [ ] Card / action-bar / drawer / mode-pill stories added to the Phase-1 catalog (#7750) once it lands: smoke play test + token/CSS check + one story per state.
 - [ ] Design validation gate passes on the OOBE components (1:1 parity vs. mockup; tokens; light+dark; a11y).
 
