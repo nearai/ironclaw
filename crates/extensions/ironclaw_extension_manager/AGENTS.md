@@ -35,7 +35,7 @@ port the host declares — never to add the dependency.
 | `operator_config_capability` | operator auto-approve / tool-permission capabilities |
 | `skill_auto_activate_capability` | the skill auto-activate capability |
 | `webui_extension_credentials` | `ProductAuthExtensionCredentialSetup` — the credential setup/status views |
-| `ironhub` | the extension hub: search / info / install, as capabilities and as a CLI command |
+| `ironhub` | the extension hub: search / info / install, as capabilities and as a CLI command; plus the agent link — the register handshake, and the operator-facing surface that accepts and stores the hub-minted shared key |
 | `lifecycle_test_support` (feature `test-support`) | the full lifecycle service bundle downstream integration tests drive |
 
 ## What deliberately stayed in the host

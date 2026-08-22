@@ -9872,3 +9872,146 @@ async fn remove_extension_uses_client_gesture_idempotency_not_permanent_input_de
         "the remove client action id must survive response-lost retries as the ProductSurface activity id"
     );
 }
+
+#[tokio::test]
+async fn ironhub_link_read_is_denied_without_the_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services,
+        WebUiV2Capabilities {
+            operator_webui_config: false,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/ironhub/link")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn ironhub_shared_key_write_is_denied_without_the_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: false,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/ironhub/link/key")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "shared_key": "ihub_sk_denied000000000000000000000000" })
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "a denied caller must never reach the product surface"
+    );
+}
+
+#[tokio::test]
+async fn ironhub_shared_key_clear_is_denied_without_the_operator_capability() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: false,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/ironhub/link/key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "a denied caller must never reach the product surface"
+    );
+}
+
+/// The IronHub link surface carries the deployment's shared key, so it follows
+/// the same rule as its operator siblings: a router built
+/// `without_operator_routes()` must not mount it at all, and a caller on such a
+/// deployment gets 404 rather than a 403 that admits the route exists.
+#[tokio::test]
+async fn ironhub_link_routes_are_stripped_alongside_operator_routes() {
+    let services = Arc::new(StubServices::default());
+    let router = webui_v2_router_with_options(
+        WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER),
+        WebUiV2RouteOptions::without_operator_routes(),
+    )
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let read_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/ironhub/link")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    let write_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/ironhub/link/key")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "shared_key": "ihub_sk_stripped00000000000000000000" })
+                        .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    let clear_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/ironhub/link/key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(read_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(write_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(clear_response.status(), StatusCode::NOT_FOUND);
+}

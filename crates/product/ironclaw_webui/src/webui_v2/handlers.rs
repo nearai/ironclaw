@@ -87,7 +87,8 @@ use ironclaw_product_contracts::inbound_requests::{
     RebornSuggestionDismissRequest, RebornSuggestionStartRequest, RebornSuggestionsGenerateRequest,
 };
 use ironclaw_product_contracts::ironhub::{
-    IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
+    IRONHUB_DELIVER_INSTALL_COMMAND, IRONHUB_LINK_CLEAR_KEY_COMMAND, IRONHUB_LINK_SET_KEY_COMMAND,
+    IRONHUB_LINK_VIEW, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
 };
 use ironclaw_product_contracts::notification_inbox::{
     NOTIFICATIONS_ARCHIVE_COMMAND, NOTIFICATIONS_MARK_ALL_READ_COMMAND,
@@ -133,6 +134,7 @@ use ironclaw_product_contracts::product_wire::{
     RebornTraceHoldAuthorizeResponse, SettingsToolPermissionState,
 };
 use ironclaw_product_contracts::product_wire::{
+    RebornIronhubLinkResponse, RebornIronhubLinkSetKeyRequest,
     RebornNotificationSetupMutationRequest, RebornNotificationSetupStatusResponse,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
@@ -2904,6 +2906,104 @@ pub async fn ironhub_deliver_install(
         caller,
         IRONHUB_DELIVER_INSTALL_COMMAND,
         body,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/ironhub/link`
+pub async fn ironhub_link(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornIronhubLinkResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        IRONHUB_LINK_VIEW.descriptor(),
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/ironhub/link/key`
+pub async fn ironhub_link_set_key(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<RebornIronhubLinkResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    // The request carries the shared key, so it is deserialize-only and must
+    // not be re-encoded by the generic command dispatch (which would copy the
+    // plaintext through a `serde_json::Value`). Parse the typed request for a
+    // validation/seeding pass, then dispatch the original JSON body verbatim,
+    // mirroring `upsert_llm_provider`'s secret-carrying command handling.
+    let request: RebornIronhubLinkSetKeyRequest = product_surface_input(body.clone())?;
+    let activity_id = ironhub_link_set_key_activity_id(&caller, &request)?;
+    let surface = state.bind_services(caller.clone());
+    let response = surface
+        .invoke(
+            ironclaw_product_contracts::surface::ProductSurfaceInvokeRequest {
+                operation_id: IRONHUB_LINK_SET_KEY_COMMAND.capability_id()?,
+                input: body,
+                activity_id,
+            },
+        )
+        .await?;
+    Ok(Json(
+        serde_json::from_value(response.output).map_err(ProductSurfaceError::internal_from)?,
+    ))
+}
+
+/// Deterministically seeds the dispatch activity id from the caller, the
+/// operation, and the shared-key bytes without ever materializing the key as a
+/// `String` (mirrors `llm_provider_upsert_activity_id`).
+fn ironhub_link_set_key_activity_id(
+    caller: &ProductSurfaceCaller,
+    request: &RebornIronhubLinkSetKeyRequest,
+) -> Result<ActivityId, ProductSurfaceError> {
+    let operation_id = IRONHUB_LINK_SET_KEY_COMMAND.capability_id()?;
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-product-capability",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        operation_id.as_str(),
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    let secret = request.shared_key.expose_secret().as_bytes();
+    seed.extend_from_slice(&(secret.len() as u64).to_be_bytes());
+    seed.extend_from_slice(secret);
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
+/// `DELETE /api/webchat/v2/ironhub/link/key`
+pub async fn ironhub_link_clear_key(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<RebornIronhubLinkResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        IRONHUB_LINK_CLEAR_KEY_COMMAND,
+        EmptyProductCommandInput {},
     )
     .await?;
     Ok(Json(response))

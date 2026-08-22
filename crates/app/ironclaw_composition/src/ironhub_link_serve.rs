@@ -24,6 +24,10 @@ use crate::RebornBuildError;
 pub const IRONHUB_REGISTER_PATH: &str = "/api/ironhub/register";
 const IRONHUB_REGISTER_ROUTE_ID: &str = "ironhub.register";
 
+pub(crate) fn ironhub_register_url(agent_base_url: Option<String>) -> Option<String> {
+    agent_base_url.map(|base| format!("{}{IRONHUB_REGISTER_PATH}", base.trim_end_matches('/')))
+}
+
 #[derive(Clone)]
 pub struct IronhubRegisterRouteState {
     link: Arc<dyn IronhubLinkService>,
@@ -189,6 +193,18 @@ mod tests {
         .expect("request JSON");
         let response = ironhub_register_handler(State(unavailable), Bytes::from(valid)).await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn the_register_url_is_joined_once_without_a_double_slash() {
+        assert_eq!(ironhub_register_url(None), None);
+        for base in ["https://agent.example.com", "https://agent.example.com/"] {
+            assert_eq!(
+                ironhub_register_url(Some(base.to_string())).as_deref(),
+                Some("https://agent.example.com/api/ironhub/register"),
+                "base {base} must join to exactly one slash"
+            );
+        }
     }
 
     #[test]

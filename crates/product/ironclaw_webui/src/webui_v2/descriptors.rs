@@ -70,6 +70,9 @@ pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
 pub const WEBUI_V2_ROUTE_IRONHUB_DELIVER_INSTALL: &str = "webui.v2.ironhub_deliver_install";
+pub const WEBUI_V2_ROUTE_IRONHUB_LINK: &str = "webui.v2.ironhub_link";
+pub const WEBUI_V2_ROUTE_IRONHUB_LINK_SET_KEY: &str = "webui.v2.ironhub_link_set_key";
+pub const WEBUI_V2_ROUTE_IRONHUB_LINK_CLEAR_KEY: &str = "webui.v2.ironhub_link_clear_key";
 pub const WEBUI_V2_ROUTE_REGISTER_HOSTED_MCP_EXTENSION: &str =
     "webui.v2.register_hosted_mcp_extension";
 pub const WEBUI_V2_ROUTE_IMPORT_EXTENSION: &str = "webui.v2.import_extension";
@@ -226,6 +229,8 @@ pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
 pub const WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL: &str = "/api/webchat/v2/ironhub/install";
+pub const WEBUI_V2_PATTERN_IRONHUB_LINK: &str = "/api/webchat/v2/ironhub/link";
+pub const WEBUI_V2_PATTERN_IRONHUB_LINK_SET_KEY: &str = "/api/webchat/v2/ironhub/link/key";
 pub const WEBUI_V2_PATTERN_REGISTER_HOSTED_MCP_EXTENSION: &str =
     "/api/webchat/v2/extensions/register-hosted-mcp";
 pub const WEBUI_V2_PATTERN_IMPORT_EXTENSION: &str = "/api/webchat/v2/extensions/import";
@@ -373,6 +378,9 @@ pub fn webui_v2_routes_with_artifact_flags(
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
         ironhub_deliver_install_descriptor(),
+        ironhub_link_descriptor(),
+        ironhub_link_set_key_descriptor(),
+        ironhub_link_clear_key_descriptor(),
         register_hosted_mcp_extension_descriptor(),
         import_extension_descriptor(),
         remove_extension_descriptor(),
@@ -495,6 +503,9 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
             // request body is buffered, instead of relying on the
             // handler-level capability check alone.
             | WEBUI_V2_ROUTE_IMPORT_EXTENSION
+            | WEBUI_V2_ROUTE_IRONHUB_LINK
+            | WEBUI_V2_ROUTE_IRONHUB_LINK_SET_KEY
+            | WEBUI_V2_ROUTE_IRONHUB_LINK_CLEAR_KEY
     )
 }
 
@@ -1485,6 +1496,48 @@ fn ironhub_deliver_install_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL,
         mutation_policy(
             body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn ironhub_link_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_IRONHUB_LINK,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_IRONHUB_LINK,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn ironhub_link_set_key_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_IRONHUB_LINK_SET_KEY,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_IRONHUB_LINK_SET_KEY,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn ironhub_link_clear_key_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_IRONHUB_LINK_CLEAR_KEY,
+        NetworkMethod::Delete,
+        WEBUI_V2_PATTERN_IRONHUB_LINK_SET_KEY,
+        mutation_policy(
+            body_limit_kib(4),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductSurface,
