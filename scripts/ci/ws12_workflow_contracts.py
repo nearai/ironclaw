@@ -1204,6 +1204,11 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             # A PR touching only the release workflow must reach fast-checks,
             # or its REQUIRED_MARKERS are only enforced post-merge.
             ".github/workflows/ironclaw-release.yml",
+            # A PR touching only this self-test must reach fast-checks, or
+            # the "Static-check self-tests" step that runs it is skipped for
+            # exactly the diff it guards (#7797 review).
+            "scripts/test-check-type-duplicates.py",
+            "scripts/check-type-duplicates.py",
         ),
         out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
     ),

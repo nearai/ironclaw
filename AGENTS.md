@@ -4,7 +4,7 @@
 
 `AGENTS.md` is the canonical agent contract for this repository — the commands, hard invariants, and routing an agent cannot infer from the tree. It is not the full architecture specification: before changing a complex area, read the owning crate's `AGENTS.md`, then its `CONTRACT.md` or `README.md` when present; cross-crate behavior is specified under `docs/internal/reborn/contracts/`. (`CLAUDE.md` files are Claude Code adapters and pointer stubs; content lives here and in the files this one names.)
 
-All product work belongs in the Reborn workspace under `crates/`; the shipping binary is `ironclaw` from the `ironclaw` package in `crates/app/ironclaw_cli`. `crates/AGENTS.md` is the routing map into the ten crate families. The repo skills under `.claude/skills/` (`ironclaw-reborn-orientation`, `reborn-feature`, `ironclaw-reborn-architecture-review`, `ironclaw-reborn-testing`, `ironclaw-reborn-skill-maintainer`, `reborn-extension-surfaces`) are plain Markdown — read the `SKILL.md` directly if your harness does not load Claude skills.
+All product work belongs in the Reborn workspace under `crates/`; the shipping binary is `ironclaw` from the `ironclaw` package in `crates/app/ironclaw_cli`. `crates/AGENTS.md` is the routing map into the ten crate families. The repo skills under `.claude/skills/` (`ironclaw-reborn-orientation`, `reborn-feature`, `ironclaw-reborn-architecture-review`, `ironclaw-reborn-testing`, `reborn-extension-surfaces`) are plain Markdown — read the `SKILL.md` directly if your harness does not load Claude skills. The same applies to the path-scoped rules in `.claude/rules/*.md` (`ls .claude/rules/` for the full set): each is canonical for its topic — architecture/layer matrix, cargo features, database parity, error handling, events, guidance maintenance, lifecycle, review discipline, safety/sandbox, runtime-skill spec, testing tiers, tools and tool evidence, types and type placement. Claude Code auto-loads them by path; other harnesses must read the matching rule before changing files it covers.
 
 ## Build, run, debug
 
@@ -15,7 +15,7 @@ cargo test                                                      # unit + integra
 RUST_LOG=ironclaw=debug cargo run -p ironclaw -- serve          # run the serve binary (add tower_http=debug for HTTP logging)
 ```
 
-The workspace-root `integration` feature is empty with zero consumers — a bare root `cargo test --features integration` adds nothing. Backend-heavy gated suites are crate-level (e.g. `cargo test -p ironclaw_hooks --features integration,test-support`). E2E suite: `tests/e2e/CLAUDE.md`.
+The workspace-root `integration` feature is empty with zero consumers — a bare root `cargo test --features integration` adds nothing. Backend-heavy gated suites are crate-level (e.g. `cargo test -p ironclaw_hooks --features integration,test-support`). E2E suite: `tests/e2e/AGENTS.md`.
 
 **Cargo features are a last resort.** A feature is a second build of the workspace, compiled and tested forever. Add one only for a heavy optional dependency, a build shape that ships with it OFF, a CI lane selector, a dev-only seam (always named `test-support`), or a privilege boundary — and say which in the manifest comment. Deployment shape belongs in `DeploymentConfig` and `[storage]`, not `#[cfg]`. Full bar: `.claude/rules/cargo-features.md`.
 
@@ -60,10 +60,10 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `crates/app/ironclaw_composition/` | `crates/app/ironclaw_composition/CONTRACT.md` |
 | `crates/domains/ironclaw_identity/` | `crates/domains/ironclaw_identity/CONTRACT.md` |
 | `crates/kernel/ironclaw_trust/` | `crates/kernel/ironclaw_trust/CONTRACT.md` |
-| `tests/` (scenario coverage map) | `tests/CLAUDE.md` |
-| `tests/integration/` | `tests/integration/CLAUDE.md` |
-| `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
-| `tests/e2e/` | `tests/e2e/CLAUDE.md` |
+| `tests/` (scenario coverage map) | `tests/AGENTS.md` |
+| `tests/integration/` | `tests/integration/AGENTS.md` |
+| `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/AGENTS.md` |
+| `tests/e2e/` | `tests/e2e/AGENTS.md` |
 
 ## Coding and contract rules
 
@@ -82,7 +82,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 3. **Integration-first.** Production-wired behavior ships with a test in `tests/integration/`, driven through the harness and asserting at a seam — never `wait_for_status(Completed)` alone. Crate tier is the fallback only when that tier cannot reach the path (say why in the PR).
 4. **Test through the caller, not just the helper.** When a helper gates a side effect, unit-testing the helper alone is not regression coverage — drive the call site at the integration tier or higher, and make mocks capture every argument the production caller passes.
 
-Full rules and tiers: `.claude/rules/testing.md`; authoring guides: `tests/integration/CLAUDE.md`, `tests/e2e/CLAUDE.md`. Select tiers with `docs/internal/testing-playbook.md`, and complete the `Test Strategy` section of `.github/pull_request_template.md` with evidence or `Not applicable: <reason>` per tier.
+Full rules and tiers: `.claude/rules/testing.md`; authoring guides: `tests/integration/AGENTS.md`, `tests/e2e/AGENTS.md`. Select tiers with `docs/internal/testing-playbook.md`, and complete the `Test Strategy` section of `.github/pull_request_template.md` with evidence or `Not applicable: <reason>` per tier.
 
 ## Persistence and configuration
 
@@ -120,7 +120,7 @@ Two identities must never be conflated (newtypes in `crates/contracts/ironclaw_c
 
 Never route setup/configure UI from `credential_name`; chat and Settings use the same setup path; generic auth-card UI is only for non-extension credential prompts or pure OAuth launches; resolve `extension_name` once in shared backend logic and carry it through the wire contract instead of re-deriving it per layer or adding frontend-only fallbacks.
 
-Adding a channel means adding one capability surface of an extension — a `[channel]` section in the `reborn.extension_manifest.v3` manifest plus a `ChannelAdapter` (`crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`), wired through `RebornHostBindings::with_channel_extension_bindings` (`crates/app/ironclaw_composition/src/input.rs`) — never per-channel host code. Start from the `reborn-extension-surfaces` skill; the worked example is `crates/extensions/packages/slack/`; family rules in `crates/extensions/AGENTS.md`.
+Adding a channel means adding one capability surface of an extension — a `[channel]` section in the `reborn.extension_manifest.v3` manifest plus implementations of the channel traits (`ChannelIngress` / `ChannelReply` / `ChannelDelivery`, `crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`), wired through `RebornHostBindings::with_channel_extension_bindings` (`crates/app/ironclaw_composition/src/input.rs`) — never per-channel host code. Start from the `reborn-extension-surfaces` skill; the worked example is `crates/extensions/packages/slack/`; family rules in `crates/extensions/AGENTS.md`.
 
 ## Project structure
 

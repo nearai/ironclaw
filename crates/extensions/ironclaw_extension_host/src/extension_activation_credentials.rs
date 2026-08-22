@@ -13,7 +13,7 @@ use ironclaw_auth::product_auth::credentials::runtime_credentials::{
 };
 use ironclaw_extension_host::{
     ExtensionActivationCredentialGate, ExtensionActivationCredentialReadiness,
-    missing_activation_credentials_error, package_runtime_credential_auth_requirements,
+    missing_activation_credentials_error, package_activation_credential_auth_requirements,
 };
 
 #[derive(Clone)]
@@ -65,7 +65,7 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
         package: &ExtensionPackage,
     ) -> Result<ExtensionActivationCredentialReadiness, ProductOperationFailure> {
         let missing = self
-            .missing_requirements(package_runtime_credential_auth_requirements(package))
+            .missing_requirements(package_activation_credential_auth_requirements(package))
             .await
             .map_err(map_activation_credential_stage_error)?;
         if missing.is_empty() {

@@ -1,31 +1,25 @@
 //! Real-Docker security boundary check for the sandbox worker image.
 //!
-//! Both preconditions — daemon reachable, image built — go through
-//! `tests/support/docker_gate.rs` rather than being open-coded here, so this
-//! test participates in the crate's single fail-closed switch: under
-//! `IRONCLAW_REQUIRE_DOCKER_TESTS=1` a missing daemon or a missing image is a
-//! hard failure instead of a skip. **Nothing in the repository sets that
-//! variable yet** (issue #7081), so with it unset the observable behavior is
-//! unchanged from the open-coded version: skip, with a visible `SKIP:` line as
-//! the gate's module doc requires.
+//! Both preconditions — daemon reachable, configured Reborn worker image built
+//! — go through `tests/support/docker_gate.rs`. Under
+//! `IRONCLAW_REQUIRE_DOCKER_TESTS=1`, a missing daemon or image is a hard
+//! failure instead of a skip. Without that switch, local runs keep the same
+//! visible `SKIP:` behavior.
 
 use std::process::Command;
-
-use ironclaw_sandbox::DEFAULT_PROCESS_SANDBOX_IMAGE;
 
 #[path = "support/docker_gate.rs"]
 mod docker_gate;
 
 #[test]
 fn docker_image_enforces_basic_security_boundary_when_available() {
+    let image = docker_gate::configured_sandbox_image();
     if !docker_gate::docker_available() {
         eprintln!("SKIP: Docker security boundary test — no Docker daemon is reachable");
         return;
     }
-    if !docker_gate::docker_image_available(DEFAULT_PROCESS_SANDBOX_IMAGE) {
-        eprintln!(
-            "SKIP: Docker security boundary test — {DEFAULT_PROCESS_SANDBOX_IMAGE} is not built"
-        );
+    if !docker_gate::docker_image_available(&image) {
+        eprintln!("SKIP: Docker security boundary test — {image} is not built");
         return;
     }
 
@@ -51,7 +45,7 @@ fn docker_image_enforces_basic_security_boundary_when_available() {
             "128m",
             "--pids-limit",
             "64",
-            DEFAULT_PROCESS_SANDBOX_IMAGE,
+            &image,
             "sh",
             "-c",
             "test \"$(id -u)\" != 0 && test -z \"$(ip route 2>/dev/null | awk '/default/ {print $0}')\"",

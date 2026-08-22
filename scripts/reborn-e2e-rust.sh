@@ -172,6 +172,11 @@ run_runtimes() {
   run_test ironclaw_processes process_journal_store_contract
   run_test ironclaw_processes legacy_migration_backend_contract
   run_test ironclaw_processes process_services_contract
+  # Pins docs/internal/reborn/contracts/notification-inbox.md: scheduled-run
+  # completion is materialized only from the committed process transition and
+  # its exact finalized assistant reply, never from a delivery watcher.
+  run_lib_test_exact ironclaw_assistant \
+    run_outcome_observer::tests::completed_background_run_publishes_only_after_exact_reply_is_finalized
 }
 
 run_substrates() {

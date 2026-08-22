@@ -1,7 +1,4 @@
 // @ts-nocheck
-// Run with:
-//   pnpm test -- hooks/useNotifications.test.ts
-
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -22,14 +19,18 @@ function sourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useNotifications };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { useNotifications };`
+    .replaceAll(
+      'import("../lib/notification-approval-compat")',
+      "loadApprovalNotificationCompat()",
+    );
 }
 
 function depsEqual(left, right) {
-  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
-    return false;
-  }
-  return left.every((item, index) => Object.is(item, right[index]));
+  return Array.isArray(left) &&
+    Array.isArray(right) &&
+    left.length === right.length &&
+    left.every((item, index) => Object.is(item, right[index]));
 }
 
 function createReactStub() {
@@ -37,26 +38,26 @@ function createReactStub() {
   let cursor = 0;
   let pendingRender = false;
   return {
-    beginRender: () => {
+    beginRender() {
       cursor = 0;
       pendingRender = false;
     },
     didScheduleUpdate: () => pendingRender,
-    useCallback: (fn, deps) => {
+    useCallback(fn, deps) {
       const index = cursor++;
       const slot = slots[index];
       if (slot && depsEqual(slot.deps, deps)) return slot.value;
       slots[index] = { deps, value: fn };
       return fn;
     },
-    useEffect: (fn, deps) => {
+    useEffect(fn, deps) {
       const index = cursor++;
       const slot = slots[index];
       if (slot && depsEqual(slot.deps, deps)) return;
       slots[index] = { deps };
       fn();
     },
-    useMemo: (fn, deps) => {
+    useMemo(fn, deps) {
       const index = cursor++;
       const slot = slots[index];
       if (slot && depsEqual(slot.deps, deps)) return slot.value;
@@ -64,301 +65,851 @@ function createReactStub() {
       slots[index] = { deps, value };
       return value;
     },
-    useState: (initial) => {
+    useState(initial) {
       const index = cursor++;
       if (!slots[index]) {
-        slots[index] = {
-          value: typeof initial === "function" ? initial() : initial,
-        };
+        slots[index] = { value: typeof initial === "function" ? initial() : initial };
       }
-      return [
-        slots[index].value,
-        (next) => {
-          const value =
-            typeof next === "function" ? next(slots[index].value) : next;
-          if (!Object.is(value, slots[index].value)) {
-            slots[index].value = value;
-            pendingRender = true;
-          }
-        },
-      ];
+      return [slots[index].value, (next) => {
+        const value = typeof next === "function" ? next(slots[index].value) : next;
+        if (!Object.is(value, slots[index].value)) {
+          slots[index].value = value;
+          pendingRender = true;
+        }
+      }];
     },
   };
 }
 
-function instantiate(queryState, options = {}) {
-  const getStateScopes = [];
-  const markSeenCalls = [];
-  const listThreadCalls = [];
-  const subscribeCalls = [];
-  const notificationInputs = [];
-  let queryOptions = null;
+function instantiate({
+  data,
+  profile = { tenant_id: "tenant", user_id: "user" },
+  activeThreadId = null,
+  inboxError = null,
+  approvalError = null,
+  mutationsPending = false,
+  archiveError = null,
+} = {}) {
+  let queryOptions;
+  const readCalls = [];
+  const allReadCalls = [];
+  const inboxCalls = [];
+  const threadCalls = [];
+  const seenCalls = [];
+  const archiveCalls = [];
+  const optimisticWrites = [];
+  const queryKeys = [];
+  const refetchCalls = [];
+  const mutationFailures = [];
+  const refetch = () => {
+    refetchCalls.push(true);
+  };
+  let storedState = { initialized: true, seenIds: new Set() };
   const react = createReactStub();
-  const translate = (key) => key;
-  let storedState = options.initialState || { initialized: true, seenIds: new Set() };
-  const states = options.threadStates || new Map();
+  /* A real query cache composes: the second optimistic write starts from the
+   * first one's result. Reading the pristine fixture back every time would let
+   * a second update silently clobber the first and still pass. */
+  let cached = data;
+  const queryClient = {
+    cancelQueries: async () => {},
+    getQueryData: () => cached,
+    setQueryData: (_key, updater) => {
+      cached = typeof updater === "function" ? updater(cached) : updater;
+      optimisticWrites.push(cached);
+    },
+    invalidateQueries: () => {},
+  };
+  let mutationIndex = 0;
   const context = {
     React: react,
-    useI18n: () => ({ t: translate, lang: "en" }),
+    Promise,
+    useI18n: () => ({ t: (key) => key }),
+    useQueryClient: () => queryClient,
+    useThreadStates: () => new Map(),
+    THREAD_STATE: { NEEDS_ATTENTION: "needs_attention" },
     useQuery: (options) => {
       queryOptions = options;
-      return queryState;
+      queryKeys.push(options.queryKey);
+      return {
+        data: cached,
+        isLoading: false,
+        error: null,
+        refetch,
+      };
+    },
+    useMutation: ({ mutationFn, onMutate, onError, onSuccess, onSettled }) => {
+      mutationIndex += 1;
+      return {
+        /* The whole lifecycle, not just the happy half: `onMutate` writes the
+         * optimistic value, and a rejecting `mutationFn` has to reach `onError`
+         * so the rollback is exercised. Stopping at `onMutate` left a failed
+         * archive looking permanently applied with every test still green. */
+        mutate: (value) => {
+          const context = onMutate?.(value);
+          // Still synchronous, so callers can assert the request without
+          // flushing; only the outcome handling is deferred.
+          const outcome = mutationFn(value);
+          return Promise.resolve(context).then((resolvedContext) =>
+            Promise.resolve(outcome)
+              .then(
+                (result) => {
+                  onSuccess?.(result, value, resolvedContext);
+                  return result;
+                },
+                (error) => {
+                  onError?.(error, value, resolvedContext);
+                  mutationFailures.push(error);
+                },
+              )
+              .finally(() => onSettled?.()),
+          );
+        },
+        isPending: mutationsPending,
+        error: null,
+        mutationIndex,
+      };
+    },
+    listNotifications: async (request) => {
+      inboxCalls.push(request);
+      if (inboxError) throw inboxError;
+      if (data?.inboxPages) {
+        const index = request.cursor
+          ? data.inboxPages.findIndex((page) => page.requestCursor === request.cursor)
+          : 0;
+        return data.inboxPages[index] || { notifications: [], unread_count: 0 };
+      }
+      return data?.inbox || { notifications: [], unread_count: 0 };
     },
     listThreads: async (request) => {
-      listThreadCalls.push(request);
-      return {};
+      threadCalls.push(request);
+      if (approvalError) throw approvalError;
+      return data?.approvalThreads || { threads: [] };
     },
-    THREAD_STATE: { NEEDS_ATTENTION: "needs_attention" },
-    useThreadStates: () => states,
-    approvalThreadNotifications: (threads, threadStates, t) => {
-      notificationInputs.push({ threads, threadStates, t });
-      return typeof options.approvalThreadNotifications === "function"
-        ? options.approvalThreadNotifications(threads, threadStates, t)
-        : threads.map((thread) => {
-            const threadId = thread.id || thread.thread_id;
-            return {
-              id: `approval:${threadId}`,
-              href: `/chat/${threadId}`,
-            };
-          });
+    markNotificationRead: async (id) => readCalls.push(id),
+    markAllNotificationsRead: async () => allReadCalls.push(true),
+    archiveNotification: async (id) => {
+      archiveCalls.push(id);
+      if (archiveError) throw archiveError;
     },
-    getNotificationState: (scope) => {
-      getStateScopes.push(scope);
-      return storedState;
-    },
-    markNotificationIdsSeen: (ids, scope) => {
-      markSeenCalls.push({ ids, scope });
-      storedState = {
-        initialized: true,
-        seenIds: new Set([...storedState.seenIds, ...ids]),
-      };
-      return storedState;
-    },
-    subscribeNotifications: (listener) => {
-      subscribeCalls.push(listener);
-      return () => {};
-    },
+    notificationMessages: (notifications) => (notifications || []).map((notification) => ({
+      id: notification.id,
+      type: notification.kind,
+      href: `/chat/${notification.action.thread_id}`,
+      threadId: notification.thread_id || notification.action.thread_id,
+      turnRunId: notification.turn_run_id || null,
+      timestamp: notification.timestamp || 2,
+      read: Boolean(notification.read_at),
+    })),
+    loadApprovalNotificationCompat: async () => ({
+      approvalThreadNotifications: (threads) => threads.map((thread) => ({
+        id: `approval:${thread.id}`,
+        type: "approval",
+        href: `/chat/${thread.id}`,
+        threadId: thread.id,
+        timestamp: 1,
+        read: false,
+      })),
+      getNotificationState: () => storedState,
+      markNotificationIdsSeen: (ids, scope) => {
+        seenCalls.push({ ids, scope });
+        storedState = {
+          initialized: true,
+          seenIds: new Set([...storedState.seenIds, ...ids]),
+        };
+        return storedState;
+      },
+    }),
     globalThis: {},
   };
   vm.runInNewContext(sourceForTest(), context);
+  /* Settle the hook the way React would, then hand back converged state. If it
+   * never settles, say so: returning the last mid-flight attempt would make a
+   * render loop in `useNotifications` read as green, with every assertion after
+   * it measuring unconverged state. */
+  const MAX_RENDER_ATTEMPTS = 5;
   const render = () => {
     let hook;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < MAX_RENDER_ATTEMPTS; attempt += 1) {
       react.beginRender();
-      hook = context.globalThis.__testExports.useNotifications({
-        profile:
-          options.profile === undefined
-            ? { tenant_id: "tenant", user_id: "user" }
-            : options.profile,
-        activeThreadId: options.activeThreadId || null,
-      });
-      if (!react.didScheduleUpdate()) break;
+      mutationIndex = 0;
+      hook = context.globalThis.__testExports.useNotifications({ profile, activeThreadId });
+      if (!react.didScheduleUpdate()) return hook;
     }
-    return hook;
+    throw new Error(
+      `useNotifications still scheduled an update after ${MAX_RENDER_ATTEMPTS} renders`,
+    );
   };
-  const hook = render();
   return {
-    hook,
+    hook: render(),
     render,
-    get queryOptions() {
-      return queryOptions;
-    },
-    getStateScopes,
-    markSeenCalls,
-    listThreadCalls,
-    notificationInputs,
-    subscribeCalls,
+    get queryOptions() { return queryOptions; },
+    readCalls,
+    allReadCalls,
+    inboxCalls,
+    queryKeys,
+    refetchCalls,
+    mutationFailures,
+    threadCalls,
+    seenCalls,
+    archiveCalls,
+    optimisticWrites,
+    setProfile(next) { profile = next; },
   };
 }
 
-function plainCalls(calls) {
-  return calls.map((call) => ({ ids: [...call.ids], scope: call.scope }));
+function notification(
+  id = "notification-1",
+  threadId = "thread-1",
+  readAt = null,
+  kind = "approval_required",
+  turnRunId = null,
+) {
+  return {
+    id,
+    kind,
+    action: { kind: "open_thread", thread_id: threadId },
+    thread_id: threadId,
+    turn_run_id: turnRunId,
+    read_at: readAt,
+  };
 }
 
-function plainThreadRequests(calls) {
-  return calls.map((call) => ({
-    limit: call.limit,
-    needsApproval: call.needsApproval,
-    candidateThreadId: call.candidateThreadId,
-  }));
+function flushAsyncWork() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-test("does not baseline approval notifications on first load", () => {
+test("reads legacy approvals alongside the inbox during the producer rollout", async () => {
   const harness = instantiate({
-    data: undefined,
-    isLoading: true,
-    isSuccess: false,
-    error: null,
-    refetch: () => {},
+    data: {
+      inbox: { notifications: [], unread_count: 0 },
+      approvalThreads: { threads: [{ id: "thread-transition" }] },
+    },
   });
+  assert.equal(harness.queryOptions.enabled, true);
+  const result = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.inboxCalls)), [
+    { limit: 30, signal: {} },
+  ], "every page carries the query's abort signal");
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
+    { limit: 20, needsApproval: true, signal: {} },
+  ]);
+  assert.equal(result.compatibility[0].id, "approval:thread-transition");
+  assert.equal(result.inboxSupported, true);
 
-  assert.deepEqual(harness.markSeenCalls, []);
-  assert.equal(harness.hook.unreadCount, 0);
-  assert.deepEqual(harness.listThreadCalls, []);
+  const pending = instantiate({ data: {}, profile: null });
+  assert.equal(pending.queryOptions.enabled, false);
 });
 
-test("queries only threads that need approval", async () => {
+test("uses the compatibility fallback when the server does not support the inbox", async () => {
   const harness = instantiate({
-    data: { threads: [] },
-    isLoading: false,
-    isSuccess: true,
-    error: null,
-    refetch: () => {},
+    data: { approvalThreads: { threads: [{ id: "thread-fallback" }] } },
+    inboxError: Object.assign(new Error("inbox unavailable"), { status: 404 }),
   });
-
-  await harness.queryOptions.queryFn();
-  assert.deepEqual(plainThreadRequests(harness.listThreadCalls), [
-    { limit: 20, needsApproval: true, candidateThreadId: undefined },
+  const result = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+  assert.deepEqual(JSON.parse(JSON.stringify(result.inbox)), {
+    notifications: [],
+    unread_count: 0,
+  });
+  assert.equal(result.compatibility[0].id, "approval:thread-fallback");
+  assert.equal(result.inboxSupported, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
+    { limit: 20, needsApproval: true, signal: {} },
   ]);
 });
 
-test("does not use active thread as an approval query candidate", async () => {
-  const harness = instantiate(
-    {
-      data: { threads: [] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
-    },
-    { activeThreadId: "thread-active" },
+test("surfaces transient inbox failures without activating the compatibility path", async () => {
+  const inboxError = Object.assign(new Error("inbox unavailable"), { status: 503 });
+  const harness = instantiate({
+    data: { approvalThreads: { threads: [{ id: "thread-fallback" }] } },
+    inboxError,
+  });
+  await assert.rejects(harness.queryOptions.queryFn({ signal: new AbortController().signal }), inboxError);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.threadCalls)),
+    [{ limit: 20, needsApproval: true, signal: {} }],
+    "both rollout sources start together, but the 503 still wins",
   );
-
-  await harness.queryOptions.queryFn();
-  assert.deepEqual(plainThreadRequests(harness.listThreadCalls), [
-    { limit: 20, needsApproval: true, candidateThreadId: undefined },
-  ]);
 });
 
-test("does not poll or persist notification state before profile scope hydrates", () => {
-  const harness = instantiate(
-    {
-      data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
+test("keeps durable notifications when the legacy approval read fails", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
     },
-    { activeThreadId: "thread-1", profile: null },
-  );
-
-  assert.equal(harness.queryOptions.enabled, false);
-  assert.deepEqual(harness.getStateScopes, []);
-  assert.deepEqual(harness.markSeenCalls, []);
-  assert.equal(harness.hook.unreadCount, 0);
+    approvalError: new Error("legacy approvals unavailable"),
+  });
+  const result = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+  assert.equal(result.inboxSupported, true);
+  assert.equal(result.inbox.notifications[0].id, "notification-1");
+  assert.deepEqual(JSON.parse(JSON.stringify(result.compatibility)), []);
 });
 
-test("does not include locally known non-automation approval threads", () => {
-  const harness = instantiate(
-    {
-      data: { threads: [] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
+test("surfaces the legacy approval failure when no durable inbox is available", async () => {
+  const approvalError = new Error("legacy approvals unavailable");
+  const harness = instantiate({
+    inboxError: Object.assign(new Error("inbox unavailable"), { status: 404 }),
+    approvalError,
+  });
+  await assert.rejects(harness.queryOptions.queryFn({ signal: new AbortController().signal }), approvalError);
+});
+
+test("durable approvals win while unmatched rollout approvals remain visible", () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
+      compatibility: [
+        {
+          // Same thread as the durable record.
+          id: "approval:thread-1",
+          type: "approval",
+          href: "/chat/thread-1",
+          threadId: "thread-1",
+          timestamp: 1,
+          read: false,
+        },
+        {
+          // A thread the durable inbox says nothing about — dropped just the
+          // same, which is what makes this suppression rather than matching.
+          id: "approval:thread-unrelated",
+          type: "approval",
+          href: "/chat/thread-unrelated",
+          threadId: "thread-unrelated",
+          timestamp: 2,
+          read: false,
+        },
+      ],
     },
-    {
-      threadStates: new Map([["thread-local", "needs_attention"]]),
-      approvalThreadNotifications: (threads) =>
-        threads.map((thread) => ({
-          id: `approval:${thread.id}`,
-          href: `/chat/${thread.id}`,
-        })),
-    },
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
+    ["notification-1", "approval:thread-unrelated"],
   );
+  assert.equal(harness.hook.unreadCount, 2);
+});
+
+test("an empty durable inbox still shows a pending rollout approval", () => {
+  const harness = instantiate({
+    data: {
+      inboxSupported: true,
+      inbox: { notifications: [], unread_count: 0 },
+      compatibility: [{
+        id: "approval:thread-transition",
+        type: "approval",
+        href: "/chat/thread-transition",
+        timestamp: 1,
+        read: false,
+      }],
+    },
+  });
 
   assert.deepEqual(
-    JSON.parse(JSON.stringify(
-      harness.notificationInputs.at(-1).threads.map((thread) => ({
-        id: thread.id,
-        state: thread.state,
-        title: thread.title,
-      })),
-    )),
-    [],
+    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
+    ["approval:thread-transition"],
   );
-  assert.equal(harness.hook.messages.length, 0);
-});
-
-test("passes local thread state to approval notification presenter for backend records", () => {
-  const threadStates = new Map([["thread-1", "needs_attention"]]);
-  const harness = instantiate(
-    {
-      data: { threads: [{ id: "thread-1", state: "idle" }] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
-    },
-    {
-      threadStates,
-      approvalThreadNotifications: (threads, states) =>
-        threads
-          .filter((thread) => states.get(thread.id) === "needs_attention")
-          .map((thread) => ({
-            id: `approval:${thread.id}`,
-            href: `/chat/${thread.id}`,
-          })),
-    },
-  );
-
-  assert.equal(harness.notificationInputs.at(-1).threadStates, threadStates);
   assert.equal(harness.hook.unreadCount, 1);
 });
 
-test("keeps pending approval messages after they are marked seen", () => {
-  const { hook, markSeenCalls, render } = instantiate({
-    data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
-    isLoading: false,
-    isSuccess: true,
-    error: null,
-    refetch: () => {},
-  });
-
-  assert.equal(hook.unreadCount, 1);
-  hook.dismissMessage("approval:thread-1");
-  assert.deepEqual(plainCalls(markSeenCalls), [
-    { ids: ["approval:thread-1"], scope: "tenant:user" },
-  ]);
-  const nextHook = render();
-  assert.equal(nextHook.messages.length, 1);
-  assert.equal(nextHook.unreadCount, 0);
-  assert.equal(nextHook.unreadIds.has("approval:thread-1"), false);
-});
-
-test("uses the profile scope for notification dismissal", () => {
-  const { getStateScopes, hook, markSeenCalls } = instantiate({
-    data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
-    isLoading: false,
-    isSuccess: true,
-    error: null,
-    refetch: () => {},
-  });
-
-  assert(getStateScopes.includes("tenant:user"));
-
-  hook.dismissMessage("approval:thread-1");
-  assert.deepEqual(plainCalls(markSeenCalls), [
-    { ids: ["approval:thread-1"], scope: "tenant:user" },
-  ]);
-});
-
-test("marks an approval notification seen after the thread has been opened", () => {
-  const { hook, markSeenCalls } = instantiate(
-    {
-      data: { threads: [{ id: "thread-1", state: "needs_attention" }] },
-      isLoading: false,
-      isSuccess: true,
-      error: null,
-      refetch: () => {},
+test("marks durable and compatibility notifications through their owning state", async () => {
+  const durable = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
+      approvalThreads: { threads: [] },
     },
-    { activeThreadId: "thread-1" },
+  });
+  durable.hook.dismissMessage("notification-1");
+  assert.deepEqual(durable.readCalls, ["notification-1"]);
+
+  const fallback = instantiate({
+    data: {
+      inboxSupported: false,
+      inbox: { notifications: [], unread_count: 0 },
+      compatibility: [{
+        id: "approval:thread-fallback",
+        type: "approval",
+        href: "/chat/thread-fallback",
+        timestamp: 1,
+        read: false,
+      }],
+    },
+  });
+  fallback.hook.dismissMessage("approval:thread-fallback");
+  await flushAsyncWork();
+  assert.deepEqual(JSON.parse(JSON.stringify(fallback.seenCalls)), [
+    { ids: ["approval:thread-fallback"], scope: "tenant:user" },
+  ]);
+});
+
+test("archives a durable notification and drops it from the cached inbox", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification(), notification("notification-2")], unread_count: 2 },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+
+  assert.deepEqual(harness.archiveCalls, ["notification-1"]);
+  const optimistic = harness.optimisticWrites.at(-1);
+  assert.deepEqual(
+    optimistic.inbox.notifications.map((record) => record.id),
+    ["notification-2"],
+    "the archived record leaves the cached list immediately",
+  );
+  assert.equal(
+    optimistic.inbox.unread_count,
+    1,
+    "archiving an unread record also drops it from the badge",
+  );
+});
+
+test("archiving a read record leaves the unread badge alone", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [notification("notification-1", "thread-1", "2026-08-19T00:00:00Z")],
+        unread_count: 0,
+      },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+
+  assert.deepEqual(harness.archiveCalls, ["notification-1"]);
+  assert.equal(harness.optimisticWrites.at(-1).inbox.unread_count, 0);
+});
+
+test("a compatibility notification is never archived through the server", () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [], unread_count: 0 },
+      approvalThreads: { threads: [{ id: "thread-fallback" }] },
+    },
+  });
+
+  harness.hook.archiveMessage("approval:thread-fallback");
+
+  assert.deepEqual(
+    harness.archiveCalls,
+    [],
+    "a legacy approval row has no durable record, so archiving it would 404",
+  );
+});
+
+const PAGED_INBOX = {
+  // The harness's `useQuery` hands `data` straight back, so `inbox` stands in
+  // for the merged state the hook derives from; `inboxPages` is what the
+  // queryFn reads through the cursor.
+  inbox: {
+    notifications: [notification("page1-a"), notification("page1-b")],
+    unread_count: 5,
+    next_cursor: "cursor-2",
+  },
+  inboxPages: [
+    {
+      notifications: [notification("page1-a"), notification("page1-b")],
+      unread_count: 5,
+      next_cursor: "cursor-2",
+    },
+    {
+      requestCursor: "cursor-2",
+      notifications: [notification("page2-a")],
+      unread_count: 5,
+      next_cursor: "cursor-3",
+    },
+    {
+      requestCursor: "cursor-3",
+      notifications: [notification("page3-a")],
+      unread_count: 5,
+      next_cursor: null,
+    },
+  ],
+  approvalThreads: { threads: [] },
+};
+
+test("paging follows the cursor instead of only widening one request", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined],
+    "the first pass asks for the head with no cursor",
+  );
+  assert.equal(harness.hook.canLoadMore, true);
+
+  harness.hook.loadMore();
+  harness.render();
+  harness.inboxCalls.length = 0;
+  const merged = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined, "cursor-2"],
+    "loading more re-reads the head and follows the reported cursor",
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(merged.inbox.notifications.map((record) => record.id))),
+    ["page1-a", "page1-b", "page2-a"],
+    "the loaded pages are one flat list, head first",
+  );
+  assert.equal(
+    merged.inbox.unread_count,
+    5,
+    "the badge keeps the server total rather than summing pages",
+  );
+  assert.equal(
+    merged.inbox.next_cursor,
+    "cursor-3",
+    "the cursor to continue from is the last loaded page's",
+  );
+});
+
+test("paging is not capped by the per-request ceiling", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  let hook = harness.hook;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    hook.loadMore();
+    hook = harness.render();
+  }
+  harness.inboxCalls.length = 0;
+  const merged = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined, "cursor-2", "cursor-3"],
+    "every reported cursor is followed, so records past one page stay reachable",
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(merged.inbox.notifications.map((record) => record.id))),
+    ["page1-a", "page1-b", "page2-a", "page3-a"],
+  );
+  assert.equal(
+    merged.inbox.next_cursor,
+    null,
+    "the last page reports no cursor, so there is nothing left to load",
+  );
+});
+
+test("stops offering more pages once the inbox reports no cursor", () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1, next_cursor: null },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  assert.equal(harness.hook.canLoadMore, false);
+});
+
+test("does not mark a notification merely because its thread route is active", () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
+    },
+    activeThreadId: "thread-1",
+  });
+  assert.deepEqual(harness.readCalls, []);
+});
+
+test("marks a run completion only after its matching final reply rendered", () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [
+          notification(
+            "notification-completed",
+            "thread-1",
+            null,
+            "run_completed",
+            "run-1",
+          ),
+        ],
+        unread_count: 1,
+      },
+    },
+    activeThreadId: "thread-1",
+  });
+  harness.hook.prepareMessageOpen(harness.hook.messages[0]);
+  const pending = harness.render();
+  assert.deepEqual(JSON.parse(JSON.stringify(pending.pendingRenderedNotification)), {
+    notificationId: "notification-completed",
+    threadId: "thread-1",
+    turnRunId: "run-1",
+  });
+  assert.deepEqual(harness.readCalls, []);
+
+  pending.acknowledgeRenderedNotification({
+    threadId: "thread-1",
+    turnRunId: "run-1",
+  });
+  assert.deepEqual(harness.readCalls, ["notification-completed"]);
+});
+
+test("acknowledges a rendered completion while an earlier mark-read is in flight", () => {
+  // The final reply renders once per run, so an acknowledgement skipped here
+  // never gets another trigger and the completion stays unread forever.
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [
+          notification(
+            "notification-completed",
+            "thread-1",
+            null,
+            "run_completed",
+            "run-1",
+          ),
+        ],
+        unread_count: 1,
+      },
+    },
+    activeThreadId: "thread-1",
+    mutationsPending: true,
+  });
+  harness.hook.prepareMessageOpen(harness.hook.messages[0]);
+  const pending = harness.render();
+  pending.acknowledgeRenderedNotification({
+    threadId: "thread-1",
+    turnRunId: "run-1",
+  });
+  assert.deepEqual(harness.readCalls, ["notification-completed"]);
+});
+
+test("mark all read settles both rollout sources when the inbox answers", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: { notifications: [notification()], unread_count: 1 },
+      compatibility: [{
+        id: "approval:thread-fallback",
+        type: "approval",
+        href: "/chat/thread-fallback",
+        threadId: "thread-fallback",
+        timestamp: 1,
+        read: false,
+      }],
+    },
+  });
+  harness.hook.markAllRead();
+  await flushAsyncWork();
+  assert.deepEqual(harness.allReadCalls, [true]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.seenCalls)),
+    [{ ids: ["approval:thread-fallback"], scope: "tenant:user" }],
+    "the rollout row is settled alongside the durable inbox",
+  );
+});
+
+test("an archived approval does not return through the compatibility source", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [notification("notification-1", "thread-fallback")],
+        unread_count: 1,
+      },
+      compatibility: [{
+        id: "approval:thread-fallback",
+        type: "approval",
+        href: "/chat/thread-fallback",
+        threadId: "thread-fallback",
+        timestamp: 1,
+        read: false,
+      }],
+    },
+  });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
+    ["notification-1"],
+    "the durable record is the only row while the inbox answers",
   );
 
-  assert.deepEqual(plainCalls(markSeenCalls), [
-    { ids: ["approval:thread-1"], scope: "tenant:user" },
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+  const afterArchive = harness.render();
+
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        harness.optimisticWrites.at(-1).inbox.notifications.map((record) => record.id),
+      ),
+    ),
+    [],
+    "archiving empties the durable list without resurrecting the pending-thread row",
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(afterArchive.messages.map((message) => message.id))),
+    [],
+    "the matching compatibility row stays suppressed after the durable archive",
+  );
+});
+
+test("does not call durable mutations when the server lacks the inbox API", async () => {
+  const harness = instantiate({
+    data: {
+      inboxSupported: false,
+      inbox: { notifications: [], unread_count: 0 },
+      compatibility: [{
+        id: "approval:thread-fallback",
+        type: "approval",
+        href: "/chat/thread-fallback",
+        timestamp: 1,
+        read: false,
+      }],
+    },
+  });
+  harness.hook.markAllRead();
+  await flushAsyncWork();
+  assert.deepEqual(harness.allReadCalls, []);
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.seenCalls)), [
+    { ids: ["approval:thread-fallback"], scope: "tenant:user" },
   ]);
-  assert.equal(hook.messages.length, 1);
-  assert.equal(hook.unreadCount, 0);
-  assert.equal(hook.unreadIds.has("approval:thread-1"), false);
+});
+
+test("an abort mid-walk stops paging instead of draining the inbox", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  harness.hook.loadMore();
+  harness.hook.loadMore();
+  harness.render();
+  harness.inboxCalls.length = 0;
+
+  // Abort as soon as the head has been read, which is what an unmount or a
+  // superseding refetch does to a query that is still walking its cursor.
+  const controller = new AbortController();
+  const paged = harness.queryOptions.queryFn({ signal: controller.signal });
+  controller.abort();
+
+  await assert.rejects(paged);
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined],
+    "the walk stops at the head rather than following cursor-2 and cursor-3",
+  );
+});
+
+test("archiving twice composes instead of resurrecting the first record", async () => {
+  const harness = instantiate({
+    data: {
+      inbox: {
+        notifications: [
+          notification("notification-1"),
+          notification("notification-2"),
+          notification("notification-3"),
+        ],
+        unread_count: 3,
+      },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+  harness.render();
+  harness.hook.archiveMessage("notification-2");
+  await flushAsyncWork();
+
+  assert.deepEqual(harness.archiveCalls, ["notification-1", "notification-2"]);
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        harness.optimisticWrites.at(-1).inbox.notifications.map((record) => record.id),
+      ),
+    ),
+    ["notification-3"],
+    "the second archive builds on the first rather than restoring it",
+  );
+  assert.equal(harness.optimisticWrites.at(-1).inbox.unread_count, 1);
+});
+
+test("loading more keeps one cache entry so the open panel never blanks", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  const firstKey = harness.queryKeys.at(-1);
+
+  harness.hook.loadMore();
+  harness.render();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.queryKeys.at(-1))),
+    JSON.parse(JSON.stringify(firstKey)),
+    "the page count is a request parameter, so it must not split the cache",
+  );
+  assert.ok(
+    harness.refetchCalls.length > 0,
+    "a stable key means the wider read has to be asked for explicitly",
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
+    ["page1-a", "page1-b"],
+    "the rows already on screen survive the transition",
+  );
+  assert.equal(harness.hook.unreadCount, 5, "and so does the badge");
+
+  harness.setProfile({ tenant_id: "other-tenant", user_id: "other-user" });
+  harness.render();
+  assert.notDeepEqual(
+    JSON.parse(JSON.stringify(harness.queryKeys.at(-1))),
+    JSON.parse(JSON.stringify(firstKey)),
+    "changing recipient scope selects a different cache entry",
+  );
+});
+
+test("closing the panel collapses paging back to the head", async () => {
+  const harness = instantiate({ data: PAGED_INBOX });
+  harness.hook.loadMore();
+  harness.hook.loadMore();
+  harness.render();
+  harness.inboxCalls.length = 0;
+  await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined, "cursor-2", "cursor-3"],
+    "a reader who paged twice has the poll walking three pages",
+  );
+
+  harness.hook.collapsePages();
+  harness.render();
+  harness.inboxCalls.length = 0;
+  await harness.queryOptions.queryFn({ signal: new AbortController().signal });
+  assert.deepEqual(
+    harness.inboxCalls.map((call) => call.cursor),
+    [undefined],
+    "with the panel shut the poll is back to one request for the badge",
+  );
+});
+
+test("a failed archive puts the row back and reports the failure", async () => {
+  const archiveError = Object.assign(new Error("archive rejected"), { status: 500 });
+  const harness = instantiate({
+    archiveError,
+    data: {
+      inbox: {
+        notifications: [notification("notification-1"), notification("notification-2")],
+        unread_count: 2,
+      },
+      approvalThreads: { threads: [] },
+    },
+  });
+
+  harness.hook.archiveMessage("notification-1");
+  await flushAsyncWork();
+
+  assert.deepEqual(harness.archiveCalls, ["notification-1"]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(harness.mutationFailures.map((error) => error.message))),
+    ["archive rejected"],
+    "the rejection reaches onError rather than being swallowed",
+  );
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        harness.optimisticWrites.at(-1).inbox.notifications.map((record) => record.id),
+      ),
+    ),
+    ["notification-1", "notification-2"],
+    "the row the server refused to archive is restored, not left missing",
+  );
+  assert.equal(harness.optimisticWrites.at(-1).inbox.unread_count, 2);
 });

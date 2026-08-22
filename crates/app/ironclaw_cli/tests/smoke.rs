@@ -454,7 +454,8 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     assert_no_removed_backend_cargo_features(&compile_workflow, "Reborn release CI");
     assert!(
         compile_workflow.matches("musl: true").count() == 2
-            && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils file")
+            && compile_workflow
+                .contains("scripts/ci/install-ci-apt-packages.sh musl-tools binutils file")
             && compile_workflow.contains("CC_x86_64_unknown_linux_musl=musl-gcc")
             && compile_workflow.contains("CC_aarch64_unknown_linux_musl=musl-gcc")
             && !compile_workflow.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER")

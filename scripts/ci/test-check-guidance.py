@@ -519,6 +519,56 @@ class GuidanceGateTests(unittest.TestCase):
         self.assertIn("no AGENTS.md sits beside it", output)
         self.assertIn("delete it", output)
 
+    # -- tests/ tree gets the same treatment as crates/ --------------------
+    def test_tests_tree_guidance_is_discovered(self) -> None:
+        """`discover_guidance`'s `tests/` branch (TESTS_PREFIX /
+        TESTS_GUIDANCE_BASENAMES) has no fixture otherwise — only the real
+        repository exercises it, and that check only asserts a clean exit.
+        A dangling reference inside a `tests/**/AGENTS.md` must be caught the
+        same way a `crates/**/AGENTS.md` one is."""
+        self.build_fixture()
+        self.write(
+            "tests/integration/AGENTS.md",
+            "Support lives at `tests/integration/support/gone.rs`.\n",
+        )
+        self.symlink("tests/integration/CLAUDE.md", "AGENTS.md")
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("tests/integration/AGENTS.md", output)
+        self.assertIn("tests/integration/support/gone.rs", output)
+
+    def test_tests_tree_alias_is_enforced(self) -> None:
+        """The alias rule walks `tests/**/AGENTS.md` too (`check_claude_aliases`
+        matches `crates/` OR `TESTS_PREFIX`), but no fixture built a tests-tree
+        AGENTS/CLAUDE pair — every existing alias fixture is under `crates/`.
+        A regression that narrowed the alias walk back to `crates/` only would
+        still pass every fixture test before this one."""
+        self.build_fixture()
+        self.write("tests/integration/AGENTS.md", "# integration guidance\n")
+        self.symlink("tests/integration/CLAUDE.md", "AGENTS.md")
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+
+        # Deleting the tracked alias fails, naming the pair.
+        tracked = [
+            t
+            for t in self.tracked()
+            if not t.startswith("tests/integration/CLAUDE.md")
+        ]
+        code, output = self.run_gate(tracked=tracked)
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "tests/integration/AGENTS.md has no tracked CLAUDE.md", output
+        )
+
+        # Retargeting it away from the bare sibling string fails too (points
+        # at a real AGENTS.md two levels up, so the read itself stays
+        # healthy and the refusal is the alias check's, not a read error).
+        self.symlink("tests/integration/CLAUDE.md", "../../AGENTS.md")
+        code, output = self.run_gate()
+        self.assertEqual(code, 1)
+        self.assertIn("must target the sibling `AGENTS.md`", output)
+
     # -- the gate must not fail open ---------------------------------------
     def test_unreadable_guidance_file_refuses(self) -> None:
         self.build_fixture()

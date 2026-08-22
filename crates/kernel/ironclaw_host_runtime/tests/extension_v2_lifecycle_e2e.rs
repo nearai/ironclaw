@@ -6,8 +6,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_capabilities::{
     BoundCapabilityAdapter, CapabilityDispatchRequest, CapabilityDispatcher, DispatchError,
-    ResolvedCapability, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
-    ToolResolver,
+    DispatchFailureKind, ResolvedCapability, RuntimeAdapterResult, RuntimeDispatchErrorKind,
+    RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_registry::{
@@ -166,13 +166,14 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     assert_eq!(requests[0].input, json!({"message":"hello"}));
 }
 
-// `dispatch_error_for_runtime` maps `Script | Sandbox => DispatchError::Script`,
-// but until now nothing in this file drove it with a `RuntimeKind::Sandbox`
-// adapter (the only `RecordingAdapter` above is `RuntimeKind::Script`). Test
-// through the caller (`RuntimeDispatcher::dispatch_json`), not the mapping
-// helper directly, per the repo's "test through the caller" rule: drive a
+// `dispatch_error_for_runtime` maps `Script | Sandbox => DispatchError::Rejected`
+// with `runtime: Some(RuntimeKind::Sandbox)`, but until now nothing in this
+// file drove it with a `RuntimeKind::Sandbox` adapter (the only
+// `RecordingAdapter` above is `RuntimeKind::Script`). Test through the
+// caller (`RuntimeDispatcher::dispatch_json`), not the mapping helper
+// directly, per the repo's "test through the caller" rule: drive a
 // Sandbox-runtime adapter through the same governor-failure path and assert
-// the dispatcher surfaces `DispatchError::Script`.
+// the dispatcher surfaces the rejection.
 #[tokio::test]
 async fn sandbox_runtime_adapter_governor_failure_surfaces_script_dispatch_error() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
@@ -236,9 +237,16 @@ async fn sandbox_runtime_adapter_governor_failure_surfaces_script_dispatch_error
         .await;
 
     match result {
-        Err(DispatchError::Script { .. }) => {}
+        Err(DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Sandbox),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+            diagnostic: None,
+            detail: None,
+        }) => {}
         other => {
-            panic!("expected DispatchError::Script for a Sandbox-runtime adapter, got {other:?}")
+            panic!(
+                "expected DispatchError::Rejected(runtime: Sandbox) for a Sandbox-runtime adapter, got {other:?}"
+            )
         }
     }
 }
@@ -649,18 +657,14 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Script | RuntimeKind::Sandbox => DispatchError::Script {
-            kind,
-            model_visible_cause: None,
-        },
-        RuntimeKind::Wasm => DispatchError::Wasm {
-            kind,
-            model_visible_cause: None,
-        },
-        RuntimeKind::Mcp => DispatchError::Mcp {
-            kind,
-            model_visible_cause: None,
-        },
+        RuntimeKind::Script | RuntimeKind::Sandbox | RuntimeKind::Wasm | RuntimeKind::Mcp => {
+            DispatchError::Rejected {
+                runtime: Some(runtime),
+                kind: DispatchFailureKind::Runtime(kind),
+                diagnostic: None,
+                detail: None,
+            }
+        }
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
             capability: CapabilityId::new("system.unsupported").unwrap(),
             runtime,

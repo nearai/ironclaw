@@ -59,23 +59,22 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
     match result {
         Err(DispatchError::AuthRequired {
             capability,
-            required_secrets,
-            credential_requirements,
+            requirement: got,
+            ..
         }) => {
             assert_eq!(capability, descriptor.id);
-            assert!(required_secrets.is_empty());
-            assert_eq!(credential_requirements, vec![requirement]);
+            assert!(got.required_secrets.is_empty());
+            assert_eq!(got.credential_requirements, vec![requirement]);
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn mcp_adapter_preserves_executor_failure_cause() {
-    // Regression (Phase 1): an MCP dispatch failure's raw cause — including
-    // path/JSON delimiters — must ride the model-visible-cause channel so the
-    // model-visible Diagnostic downstream keeps it instead of collapsing to a
-    // bare failure category.
+async fn mcp_adapter_sanitizes_executor_failure_paths() {
+    // MCP client errors may contain host filesystem paths. The provider
+    // diagnostic keeps the corrective context but never exposes those paths;
+    // raw backend details stay in host-side diagnostics only.
     let raw = "MCP client failed at /tmp/{socket}";
     let adapter = McpRuntimeAdapter::from_executor(Arc::new(FailingMcpExecutor {
         reason: raw.to_string(),
@@ -111,12 +110,16 @@ async fn mcp_adapter_preserves_executor_failure_cause() {
         .await;
 
     match result {
-        Err(DispatchError::Mcp {
-            model_visible_cause,
-            ..
-        }) => {
-            let summary = model_visible_cause.expect("MCP cause should be retained");
-            assert!(summary.contains(raw), "unexpected cause: {summary}");
+        Err(DispatchError::Rejected { diagnostic, .. }) => {
+            let summary = diagnostic
+                .and_then(|diagnostic| diagnostic.message)
+                .map(|message| message.as_str().to_string())
+                .expect("MCP cause should be retained");
+            assert!(!summary.contains(raw), "raw MCP path leaked: {summary}");
+            assert!(
+                summary.contains("[redacted]"),
+                "path was not sanitized: {summary}"
+            );
         }
         other => panic!("expected MCP dispatch failure, got {other:?}"),
     }

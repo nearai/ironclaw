@@ -1340,7 +1340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_visible_extension_search_omits_channel_connection_chrome() {
+    async fn model_visible_extension_search_hides_oauth_and_keeps_generated_code_connection() {
         let services = test_services("extension-search-model-output-owner", None, false).await;
 
         let search = invoke_json(
@@ -1393,18 +1393,17 @@ mod tests {
                 .is_some_and(|kinds| kinds.iter().any(|kind| kind == "channel")),
             "model-visible search must still identify Telegram as a channel: {telegram}"
         );
+        let connection = telegram["channel_connection"]
+            .as_object()
+            .expect("Telegram generated-code connection remains model-visible");
+        assert_eq!(connection["strategy"], "web_generated_code");
+        assert_eq!(connection["submit_label"], "Connect workspace bot");
         assert!(
-            telegram.get("channel_connection").is_none(),
-            "model-visible search must strip device-link connection chrome: {telegram}"
+            connection["instructions"]
+                .as_str()
+                .is_some_and(|copy| copy.contains("does not link your personal account")),
+            "Telegram generated-code instructions must distinguish bot pairing from personal-account linking: {telegram}"
         );
-        let telegram_wire = serde_json::to_string(&search).expect("search response serializes");
-        for retired_pairing_copy in ["IronClaw pairing panel", "/start", "displayed code"] {
-            assert!(
-                !telegram_wire.contains(retired_pairing_copy),
-                "device-link Telegram search must not revive retired proof-code copy \
-                 {retired_pairing_copy:?}: {telegram}"
-            );
-        }
     }
 
     #[test]

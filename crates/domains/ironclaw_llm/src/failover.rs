@@ -389,10 +389,14 @@ struct FailoverStreamSink {
 #[async_trait]
 impl CompletionStreamSink for FailoverStreamSink {
     async fn text_delta(&self, delta: String) {
-        if !delta.is_empty() {
+        if !delta.is_empty() && self.inner.text_is_visible() {
             self.emitted_text.store(true, Ordering::Relaxed);
         }
         self.inner.text_delta(delta).await;
+    }
+
+    fn text_is_visible(&self) -> bool {
+        self.inner.text_is_visible()
     }
 
     fn supports_text_replacement(&self) -> bool {
@@ -712,6 +716,17 @@ mod tests {
         }
     }
 
+    struct DiscardingDeltaSink;
+
+    #[async_trait]
+    impl CompletionStreamSink for DiscardingDeltaSink {
+        async fn text_delta(&self, _delta: String) {}
+
+        fn text_is_visible(&self) -> bool {
+            false
+        }
+    }
+
     #[tokio::test]
     async fn streaming_failover_never_appends_a_second_provider_after_visible_text() {
         let primary = Arc::new(StreamingOutcomeProvider {
@@ -759,6 +774,30 @@ mod tests {
 
         assert_eq!(response.content, "fallback");
         assert_eq!(sink.0.lock().unwrap().as_slice(), ["fallback"]);
+        assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_failover_advances_after_discarded_text() {
+        let primary = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("discarded partial"),
+            result: Err("disconnected"),
+        });
+        let fallback = Arc::new(StreamingOutcomeProvider {
+            calls: AtomicUsize::new(0),
+            delta: Some("replacement"),
+            result: Ok("replacement"),
+        });
+        let provider = FailoverProvider::new(vec![primary.clone(), fallback.clone()]).unwrap();
+
+        let response = provider
+            .complete_streaming(make_request(), Arc::new(DiscardingDeltaSink))
+            .await
+            .expect("discarded primary output must not suppress failover");
+
+        assert_eq!(response.content, "replacement");
         assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
         assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
     }

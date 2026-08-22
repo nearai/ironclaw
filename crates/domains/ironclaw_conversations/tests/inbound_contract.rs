@@ -4110,6 +4110,7 @@ fn submit_turn_request(submission: ConversationTurnSubmission) -> SubmitTurnRequ
         product_context.execution_policy = submission.execution_policy;
     }
     SubmitTurnRequest {
+        subagent_activation_provenance: None,
         requested_model: None,
         output_contract: None,
         scope: submission.scope,

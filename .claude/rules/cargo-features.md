@@ -95,10 +95,10 @@ when introduced:
   `scripts/ci/package-feature-flags.sh` and its self-test, and
   `docs/internal/plans/composition-pubuse.snapshot` when the public facade
   changes.
-- **Persisted strings are not feature references.**
-  `SLACK_OUTBOUND_PROVIDER_KEY_PREFIX = "slack-v2-host-beta"` is a
-  secret-store key prefix. Renaming it corrupts existing rows. Check
-  before a global find-and-replace.
+- **Persisted strings are not feature references.** A feature name
+  embedded in a persisted secret-store key prefix corrupts existing rows
+  if renamed. Check before a global find-and-replace whenever a feature
+  that gates persisted keys is renamed.
 
 ## Review flags
 

@@ -28,6 +28,7 @@ jobs:
   check-nightly:
     name: Check ${{ matrix.workflow }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -84,7 +85,7 @@ jobs:
 
           if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
             payload="$(jq -n --arg text "$text" '{text: $text}')"
-            curl -fsS -X POST -H 'Content-type: application/json' \
+            curl -fsS --max-time 30 -X POST -H 'Content-type: application/json' \
               --data "$payload" "$SLACK_WEBHOOK_URL" > /dev/null \
               || echo "Warning: Slack delivery failed" >&2
           else

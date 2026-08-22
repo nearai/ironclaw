@@ -14,10 +14,11 @@ use ironclaw_host_api::{
 };
 use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
-    MissingTriggerActiveRunLookup, TriggerActiveRunLookup, TriggerError, TriggerExecutionSpec,
-    TriggerId, TriggerRecord, TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord,
-    TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind, TriggerState,
-    active_holds_for_records,
+    MissingTriggerActiveRunLookup, MissingTriggerManualFireRunner, TriggerActiveRunLookup,
+    TriggerError, TriggerExecutionSpec, TriggerId, TriggerManualFireOutcome,
+    TriggerManualFireRunner, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
+    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
+    TriggerState, active_holds_for_records,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -42,6 +43,7 @@ pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
+pub const TRIGGER_RUN_CAPABILITY_ID: &str = "builtin.trigger_run";
 
 /// Grounding description for the read path (issue #7246): the model was
 /// observed fabricating automation status ("your digest routine is running")
@@ -91,6 +93,13 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
             PermissionMode::Ask,
             resource_profile(),
         )?,
+        first_party_capability_manifest(
+            TRIGGER_RUN_CAPABILITY_ID,
+            "Run a caller-scoped scheduled trigger now through its normal execution and delivery path without changing its schedule",
+            vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
     ])
 }
 
@@ -101,11 +110,12 @@ pub(super) fn insert_handlers(
     // Compatibility wrapper: supplies `MissingTriggerActiveRunLookup`, so
     // callers through this path never project an `active_hold`, mirroring
     // `NoopTriggerCreateHook` below (#5886).
-    insert_handlers_with_create_hook(
+    insert_handlers_with_services(
         registry,
         repository,
         Arc::new(NoopTriggerCreateHook),
         Arc::new(MissingTriggerActiveRunLookup),
+        Arc::new(MissingTriggerManualFireRunner),
     )
 }
 
@@ -115,6 +125,22 @@ pub(super) fn insert_handlers_with_create_hook(
     create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 ) -> Result<(), HostApiError> {
+    insert_handlers_with_services(
+        registry,
+        repository,
+        create_hook,
+        active_run_lookup,
+        Arc::new(MissingTriggerManualFireRunner),
+    )
+}
+
+pub(super) fn insert_handlers_with_services(
+    registry: &mut FirstPartyCapabilityRegistry,
+    repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
+) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
         Arc::new(TriggerManagementToolHandler {
@@ -122,6 +148,7 @@ pub(super) fn insert_handlers_with_create_hook(
             create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
             active_run_lookup,
+            manual_fire_runner,
         }),
     )
 }
@@ -139,6 +166,7 @@ pub(super) fn insert_handlers_with_clock(
             create_hook: Arc::new(NoopTriggerCreateHook),
             clock,
             active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+            manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
         }),
     )
 }
@@ -163,7 +191,11 @@ fn insert_trigger_handlers(
         CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
         handler.clone(),
     );
-    registry.insert_handler(CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?, handler);
+    registry.insert_handler(
+        CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(CapabilityId::new(TRIGGER_RUN_CAPABILITY_ID)?, handler);
     Ok(())
 }
 
@@ -236,6 +268,7 @@ struct TriggerManagementToolHandler {
     create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
 }
 
 #[async_trait]
@@ -245,14 +278,14 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         // Defense-in-depth backstop (issue #5505): a scheduled/automation origin
-        // must never create, remove, pause, or resume a routine — that is
+        // must never create, remove, pause, resume, or run a routine — that is
         // self-referential automation that could silence or reschedule itself.
         //
         // The PRIMARY structural guarantees live one layer up, in the runner's
         // capability surface (`ironclaw_turn_runner::runtime`):
         //   * a scheduled-trigger fire runs on the `scheduled_trigger` surface
         //     profile, whose `resolved CapabilitySurfacePolicy`
-        //     (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`) strips the four mutation
+        //     (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`) strips the mutation
         //     capabilities before the model can see them (`trigger_list` stays);
         //   * a subagent runs on the `subagent_tools` surface, whose per-flavor
         //     tool allowlist (`BUILTIN_SUBAGENT_FLAVORS`) never includes any
@@ -320,6 +353,16 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                 )
                 .await?
             }
+            TRIGGER_RUN_CAPABILITY_ID => {
+                run_trigger(
+                    &*self.repository,
+                    &*self.manual_fire_runner,
+                    &request.scope,
+                    request.input,
+                    self.clock.now(),
+                )
+                .await?
+            }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
@@ -341,6 +384,7 @@ fn is_trigger_mutation(capability_id: &str) -> bool {
             | TRIGGER_REMOVE_CAPABILITY_ID
             | TRIGGER_PAUSE_CAPABILITY_ID
             | TRIGGER_RESUME_CAPABILITY_ID
+            | TRIGGER_RUN_CAPABILITY_ID
     )
 }
 
@@ -408,6 +452,12 @@ struct TriggerRemoveInput {
 
 #[derive(Deserialize)]
 struct TriggerStateInput {
+    trigger_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TriggerRunInput {
     trigger_id: String,
 }
 
@@ -520,6 +570,7 @@ fn reject_forbidden_scheduled_capabilities(
         TRIGGER_REMOVE_CAPABILITY_ID,
         TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_RESUME_CAPABILITY_ID,
+        TRIGGER_RUN_CAPABILITY_ID,
     ];
     let forbidden = spec
         .policy
@@ -672,6 +723,107 @@ async fn set_trigger_state(
     }))
 }
 
+async fn run_trigger(
+    repository: &dyn TriggerRepository,
+    manual_fire_runner: &dyn TriggerManualFireRunner,
+    scope: &ResourceScope,
+    input: Value,
+    now: DateTime<Utc>,
+) -> Result<Value, FirstPartyCapabilityError> {
+    let input: TriggerRunInput =
+        TriggerRunInput::deserialize(&input).map_err(|_| trigger_run_shape_error(&input))?;
+    let trigger_id = TriggerId::parse(&input.trigger_id).map_err(|error| {
+        tracing::debug!(
+            trigger_error_kind = trigger_error_kind(&error),
+            "trigger_run received an invalid trigger id"
+        );
+        trigger_run_input_error(DispatchInputIssueCode::InvalidValue)
+    })?;
+
+    // The worker's manual-fire port is tenant-scoped because it is also used
+    // by trusted product orchestration. Resolve through the same full caller
+    // scope as the other model-facing trigger mutations before crossing that
+    // boundary, so a caller cannot probe or fire another user's routine.
+    let is_caller_scoped = repository
+        .get_trigger(scope.tenant_id.clone(), trigger_id)
+        .await
+        .map_err(|error| trigger_repository_error("get_trigger", error))?
+        .is_some_and(|record| {
+            record.creator_user_id == scope.user_id
+                && record.agent_id == scope.agent_id
+                && record.project_id == scope.project_id
+        });
+    if !is_caller_scoped {
+        return Err(trigger_run_input_error(
+            DispatchInputIssueCode::InvalidValue,
+        ));
+    }
+
+    match manual_fire_runner
+        .run_manual_fire(scope.tenant_id.clone(), trigger_id, now)
+        .await
+        .map_err(|error| trigger_repository_error("run_manual_fire", error))?
+    {
+        TriggerManualFireOutcome::Submitted { run_id } => Ok(json!({
+            "trigger_id": trigger_id.to_string(),
+            "source": "manual",
+            "status": "submitted",
+            "run_id": run_id.to_string(),
+        })),
+        TriggerManualFireOutcome::Replayed { original_run_id } => Ok(json!({
+            "trigger_id": trigger_id.to_string(),
+            "source": "manual",
+            "status": "replayed",
+            "run_id": original_run_id.to_string(),
+        })),
+        TriggerManualFireOutcome::AlreadyActive { .. } => {
+            Err(FirstPartyCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::OperationFailed,
+                "trigger is already running",
+            ))
+        }
+        TriggerManualFireOutcome::Paused => Err(FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::PolicyDenied,
+            "paused trigger cannot be run",
+        )),
+        TriggerManualFireOutcome::Completed => Err(FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::OperationFailed,
+            "completed trigger cannot be run",
+        )),
+        TriggerManualFireOutcome::NotFound => Err(trigger_run_input_error(
+            DispatchInputIssueCode::InvalidValue,
+        )),
+        TriggerManualFireOutcome::Failed { .. } => {
+            Err(FirstPartyCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::OperationFailed,
+                "trigger run failed",
+            ))
+        }
+    }
+}
+
+fn trigger_run_shape_error(input: &Value) -> FirstPartyCapabilityError {
+    let Some(root) = input.as_object() else {
+        return FirstPartyCapabilityError::invalid_input_issues(
+            "trigger_run input failed validation",
+            vec![type_mismatch("input", "object")],
+        );
+    };
+    let mut issues = Vec::new();
+    required_string(root, "trigger_id", "trigger_id", "trigger id", &mut issues);
+    unexpected_fields(root, &["trigger_id"], "unexpected_field", &mut issues);
+    FirstPartyCapabilityError::invalid_input_issues("trigger_run input failed validation", issues)
+}
+
+fn trigger_run_input_error(code: DispatchInputIssueCode) -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::invalid_input_issues(
+        "trigger_run input failed validation",
+        vec![
+            DispatchInputIssue::new("trigger_id", code).expected("known caller-scoped trigger id"),
+        ],
+    )
+}
+
 fn trigger_output(
     record: &TriggerRecord,
     recent_runs: &[TriggerRunRecord],
@@ -711,6 +863,7 @@ fn trigger_output(
 fn trigger_run_output(run: &TriggerRunRecord) -> Value {
     json!({
         "fire_slot": run.fire_slot,
+        "source": run.source,
         "run_id": run.run_id.as_ref().map(ToString::to_string),
         "thread_id": run.thread_id.as_ref().map(|t| t.as_str()),
         "status": run.status,

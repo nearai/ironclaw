@@ -22,11 +22,11 @@ use ironclaw_product_contracts::surface::{
 };
 
 use crate::{
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecycleProductAction,
-    LifecycleProductPayload, LifecycleProductResponse, ProductView, RebornAccountBindingSource,
-    RebornAuthAccount, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
-    RebornVendorAuthAccounts,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionSummary,
+    LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductPayload,
+    LifecycleProductResponse, ProductView, RebornAccountBindingSource, RebornAuthAccount,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornVendorAuthAccounts,
 };
 
 use super::{
@@ -305,6 +305,9 @@ pub(crate) struct CallerChannelConnection {
     /// the vendor's OAuth or a pairing/proof-code binding. Always `false` for
     /// non-channel extensions and channels that need no personal connection.
     pub(crate) channel_unconnected: bool,
+    /// A generated-code channel binding is independent from any personal
+    /// pairing/device-link credential used by the extension's tools.
+    pub(crate) binding_satisfies_public_readiness: bool,
 }
 
 /// Compute [`CallerChannelConnection`] from the caller's per-channel
@@ -337,7 +340,10 @@ pub(crate) fn caller_channel_connection(
     let account_state = extension_id.as_ref().and_then(|id| account_states.get(id));
     let requires_personal_account = channel_requires_personal_account(summary);
     let requires_personal_binding = channel_requires_personal_binding(summary);
-    let projected_account = if requires_personal_account || requires_personal_binding {
+    let generated_code_binding = channel_uses_generated_code_binding(summary);
+    let projected_account = if generated_code_binding {
+        None
+    } else if requires_personal_account || requires_personal_binding {
         projected_channel_account(
             connected,
             requires_personal_account.then_some(account_state).flatten(),
@@ -347,13 +353,17 @@ pub(crate) fn caller_channel_connection(
     };
     let channel_unconnected = has_external_channel_surface
         && ((requires_personal_binding && connected != Some(true))
-            || (requires_personal_account
+            || (!generated_code_binding
+                && requires_personal_account
                 && projected_account
                     .as_ref()
                     .is_some_and(|(state, _)| *state != AuthAccountState::Connected)));
     CallerChannelConnection {
         projected_account,
         channel_unconnected,
+        binding_satisfies_public_readiness: generated_code_binding
+            && connected == Some(true)
+            && channel_credentials_are_dispatch_only(summary),
     }
 }
 
@@ -446,8 +456,18 @@ fn extension_info(
     activation_errors: &HashMap<ExtensionId, String>,
 ) -> RebornExtensionInfo {
     let phase = installed.phase;
+    let CallerChannelConnection {
+        projected_account,
+        channel_unconnected,
+        binding_satisfies_public_readiness,
+    } = caller_channel_connection(&installed.summary, connections, account_states);
+    let public_readiness = if binding_satisfies_public_readiness {
+        ExtensionCredentialReadiness::NotRequired
+    } else {
+        readiness
+    };
     let onboarding =
-        extension_onboarding::for_installed_with_credential_status(&installed, readiness);
+        extension_onboarding::for_installed_with_credential_status(&installed, public_readiness);
     let install_scope = installed.install_scope;
     let summary = installed.summary;
     let runtime = summary.runtime_kind.runtime_wire_name().to_string();
@@ -462,10 +482,6 @@ fn extension_info(
     let activation_error = extension_id
         .as_ref()
         .and_then(|id| activation_errors.get(id).cloned());
-    let CallerChannelConnection {
-        projected_account,
-        channel_unconnected,
-    } = caller_channel_connection(&summary, connections, account_states);
     let auth_accounts = vendor_auth_accounts(&summary, projected_account, missing_recipe_scopes);
     let resolved_account_id = auth_accounts
         .first()
@@ -480,7 +496,7 @@ fn extension_info(
         tools: summary.visible_capability_ids,
         installation_state: caller_public_state(
             phase,
-            readiness,
+            public_readiness,
             channel_unconnected,
             activation_error.is_some(),
         ),
@@ -583,13 +599,41 @@ fn channel_requires_personal_binding(summary: &LifecycleExtensionSummary) -> boo
         })
 }
 
+fn channel_uses_generated_code_binding(summary: &LifecycleExtensionSummary) -> bool {
+    summary
+        .channel_connection
+        .as_ref()
+        .is_some_and(|connection| {
+            matches!(
+                connection.strategy,
+                crate::RebornChannelConnectStrategy::WebGeneratedCode
+            )
+        })
+}
+
+fn channel_credentials_are_dispatch_only(summary: &LifecycleExtensionSummary) -> bool {
+    summary
+        .credential_requirements
+        .iter()
+        .filter(|requirement| requirement.required)
+        .all(|requirement| {
+            matches!(
+                requirement.setup,
+                LifecycleExtensionCredentialSetup::Pairing
+                    | LifecycleExtensionCredentialSetup::DeviceLink
+            )
+        })
+}
+
 /// The caller-scoped public lifecycle verdict (§6.1).
 ///
 /// The host checkpoint is only one input. An extension is `active` for *this*
 /// caller only when the host is serving it AND the caller's required
-/// credentials are present AND the caller has connected/paired every channel
-/// surface that needs it AND activation did not fail. Anything else is
-/// `setup_needed`, which is what drives the Configure/Connect affordance.
+/// activation credentials are present AND the caller has connected/paired
+/// every channel surface that needs it AND activation did not fail. Personal
+/// pairing/device-link credentials used only by tools remain dispatch-gated.
+/// Anything else is `setup_needed`, which drives the Configure/Connect
+/// affordance.
 ///
 /// Fails closed: every unproven input yields `setup_needed`, never `active`.
 fn caller_public_state(
@@ -1236,6 +1280,47 @@ mod tests {
                 "a connected {strategy:?} channel must project active",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn paired_web_code_channel_is_active_without_personal_device_link() {
+        let mut summary = summary_with_onboarding();
+        summary.runtime_kind = LifecycleExtensionRuntimeKind::FirstParty;
+        summary.surface_kinds = vec![CapabilitySurfaceKind::Channel, CapabilitySurfaceKind::Auth];
+        summary.credential_requirements = vec![LifecycleExtensionCredentialRequirement {
+            name: "fixture_linked_session".to_string(),
+            provider: "fixture".to_string(),
+            required: true,
+            setup: LifecycleExtensionCredentialSetup::DeviceLink,
+        }];
+        summary.channel_connection = Some(test_channel_connection(
+            RebornChannelConnectStrategy::WebGeneratedCode,
+        ));
+        let credentials: Arc<dyn ExtensionCredentialSetupService> =
+            Arc::new(RecordingCredentials::default());
+
+        let response = list_extensions(
+            Arc::new(ListingService {
+                extension: LifecycleInstalledExtensionSummary {
+                    summary,
+                    phase: InstallationState::Active,
+                    install_scope: None,
+                },
+            }),
+            Some(credentials),
+            channel_connections(&[("fixture", true)]),
+            None,
+            caller(),
+        )
+        .await
+        .expect("list extensions");
+        let extension = response.extensions.first().expect("one extension");
+
+        assert_eq!(extension.installation_state, LifecyclePublicState::Active);
+        assert!(
+            extension.auth_accounts.is_empty(),
+            "bot pairing must not masquerade as a linked personal account"
+        );
     }
 
     fn test_channel_connection(

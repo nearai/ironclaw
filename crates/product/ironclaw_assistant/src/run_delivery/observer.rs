@@ -25,6 +25,7 @@ use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
+use ironclaw_notifications::NotificationKind;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
@@ -574,6 +575,21 @@ impl RunDeliveryObserver {
                 )
                 .await;
             }
+            let next_blocked_marker = blocked_actionable_marker(&actionable_state);
+            if let Some(previous) = delivered_blocked_marker.as_ref()
+                && Some(previous) != next_blocked_marker.as_ref()
+                && let Some(kind) = super::blocked_status_notification_kind(previous.status)
+            {
+                self.services
+                    .resolve_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        previous.gate_ref.as_deref(),
+                    )
+                    .await;
+            }
             let notification = match self
                 .notification_for_actionable_state(
                     &envelope,
@@ -636,9 +652,19 @@ impl RunDeliveryObserver {
                     return Ok(());
                 }
             };
-            let next_blocked_marker = blocked_actionable_marker(&actionable_state);
             let event_kind = notification.event_kind;
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
+            if let Some(kind) = inbox_kind_for_event(event_kind) {
+                self.services
+                    .publish_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        gate_ref_for_routing.as_deref(),
+                    )
+                    .await;
+            }
             let delivered_messages = self
                 .deliver_run_notification(
                     RunNotificationDeliveryContext {
@@ -1557,6 +1583,15 @@ impl RunDeliveryObserver {
                 prompts::BUSY_GENERIC_MESSAGE.to_string()
             }
         }
+    }
+}
+
+fn inbox_kind_for_event(event_kind: RunNotificationEventKind) -> Option<NotificationKind> {
+    match event_kind {
+        RunNotificationEventKind::ApprovalNeeded => Some(NotificationKind::ApprovalRequired),
+        RunNotificationEventKind::AuthRequired => Some(NotificationKind::AuthenticationRequired),
+        RunNotificationEventKind::RunBlocked => Some(NotificationKind::RunBlocked),
+        _ => None,
     }
 }
 

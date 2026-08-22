@@ -1,5 +1,7 @@
+use std::sync::LazyLock;
 use std::time::Instant;
 
+use ironclaw_safety::LeakDetector;
 use wasmtime::component::Linker;
 use wasmtime::{Config, Engine, Store};
 
@@ -8,8 +10,51 @@ use crate::config::{EPOCH_TICK_INTERVAL, WIT_TOOL_VERSION, WitToolRuntimeConfig}
 use crate::error::WasmError;
 use crate::host::WitToolHost;
 use crate::store::StoreData;
-use crate::types::{PreparedWitTool, WitToolExecution, WitToolRequest};
+use crate::types::{
+    PreparedWitTool, WitErrorKind, WitGuestFailure, WitToolExecution, WitToolOutcome,
+    WitToolRequest,
+};
 use crate::wasm_sandbox_core::SandboxLimits;
+
+/// Shared leak-detector registry (well-known vendor API-token shapes,
+/// PEM/SSH keys, bearer/JWT, …) used to scrub guest-authored error text
+/// before it crosses the WASM sandbox boundary into host-controlled data.
+///
+/// Guests are sandboxed but not trusted with free text on the error channel:
+/// a provider HTTP body echoed verbatim by a guest (e.g. a rejected-request
+/// response body that repeats the credential the caller sent) can carry live
+/// credential material. This is the single chokepoint every WIT tool's guest
+/// error crosses on the way out of the sandbox, so redacting here defends
+/// all WASM tools, not just one. This applies to `guest-failure`'s
+/// `code`/`message` fields — the only free-text carriers on that path.
+static GUEST_ERROR_LEAK_DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::new);
+
+/// Maximum retained bytes for either free-text field in a guest failure.
+/// This is enforced at the sandbox exit before host allocation and scanning
+/// can be amplified by concurrently failing guests.
+const MAX_GUEST_ERROR_BYTES: usize = 4096;
+
+/// Redact secret-shaped values from a guest-authored string before it becomes
+/// guest-visible (`WitToolExecution::outcome`). Downstream seams (the
+/// model-visible diagnostic seam in `ironclaw_loop_host`) still apply their
+/// own scrubbing and injection fencing; this is the earlier, sandbox-exit
+/// boundary. It redacts secret values and bounds retained text without ever
+/// splitting a UTF-8 code point.
+fn scrub_guest_error(error: String) -> String {
+    let (mut scrubbed, _redacted) = GUEST_ERROR_LEAK_DETECTOR.redact_all_secrets(&error);
+    if scrubbed.len() > MAX_GUEST_ERROR_BYTES {
+        let mut end = MAX_GUEST_ERROR_BYTES;
+        while !scrubbed.is_char_boundary(end) {
+            end -= 1;
+        }
+        scrubbed.truncate(end);
+    }
+    scrubbed
+}
+
+fn scrub_guest_error_opt(error: Option<String>) -> Option<String> {
+    error.map(scrub_guest_error)
+}
 
 /// Reborn WIT-compatible WASM tool runtime.
 ///
@@ -73,17 +118,17 @@ impl WitToolRuntime {
         let (mut store, instance) =
             self.instantiate(&prepared.component, host, &prepared.limits)?;
         let tool = instance.near_agent_tool();
-        let request = bindings::exports::near::agent::tool::Request {
+        let wit_request = bindings::exports::near::agent::tool::Request {
             params: request.params_json,
             context: request.context_json,
         };
-        let response = match tool.call_execute(&mut store, &request) {
+        let response = match tool.call_execute(&mut store, &wit_request) {
             Ok(response) => response,
             Err(error) => {
                 let message = if store.data().deadline_exceeded() {
                     "WASM execution deadline exceeded".to_string()
                 } else {
-                    error.to_string()
+                    scrub_guest_error(error.to_string())
                 };
                 return Err(execution_failed_with_usage(message, &store, started));
             }
@@ -96,18 +141,32 @@ impl WitToolRuntime {
             ));
         }
 
+        let output_bytes = match &response {
+            bindings::exports::near::agent::tool::Response::Success(output) => {
+                output.len().min(u64::MAX as usize) as u64
+            }
+            bindings::exports::near::agent::tool::Response::Failure(_) => 0,
+        };
         let mut usage = store.data().usage.clone();
         usage.wall_clock_ms = elapsed_millis(started);
-        usage.output_bytes = response
-            .output
-            .as_deref()
-            .map(|output| output.len().min(u64::MAX as usize) as u64)
-            .unwrap_or(0);
+        usage.output_bytes = output_bytes;
         let logs = store.data().logs.clone();
 
+        let outcome = match response {
+            bindings::exports::near::agent::tool::Response::Success(output) => {
+                WitToolOutcome::Success(output)
+            }
+            bindings::exports::near::agent::tool::Response::Failure(failure) => {
+                WitToolOutcome::Failure(WitGuestFailure {
+                    kind: map_error_kind(failure.kind),
+                    code: scrub_guest_error_opt(failure.code),
+                    message: scrub_guest_error_opt(failure.message),
+                })
+            }
+        };
+
         Ok(WitToolExecution {
-            output_json: response.output,
-            error: response.error,
+            outcome,
             usage,
             logs,
         })
@@ -159,6 +218,19 @@ impl std::fmt::Debug for WitToolRuntime {
         f.debug_struct("WitToolRuntime")
             .field("config", &self.config)
             .finish_non_exhaustive()
+    }
+}
+
+fn map_error_kind(kind: bindings::exports::near::agent::tool::ErrorKind) -> WitErrorKind {
+    use bindings::exports::near::agent::tool::ErrorKind as WitKind;
+    match kind {
+        WitKind::AuthRequired => WitErrorKind::AuthRequired,
+        WitKind::Input => WitErrorKind::Input,
+        WitKind::OutputTooLarge => WitErrorKind::OutputTooLarge,
+        WitKind::Executor => WitErrorKind::Executor,
+        WitKind::NetworkDenied => WitErrorKind::NetworkDenied,
+        WitKind::Client => WitErrorKind::Client,
+        WitKind::OperationFailed => WitErrorKind::OperationFailed,
     }
 }
 
@@ -216,12 +288,138 @@ fn create_linker(engine: &Engine) -> Result<Linker<StoreData>, WasmError> {
     Ok(linker)
 }
 
+/// Classify a WIT contract-version mismatch separately from an unrelated
+/// instantiation failure. Wasmtime includes the imported interface reference
+/// (for example, `near:agent/host@0.3.0`) in these errors; generic imports and
+/// same-version missing imports must remain ordinary instantiation failures.
 fn classify_instantiation_error(message: String) -> WasmError {
-    if message.contains("near:agent") || message.contains("import") {
-        WasmError::InstantiationFailed(format!(
-            "{message}. This usually means the component was compiled against a different WIT version than the host supports (host: {WIT_TOOL_VERSION})."
+    if has_unsupported_wit_contract_version(&message) {
+        WasmError::UnsupportedContract(format!(
+            "{message}. This component targets an unsupported WIT contract version — the host only supports near:agent@{WIT_TOOL_VERSION}."
         ))
     } else {
         WasmError::InstantiationFailed(message)
+    }
+}
+
+fn has_unsupported_wit_contract_version(message: &str) -> bool {
+    message
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, '`' | '"' | '\'' | ',' | '(' | ')')
+        })
+        .filter_map(|token| token.strip_prefix("near:agent"))
+        .filter(|reference| reference.starts_with('/') || reference.starts_with('@'))
+        .filter_map(|reference| {
+            reference.rsplit_once('@').map(|(_, version)| {
+                version
+                    .split_once('#')
+                    .map_or(version, |(version, _)| version)
+            })
+        })
+        .any(|version| version != WIT_TOOL_VERSION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recognized by `LeakDetector`'s `github_token` pattern
+    /// (`ironclaw_safety::leak_detector::test_detect_github_token`).
+    const GITHUB_TOKEN_SHAPE: &str = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+    #[test]
+    fn scrub_guest_error_redacts_leak_detector_recognized_secret_shapes() {
+        let guest_error = format!("upstream rejected request: token {GITHUB_TOKEN_SHAPE} failed");
+
+        let scrubbed = scrub_guest_error(guest_error.clone());
+
+        assert_ne!(scrubbed, guest_error);
+        assert!(!scrubbed.contains(GITHUB_TOKEN_SHAPE));
+    }
+
+    #[test]
+    fn scrub_guest_error_leaves_benign_text_unchanged() {
+        let guest_error = "channel_not_found: no such Slack channel".to_string();
+
+        let scrubbed = scrub_guest_error(guest_error.clone());
+
+        assert_eq!(scrubbed, guest_error);
+    }
+
+    #[test]
+    fn scrub_guest_error_bounds_text_at_a_utf8_boundary() {
+        let guest_error = format!("{}é", "a".repeat(4095));
+
+        let scrubbed = scrub_guest_error(guest_error);
+
+        assert!(scrubbed.len() <= 4096, "{} bytes", scrubbed.len());
+        assert_eq!(scrubbed, "a".repeat(4095));
+    }
+
+    /// Integration-ish: pins the exact seam `WitToolRuntime::execute` uses —
+    /// `response.error.map(scrub_guest_error)` — so a guest-authored error
+    /// carrying a secret-shaped value is redacted before it can populate
+    /// `WitToolExecution::error`, the value that crosses the sandbox
+    /// boundary into host-controlled data.
+    #[test]
+    fn execute_seam_scrubs_guest_error_before_reaching_wit_tool_execution() {
+        let guest_error = Some(format!("leaked cred: {GITHUB_TOKEN_SHAPE}"));
+
+        let scrubbed_error: Option<String> = guest_error.map(scrub_guest_error);
+
+        assert!(!scrubbed_error.unwrap().contains(GITHUB_TOKEN_SHAPE));
+    }
+}
+
+#[cfg(test)]
+mod classify_instantiation_error_tests {
+    use super::*;
+
+    #[test]
+    fn version_mismatch_message_gains_the_unsupported_contract_hint() {
+        let error = classify_instantiation_error(
+            "component imports instance `near:agent/host@0.3.0`, but a matching implementation \
+             was not found in the linker"
+                .to_string(),
+        );
+        let WasmError::UnsupportedContract(message) = error else {
+            panic!("expected UnsupportedContract");
+        };
+        assert!(message.contains("near:agent/host@0.3.0"));
+        assert!(message.contains("unsupported WIT contract version"));
+        assert!(message.contains(WIT_TOOL_VERSION));
+    }
+
+    #[test]
+    fn generic_import_error_remains_an_instantiation_failure() {
+        let error =
+            classify_instantiation_error("missing import `some-other-interface`".to_string());
+        let WasmError::InstantiationFailed(message) = error else {
+            panic!("expected InstantiationFailed");
+        };
+        assert_eq!(message, "missing import `some-other-interface`");
+    }
+
+    #[test]
+    fn same_version_unknown_import_remains_an_instantiation_failure() {
+        let error = classify_instantiation_error(
+            "missing import `near:agent/host@0.4.1` function `unknown-interface`".to_string(),
+        );
+        let WasmError::InstantiationFailed(message) = error else {
+            panic!("expected InstantiationFailed");
+        };
+        assert_eq!(
+            message,
+            "missing import `near:agent/host@0.4.1` function `unknown-interface`"
+        );
+    }
+
+    #[test]
+    fn unrelated_instantiation_failure_passes_through_unmodified() {
+        let error = classify_instantiation_error("trap: out of bounds memory access".to_string());
+        let WasmError::InstantiationFailed(message) = error else {
+            panic!("expected InstantiationFailed");
+        };
+        assert_eq!(message, "trap: out of bounds memory access");
     }
 }

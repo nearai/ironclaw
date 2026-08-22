@@ -10,19 +10,16 @@
 //! vocabulary — the host validates both post-dispatch, so a shape or code
 //! drift here becomes a model-visible tool failure.
 
+use crate::exports::near::agent::tool::{ErrorKind, GuestFailure};
 use crate::near::agent::host;
 use crate::types::*;
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
 
-/// Emit the host runtime's structured guest-error contract
-/// (`StructuredWasmGuestError { code, kind }`, parsed in
-/// `crates/kernel/ironclaw_host_runtime/src/services/wasm_execution.rs`) so a Slack
-/// failure keeps its actionable error code instead of collapsing to a generic
-/// "the tool operation failed". `kind` must be one of the host parser's enum
-/// values: `auth_required` | `input` | `output_too_large` | `executor` |
-/// `network_denied` | `client` | `operation_failed`.
-fn structured_error(code: &str, kind: &'static str) -> String {
+/// Build the typed guest-failure (WIT `guest-failure`, near:agent@0.4.1) for
+/// a Slack failure, so a failure keeps its actionable error code instead of
+/// collapsing to a generic "the tool operation failed".
+fn structured_error(code: &str, kind: ErrorKind) -> GuestFailure {
     // Slack error codes are snake_case ASCII identifiers; reduce to that shape
     // so a hostile response body cannot smuggle free text into the error
     // channel (the host sanitizes again before anything reaches the model).
@@ -38,7 +35,11 @@ fn structured_error(code: &str, kind: &'static str) -> String {
     } else {
         code
     };
-    serde_json::json!({ "code": code, "kind": kind }).to_string()
+    GuestFailure {
+        kind,
+        code: Some(code),
+        message: None,
+    }
 }
 
 /// True for Slack error codes that mean the credential itself is invalid or
@@ -102,8 +103,7 @@ fn slack_error_to_standard_code(code: &str) -> &'static str {
 
 /// The WASM structured-error `kind` for a standard messaging error code,
 /// chosen from the finite set the host actually parses
-/// (`StructuredWasmGuestErrorKind` in
-/// `crates/kernel/ironclaw_host_runtime/src/services/wasm_execution.rs:333-343`) —
+/// (`error-kind` in `crates/lanes/ironclaw_wasm/wit/tool.wit`) —
 /// NOT the spec §8 class-column labels verbatim, which do not name real
 /// variants of that enum. `input` covers the invalid-input-class codes
 /// (immediately model-visible; the model can retry with different
@@ -118,25 +118,42 @@ fn slack_error_to_standard_code(code: &str) -> &'static str {
 /// non-taxonomy synthetic failures (a malformed/missing conversation
 /// identity, a send with no `ts`) on the exact kind they used before this
 /// task.
-fn standard_messaging_error_kind(standard_code: &str) -> &'static str {
+fn standard_messaging_error_kind(standard_code: &str) -> ErrorKind {
     match standard_code {
         "messaging.unknown_conversation"
         | "messaging.unknown_message"
         | "messaging.unknown_user"
         | "messaging.message_too_long"
-        | "messaging.unsupported_content" => "input",
-        "messaging.rate_limited" => "client",
-        _ => "operation_failed",
+        | "messaging.unsupported_content" => ErrorKind::Input,
+        "messaging.rate_limited" => ErrorKind::Client,
+        _ => ErrorKind::OperationFailed,
     }
 }
 
-/// Map a raw Slack error code straight to the host's structured guest-error
-/// JSON via the standard taxonomy — the shared tail every [`RawSlackFailure`]
-/// arm not requiring special handling (auth, `as_user` retry) funnels
-/// through.
-fn structured_taxonomy_error(slack_code: &str) -> String {
+/// Map a raw Slack error code straight to the typed guest-failure via the
+/// standard taxonomy — the shared tail every [`RawSlackFailure`] arm not
+/// requiring special handling (auth, `as_user` retry) funnels through.
+fn structured_taxonomy_error(slack_code: &str) -> GuestFailure {
     let standard_code = slack_error_to_standard_code(slack_code);
     structured_error(standard_code, standard_messaging_error_kind(standard_code))
+}
+
+/// A guest-side JSON encode of an already-constructed payload failed — an
+/// internal invariant break, not anything the caller did wrong.
+pub(crate) fn serialization_failure(error: &serde_json::Error) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Executor,
+        code: Some("serialization_failed".to_string()),
+        message: Some(bounded_message(&error.to_string())),
+    }
+}
+
+/// Bound a free-text message to a sane length before it rides in a
+/// `guest-failure`; the host re-bounds and scrubs downstream, but the guest
+/// should never hand over an unbounded string in the first place.
+pub(crate) fn bounded_message(message: &str) -> String {
+    const MAX_MESSAGE_CHARS: usize = 512;
+    message.chars().take(MAX_MESSAGE_CHARS).collect()
 }
 
 /// Percent-encode a string for use as a URL query parameter value.
@@ -169,17 +186,15 @@ fn next_cursor_from_response(parsed: &serde_json::Value) -> Option<String> {
 }
 
 /// One Slack API failure, before taxonomy mapping. Kept distinct from the
-/// final structured JSON error so `send_message` can inspect the RAW vendor
+/// final typed guest-failure so `send_message` can inspect the RAW vendor
 /// code for the classic-vs-granular-app `as_user` retry without
-/// string-matching an already-mapped/JSON-encoded error.
+/// string-matching an already-mapped error.
 #[derive(Debug)]
 enum RawSlackFailure {
-    /// A host-level transport failure (network denial, timeout, ...). The
-    /// string is already one of the host's own literal error identifiers
-    /// (`host_http_network_denied` etc., see `wasm_guest_error_kind`'s
-    /// literal-string table) — passed straight through unmapped, exactly as
-    /// before this task.
-    Transport(String),
+    /// A host-level transport failure. The host supplies a closed error kind,
+    /// optional stable code, and bounded message; `structured_error_for`
+    /// preserves that typed classification in the guest response.
+    Transport(host::HttpFailure),
     /// Non-2xx HTTP status that was not itself a recognized rate limit.
     HttpStatus(u16),
     /// HTTP 429 / Slack-signaled rate limiting.
@@ -190,20 +205,34 @@ enum RawSlackFailure {
     Vendor(String),
 }
 
-/// Map a [`RawSlackFailure`] to the host's structured guest-error JSON:
-/// genuine credential problems keep riding the existing `AuthRequired`
-/// re-auth gate; everything else maps onto the closed `messaging.*`
-/// vocabulary.
-fn structured_error_for(failure: RawSlackFailure) -> String {
+/// Map a [`RawSlackFailure`] to the typed guest-failure: genuine credential
+/// problems keep riding the existing `AuthRequired` re-auth gate; everything
+/// else maps onto the closed `messaging.*` vocabulary.
+fn structured_error_for(failure: RawSlackFailure) -> GuestFailure {
     match failure {
-        RawSlackFailure::Transport(raw) => raw,
+        RawSlackFailure::Transport(failure) => {
+            let kind = match failure.kind {
+                host::HttpErrorKind::AuthRequired => ErrorKind::AuthRequired,
+                host::HttpErrorKind::Input => ErrorKind::Input,
+                host::HttpErrorKind::OutputTooLarge => ErrorKind::OutputTooLarge,
+                host::HttpErrorKind::Executor => ErrorKind::Executor,
+                host::HttpErrorKind::NetworkDenied => ErrorKind::NetworkDenied,
+                host::HttpErrorKind::Client => ErrorKind::Client,
+                host::HttpErrorKind::OperationFailed => ErrorKind::OperationFailed,
+            };
+            GuestFailure {
+                kind,
+                code: failure.code,
+                message: failure.message.as_deref().map(bounded_message),
+            }
+        }
         RawSlackFailure::RateLimited => structured_taxonomy_error("ratelimited"),
         RawSlackFailure::HttpStatus(status) => {
             structured_taxonomy_error(&format!("http_status_{status}"))
         }
         RawSlackFailure::InvalidJson => structured_taxonomy_error("invalid_json_response"),
         RawSlackFailure::Vendor(code) if slack_error_requires_reauth(&code) => {
-            structured_error(&code, "auth_required")
+            structured_error(&code, ErrorKind::AuthRequired)
         }
         RawSlackFailure::Vendor(code) => structured_taxonomy_error(&code),
     }
@@ -212,7 +241,7 @@ fn structured_error_for(failure: RawSlackFailure) -> String {
 /// Make a Slack API call and return the parsed JSON value, surfacing HTTP
 /// and Slack (`ok: false`) failures as the RAW [`RawSlackFailure`] shape —
 /// before taxonomy mapping. Shared by [`slack_api_call`] (which maps every
-/// failure to the host's structured guest-error JSON) and `send_message`
+/// failure to the host's typed [`GuestFailure`]) and `send_message`
 /// (which additionally needs the RAW vendor code to decide whether to retry
 /// without `as_user`).
 fn slack_api_call_raw(
@@ -253,8 +282,6 @@ fn slack_api_call_raw(
             ),
         );
         // Slack signals rate limiting at the HTTP layer (429 + Retry-After);
-        // the host's structured error shape carries only {code, kind}, so the
-        // Retry-After value cannot ride along.
         if response.status == 429 {
             return Err(RawSlackFailure::RateLimited);
         }
@@ -279,13 +306,13 @@ fn slack_api_call_raw(
     Ok(parsed)
 }
 
-/// [`slack_api_call_raw`], mapped to the host's structured guest-error JSON
+/// [`slack_api_call_raw`], mapped to the host's typed [`GuestFailure`]
 /// — the call every op except `send_message`'s first attempt uses.
 fn slack_api_call(
     method: &str,
     endpoint: &str,
     body: Option<&str>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GuestFailure> {
     slack_api_call_raw(method, endpoint, body).map_err(structured_error_for)
 }
 
@@ -349,7 +376,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 const MAX_USER_NAME_LOOKUPS: usize = 25;
 
 /// Resolve the CONNECTED account via `auth.test`: `(user_id, team_id)`.
-fn auth_test() -> Result<(String, Option<String>), String> {
+fn auth_test() -> Result<(String, Option<String>), GuestFailure> {
     let parsed = slack_api_call("GET", "auth.test", None)?;
     let user_id = parsed["user_id"]
         .as_str()
@@ -369,7 +396,7 @@ fn current_user_id_best_effort() -> Option<String> {
         Err(error) => {
             host::log(
                 host::LogLevel::Debug,
-                &format!("auth.test identity lookup skipped: {error}"),
+                &format!("auth.test identity lookup skipped: {error:?}"),
             );
             None
         }
@@ -393,7 +420,7 @@ fn mark_is_self(messages: &mut [Message], current_user_id: Option<&str>) {
 /// [`get_user_info`] (the canonical public result) because the display-name
 /// fallback chain below needs Slack's raw username, which has no canonical
 /// field to live in.
-fn raw_user_info(user_id: &str) -> Result<serde_json::Value, String> {
+fn raw_user_info(user_id: &str) -> Result<serde_json::Value, GuestFailure> {
     let url = format!("users.info?user={}", url_encode(user_id));
     slack_api_call("GET", &url, None)
 }
@@ -462,7 +489,7 @@ fn resolve_user_display_names(
             Err(error) => {
                 host::log(
                     host::LogLevel::Debug,
-                    &format!("users.info lookup skipped: {error}"),
+                    &format!("users.info lookup skipped: {error:?}"),
                 );
             }
         }
@@ -659,7 +686,7 @@ pub fn list_conversations(
     kinds: Option<&[ConversationKind]>,
     limit: Option<u32>,
     cursor: Option<&str>,
-) -> Result<ListConversationsResult, String> {
+) -> Result<ListConversationsResult, GuestFailure> {
     let types = slack_types_for_kinds(kinds);
     if types.is_empty() {
         return Ok(ListConversationsResult {
@@ -710,7 +737,7 @@ pub fn list_conversations(
 /// Retrieve one exact Slack conversation by ID. Unlike
 /// `list_conversations`, this response cannot be hidden beyond a model-output
 /// preview boundary or confused with another same-name DM.
-pub fn get_conversation_info(conversation: &str) -> Result<ConversationInfo, String> {
+pub fn get_conversation_info(conversation: &str) -> Result<ConversationInfo, GuestFailure> {
     let url = format!("conversations.info?channel={}", url_encode(conversation));
     let parsed = slack_api_call("GET", &url, None)?;
     let mut info = conversation_info_from_value(&parsed["channel"]);
@@ -830,7 +857,7 @@ pub fn get_conversation_history(
     conversation: &str,
     limit: Option<u32>,
     cursor: Option<&str>,
-) -> Result<ConversationHistoryResult, String> {
+) -> Result<ConversationHistoryResult, GuestFailure> {
     // Slack rejects limit=1000; 999 is the real maximum.
     let limit = limit.unwrap_or(50).clamp(1, 999);
     let mut url = format!(
@@ -855,7 +882,7 @@ pub fn get_thread_replies(
     thread: &str,
     limit: Option<u32>,
     cursor: Option<&str>,
-) -> Result<ConversationHistoryResult, String> {
+) -> Result<ConversationHistoryResult, GuestFailure> {
     // Slack rejects limit=1000; 999 is the real maximum.
     let limit = limit.unwrap_or(50).clamp(1, 999);
     let mut url = format!(
@@ -917,7 +944,7 @@ pub fn search_messages(
     sort: Option<SearchMessagesSort>,
     limit: Option<u32>,
     cursor: Option<&str>,
-) -> Result<SearchMessagesResult, String> {
+) -> Result<SearchMessagesResult, GuestFailure> {
     let count = limit.unwrap_or(20).clamp(1, 100);
     // W14 (pre-merge amendment wave, binding ruling): a SUPPLIED cursor that
     // fails to decode as a Slack page number must surface a model-visible
@@ -935,7 +962,10 @@ pub fn search_messages(
                     host::LogLevel::Debug,
                     &format!("search_messages: unrecognized pagination cursor: {raw_cursor}"),
                 );
-                return Err(structured_error("messaging.unsupported_content", "input"));
+                return Err(structured_error(
+                    "messaging.unsupported_content",
+                    ErrorKind::Input,
+                ));
             }
         },
     };
@@ -979,7 +1009,7 @@ pub fn search_messages(
 }
 
 /// Get information about a user.
-pub fn get_user_info(user_ref: &str) -> Result<GetUserInfoResult, String> {
+pub fn get_user_info(user_ref: &str) -> Result<GetUserInfoResult, GuestFailure> {
     let parsed = raw_user_info(user_ref)?;
 
     let user = &parsed["user"];
@@ -1017,14 +1047,14 @@ pub fn get_user_info(user_ref: &str) -> Result<GetUserInfoResult, String> {
 /// Resolve who the CONNECTED account is: `auth.test` for the user id (the
 /// operation itself, so its failure fails the call) plus a best-effort
 /// `users.info` for the human-readable name.
-pub fn whoami() -> Result<WhoamiResult, String> {
+pub fn whoami() -> Result<WhoamiResult, GuestFailure> {
     let (user_id, _team_id) = auth_test()?;
     let display_name = match raw_user_info(&user_id) {
         Ok(parsed) => display_name_fallback_from_user_info(&parsed),
         Err(error) => {
             host::log(
                 host::LogLevel::Debug,
-                &format!("whoami users.info lookup skipped: {error}"),
+                &format!("whoami users.info lookup skipped: {error:?}"),
             );
             None
         }
@@ -1040,7 +1070,7 @@ fn send_message_payload(
     text: &str,
     thread: Option<&str>,
     as_user: bool,
-) -> Result<String, String> {
+) -> Result<String, GuestFailure> {
     let mut payload = serde_json::json!({
         "channel": conversation,
         "text": text,
@@ -1051,7 +1081,7 @@ fn send_message_payload(
     if let Some(ts) = thread {
         payload["thread_ts"] = serde_json::Value::String(ts.to_string());
     }
-    serde_json::to_string(&payload).map_err(|e| e.to_string())
+    serde_json::to_string(&payload).map_err(|e| serialization_failure(&e))
 }
 
 /// Send a message as the user.
@@ -1084,7 +1114,7 @@ pub fn send_message(
     text: &str,
     thread: Option<&str>,
     reply_to: Option<&MessageRefInput>,
-) -> Result<SendMessageResult, String> {
+) -> Result<SendMessageResult, GuestFailure> {
     let effective_thread_ts =
         thread.or_else(|| reply_to.map(|reply_to| reply_to.message_id.as_str()));
     let payload = send_message_payload(conversation, text, effective_thread_ts, true)?;
@@ -1148,10 +1178,10 @@ fn message_ref_payload(message_ref: &MessageRefInput) -> serde_json::Value {
 pub fn edit_message(
     message_ref: &MessageRefInput,
     text: &str,
-) -> Result<EditMessageResult, String> {
+) -> Result<EditMessageResult, GuestFailure> {
     let mut payload = message_ref_payload(message_ref);
     payload["text"] = serde_json::Value::String(text.to_string());
-    let payload = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+    let payload = serde_json::to_string(&payload).map_err(|e| serialization_failure(&e))?;
 
     let parsed = slack_api_call("POST", "chat.update", Some(&payload))?;
 
@@ -1177,9 +1207,9 @@ pub fn edit_message(
 /// restating the message — so the returned ref falls back to the input
 /// address when the response omits it. `deleted` is always `true`: a delete
 /// that did not happen has already returned an error above.
-pub fn delete_message(message_ref: &MessageRefInput) -> Result<DeleteMessageResult, String> {
-    let payload =
-        serde_json::to_string(&message_ref_payload(message_ref)).map_err(|e| e.to_string())?;
+pub fn delete_message(message_ref: &MessageRefInput) -> Result<DeleteMessageResult, GuestFailure> {
+    let payload = serde_json::to_string(&message_ref_payload(message_ref))
+        .map_err(|e| serialization_failure(&e))?;
 
     let parsed = slack_api_call("POST", "chat.delete", Some(&payload))?;
 
@@ -1212,13 +1242,13 @@ fn normalize_emoji(emoji: &str) -> String {
 }
 
 /// `reactions.add`/`reactions.remove` share this body shape.
-fn reaction_payload(message_ref: &MessageRefInput, name: &str) -> Result<String, String> {
+fn reaction_payload(message_ref: &MessageRefInput, name: &str) -> Result<String, GuestFailure> {
     serde_json::to_string(&serde_json::json!({
         "channel": message_ref.conversation,
         "timestamp": message_ref.message_id,
         "name": name,
     }))
-    .map_err(|e| e.to_string())
+    .map_err(|e| serialization_failure(&e))
 }
 
 /// Slack's "you already reacted with this" code — `reactions.add`'s
@@ -1239,7 +1269,7 @@ const NO_REACTION: &str = "no_reaction";
 fn reaction_write_outcome(
     result: Result<serde_json::Value, RawSlackFailure>,
     end_state_code: &str,
-) -> Result<(), String> {
+) -> Result<(), GuestFailure> {
     match result {
         Ok(_) => Ok(()),
         Err(RawSlackFailure::Vendor(code)) if code == end_state_code => Ok(()),
@@ -1251,10 +1281,13 @@ fn reaction_write_outcome(
 pub fn add_reaction(
     message_ref: &MessageRefInput,
     emoji: &str,
-) -> Result<AddReactionResult, String> {
+) -> Result<AddReactionResult, GuestFailure> {
     let name = normalize_emoji(emoji);
     if name.is_empty() {
-        return Err(structured_error("messaging.unsupported_content", "input"));
+        return Err(structured_error(
+            "messaging.unsupported_content",
+            ErrorKind::Input,
+        ));
     }
     let payload = reaction_payload(message_ref, &name)?;
 
@@ -1270,7 +1303,7 @@ pub fn add_reaction(
 }
 
 /// Remove one named reaction.
-fn remove_one_reaction(message_ref: &MessageRefInput, name: &str) -> Result<(), String> {
+fn remove_one_reaction(message_ref: &MessageRefInput, name: &str) -> Result<(), GuestFailure> {
     let payload = reaction_payload(message_ref, name)?;
     reaction_write_outcome(
         slack_api_call_raw("POST", "reactions.remove", Some(&payload)),
@@ -1286,7 +1319,7 @@ fn remove_one_reaction(message_ref: &MessageRefInput, name: &str) -> Result<(), 
 /// else's — so unlike the best-effort identity marking on reads, an
 /// `auth.test` failure fails the call instead of degrading it. Removing
 /// someone else's reaction is the failure this guards against.
-fn own_reaction_names(message_ref: &MessageRefInput) -> Result<Vec<String>, String> {
+fn own_reaction_names(message_ref: &MessageRefInput) -> Result<Vec<String>, GuestFailure> {
     let (current_user_id, _team_id) = auth_test()?;
     // `full=true` is load-bearing: without it Slack truncates each
     // reaction's `users` array on popular messages, and a truncated list
@@ -1348,12 +1381,15 @@ fn own_reaction_names_from_response(
 pub fn remove_reaction(
     message_ref: &MessageRefInput,
     emoji: Option<&str>,
-) -> Result<RemoveReactionResult, String> {
+) -> Result<RemoveReactionResult, GuestFailure> {
     match emoji {
         Some(emoji) => {
             let name = normalize_emoji(emoji);
             if name.is_empty() {
-                return Err(structured_error("messaging.unsupported_content", "input"));
+                return Err(structured_error(
+                    "messaging.unsupported_content",
+                    ErrorKind::Input,
+                ));
             }
             remove_one_reaction(message_ref, &name)?;
             Ok(RemoveReactionResult {
@@ -1378,17 +1414,17 @@ pub fn remove_reaction(
 ///
 /// Slack returns the existing DM when one is already open, so this is safe to
 /// call repeatedly and never creates a duplicate conversation.
-pub fn open_dm(user_ref: &str) -> Result<OpenDmResult, String> {
+pub fn open_dm(user_ref: &str) -> Result<OpenDmResult, GuestFailure> {
     // Slack's `users` field takes a comma-separated LIST: two ids would
     // silently open a multi-person group DM while every contract layer
     // promises the 1:1 DM with one person. Requiring a single well-formed
     // user id here (commas and lowercase both fail the check) keeps that
     // promise instead of delegating it to the model's good behavior.
     if !is_slack_user_id(user_ref) {
-        return Err(structured_error("messaging.unknown_user", "input"));
+        return Err(structured_error("messaging.unknown_user", ErrorKind::Input));
     }
     let payload = serde_json::to_string(&serde_json::json!({ "users": user_ref }))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| serialization_failure(&e))?;
 
     let parsed = slack_api_call("POST", "conversations.open", Some(&payload))?;
 
@@ -1425,7 +1461,7 @@ fn exact_message(
 /// miss falls back to `conversations.replies`, which returns the whole thread
 /// a ts belongs to. Only an exact ts match is ever returned; anything else is
 /// `messaging.unknown_message` rather than a neighbouring message.
-pub fn get_message(message_ref: &MessageRefInput) -> Result<GetMessageResult, String> {
+pub fn get_message(message_ref: &MessageRefInput) -> Result<GetMessageResult, GuestFailure> {
     let conversation = message_ref.conversation.as_str();
     let target_ts = message_ref.message_id.as_str();
 
@@ -1465,7 +1501,10 @@ pub fn get_message(message_ref: &MessageRefInput) -> Result<GetMessageResult, St
     }
 
     let Some(message) = found else {
-        return Err(structured_error("messaging.unknown_message", "input"));
+        return Err(structured_error(
+            "messaging.unknown_message",
+            ErrorKind::Input,
+        ));
     };
 
     let mut messages = vec![message];
@@ -1550,13 +1589,16 @@ pub fn resolve_user(
     query: &str,
     limit: Option<u32>,
     cursor: Option<&str>,
-) -> Result<ResolveUserResult, String> {
+) -> Result<ResolveUserResult, GuestFailure> {
     let limit = limit
         .unwrap_or(RESOLVE_USER_SCAN_PAGE)
         .clamp(1, RESOLVE_USER_SCAN_PAGE);
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
-        return Err(structured_error("messaging.unsupported_content", "input"));
+        return Err(structured_error(
+            "messaging.unsupported_content",
+            ErrorKind::Input,
+        ));
     }
 
     let mut url = format!("users.list?limit={limit}");
@@ -1601,7 +1643,7 @@ pub fn list_members(
     conversation: &str,
     limit: Option<u32>,
     cursor: Option<&str>,
-) -> Result<ListMembersResult, String> {
+) -> Result<ListMembersResult, GuestFailure> {
     // Slack rejects limit=1000; 999 is the real maximum.
     let limit = limit.unwrap_or(100).clamp(1, 999);
     let mut url = format!(
@@ -1732,11 +1774,11 @@ mod tests {
     fn unknown_message_is_an_input_class_failure() {
         assert_eq!(
             standard_messaging_error_kind("messaging.unknown_message"),
-            "input"
+            ErrorKind::Input
         );
         assert_eq!(
             standard_messaging_error_kind("messaging.cannot_message_user"),
-            "operation_failed"
+            ErrorKind::OperationFailed
         );
     }
 
@@ -1827,9 +1869,10 @@ mod tests {
         // Everything else still maps through the closed taxonomy.
         let error = reaction_write_outcome(vendor("message_not_found"), ALREADY_REACTED)
             .expect_err("an unresolvable message is a failure");
-        assert!(
-            error.contains("messaging.unknown_message"),
-            "expected the canonical code, got {error}"
+        assert_eq!(
+            error.code.as_deref(),
+            Some("messaging.unknown_message"),
+            "expected the canonical code, got {error:?}"
         );
     }
 

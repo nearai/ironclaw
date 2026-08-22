@@ -1059,6 +1059,14 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["trigger_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/trigger_run.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
         _ => return None,
     })
 }
@@ -1261,6 +1269,16 @@ mod tests {
             ) && !goal_description.contains("unavailable to scheduled automations"),
             "the execution-contract schema must allow future scheduled loop-runs to use the owning user's linked integrations: {goal_description}"
         );
+    }
+
+    #[test]
+    fn trigger_run_requires_only_a_trigger_id() {
+        let schema = resolve_builtin_input_schema_ref("schemas/builtin/trigger_run.input.v1.json")
+            .expect("trigger_run schema is registered");
+
+        assert_eq!(schema["required"], serde_json::json!(["trigger_id"]));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["trigger_id"]["type"], "string");
     }
 
     #[test]

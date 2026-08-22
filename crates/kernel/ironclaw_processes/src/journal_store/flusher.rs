@@ -548,6 +548,7 @@ fn committed_batch(entries: Vec<ProcessJournalEntry>) -> Option<CommittedBatch> 
             entry.committed_state.map(|state| ProcessJournalCommit {
                 state: *state,
                 kind: entry.kind,
+                occurred_at: entry.occurred_at,
                 sanitized_reason: entry.sanitized_reason,
             })
         })

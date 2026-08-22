@@ -335,7 +335,10 @@ export function useExtensionSetup(packageRef) {
   });
 
   return {
+    phase: query.data?.phase || null,
+    blockers: query.data?.blockers || [],
     secrets: query.data?.secrets || [],
+    fields: query.data?.fields || [],
     onboarding: query.data?.onboarding || null,
     hostedMcpAuthSelectionRequired:
       query.data?.blockers?.some(

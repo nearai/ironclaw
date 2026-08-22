@@ -75,6 +75,7 @@ fn coordinator_submit_request(submission: ConversationTurnSubmission) -> SubmitT
         product_context.execution_policy = submission.execution_policy;
     }
     SubmitTurnRequest {
+        subagent_activation_provenance: None,
         requested_model: None,
         scope: submission.scope,
         actor: submission.actor,
@@ -138,6 +139,13 @@ pub(crate) fn turn_submission_error(error: TurnError) -> TurnSubmissionError {
             AdmissionRejectionReason::ProfileRejected => (
                 TurnSubmissionErrorCategory::InvalidRequest,
                 TurnSubmissionRetry::Permanent,
+            ),
+            // A thread that spent its autonomous-wake budget is parked pending
+            // human attention, not permanently refused: the trigger poller may
+            // retry, and a human activation restores the budget.
+            AdmissionRejectionReason::SystemWakeStreak => (
+                TurnSubmissionErrorCategory::AdmissionRejected,
+                TurnSubmissionRetry::RetryableAfterKeyRotation,
             ),
             AdmissionRejectionReason::Policy | AdmissionRejectionReason::Unauthorized => (
                 TurnSubmissionErrorCategory::Unauthorized,
@@ -231,6 +239,13 @@ mod tests {
                 )),
                 TurnSubmissionErrorCategory::InvalidRequest,
                 TurnSubmissionRetry::Permanent,
+            ),
+            (
+                TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::SystemWakeStreak,
+                )),
+                TurnSubmissionErrorCategory::AdmissionRejected,
+                TurnSubmissionRetry::RetryableAfterKeyRotation,
             ),
             (
                 TurnError::AdmissionRejected(AdmissionRejection::new(
@@ -351,7 +366,7 @@ mod tests {
             distinct.len(),
             12,
             "TurnError has 12 variants; the class table must name every one \
-             (AdmissionRejected appears four times, once per rejection reason)"
+             (AdmissionRejected appears six times, once per rejection reason)"
         );
     }
 

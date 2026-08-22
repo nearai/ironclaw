@@ -73,10 +73,11 @@ pub(super) fn capability_invocation_from_auth_resume_candidate(
         pending_auth.disposition,
         Some(ironclaw_host_api::turn::GateResumeDisposition::Denied)
     ) {
-        Some(CapabilityAuthResume::denied())
+        Some(CapabilityAuthResume::denied(pending_auth.gate_ref.clone()))
     } else {
         pending_auth.resume_token.as_ref().map(|token| {
             CapabilityAuthResume::resolved(
+                pending_auth.gate_ref.clone(),
                 token.clone(),
                 pending_auth.prior_approval.as_ref().map(|pa| {
                     ironclaw_loop_contracts::AuthResumeApprovalIdentity {

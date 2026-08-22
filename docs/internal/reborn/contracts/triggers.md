@@ -55,9 +55,9 @@ The trigger system is owned by `ironclaw_triggers` in implementation terms, but 
 
 ### 3.1 Source kinds
 
-V1 source kind is schedule-only.
-
-- `Schedule` is the only V1 source kind.
+- `Schedule` identifies a fire claimed from the trigger's stored cadence.
+- `Manual` identifies an on-demand fire of a scheduled trigger. It is fire
+  provenance, not a separately persisted trigger-definition kind.
 - Webhook, regex, and internal system-event sources are fast-follow and must not be accepted by the V1 contract.
 
 ### 3.2 Schedule shape and cadence
@@ -230,6 +230,9 @@ UTF-8 bytes for `tenant_id`, `trigger_id`, and `fire_slot`, prefixed by the
 literal version label `ironclaw.trigger-fire.v1`. Implementations must not use
 raw string concatenation. `route_thread_id` uses the domain label
 `route-thread`; `external_event_id` uses the domain label `external-event`.
+Manual fire uses the same length-prefixed `tenant_id`, `trigger_id`, and
+`fire_slot` components with the additive domain labels `manual-route-thread`
+and `manual-external-event`, respectively.
 Each output is encoded from a collision-resistant digest over
 `version_label || domain_label || length_prefixed_components`.
 
@@ -246,6 +249,31 @@ V1 has one provider: a schedule provider.
 
 - The schedule provider is cron-backed.
 - Webhook, regex, and system-event providers are fast-follow and must emit the same `TriggerFire` shape when they are later added.
+
+### 4.3 Manual fire
+
+Manual fire uses the same source evaluation, prompt materialization, trusted
+submission, and settlement path as a scheduled fire, but claims without the
+schedule due-time gate. The repository claim remains atomic and respects the
+single-active-fire lock. Paused triggers return a distinct refusal.
+
+A manual claim, successful submission, failure settlement, and terminal-run
+cleanup must preserve `next_run_at` byte-for-byte and must not complete a
+one-shot trigger. Run history records `Manual` provenance. Manual identities
+use additive manual domain labels: `route_thread_id` uses `manual-route-thread`
+and `external_event_id` uses `manual-external-event`. The scheduled identity
+labels, version label, and digest input ordering remain frozen for replay
+compatibility. Two manual claims in
+the same timestamp resolution cannot both mint an identity while they overlap:
+the atomic active-fire claim rejects the competing call. Run history remains
+observational and is not a permanent idempotency ledger after settlement.
+
+Run-history persistence includes the fire source in its identity:
+`(tenant_id, trigger_id, fire_slot, source)`. A manual fire and a scheduled fire
+may legitimately use the same timestamp after the manual run settles; both
+rows must remain independently observable, and accepting the scheduled row
+must still advance its cadence. Legacy three-column run-history primary keys
+are migrated in place with existing rows classified by their stored source.
 
 ---
 
@@ -418,11 +446,12 @@ active-fire claim and does not become an in-flight sentinel.
 
 V1 also persists bounded per-trigger run-history rows for product-surface inspection:
 
-- each row is scoped by `(tenant_id, trigger_id, fire_slot)` and records the
+- each row is scoped by `(tenant_id, trigger_id, fire_slot, source)` and records the
   deterministic trigger route thread id, optional submitted `TurnRunId`,
   status, `submitted_at`, and optional `completed_at`;
 - `Running` means the fire was claimed or submitted and no terminal cleanup has
-  completed for that `fire_slot`;
+  completed for that `fire_slot` and source. Claiming the same slot from the
+  other source retires any stale `Running` row before recording the new claim;
 - `Ok` means active-run cleanup observed a completed terminal turn and cleared
   the exact active fire;
 - `Error` means poller-owned claim or submit processing failed before an active
@@ -431,7 +460,9 @@ V1 also persists bounded per-trigger run-history rows for product-surface inspec
 - list APIs return newest rows first and clamp caller limits to the repository
   maximum. A zero limit returns no rows. User-facing list paths must use the
   batched repository query when loading histories for multiple triggers;
-- durable repositories retain only the newest 500 run-history rows per trigger.
+- durable repositories retain at most 500 run-history rows per trigger,
+  retaining `Running` rows before completed rows and then the newest fire slots
+  with a deterministic source tie-break.
 
 Run-history rows are observational. They must not be used as the idempotency
 ledger for fire replay; deterministic fire identity and the trusted conversation
@@ -444,6 +475,10 @@ failure requires a later lifecycle-observer contract and a distinct retry
 identity policy.
 
 Slot bookkeeping is tied to acceptance, not merely polling:
+
+The failure-settlement rules below apply to scheduled fires. Manual settlement
+always follows the override in §4.3: it preserves `next_run_at` and never
+completes a one-shot trigger.
 
 - accepted or replayed fires write `last_run_at`, `last_fired_slot`,
   `last_status = Ok`, `next_run_at`, `active_fire_slot`, and `active_run_ref`

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use ironclaw_host_api::resource::ResourceUsage;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+use crate::WasmHostError;
 use crate::bindings;
 use crate::config::{DEFAULT_HTTP_TIMEOUT_MS, MAX_LOG_MESSAGE_BYTES, MAX_LOGS_PER_EXECUTION};
 use crate::host::{WasmHttpRequest, WitToolHost};
@@ -77,27 +78,22 @@ impl WasiView for StoreData {
     }
 }
 
-impl bindings::near::agent::host::Host for StoreData {
-    fn log(&mut self, level: bindings::near::agent::host::LogLevel, message: String) {
+/// Core implementation of the WIT `host` import surface, shared by the
+/// generated `Host` trait impl below.
+impl StoreData {
+    fn log_core(&mut self, level: WasmLogLevel, message: String) {
         if self.logs.len() >= MAX_LOGS_PER_EXECUTION {
             return;
         }
         let message = truncate_log_message(message);
-        let level = match level {
-            bindings::near::agent::host::LogLevel::Trace => WasmLogLevel::Trace,
-            bindings::near::agent::host::LogLevel::Debug => WasmLogLevel::Debug,
-            bindings::near::agent::host::LogLevel::Info => WasmLogLevel::Info,
-            bindings::near::agent::host::LogLevel::Warn => WasmLogLevel::Warn,
-            bindings::near::agent::host::LogLevel::Error => WasmLogLevel::Error,
-        };
         self.logs.push(WasmLogRecord { level, message });
     }
 
-    fn now_millis(&mut self) -> u64 {
+    fn now_millis_core(&mut self) -> u64 {
         self.host.clock.now_millis()
     }
 
-    fn workspace_read(&mut self, path: String) -> Option<String> {
+    fn workspace_read_core(&mut self, path: String) -> Option<String> {
         if self.deadline_exceeded() {
             return None;
         }
@@ -108,16 +104,16 @@ impl bindings::near::agent::host::Host for StoreData {
         result
     }
 
-    fn http_request(
+    fn http_request_core(
         &mut self,
         method: String,
         url: String,
         headers_json: String,
         body: Option<Vec<u8>>,
         timeout_ms: Option<u32>,
-    ) -> Result<bindings::near::agent::host::HttpResponse, String> {
+    ) -> Result<(u16, String, Vec<u8>), WasmHostError> {
         if let Some(error) = self.deadline_error() {
-            return Err(error);
+            return Err(WasmHostError::Timeout(error));
         }
 
         let request_body_bytes = body.as_ref().map(|body| body.len() as u64).unwrap_or(0);
@@ -132,24 +128,20 @@ impl bindings::near::agent::host::Host for StoreData {
             Ok(response) => {
                 self.record_network_egress(request_body_bytes);
                 if let Some(error) = self.deadline_error() {
-                    return Err(error);
+                    return Err(WasmHostError::Timeout(error));
                 }
-                Ok(bindings::near::agent::host::HttpResponse {
-                    status: response.status,
-                    headers_json: response.headers_json,
-                    body: response.body,
-                })
+                Ok((response.status, response.headers_json, response.body))
             }
             Err(error) => {
                 if error.request_was_sent() {
                     self.record_network_egress(request_body_bytes);
                 }
-                Err(error.to_string())
+                Err(error)
             }
         }
     }
 
-    fn tool_invoke(&mut self, alias: String, params_json: String) -> Result<String, String> {
+    fn tool_invoke_core(&mut self, alias: String, params_json: String) -> Result<String, String> {
         if let Some(error) = self.deadline_error() {
             return Err(error);
         }
@@ -164,7 +156,7 @@ impl bindings::near::agent::host::Host for StoreData {
         result
     }
 
-    fn secret_exists(&mut self, name: String) -> bool {
+    fn secret_exists_core(&mut self, name: String) -> bool {
         if self.deadline_exceeded() {
             return false;
         }
@@ -173,6 +165,75 @@ impl bindings::near::agent::host::Host for StoreData {
             return false;
         }
         exists
+    }
+}
+
+impl bindings::near::agent::host::Host for StoreData {
+    fn log(&mut self, level: bindings::near::agent::host::LogLevel, message: String) {
+        let level = match level {
+            bindings::near::agent::host::LogLevel::Trace => WasmLogLevel::Trace,
+            bindings::near::agent::host::LogLevel::Debug => WasmLogLevel::Debug,
+            bindings::near::agent::host::LogLevel::Info => WasmLogLevel::Info,
+            bindings::near::agent::host::LogLevel::Warn => WasmLogLevel::Warn,
+            bindings::near::agent::host::LogLevel::Error => WasmLogLevel::Error,
+        };
+        self.log_core(level, message);
+    }
+
+    fn now_millis(&mut self) -> u64 {
+        self.now_millis_core()
+    }
+
+    fn workspace_read(&mut self, path: String) -> Option<String> {
+        self.workspace_read_core(path)
+    }
+
+    fn http_request(
+        &mut self,
+        method: String,
+        url: String,
+        headers_json: String,
+        body: Option<Vec<u8>>,
+        timeout_ms: Option<u32>,
+    ) -> Result<bindings::near::agent::host::HttpResponse, bindings::near::agent::host::HttpFailure>
+    {
+        self.http_request_core(method, url, headers_json, body, timeout_ms)
+            .map(
+                |(status, headers_json, body)| bindings::near::agent::host::HttpResponse {
+                    status,
+                    headers_json,
+                    body,
+                },
+            )
+            .map_err(wit_http_failure)
+    }
+
+    fn tool_invoke(&mut self, alias: String, params_json: String) -> Result<String, String> {
+        self.tool_invoke_core(alias, params_json)
+    }
+
+    fn secret_exists(&mut self, name: String) -> bool {
+        self.secret_exists_core(name)
+    }
+}
+
+fn wit_http_failure(error: WasmHostError) -> bindings::near::agent::host::HttpFailure {
+    use bindings::near::agent::host::{HttpErrorKind, HttpFailure};
+
+    let kind = match &error {
+        WasmHostError::AuthRequired(_) => HttpErrorKind::AuthRequired,
+        WasmHostError::Denied(_) => HttpErrorKind::NetworkDenied,
+        WasmHostError::Network { .. } | WasmHostError::Timeout(_) => HttpErrorKind::Client,
+        WasmHostError::Unavailable(_) => HttpErrorKind::Executor,
+        WasmHostError::Failed(_) | WasmHostError::FailedAfterRequestSent(_) => {
+            HttpErrorKind::OperationFailed
+        }
+    };
+    HttpFailure {
+        kind,
+        code: error.stable_code().map(str::to_string),
+        message: Some(error.to_string()),
+        request_sent: error.request_was_sent(),
     }
 }
 
@@ -190,7 +251,12 @@ fn truncate_log_message(message: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_LOG_MESSAGE_BYTES, truncate_log_message};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{MAX_LOG_MESSAGE_BYTES, StoreData, bindings, truncate_log_message};
+    use crate::WasmHostError;
+    use crate::host::{RecordingWasmHostHttp, WitToolHost};
 
     #[test]
     fn truncate_log_message_respects_utf8_boundaries() {
@@ -198,5 +264,62 @@ mod tests {
         let truncated = truncate_log_message(message);
         assert!(truncated.len() <= MAX_LOG_MESSAGE_BYTES);
         assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn wit_http_failure_mapping_preserves_network_code_and_request_sent() {
+        let network = Arc::new(RecordingWasmHostHttp::err(WasmHostError::Network {
+            message: "provider rejected request".to_string(),
+            code: Some("provider_code".to_string()),
+            request_sent: true,
+        }));
+        let mut store = StoreData::new(
+            WitToolHost::deny_all().with_http(network),
+            1024 * 1024,
+            Duration::from_secs(5),
+        );
+        let network_failure = <StoreData as bindings::near::agent::host::Host>::http_request(
+            &mut store,
+            "POST".to_string(),
+            "https://example.test".to_string(),
+            "{}".to_string(),
+            Some(b"body".to_vec()),
+            None,
+        )
+        .expect_err("the recording host must return the configured network failure");
+
+        assert_eq!(
+            network_failure.kind,
+            bindings::near::agent::host::HttpErrorKind::Client
+        );
+        assert_eq!(network_failure.code.as_deref(), Some("provider_code"));
+        assert!(network_failure.message.is_some());
+        assert!(network_failure.request_sent);
+
+        let after_send = Arc::new(RecordingWasmHostHttp::err(
+            WasmHostError::FailedAfterRequestSent("response failed".to_string()),
+        ));
+        let mut store = StoreData::new(
+            WitToolHost::deny_all().with_http(after_send),
+            1024 * 1024,
+            Duration::from_secs(5),
+        );
+        let after_send_failure = <StoreData as bindings::near::agent::host::Host>::http_request(
+            &mut store,
+            "POST".to_string(),
+            "https://example.test".to_string(),
+            "{}".to_string(),
+            Some(b"body".to_vec()),
+            None,
+        )
+        .expect_err("the recording host must return the configured after-send failure");
+
+        assert_eq!(
+            after_send_failure.kind,
+            bindings::near::agent::host::HttpErrorKind::OperationFailed
+        );
+        assert_eq!(after_send_failure.code, None);
+        assert!(after_send_failure.message.is_some());
+        assert!(after_send_failure.request_sent);
     }
 }

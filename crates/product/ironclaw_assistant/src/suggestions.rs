@@ -2,9 +2,7 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_host_api::{
-    capability::{
-        EXTENSION_SEARCH_CAPABILITY_ID, TOOL_DESCRIBE_CAPABILITY_ID, TOOL_SEARCH_CAPABILITY_ID,
-    },
+    capability::EXTENSION_SEARCH_CAPABILITY_ID,
     ids::{CapabilityId, InvocationId},
     output::OutputContract,
     resource::ResourceScope,
@@ -408,8 +406,6 @@ fn suggestion_tool_allowlist() -> Result<Vec<CapabilityId>, ProductSurfaceError>
         MEMORY_READ_CAPABILITY_ID,
         MEMORY_TREE_CAPABILITY_ID,
         EXTENSION_SEARCH_CAPABILITY_ID,
-        TOOL_SEARCH_CAPABILITY_ID,
-        TOOL_DESCRIBE_CAPABILITY_ID,
     ]
     .into_iter()
     .map(|capability_id| {
