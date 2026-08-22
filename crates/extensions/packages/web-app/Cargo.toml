@@ -27,6 +27,6 @@ tracing = "0.1"
 
 [dev-dependencies]
 # Building RFC 8291-shaped key material for the registration-parsing fixtures.
-base64 = "0.22"
+base64 = "0.23"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
-toml = "0.9"
+toml = "1.1"
