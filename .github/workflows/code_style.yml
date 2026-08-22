@@ -335,6 +335,32 @@ jobs:
       - name: Build WebUI v2 frontend
         working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
         run: pnpm build
+      # The Storybook design-system catalog ships its own regression harness:
+      # the story suite runs in a headless Chromium (play functions, computed-
+      # style checks, and a11y=error), and the static build catches broken
+      # stories/config. `pnpm test` above deliberately runs only the browser-
+      # free `unit` project, so without these two steps the whole catalog could
+      # rot with CI still green (the `test:storybook` split gap).
+      # `hashFiles` takes an expression, so the lockfile path is built from the
+      # WEBUI_FRONTEND_DIR resolved above (crate-dir.sh) rather than spelled as
+      # a flat literal — `env` is available to `steps.<*>.with`, and
+      # ws12_workflow_contracts.py sanctions the flat literal only in the
+      # `cache-dependency-path` twinned-line shape.
+      - name: Cache Playwright browsers (Storybook suite)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-storybook-${{ hashFiles(format('{0}/pnpm-lock.yaml', env.WEBUI_FRONTEND_DIR)) }}
+          restore-keys: ${{ runner.os }}-playwright-storybook-
+      - name: Install Playwright Chromium (Storybook suite)
+        working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
+        run: pnpm exec playwright install --with-deps chromium
+      - name: WebUI v2 Storybook story tests (vitest, Chromium)
+        working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
+        run: pnpm test:storybook
+      - name: Build WebUI v2 Storybook catalog
+        working-directory: ${{ env.WEBUI_FRONTEND_DIR }}
+        run: pnpm build-storybook
 
   clippy:
     name: Clippy (${{ matrix.name }})
