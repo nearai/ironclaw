@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Card } from "../../../design-system/card";
+import { Skeleton } from "../../../design-system/skeleton";
 import { useT } from "../../../lib/i18n";
 import { useTraceCredits } from "../hooks/useTraceCredits";
 import { useAccountTraces } from "../hooks/useAccountTraces";
@@ -150,8 +151,8 @@ export function TraceCommonsTab({ searchQuery = "" }) {
               key={i}
               className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3 first:border-0"
             >
-              <div className="h-4 w-32 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-              <div className="h-4 w-16 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+              <Skeleton className="h-4 w-32 rounded" />
+              <Skeleton className="h-4 w-16 rounded" />
             </div>
           )
         )}

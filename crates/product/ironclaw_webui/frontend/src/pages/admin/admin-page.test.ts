@@ -64,6 +64,8 @@ function createAdminPageHarness() {
     },
   };
   const Navigate = () => null;
+  const PageScroll = ({ children }) => children;
+  const PageStack = ({ children }) => children;
   const router = {
     useNavigate: () => () => {},
     useParams: () => ({ tab: "users" }),
@@ -72,6 +74,8 @@ function createAdminPageHarness() {
   return {
     React,
     Navigate,
+    PageScroll,
+    PageStack,
     ...router,
     RouteLoadBoundary,
     reset: () => {

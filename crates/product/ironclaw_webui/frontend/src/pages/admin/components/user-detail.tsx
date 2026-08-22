@@ -5,6 +5,7 @@ import { Panel, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { SelectMenu } from "../../../design-system/select-menu";
+import { Skeleton } from "../../../design-system/skeleton";
 import { useAdminUserDetail, useAdminUsers } from "../hooks/useAdminUsers";
 import { UserSecretsPanel } from "./user-secrets-panel";
 import { ThreadScrapingPanel } from "./thread-scraping-panel";
@@ -81,8 +82,8 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
     return (
       <div className="space-y-5">
         <Panel className="p-5 sm:p-6">
-          <div className="v2-skeleton mb-2 h-6 w-48 rounded" />
-          <div className="v2-skeleton h-4 w-32 rounded" />
+          <Skeleton className="mb-2 h-6 w-48 rounded" />
+          <Skeleton className="h-4 w-32 rounded" />
         </Panel>
       </div>
     );

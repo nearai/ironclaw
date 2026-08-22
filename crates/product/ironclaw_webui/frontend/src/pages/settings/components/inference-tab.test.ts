@@ -41,6 +41,7 @@ function renderInferenceModule() {
   const context = {
     Badge: component("Badge"),
     Card: component("Card"),
+    Skeleton: component("Skeleton"),
     ProviderManagement: component("ProviderManagement"),
     ModelSelectionPolicyEditor: component("ModelSelectionPolicyEditor"),
     UserModelPreferenceSelector: component("UserModelPreferenceSelector"),
