@@ -8905,6 +8905,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             match.group("body"),
             "raw live-account traces must never enter the uploaded artifact",
         )
+        for excluded_path in (
+            "!artifacts/live-canary/**/reborn-home/**",
+            "!artifacts/live-canary/**/generated-reborn-home/**",
+            "!artifacts/live-canary/**/workspace/**",
+            "!artifacts/live-canary/**/ironclaw-reborn-serve.stdout.log",
+            "!artifacts/live-canary/**/ironclaw-reborn-serve.stderr.log",
+            "!artifacts/live-canary/**/browser-diagnostics/**/playwright-trace.zip",
+        ):
+            self.assertIn(
+                excluded_path,
+                match.group("body"),
+                "regenerable live-QA artifact must stay out of shard uploads: "
+                f"{excluded_path}",
+            )
         self.assertIn("REBORN_WEBUI_V2_LIVE_QA_BUILD_SOURCE", match.group("body"))
         self.assertIn("Cache Playwright browsers", match.group("body"))
         self.assertIn("cache: pip", match.group("body"))

@@ -1208,6 +1208,12 @@ jobs:
           path: |
             artifacts/live-canary/
             !artifacts/live-canary/**/llm-traces/**
+            !artifacts/live-canary/**/reborn-home/**
+            !artifacts/live-canary/**/generated-reborn-home/**
+            !artifacts/live-canary/**/workspace/**
+            !artifacts/live-canary/**/ironclaw-reborn-serve.stdout.log
+            !artifacts/live-canary/**/ironclaw-reborn-serve.stderr.log
+            !artifacts/live-canary/**/browser-diagnostics/**/playwright-trace.zip
           if-no-files-found: ignore
           retention-days: 14
 
