@@ -468,7 +468,7 @@ test("useChatEvents: final_reply replaces matching streamed projection bubble", 
   assert.equal(harness.isProcessing, false);
 });
 
-test("useChatEvents: final_reply preserves earlier assistant phases and replaces only the latest", () => {
+test("useChatEvents: final_reply collapses earlier assistant phases from the same run", () => {
   const harness = createUseChatEventsHarness();
 
   harness.handleEvent({
@@ -523,12 +523,6 @@ test("useChatEvents: final_reply preserves earlier assistant phases and replaces
       isStreaming: message.isStreaming,
     })),
     [
-      {
-        id: "text-text:run-1:1",
-        content: "I’ll research this first.",
-        isFinalReply: false,
-        isStreaming: false,
-      },
       {
         id: "reply-run-1",
         content: "Here is the final answer.",

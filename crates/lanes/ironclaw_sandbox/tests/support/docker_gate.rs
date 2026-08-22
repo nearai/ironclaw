@@ -86,3 +86,12 @@ pub(crate) fn configured_sandbox_image() -> String {
         .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
         .unwrap_or_else(|_| "ironclaw-worker:latest".to_string())
 }
+
+/// Resolve the pinned managed-egress proxy image used by the local sandbox.
+#[allow(dead_code)]
+pub(crate) fn configured_sandbox_proxy_image() -> String {
+    std::env::var("IRONCLAW_REBORN_SANDBOX_PROXY_IMAGE").unwrap_or_else(|_| {
+        "ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da"
+            .to_string()
+    })
+}

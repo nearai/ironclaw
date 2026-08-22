@@ -819,18 +819,18 @@ impl GenericChannelHostAssembly {
             self.deps.identity_lookup.as_ref(),
             source.resolved().auth.first(),
         ) {
+            // A generated-code channel owns its channel identity even when the
+            // same extension also declares unrelated personal-account auth.
+            // Prioritizing auth here would make Bot API admission depend on the
+            // MTProto surface and recreate the two-mode identity collision.
+            (Some(lookup), _) if pairing_extension => (
+                source.extension_id().to_string(),
+                crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
+                Some(Arc::clone(lookup)),
+            ),
             (Some(lookup), Some(auth)) => (
                 auth.vendor.as_str().to_string(),
                 identity_keyspace,
-                Some(Arc::clone(lookup)),
-            ),
-            // Pairing-strategy channels have no OAuth vendor; verified
-            // inbound actors resolve through the bindings the pairing
-            // consume wrote, keyed by the extension id as provider. Unbound
-            // actors fail closed instead of inheriting the operator.
-            (Some(lookup), None) if pairing_extension => (
-                source.extension_id().to_string(),
-                crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
                 Some(Arc::clone(lookup)),
             ),
             _ => (

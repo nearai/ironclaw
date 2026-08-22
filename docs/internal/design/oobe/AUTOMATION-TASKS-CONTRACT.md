@@ -15,7 +15,7 @@ code-free, and its target UI now lives in the [mockup](mockup.html). Nothing her
 is implemented yet. This document is the reviewable wiring path — the durable
 events, projection, transport frame, HTTP surface, and facade methods a follow-up
 must add to make the two OOBE concepts real. It follows the Reborn
-rules in `.claude/rules/gateway-events.md`, `.claude/rules/lifecycle.md`, and
+rules in `.claude/rules/events.md`, `.claude/rules/lifecycle.md`, and
 `.claude/rules/types.md`. *(Crate names below reflect current `main` after the
 #6918 family-folder reorg: the event log is `ironclaw_event_log`, the durable
 store `ironclaw_event_store`, both under `crates/events/`; the facade
@@ -102,7 +102,7 @@ A must never appear in user B's projection).
 
 The inline calendar card is durable UI state, so it rides the existing
 projection → `EventStreamManager` → SSE/WebSocket path
-(`.claude/rules/gateway-events.md`), **not** a bespoke message. Add a redacted
+(`.claude/rules/events.md`), **not** a bespoke message. Add a redacted
 `WebChatV2EventFrame` variant:
 
 ```
@@ -138,7 +138,7 @@ consume only `RebornServicesApi`; errors go through `WebUiV2HttpError`.
 ## 6. Facade + effect (`RebornServicesApi` in `ironclaw_assistant`)
 
 New facade methods, each returning the **server-confirmed** task record, never an
-optimistic echo (`.claude/rules/gateway-events.md`):
+optimistic echo (`.claude/rules/events.md`):
 
 - `list_automation_tasks(caller) -> Vec<AutomationTask>`
 - `approve_automation_task(caller, id) -> AutomationTask`

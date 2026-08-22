@@ -17,7 +17,8 @@ artifacts can never satisfy a reference and CI and a laptop agree:
   1. **References resolve.** Every repo path a guidance document names —
      backticked inline paths and relative markdown links in the root
      `AGENTS.md`/`CLAUDE.md`, every `AGENTS.md`/`CLAUDE.md`/`CONTRACT.md`/
-     `README.md` under `crates/`, `.claude/rules/*.md`, and
+     `README.md` under `crates/`, every `AGENTS.md`/`CLAUDE.md` under
+     `tests/`, `.claude/rules/*.md`, and
      `.claude/skills/*/SKILL.md` — must resolve to a tracked file or
      directory. Published `docs/` pages (everything outside `docs/internal/`,
      `zh/` mirror included) are scanned for backticked paths only — their
@@ -39,8 +40,8 @@ artifacts can never satisfy a reference and CI and a laptop agree:
      and `crates/AGENTS.md` states "Every crate has one"; measured 2026-08-06
      the tree is at 62/62, so this gates rather than warns.
   5. **The `CLAUDE.md` alias rule holds.** Beside the root `AGENTS.md` and
-     every `AGENTS.md` under `crates/`, a `CLAUDE.md` must be tracked — and,
-     outside the two named real-file exceptions in
+     every `AGENTS.md` under `crates/` or `tests/`, a `CLAUDE.md` must be
+     tracked — and, outside the two named real-file exceptions in
      `ALIAS_REAL_FILE_EXCEPTIONS` below, tracked *as a symlink* (index mode
      `120000`) whose target is exactly `AGENTS.md`. Checked against the git
      **index**, not the working tree: a committed symlink deletion, or a link
@@ -146,6 +147,11 @@ import docs_publication_boundary  # noqa: E402  (scripts/ci)
 
 ROOT_GUIDANCE = ("AGENTS.md", "CLAUDE.md")
 CRATE_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md", "CONTRACT.md", "README.md")
+# `tests/` carries the same AGENTS.md-canonical/CLAUDE.md-alias shape as
+# crates/**, but none of the CONTRACT.md/README.md-per-crate convention —
+# only the two alias basenames are guidance here.
+TESTS_PREFIX = "tests/"
+TESTS_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md")
 RULES_PREFIX = ".claude/rules/"
 SKILLS_PREFIX = ".claude/skills/"
 # The docs scan reads the git tree, not the publication set (`.mintignore`
@@ -185,10 +191,10 @@ NON_PATH_IDENTIFIERS = frozenset(
 
 # The `CLAUDE.md` alias rule (docs/internal/reborn/guidance-conventions.md, "How the
 # files actually load"): beside the root `AGENTS.md` and every `AGENTS.md`
-# under `crates/`, a `CLAUDE.md` symlink — index mode `120000`, target exactly
-# this string — keeps Claude Code auto-injection and AGENTS.md-reading tools
-# on the same bytes. A regular-file copy would drift; a deleted or retargeted
-# link silently splits the two audiences again.
+# under `crates/` or `tests/`, a `CLAUDE.md` symlink — index mode `120000`,
+# target exactly this string — keeps Claude Code auto-injection and
+# AGENTS.md-reading tools on the same bytes. A regular-file copy would drift;
+# a deleted or retargeted link silently splits the two audiences again.
 ALIAS_TARGET = "AGENTS.md"
 
 # Named real-file exceptions to the alias rule — the only two, each carrying
@@ -436,6 +442,8 @@ def discover_guidance(tree: Tree) -> list[str]:
         docs.append(name)
     for path in sorted(tree.files):
         if path.startswith("crates/") and path.rsplit("/", 1)[-1] in CRATE_GUIDANCE_BASENAMES:
+            docs.append(path)
+        elif path.startswith(TESTS_PREFIX) and path.rsplit("/", 1)[-1] in TESTS_GUIDANCE_BASENAMES:
             docs.append(path)
         elif path.startswith(RULES_PREFIX) and path.endswith(".md") and "/" not in path[len(RULES_PREFIX):]:
             docs.append(path)
@@ -1064,7 +1072,8 @@ def check_claude_aliases(
     agents_docs = ["AGENTS.md"] + sorted(
         path
         for path in tree.files
-        if path.startswith("crates/") and path.endswith("/AGENTS.md")
+        if path.endswith("/AGENTS.md")
+        and (path.startswith("crates/") or path.startswith(TESTS_PREFIX))
     )
     if len(agents_docs) < MIN_ALIAS_PAIRS:
         raise GuidanceError(
@@ -1099,7 +1108,7 @@ def check_claude_aliases(
         if alias not in tree.files:
             problems.append(
                 f"  {agents} has no tracked CLAUDE.md beside it — every "
-                "AGENTS.md at the root and under crates/ carries a "
+                "AGENTS.md at the root and under crates/ or tests/ carries a "
                 "`CLAUDE.md -> AGENTS.md` symlink alias so Claude Code "
                 "auto-injection and AGENTS.md readers see the same bytes "
                 "(docs/internal/reborn/guidance-conventions.md). Restore it: "

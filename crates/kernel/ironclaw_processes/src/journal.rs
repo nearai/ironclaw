@@ -513,6 +513,10 @@ pub struct ProcessJournalEntry {
 pub struct ProcessJournalCommit {
     pub state: JournaledProcessSnapshot,
     pub kind: ProcessJournalKind,
+    /// Timestamp of the journal transition that produced this committed
+    /// state. Observers use it for replay-stable materialized records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanitized_reason: Option<String>,
 }
@@ -1487,6 +1491,52 @@ mod tests {
         let absent: JournaledProcessSnapshot =
             serde_json::from_value(encoded).expect("a snapshot written before the kind existed");
         assert_eq!(absent.checkpoint_kind, None);
+    }
+
+    #[test]
+    fn process_journal_commit_without_occurred_at_remains_readable() {
+        let commit = ProcessJournalCommit {
+            state: JournaledProcessSnapshot {
+                process_id: ProcessId::new(),
+                process_kind: ProcessKind::Internal,
+                scope: ResourceScope {
+                    tenant_id: TenantId::new("tenant-legacy-commit").expect("tenant"),
+                    user_id: UserId::new("user-legacy-commit").expect("user"),
+                    agent_id: None,
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+                },
+                status: ProcessLifecycleStatus::Completed,
+                suspension: None,
+                checkpoint_ref: None,
+                checkpoint_kind: None,
+                input_ref: None,
+                failure: None,
+                journal_cursor: ProcessJournalCursor(1),
+                lease: None,
+                crash_reclaim_count: 0,
+                created_at: chrono::Utc::now(),
+                owner_user_id: None,
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                metadata: Value::Null,
+            },
+            kind: ProcessJournalKind::Completed,
+            occurred_at: Some(chrono::Utc::now()),
+            sanitized_reason: None,
+        };
+        let mut legacy = serde_json::to_value(commit).expect("serialize current commit");
+        legacy
+            .as_object_mut()
+            .expect("commit object")
+            .remove("occurred_at");
+
+        let decoded: ProcessJournalCommit =
+            serde_json::from_value(legacy).expect("legacy commit remains readable");
+        assert_eq!(decoded.occurred_at, None);
     }
 
     #[test]

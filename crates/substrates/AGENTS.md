@@ -34,8 +34,8 @@ every crate here answers differently (`families/substrates.md` requires it
 stated per crate):
 
 - `ironclaw_filesystem` — kernel services and domain record owners hold direct
-  trait handles; that breadth is the point (28 normal-dep consumers, measured
-  via `cargo metadata` 2026-08-05).
+  trait handles; that breadth is the point (re-derive the fan-in with
+  `grep -rl '^ironclaw_filesystem = ' --include=Cargo.toml crates tools | wc -l`).
 - `ironclaw_libsql_runtime` — exactly `ironclaw_filesystem`,
   `ironclaw_triggers`, `ironclaw_composition` (measured fan-in 3; the three sit
   in three families, which is why the crate exists).
@@ -45,7 +45,8 @@ stated per crate):
   edges (5 total) — standing narrowing targets, not charter.
 - `ironclaw_observability` — anyone (7 consumers); the only crate here with no
   security-relevant surface.
-- `ironclaw_safety` — any caller needing detection (17 consumers).
+- `ironclaw_safety` — any caller needing detection (re-derive the fan-in with
+  `grep -rl '^ironclaw_safety = ' --include=Cargo.toml crates tools | wc -l`).
 - `ironclaw_secrets` — the tightest. The auth engine (`ironclaw_auth`) is the
   chartered direct consumer (it owns token custody); everything else is meant
   to arrive through kernel staging or a `product_contracts` port. Measured

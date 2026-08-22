@@ -109,6 +109,9 @@ export function NotificationPanel({
   React.useEffect(() => {
     panelRef?.current?.focus?.();
   }, [panelRef]);
+  /* Escape is not handled here: the centre already owns a document-level
+   * listener for it, scoped to the open panel, which fires wherever focus sits.
+   * A second handler on the dialog would just close it twice. */
   const containFocus = React.useCallback((event) => {
     if (event.key !== "Tab") return;
     const panel = panelRef?.current;

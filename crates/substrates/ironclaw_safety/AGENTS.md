@@ -2,9 +2,10 @@
 
 ## Start Here
 
-- This is the crate's canonical working-rules file (there is no crate-local
-  `CLAUDE.md`); orientation lives in [`README.md`](./README.md), the family
-  boundary in [`../AGENTS.md`](../AGENTS.md).
+- This is the crate's canonical working-rules file (`CLAUDE.md` here is a
+  pointer symlink to this file); orientation lives in
+  [`README.md`](./README.md), the family boundary in
+  [`../AGENTS.md`](../AGENTS.md).
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these sources of truth before changing safety behavior:
 - `.claude/rules/safety-and-sandbox.md`

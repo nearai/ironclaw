@@ -488,3 +488,92 @@ test("mark all read is offered only while something is unread", async () => {
     "an in-flight request must not be fired twice",
   );
 });
+
+test("Escape dismisses the trapped dialog and returns focus to the bell", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  const collapsePages = vi.fn();
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{
+          messages: [{
+            id: "notification-1",
+            title: "Finished",
+            href: "/chat/thread-1",
+            timestamp: 1,
+            durable: true,
+          }],
+          unreadIds: new Set(),
+          collapsePages,
+        }}
+      />,
+    );
+  });
+  await openPanel(container);
+
+  const panel = document.querySelector<HTMLElement>("[data-testid='notification-panel']");
+  assert.ok(panel);
+  await act(async () => {
+    panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+
+  assert.equal(
+    document.querySelector("[data-testid='notification-panel']"),
+    null,
+    "a focus-trapped modal has to offer Escape as its keyboard exit",
+  );
+  const bell = container.querySelector<HTMLButtonElement>(
+    "[data-testid='notification-bell']",
+  );
+  assert.equal(document.activeElement, bell, "focus returns to the control that opened it");
+  assert.equal(collapsePages.mock.calls.length, 1, "and the close path is the same one");
+});
+
+test("Escape from a control inside the dialog still dismisses it", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  await act(async () => {
+    root.render(
+      <NotificationCenter
+        state={{
+          messages: [{
+            id: "notification-1",
+            title: "Finished",
+            href: "/chat/thread-1",
+            timestamp: 1,
+            durable: true,
+          }],
+          unreadIds: new Set(["notification-1"]),
+          unreadCount: 1,
+          markAllRead: vi.fn(),
+          archiveMessage: vi.fn(),
+        }}
+      />,
+    );
+  });
+  await openPanel(container);
+
+  const panel = document.querySelector<HTMLElement>("[data-testid='notification-panel']");
+  assert.ok(panel);
+  const control = panel.querySelector<HTMLElement>(
+    "button:not([disabled]):not([tabindex='-1'])",
+  );
+  assert.ok(control, "the fixture puts a real control inside the dialog");
+  control.focus();
+  await act(async () => {
+    control.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  });
+
+  assert.equal(
+    document.querySelector("[data-testid='notification-panel']"),
+    null,
+    "the document-level handler dismisses the dialog wherever focus sits inside it",
+  );
+});

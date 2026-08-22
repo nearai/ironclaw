@@ -12,16 +12,25 @@
 
 ## What This Crate Owns
 
-- Skill metadata parsing (`parser`), validation (`validation`), deterministic scoring/selection (`selector`), filesystem management and its mount-scoped port (`management`, `scoped_management`), installed-skill records (`install_metadata`), pure learning distillation/refinement logic (`learning`), and the skill type definitions (`types`).
+- Skill metadata parsing (`parser`), validation (`validation`), deterministic scoring/selection (`selector`), pluggable activation-scoring strategy binding (`activation_strategy`), filesystem management and its mount-scoped port (`management`, `scoped_management`), installed-skill records (`install_metadata`), pure learning distillation/refinement logic (`learning`), requirement gating for skill activation (`gating`), and the skill type definitions (`types`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
-> ✎ **Corrected 2026-08-04 (WS6 domain-internal cleanups).** This section previously
-> claimed modules `gating`, `registry` and `catalog`, and a `v2` module exporting
-> `V2SkillMetadata` / `CodeSnippet` / `SkillMetrics` / `SkillRevision` /
-> `SkillRepairRecord` "serialized into `MemoryDoc.metadata` by the engine crate".
-> **None of those modules or symbols exists** — `rg` over `crates/` matched only
-> this file — and `ironclaw_engine` was deleted. The module list above is the real
-> `src/` contents.
+> ✎ **Corrected 2026-08-04 (WS6 domain-internal cleanups), re-corrected since.**
+> This section previously claimed modules `gating`, `registry` and `catalog`, and
+> a `v2` module exporting `V2SkillMetadata` / `CodeSnippet` / `SkillMetrics` /
+> `SkillRevision` / `SkillRepairRecord` "serialized into `MemoryDoc.metadata` by
+> the engine crate". `registry`, `catalog`, and the `v2` module never came back
+> and still do not exist (`ironclaw_engine` stays deleted). **`gating` is back**,
+> though: `crates/domains/ironclaw_skills/src/gating.rs` was restored after main
+> deleted it as verified-dead (#6943) — the deletion was itself the bug, since
+> `requires` was parsed and never consulted, so a skill declaring a missing
+> binary activated cleanly and failed later in the shell. Today's `gating` is a
+> different, smaller module than the one this note originally described: it
+> owns only `GatingResult`/`binary_exists`/`check_requirements_sync` gating a
+> skill's declared `requires.bins`/`requires.env`/`requires.config`, not the
+> registry/catalog/v2 system the 2026-08-04 correction was refuting. Re-verify
+> module claims against `src/` before trusting either version of this note:
+> `ls crates/domains/ironclaw_skills/src/`.
 
 ## Do Not Move In Here
 

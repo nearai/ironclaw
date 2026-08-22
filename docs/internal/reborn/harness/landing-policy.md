@@ -15,6 +15,10 @@ Related trackers: #2987 (landing epic), #3230 (default-off substrate landing),
 #3026 (production-composition readiness, closed out), #3039 (final cutover
 reviewer checklist), #3032 (no-exposure safeguards).
 
+**Status:** the cutover this document anticipates has since shipped — v1
+(`src/`) is fully removed and Reborn is the only stack; read the categories
+below as historical context for how that transition was reviewed.
+
 ## Why classify
 
 A large Reborn PR can mix code that cannot affect any current user with code

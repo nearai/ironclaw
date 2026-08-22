@@ -22,9 +22,11 @@ complains, the answer is almost never `#[allow]`.**
 
 clippy's default is 7 args. Reaching it means the function has more
 inputs than a reader can hold in their head. Allowing it once is a
-trade — allowing it 38 times across 26 files (measured on this tree with
-`rg -c '#\[allow\(clippy::too_many_arguments\)\]' crates/`) is a refactor
-someone declined to do.
+trade — allowing it dozens of times across dozens of files is a refactor
+someone declined to do. Re-measure with
+`rg -o '#\[allow\(clippy::too_many_arguments\)\]' crates/ | wc -l` for the
+total occurrence count, or `rg -l '#\[allow\(clippy::too_many_arguments\)\]' crates/ | wc -l`
+for the file count, before quoting a number.
 
 **Required pattern** when introducing the allow:
 
@@ -212,10 +214,9 @@ documents as architectural authority.
 
 - Adjacent rules with the same shape (extract a single gateway,
   route everything through it): `safety-and-sandbox.md`,
-  `gateway-events.md`.
+  `events.md`.
 - Type location/multiplicity (mirror DTOs, `host_api` ownership):
   `type-placement.md` — the rule the capability-path collapse applies.
 - Annotation discipline: the canonical shape is this rule's own
   `// arch-exempt: <category>, <detail>, plan #NNNN`, enforced by the
-  `ARCH-SPRAWL` checks in `scripts/pre-commit-safety.sh`. (`gateway-events.md`
-  carries no `projection-exempt` convention; that cross-reference was wrong.)
+  `ARCH-SPRAWL` checks in `scripts/pre-commit-safety.sh`.

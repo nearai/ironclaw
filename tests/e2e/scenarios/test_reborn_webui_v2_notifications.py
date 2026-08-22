@@ -71,6 +71,11 @@ async def _route_notification_inbox(
 ):
     state = {
         "read_at": None,
+        # What the thread actually showed at the instant the read arrived. The
+        # DOM can only be inspected after the response resolves, by which time a
+        # correct and an incorrect implementation look identical — so the answer
+        # has to be captured while the request is still in flight.
+        "rendered_when_read": None,
     }
 
     async def threads_handler(route):
@@ -105,6 +110,15 @@ async def _route_notification_inbox(
             "/api/webchat/v2/notifications/read-all",
         }:
             state["read_at"] = "2026-06-30T08:11:00Z"
+            if state["rendered_when_read"] is None:
+                state["rendered_when_read"] = await page.evaluate(
+                    """
+                    (selector) => [...document.querySelectorAll(selector)]
+                      .map((node) => node.textContent || "")
+                      .join("\\n")
+                    """,
+                    SEL_V2["msg_assistant"],
+                )
             await route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -291,6 +305,14 @@ async def test_reborn_v2_completion_waits_for_matching_final_reply_render(
             timeout=5000,
         )
         assert state["read_at"] is not None
+        # The point of deferring the acknowledgement is that the answer is on
+        # screen before the notification is settled. Asserting the DOM after the
+        # response has resolved cannot tell the two orderings apart.
+        assert state["rendered_when_read"] is not None
+        assert "The scheduled report is ready." in state["rendered_when_read"], (
+            "the read request was sent before the matching final reply rendered: "
+            f"{state['rendered_when_read']!r}"
+        )
     finally:
         await context.close()
 

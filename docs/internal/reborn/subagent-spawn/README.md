@@ -723,8 +723,8 @@ Things no slice may break; each is enforced or pinned today.
 | E2E suite (ignored until R4) | `tests/reborn_subagent_spawn_e2e.rs` |
 
 Family rules: `crates/loop/AGENTS.md` and per-crate `AGENTS.md`/`README.md`
-files govern placement; `tests/integration/CLAUDE.md` governs scenario
-authoring; update `tests/CLAUDE.md` rows in the same commit as any scenario
+files govern placement; `tests/integration/AGENTS.md` governs scenario
+authoring; update `tests/AGENTS.md` rows in the same commit as any scenario
 change.
 
 ---
@@ -800,7 +800,7 @@ startup paths use bounded, partition-leading keyset queries only — so §4.2's
 - Run per-crate tests + `cargo test -p ironclaw_architecture_tests` (a
   contracts enum changes) + `cargo clippy --all-targets --all-features -- -D warnings`
   on touched crates before any PR.
-- Update `tests/CLAUDE.md` rows in the same commit as any
+- Update `tests/AGENTS.md` rows in the same commit as any
   `tests/integration/` scenario change.
 
 ### Task 1: `LoopInput::SubagentSettled` variant — shipped, slice 2a
@@ -1117,7 +1117,7 @@ work and belongs to 2b.
 
 **Files:**
 - Modify: `tests/integration/subagent_await_edge.rs` (extend — same seam)
-- Modify: `tests/CLAUDE.md` (rows, same commit); `Cargo.toml` untouched
+- Modify: `tests/AGENTS.md` (rows, same commit); `Cargo.toml` untouched
   (binary exists: `reborn_integration_subagent_await_edge`)
 
 Scenarios (harness-side capability enablement; production filter untouched):
@@ -1134,7 +1134,7 @@ Scenarios (harness-side capability enablement; production filter untouched):
 - [ ] `streak_capped_result_waits_for_human` — cap exhausted → edge
   `AttentionDeferredStreakCap` (unclosed); a human-provenance turn on the
   thread drains and closes it at run start.
-- [ ] Commit with `tests/CLAUDE.md` rows updated.
+- [ ] Commit with `tests/AGENTS.md` rows updated.
 
 ### Task 9: prompt + doc closeout
 

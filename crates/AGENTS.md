@@ -59,15 +59,18 @@ The mechanically enforced dependency truth is each crate's
 Seven layers, strictly ordered; a crate may take normal dependencies only on
 its own layer or below (dev-dependencies are outside the matrix):
 
-| Layer (low → high) | May depend on | Crates today |
-| --- | --- | --- |
-| `contracts` | contracts | 6 |
-| `substrates` | contracts, substrates | 29 |
-| `runtimes` | + runtimes | 5 |
-| `kernel` | + kernel | 9 |
-| `loops` | + loops | 5 |
-| `products` | + products | 8 |
-| `app` | + app (everything) | 5 |
+| Layer (low → high) | May depend on |
+| --- | --- |
+| `contracts` | contracts |
+| `substrates` | contracts, substrates |
+| `runtimes` | + runtimes |
+| `kernel` | + kernel |
+| `loops` | + loops |
+| `products` | + products |
+| `app` | + app (everything) |
+
+Per-layer crate counts drift; regenerate them when needed:
+`for k in contracts substrates runtimes kernel loops products app; do echo "$k: $(rg -l "^layer = \"$k\"" crates -g Cargo.toml | wc -l)"; done`
 
 The standing-exception list (`LAYER_MATRIX_EXCEPTIONS`, same file) is
 **empty** — measured 2026-08-05 — and a ratchet test in that file fails the
