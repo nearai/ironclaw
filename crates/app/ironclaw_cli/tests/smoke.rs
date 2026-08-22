@@ -2319,24 +2319,30 @@ fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd()
     let _ = child.wait();
 }
 
-/// Companion regression pin: cwd=reborn_home itself (the crate's first,
-/// insufficient fix attempt) still fails, because reborn_home is an
-/// ancestor of the default standalone skill/extension roots and trips
-/// composition's `paths_overlap` check. Guards against reverting the
-/// installer back to cwd=reborn_home.
+/// Pins the CLI workspace-root fallback (issue #7431): launching `serve` with
+/// cwd=reborn_home — an ancestor of every default standalone skill root —
+/// boots by falling back to `<reborn_home>/workspace`, the same workspace the
+/// installed service mounts, instead of failing composition's isolation
+/// check. This is the fresh-onboard shape: `ironclaw repl`/`run`/`serve`
+/// launched from the operator's shell (cwd=`$HOME`, which contains the Reborn
+/// home) must not die with "workspace root must not overlap default skill
+/// root". Composition's own
+/// `standalone_workspace_root_overlapping_skill_root_is_rejected` pins that
+/// the isolation check itself still rejects an overlapping workspace root.
 #[test]
-fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
+fn serve_boots_from_an_ancestor_cwd_via_workspace_fallback() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).expect("home dir");
     std::fs::create_dir_all(&reborn_home).expect("reborn home");
+    std::fs::create_dir_all(reborn_home.join("local-dev")).expect("local runtime storage root");
     let _serve_port_guard = SERVE_PORT_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = unused_local_port();
 
-    let output = reborn_command()
+    let mut child = reborn_command()
         .args(["serve", "--host", "127.0.0.1", "--port"])
         .arg(port.to_string())
         .current_dir(&reborn_home)
@@ -2347,21 +2353,84 @@ fn serve_crash_loops_with_skill_root_overlap_when_cwd_is_reborn_home_itself() {
             "IRONCLAW_REBORN_WEBUI_TOKEN",
             "reborn-smoke-test-cwd-reborn-home-token-0123456789abcdef",
         )
-        .output()
-        .expect("ironclaw-reborn serve should run and exit");
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn serve should start");
+    let stderr_text = wait_for_serve_banner(&mut child);
+    let used_workspace_fallback = stderr_text.contains("using the default workspace instead");
+    let _ = child.kill();
+    let _ = child.wait();
 
     assert!(
-        !output.status.success(),
-        "serve launched with cwd=reborn_home must fail closed on the skill-root overlap, \
-         not silently boot: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        used_workspace_fallback,
+        "expected the workspace fallback warning for cwd=<reborn_home>: stderr={stderr_text}"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_workspace = reborn_home.join("workspace");
     assert!(
-        stderr.contains("workspace root must not overlap default skill root"),
-        "expected the exact composition overlap error this fix eliminates for \
-         <reborn_home>/workspace: stderr={stderr}"
+        expected_workspace.is_dir(),
+        "fallback must use the same workspace as the installed service: {}",
+        expected_workspace.display()
+    );
+    assert!(
+        !reborn_home.join("local-dev/workspace").exists(),
+        "fallback must not create a profile-local second workspace"
+    );
+}
+
+/// Pins the CLI workspace-root fallback for cwds nested *inside* a protected
+/// root (issue #7431 companion): launching `serve` from
+/// `<storage_root>/skills/...` or `<storage_root>/system/extensions/...` must
+/// also fall back to `<reborn_home>/workspace` instead of letting composition
+/// reject the workspace.
+#[test]
+fn serve_boots_with_fallback_when_cwd_is_inside_a_protected_root() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home = temp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home dir");
+    let storage_root = reborn_home.join("local-dev");
+
+    for protected_root in [
+        storage_root.join("skills"),
+        storage_root.join("system/extensions"),
+    ] {
+        std::fs::create_dir_all(&protected_root).expect("protected root");
+        let _serve_port_guard = SERVE_PORT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let port = unused_local_port();
+
+        let mut child = reborn_command()
+            .args(["serve", "--host", "127.0.0.1", "--port"])
+            .arg(port.to_string())
+            .current_dir(&protected_root)
+            .env("HOME", &home)
+            .env("IRONCLAW_REBORN_HOME", &reborn_home)
+            .env_remove("IRONCLAW_REBORN_PROFILE")
+            .env(
+                "IRONCLAW_REBORN_WEBUI_TOKEN",
+                format!("reborn-smoke-test-nested-{port}-token-0123456789abcdef"),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("ironclaw-reborn serve should start");
+        let stderr_text = wait_for_serve_banner(&mut child);
+        let used_workspace_fallback = stderr_text.contains("using the default workspace instead");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            used_workspace_fallback,
+            "expected the workspace fallback warning for cwd inside protected root {}: \
+             stderr={stderr_text}",
+            protected_root.display()
+        );
+    }
+    assert!(
+        reborn_home.join("workspace").is_dir(),
+        "fallback must use the same workspace as the installed service"
     );
 }
 

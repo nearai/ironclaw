@@ -101,6 +101,8 @@ pub use factory::{KeychainMasterKeyOutcome, provision_standalone_keychain_master
 pub use filesystem_assembly::standalone_db_path;
 // consumer: `ironclaw_cli` config/set · pinned by: `ironclaw_cli` build (the error is the store's; module is private)
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
+// consumer: `ironclaw_cli` runtime workspace fallback (no access to the private module) · pinned by: `ironclaw_cli` build
+pub use host_access_assembly::{paths_overlap, protected_root_suffixes};
 // consumer: `ironclaw_cli` native channel bindings · pinned by: `ironclaw_cli` build
 pub use channel_initialization::{
     FirstPartyChannelInitializationContext, FirstPartyChannelInitializationError,
