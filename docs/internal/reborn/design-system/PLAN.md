@@ -36,10 +36,10 @@ redrawn here, so the grouping cannot drift out of step with it.*
 
 ## Phase 3 — Theme update & UI reskin · [Epic #7781](README.md#epic-ownership-canonical)
 *Change token values + assets to the M3X look; validate in Storybook.*
-- Resolve the Phase-3 dependencies first: **dark palette derivation**, **WCAG contrast validation**, **fonts/licensing** (PROPOSAL §7.3–§7.4; expressive motion is §7.5 and gates Phase 4, not this one).
+- Resolve the Phase-3 dependencies first — there are **two**, not three: **dark-palette derivation with WCAG AA contrast validation** (§7.3 — contrast is a standing invariant carried inside the palette work, not a separately-ownable dependency) and **fonts/licensing** (§7.4). Expressive motion is §7.5 and gates Phase 4, not this one.
 - Land M3 → `--v2-*` token *values* (light + dark) in `app.css`; refresh color/type/space/radius scales; vendor fonts.
 - Reskin primitives/composites against the new tokens; every change validated by its story + `CssCheck` + a11y.
-- **Close the invariant-2 gap** (PROPOSAL §3.1): migrate the 345 arbitrary pixel classes across 91 production components to the new type/space/radius scales, starting with the 38 inside `design-system/` (8 files) and the OOBE pilot card, and retire the 10 hardcoded hexes in 3 `.tsx` files.
+- **Close the invariant-2 gap** (PROPOSAL §3.1): migrate the **345 occurrences of arbitrary pixel classes across 91 files** to the new type/space/radius scales, starting with the 38 occurrences in `design-system/`'s 8 files and the OOBE pilot card, and retire the **10 hardcoded six-digit hex values in 3 `.tsx` files**.
 **Milestone:** new palette live in both themes, all `Tokens/*` stories pass contrast, primitives reskinned with green story tests, and `design-system/` free of arbitrary px/hex.
 **Exit criteria (safeguards, PROPOSAL §7.0):** token *names* unchanged; fonts self-hosted with a tested fallback stack; the phase revertable by a single PR revert with no residue.
 **⚠ Ordering:** Phase 2 lands **before** Phase 3 (DESIGN.md is the spec the token values are judged against, and both phases sit under the same Epic — see the [ownership table](README.md#epic-ownership-canonical)); token values land **before** component restyle; Phase 3 branches off `main` after #7750 and the Phase-2 PR merge.

@@ -23,12 +23,12 @@
 
 ## WS3 — Theme foundation & reskin (Phase 3) · [Epic #7781](README.md#epic-ownership-canonical)
 - [ ] Dark-palette values derived for every token (`:root[data-theme="dark"]`) (PROPOSAL §7.3)
-- [ ] WCAG AA contrast validated for all text/token pairings; `Tokens/Colors` story asserts it (invariant §3.4, carried inside PROPOSAL §7.3)
+- [ ] WCAG AA contrast validated for all text/token pairings; `Tokens/Colors` story asserts it — invariant §3.4, carried inside the dark-palette dependency (§7.3), not owned separately
 - [ ] Fonts vendored: Roboto Flex + Roboto Mono (OFL) under `/vendor/fonts` — **[decision]** Google Sans substitute (§7.4)
 - [ ] M3 → `--v2-*` token *values* land in `app.css` (light + dark)
 - [ ] ⚠ Token values land **before** any component restyle
 - [ ] Primitives/composites reskinned against new tokens; each story + `CssCheck` + a11y green
-- [ ] **Invariant 2 gap closed** (PROPOSAL §3.1) — the 345 arbitrary pixel classes across 91 production components migrated to the type/space/radius scales and the 10 hardcoded hexes in 3 `.tsx` files retired; `design-system/` (38 occurrences in 8 files) and the OOBE pilot card go first, and a lint or grep gate keeps the count from regrowing
+- [ ] **Invariant 2 gap closed** (PROPOSAL §3.1) — the **345 occurrences of arbitrary pixel classes across 91 files** migrated to the type/space/radius scales and the **10 hardcoded six-digit hex values in 3 `.tsx` files** retired; `design-system/` (38 occurrences in 8 files) and the OOBE pilot card go first, and a lint or grep gate keeps the count from regrowing
 - [ ] **Safeguards (§7.0)** — fonts self-hosted with a tested system-fallback stack + `font-display: swap`; token *names* unchanged (values only); the whole phase revertable by a single PR revert with no residue
 
 ## WS4 — Agentic components & interactions (Phase 4) · [Epic #7782](README.md#epic-ownership-canonical)
