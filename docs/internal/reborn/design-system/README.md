@@ -50,13 +50,15 @@ flowchart TD
 
 ## The five phases
 
-| Phase | Scope | Epic | Status | Ships as |
-|---|---|---|---|---|
-| **1** | Storybook integration + design-system catalog | [#7038](https://github.com/nearai/ironclaw/issues/7038) | In review | PR [#7750](https://github.com/nearai/ironclaw/pull/7750) (supersedes closed #7039) |
-| **2** | `DESIGN.md` governance & guidelines | [#7781](https://github.com/nearai/ironclaw/issues/7781) | Ready, PR to follow #7750 | Issue [#7042](https://github.com/nearai/ironclaw/issues/7042) (old PR #7043 closed) |
-| **3** | Theme update & UI reskin (tokens + assets) | [#7781](https://github.com/nearai/ironclaw/issues/7781) | Planned | — |
-| **4** | Interaction & component updates (agentic-first) | [#7782](https://github.com/nearai/ironclaw/issues/7782) | Planned | — |
-| **5** | Information architecture | [#7782](https://github.com/nearai/ironclaw/issues/7782) | Planned | — |
+*Scope and delivery state only — which Epic carries which phase is the [table above](#epic-ownership-canonical), the one place that mapping is written down.*
+
+| Phase | Scope | Status | Ships as |
+|---|---|---|---|
+| **1** | Storybook integration + design-system catalog | In review | PR [#7750](https://github.com/nearai/ironclaw/pull/7750) (supersedes closed #7039) |
+| **2** | `DESIGN.md` governance & guidelines | Ready, PR to follow #7750 | Issue [#7042](https://github.com/nearai/ironclaw/issues/7042) (old PR #7043 closed) |
+| **3** | Theme update & UI reskin (tokens + assets) | Planned | — |
+| **4** | Interaction & component updates (agentic-first) | Planned | — |
+| **5** | Information architecture | Planned | — |
 
 ## Ownership boundary
 
@@ -64,7 +66,7 @@ This package is the **canonical design-system governance record**: it owns `DESI
 
 ## Dependencies at a glance
 
-The reskin/interaction phases carry hard prerequisites. Each has a proposed implementation **and a named owner** in [PROPOSAL §7](PROPOSAL.md#7-dependencies-and-their-implementation-proposals) — the owner is the Epic carrying the gating phase, made individual by a dependency sub-issue that must be cut and assigned before that phase's first PR opens:
+The reskin/interaction phases carry hard prerequisites. Each has a proposed implementation **and a named owner** in [PROPOSAL §7](PROPOSAL.md#7-dependencies-and-their-implementation-proposals). The Epic on each line below is that *dependency's* owner, derived from its gating phase via the [ownership table](#epic-ownership-canonical) — it is a per-dependency attribution, not a second copy of the phase mapping — the owner is the Epic carrying the gating phase, made individual by a dependency sub-issue that must be cut and assigned before that phase's first PR opens:
 
 - **Dark palette derivation** — the supplied M3 palette is light-only; the app is dark-default and dual-theme. *(gates Phase 3 · Epic #7781)*
 - **WCAG AA contrast validation** for the high-chroma tokens — a standing invariant carried inside the palette work. *(gates Phase 3 · Epic #7781)*

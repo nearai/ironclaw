@@ -41,7 +41,7 @@ redrawn here, so the grouping cannot drift out of step with it.*
 - Reskin primitives/composites against the new tokens; every change validated by its story + `CssCheck` + a11y.
 **Milestone:** new palette live in both themes, all `Tokens/*` stories pass contrast, primitives reskinned with green story tests.
 **Exit criteria (safeguards, PROPOSAL §7.0):** token *names* unchanged; fonts self-hosted with a tested fallback stack; the phase revertable by a single PR revert with no residue.
-**⚠ Ordering:** Phase 2 lands **before** Phase 3 (DESIGN.md is the spec the token values are judged against — both are Epic #7781); token values land **before** component restyle; Phase 3 branches off `main` after #7750 and the Phase-2 PR merge.
+**⚠ Ordering:** Phase 2 lands **before** Phase 3 (DESIGN.md is the spec the token values are judged against, and both phases sit under the same Epic — see the [ownership table](README.md#epic-ownership-canonical)); token values land **before** component restyle; Phase 3 branches off `main` after #7750 and the Phase-2 PR merge.
 
 ## Phase 4 — Interaction & component updates (agentic-first) · [Epic #7782](README.md#epic-ownership-canonical)
 *Add the expressive, agent-first interactions + new components.*
@@ -57,7 +57,7 @@ redrawn here, so the grouping cannot drift out of step with it.*
 **Milestone:** IA restructured; CUJs (chat, approvals, projects, settings) verified unbroken.
 
 ## Suggested next PRs (concrete, in order)
-1. **Merge #7750** — that closes Epic #7038 (Phase 1). Then land the Phase-2 (#7042) changeset as a fresh PR off `main`, opening Epic #7781's first half.
+1. **Merge #7750** — that closes Phase 1. Then land the Phase-2 (#7042) changeset as a fresh PR off `main`, opening Phase 2.
 2. **Before Phase 3a opens — name the owners:** cut the dependency sub-issues on #7781 (dark palette + contrast, fonts/licensing **[decision]**) and assign them; PROPOSAL §7's accountability rule is what makes the gates real.
 3. **Phase 3a — token foundation:** dark-palette + contrast + font vendoring in `app.css` (+ updated `Tokens/*` stories). No component restyle yet.
 4. **Phase 3b — primitive reskin:** restyle `design-system/` primitives against the new tokens, story-by-story.

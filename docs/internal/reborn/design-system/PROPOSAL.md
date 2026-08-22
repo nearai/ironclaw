@@ -24,8 +24,8 @@ Phases 1–2 are in flight (PR #7750 in review; the Phase-2 changeset preserved 
 
 Phases 1–2 are *built but unmerged*. Nothing in this section can be verified by checking out `main`; each item's home path is created by the PR or tracked issue named beside it — and Phase 2 has an issue, not yet a PR.
 
-- **Phase 1 — `IN REVIEW` (PR #7750, supersedes closed #7039; Epic #7038):** Storybook 10 (`@storybook/react-vite`, pnpm) wired to the real `app.css` + a light/dark toolbar; **~33 stories** in five sidebar categories (Primitives / Components / Composites / Icons / Tokens); a vitest split (`pnpm test` node-only, `pnpm test:storybook` in headless Chromium); `@storybook/addon-mcp` for agent access. On `main` today: no `.storybook/` directory, no stories.
-- **Phase 2 — `PREPARED`, no open PR (issue #7042, changeset preserved from closed #7043; Epic #7781):** `crates/product/ironclaw_webui/frontend/DESIGN.md` (M3X spec + an IronClaw implementation/governance appendix), a Storybook `Design/Guidelines` docs page, and `.claude/rules/design-system.md` agent governance. On `main` today: none of those three files exists.
+- **Phase 1 — `IN REVIEW` (PR #7750, supersedes closed #7039):** Storybook 10 (`@storybook/react-vite`, pnpm) wired to the real `app.css` + a light/dark toolbar; **~33 stories** in five sidebar categories (Primitives / Components / Composites / Icons / Tokens); a vitest split (`pnpm test` node-only, `pnpm test:storybook` in headless Chromium); `@storybook/addon-mcp` for agent access. On `main` today: no `.storybook/` directory, no stories.
+- **Phase 2 — `PREPARED`, no open PR (issue #7042, changeset preserved from closed #7043):** `crates/product/ironclaw_webui/frontend/DESIGN.md` (M3X spec + an IronClaw implementation/governance appendix), a Storybook `Design/Guidelines` docs page, and `.claude/rules/design-system.md` agent governance. On `main` today: none of those three files exists.
 
 ### 2.4 Current-state conclusion
 The workbench, catalog, governance doc, and agent rules are **written and reviewable, but not merged** — Phase 1 in review, Phase 2 awaiting its fresh PR (§7.6). Read every `DESIGN.md` / Storybook / `.claude/rules/design-system.md` reference in this package as *the artifact those two phases land*, not as something present on `main`. What remains after them is the **visual/interaction transformation** (Phases 3–5) — which is where the dependencies and risk concentrate.
@@ -127,7 +127,7 @@ flowchart LR
 - **Dynamic loading fails closed.** If the motion module is imported dynamically, a rejected chunk is caught and the component renders the static baseline. A failed *static* import stays a build failure — it is not something to paper over at runtime.
 - **Tested at the caller.** Coverage asserts the disabled path at the component that animates, not only on the helper: signal on → no RAF scheduled, no inline transform written, static end-state rendered.
 
-**7.6 Merge-order / stacked PRs.** *Gates: Phase 1→2 landing (Epic #7038 → #7781).* *Owner: #7750's author for Phase 1; the Phase-2 fresh-PR author for #7042.* The original Phase-2 PR #7043 was stacked on Phase-1 #7039; both were closed after the stack became an unmergeable merge-commit tangle. **Proposal:** merge the recreated, non-stacked **#7750** first, then land the preserved Phase-2 changeset (#7042) as a fresh PR off `main`; Phase 3 branches off `main` after both land.
+**7.6 Merge-order / stacked PRs.** *Gates: Phase 1→2 landing.* *Owner: #7750's author for Phase 1; the Phase-2 fresh-PR author for #7042.* The original Phase-2 PR #7043 was stacked on Phase-1 #7039; both were closed after the stack became an unmergeable merge-commit tangle. **Proposal:** merge the recreated, non-stacked **#7750** first, then land the preserved Phase-2 changeset (#7042) as a fresh PR off `main`; Phase 3 branches off `main` after both land.
 
 ## 8. Alignment with the governance benchmarks
 
