@@ -135,6 +135,14 @@ jobs:
       RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+      # These groups compile ironclaw_webui only as a dependency of the root
+      # integration package (3 of 4 groups; substrates does not). Verified
+      # this session (T3 Task 5): none of the 50+ test targets across all
+      # four groups read ASSETS/serve SPA content, so skipping the embedded
+      # frontend build here is safe — it removes a real per-job npm-fallback
+      # pnpm download + vite build and an unbounded external-download risk
+      # (the #7756 class) from the lane.
+      SKIP_FRONTEND_BUILD: "1"
     strategy:
       fail-fast: false
       matrix:

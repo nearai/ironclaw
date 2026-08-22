@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import re
 import subprocess
 import sys
 import tomllib
@@ -580,20 +581,100 @@ DOCKER_RUNTIME_CONFIG_OWNERS = {
     "docker/reborn/config.hosted-single-tenant.toml": "tests/dockerfile_runtime_home.rs",
     "docker/reborn/config.hosted-single-tenant-volume.toml": "tests/dockerfile_runtime_home.rs",
 }
-# Repository configuration that a Reborn crate test reads as an asserted input.
-# These paths are not static CI control: changing one must schedule the test that
-# defines its product/security contract. The linked-device supply-chain test
-# parses Dependabot's Cargo ignore rules so the exact grammers pin cannot be
-# silently reopened by an automated dependency update.
+# Matches a `.github/<file>` string literal with a file-shaped last segment
+# (contains `.`, or is the bare token CODEOWNERS) so a directory-level scan
+# (`.github/workflows` with no trailing filename — a read-whatever's-there
+# ratchet, not a content pin) is never mistaken for a drift risk. See
+# reborn_sealed_evidence_mint_ratchet.rs / dockerfile_runtime_home.rs, which
+# both walk the bare directory and are deliberately excluded.
+_GITHUB_FILE_LITERAL = re.compile(r'"(\.github/[\w./-]+)"')
+_GITHUB_DIRECTORY_LITERALS = {".github/workflows", ".github/actions", ".github"}
+
+
+def repo_config_file_literals_in_test_sources() -> dict[str, list[Path]]:
+    """Every `.github/<file>` literal any workspace test target reads.
+
+    Scans every `tests/*.rs` file (root and per-crate — `crates/**/tests/*.rs`
+    via rglob) rather than a hand-maintained list, so a new test added later
+    that reads a workflow file fails the drift-guard test immediately.
+    """
+    hits: dict[str, list[Path]] = defaultdict(list)
+    candidates = sorted((ROOT / "tests").glob("*.rs")) + sorted(
+        (ROOT / "crates").rglob("tests/*.rs")
+    )
+    for rs_file in candidates:
+        text = rs_file.read_text(encoding="utf-8")
+        for match in _GITHUB_FILE_LITERAL.finditer(text):
+            literal = match.group(1)
+            if literal in _GITHUB_DIRECTORY_LITERALS:
+                continue
+            last_segment = literal.rsplit("/", 1)[-1]
+            if "." in last_segment or last_segment == "CODEOWNERS":
+                hits[literal].append(rs_file.relative_to(ROOT))
+    return hits
+
+
+@functools.lru_cache(maxsize=None)
+def _cli_smoke_test_owner() -> str:
+    """`<ironclaw_cli crate dir>/tests/smoke.rs`, resolved once per process."""
+    try:
+        directory = crate_directory("ironclaw_cli", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve the ironclaw_cli crate for "
+            f"REPO_CONFIG_TEST_OWNERS: {error}"
+        ) from error
+    return f"{directory}/tests/smoke.rs"
+
+
+@functools.lru_cache(maxsize=None)
+def _architecture_tests_owner(test_name: str) -> str:
+    """`<ironclaw_architecture_tests crate dir>/tests/<test_name>.rs`."""
+    try:
+        directory = crate_directory("ironclaw_architecture_tests", ROOT)
+    except CrateTreeError as error:
+        raise RuntimeError(
+            "reborn_pr_test_plan: cannot resolve ironclaw_architecture_tests for "
+            f"REPO_CONFIG_TEST_OWNERS: {error}"
+        ) from error
+    return f"{directory}/tests/{test_name}.rs"
+
+
+# Repository configuration a Reborn crate test reads as an asserted input.
+# These paths are not static CI control: changing one must schedule the
+# test that defines its product/security contract. Every owner is resolved
+# by crate NAME (never a path literal) so a family move cannot dangle it.
+# Populated from repo_config_file_literals_in_test_sources()'s real scan —
+# see test_repo_config_file_literals_in_test_sources_are_all_mapped, the
+# class-level drift guard this table exists to satisfy.
 REPO_CONFIG_TEST_OWNERS = {
-    ".github/dependabot.yml": (
-        "crates/app/ironclaw_architecture_tests/tests/"
-        "reborn_linked_device_supply_chain_pin.rs"
+    ".github/dependabot.yml": _architecture_tests_owner(
+        "reborn_linked_device_supply_chain_pin"
     ),
+    ".github/CODEOWNERS": _architecture_tests_owner(
+        "reborn_linked_device_supply_chain_pin"
+    ),
+    # run 32310981177 / PR #7756 / fix 064ebde65: smoke.rs pins apt-installer
+    # literals from these four release/CI workflows.
+    ".github/workflows/reborn-release-compile.yml": _cli_smoke_test_owner(),
+    ".github/workflows/ironclaw-release.yml": _cli_smoke_test_owner(),
+    ".github/workflows/code_style.yml": _cli_smoke_test_owner(),
+    ".github/workflows/docker.yml": _cli_smoke_test_owner(),
+    ".github/dist-build-setup.yml": _cli_smoke_test_owner(),
+    # T3 approach-audit charter counter-instance: reborn_coverage_lane_stack
+    # _headroom.rs (root package) pins RUST_MIN_STACK headroom declared in
+    # these two workflows' llvm-cov jobs.
+    ".github/workflows/coverage.yml": "tests/reborn_coverage_lane_stack_headroom.rs",
+    ".github/workflows/reborn-tests.yml": "tests/reborn_coverage_lane_stack_headroom.rs",
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
+# Test crates that assert on every crate's sources and manifests via
+# filesystem scans (Cargo.toml declares only 2 dep edges), so the reverse-
+# dependency closure structurally cannot select them for a product change —
+# run 32291404351 / PR #6994 / fix 156288d4d is the measured miss.
+WORKSPACE_SCANNING_TEST_PACKAGES: tuple[str, ...] = ("ironclaw_architecture_tests",)
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
 SHARED_REBORN_ACTION_PREFIXES = (".github/actions/setup-sccache-dist/",)
 BUCKET_WEIGHTS = {
@@ -930,6 +1011,10 @@ def build_plan(
             continue
         if path in REPO_CONFIG_TEST_OWNERS:
             owner = REPO_CONFIG_TEST_OWNERS[path]
+            if owner in root_inventory:
+                root_partitions.add(root_inventory[owner])
+                reasons.append(f"repository config parsed by {owner}: {path}")
+                continue
             package = next(
                 (
                     name
@@ -1248,6 +1333,15 @@ def build_plan(
     affected = (
         _affected_packages(production_packages, reverse) | direct_test_packages
     ) & canonical_set
+    if production_packages:
+        scanning_packages = set(WORKSPACE_SCANNING_TEST_PACKAGES) & canonical_set
+        if scanning_packages - affected:
+            affected |= scanning_packages
+            reasons.append(
+                "workspace scan: ironclaw_architecture_tests reads every "
+                "crate's sources from disk and has no dependency edge to "
+                "any of them, so it joins any production-package change"
+            )
     if changed_packages and not affected:
         raise ValueError(
             "changed packages are outside the canonical Reborn package set: "

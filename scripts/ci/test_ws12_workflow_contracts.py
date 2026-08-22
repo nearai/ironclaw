@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -327,6 +329,26 @@ class WorkflowContractSabotageTests(unittest.TestCase):
             ' >> "$GITHUB_OUTPUT"\n'
         )
         self.assertEqual(validate_production_lint_targets(unrelated), [])
+
+    def test_pull_request_clippy_matrix_includes_the_default_features_flavor(self) -> None:
+        """#7119's queue-only default-features shape must also run scoped on PRs.
+
+        Pinned as structured JSON, not a substring, because the PR and non-PR
+        branches share nearly the same literal — a substring match could pass
+        by matching the WRONG branch.
+        """
+        workflow = self.workflows[CODE_STYLE_WORKFLOW]
+        branches = re.findall(
+            r"if \[ \"\$\{\{ github\.event_name \}\}\" = \"pull_request\" \]; then\n"
+            r'\s*echo \'clippy_matrix=(.+?)\' >> "\$GITHUB_OUTPUT"\n'
+            r"\s*else\n"
+            r'\s*echo \'clippy_matrix=(.+?)\' >> "\$GITHUB_OUTPUT"',
+            workflow,
+        )
+        self.assertEqual(len(branches), 1, "expected exactly one pull_request/else clippy_matrix pair")
+        pr_matrix = json.loads(branches[0][0])
+        self.assertIn({"name": "default", "flags": ""}, pr_matrix)
+        self.assertIn({"name": "all-features", "flags": "--all-features"}, pr_matrix)
 
     def test_losing_the_step_or_its_command_fails_loudly(self) -> None:
         """A contract that cannot see the command must say so, not pass."""
@@ -814,8 +836,12 @@ class WebuiFrontendSiteSabotageTests(unittest.TestCase):
 
     def test_every_site_was_actually_converted(self) -> None:
         """Sanity floor: the checked-in tree must contain the expected number
-        of sanctioned cache-dependency-path pairings (12) — a pin that passes
-        vacuously because nobody scanned anything is the defect being fixed."""
+        of sanctioned cache-dependency-path pairings (11, down from 12 —
+        T3 Task 5 removed code_style.yml's `clippy` job's "Install Node.js
+        for WebUI bundle builds" step, whose only purpose was priming the
+        pnpm cache for a frontend build SKIP_FRONTEND_BUILD now skips
+        entirely) — a pin that passes vacuously because nobody scanned
+        anything is the defect being fixed."""
         flat_lockfile = f"{self.webui_dir}/frontend/pnpm-lock.yaml"
         pairs = 0
         for text in self.workflows.values():
@@ -828,7 +854,7 @@ class WebuiFrontendSiteSabotageTests(unittest.TestCase):
                 )
                 if following == WEBUI_NESTED_LOCKFILE_PATTERN:
                     pairs += 1
-        self.assertEqual(pairs, 12, "expected exactly 12 cache-dependency-path sites")
+        self.assertEqual(pairs, 11, "expected exactly 11 cache-dependency-path sites")
 
     def test_reintroducing_a_bare_cd_site_fails_loudly(self) -> None:
         """The exact pre-#7155 regression: a `cd` back to the flat literal."""

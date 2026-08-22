@@ -79,9 +79,13 @@ PRs do not compile an unchanged workspace solely for linting. Root
 `Cargo.toml` and `Cargo.lock` changes lint every workspace package because
 their dependency and feature impact is workspace-wide. Merge queue and main
 lint the full workspace, add test and example targets, and run the
-default-feature matrix. Code Style's CLI Rust smoke and Reborn E2E's
-four Rust groups run on merge queue and main, where they validate the
-exhaustive merged state, but do not repeat those contracts on PR runners. The release-binary
+default-feature matrix. Code Style's CLI Rust smoke runs on pull requests
+too, scoped by `has_reborn_cli`, and unconditionally on merge queue and main,
+where it validates the exhaustive merged state. Reborn E2E's four Rust
+groups still run only on merge queue and main, validating the exhaustive
+merged state without repeating that contract on PR runners — see "Known
+accepted gaps" for the re-sampling plan that gates scoping them to PRs too.
+The release-binary
 smoke harness self-test remains in Code Style's fast deterministic job on every
 code PR. Reborn E2E continues to build the real product binary and run all
 browser/provider lanes on pull requests.
@@ -120,13 +124,18 @@ roll-up **job names**, never individual matrix jobs):
 | `Reborn E2E` | `reborn-e2e.yml` | candidate — require once queue cost is confirmed |
 | `Platform & Compat` | `platform-and-compat.yml` | candidate — require once queue cost is confirmed |
 
-The 2026-07-30 queue-cost audit found only one retained `merge_group` sample
-for each candidate: Reborn E2E took 594 seconds and failed; Platform & Compat
-took 364 seconds and passed. Pull-request history was healthier (Reborn E2E
-p50/p95 877/1124 seconds; Platform & Compat 415/492 seconds), but one real queue
-sample—especially a failing E2E sample—is not enough evidence to alter the
-repository ruleset. Both checks therefore remain candidates. Refresh the
-workflow-run sample before promotion; a workflow being present on
+The 2026-08-21 queue-cost sample (200 queue runs, 40 tracked entries per
+workflow) found: Reborn E2E failed 5/40 + 4 cancelled (≈22.5% non-green,
+≈64 runner-minutes/entry); Code Style (already required) failed 11/40
+(27.5%); Platform & Compat was not separately sampled this session (prior
+single-sample: 364 seconds, passed, ≈10 runner-minutes/entry). A ~22.5%+
+non-green rate on a non-required check is not evidence for promoting it —
+promoting would bounce roughly 1 in 4-5 queue entries that merge fine today,
+directly against the queue's own "reds must drop" goal. Both checks remain
+candidates. The queue-runner-minute cost from `rust-reborn`'s frontend build
+was cut in-place (`SKIP_FRONTEND_BUILD`, no trigger change) rather than by
+narrowing `merge_group` coverage — see the CI-Contract invariant above.
+Refresh the workflow-run sample before promotion; a workflow being present on
 `merge_group` is not itself proof that it is safe to require.
 
 Rules for a roll-up job that is (or may become) required:
@@ -363,5 +372,15 @@ points, including their existing optional DIND dispatch. The manual
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep
   `reborn-e2e.yml`'s `changes` regex in sync with its `paths:` filters.
+- **Reborn E2E's four `rust-reborn` groups are not scoped to a PR's diff**,
+  on either pull_request or merge_group — they run exhaustively on merge
+  queue and main only. Deriving a group→package mapping from
+  `scripts/reborn-e2e-rust.sh` to scope either side was investigated and
+  deferred rather than built as a second, fragile bash-parsing fork: land
+  the planner drift-guard fixes first, re-sample merge_group `rust-reborn`
+  failures over ~2 weeks, and if a residual under-selection class remains,
+  design the derivation once (a `LIST_ONLY=1` script mode, a shared TOML
+  manifest, or a static hand-maintained regex mirroring `has_reborn_cli`) —
+  never twice, one for PR scope and one for merge_group scope.
 - **Code Coverage**, **IronClaw Stress**, live canaries, Docker/release
   pipelines are informational or post-merge; they are not merge-gating.

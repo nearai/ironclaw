@@ -550,12 +550,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["integration_lanes"], [])
 
     def test_unrelated_workflow_change_runs_only_baseline_qa_replay(self) -> None:
-        plan = self.plan("pull_request", [".github/workflows/code_style.yml"])
+        plan = self.plan("pull_request", [".github/workflows/nightly-deep-ci.yml"])
         self.assertEqual(plan["mode"], "none")
         self.assertTrue(plan["run_qa_replay"])
 
     def test_reborn_workflow_change_is_owned_by_static_and_merge_queue_gates(self) -> None:
-        plan = self.plan("pull_request", [".github/workflows/reborn-tests.yml"])
+        plan = self.plan("pull_request", [".github/workflows/reborn-e2e.yml"])
         self.assertEqual(plan["mode"], "none")
         self.assertEqual(plan["root_partitions"], [])
         self.assertEqual(plan["integration_lanes"], [])
@@ -1202,6 +1202,127 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_repo_config_file_literals_in_test_sources_are_all_mapped(self) -> None:
+        """Class-level guard for the run-32310981177 failure mode.
+
+        Any Rust test that reads a specific `.github/<file>` path from disk and
+        asserts its content is a drift risk the planner cannot see unless that
+        path is a REPO_CONFIG_TEST_OWNERS key: an edit to that file changes
+        behavior the test pins, but PR_STATIC_CONTROL_PREFIXES routes the
+        changed path to "static CI... owns this" and schedules nothing, so the
+        break surfaces only in the merge queue's full plan — smoke.rs's class
+        (run 32310981177 / PR #7756 / fix 064ebde65) and the
+        reborn_coverage_lane_stack_headroom.rs counter-instance the approach-
+        audit charter found in coverage.yml. Scanning every workspace test
+        target, instead of hand-listing files, means a NEW test added later
+        that reads a workflow file fails this guard immediately instead of
+        waiting for its own queue-only incident.
+        """
+        hits = planner.repo_config_file_literals_in_test_sources()
+        unmapped = sorted(
+            literal for literal in hits if literal not in planner.REPO_CONFIG_TEST_OWNERS
+        )
+        self.assertEqual(
+            unmapped,
+            [],
+            "found .github/<file> literals read by a test but not owned in "
+            f"REPO_CONFIG_TEST_OWNERS: { {k: sorted(str(p) for p in v) for k, v in hits.items() if k in unmapped} }",
+        )
+
+    def test_repo_config_test_owners_route_to_a_real_package_or_root_partition(self) -> None:
+        """Every mapped owner must actually resolve — catches a moved/renamed owner file."""
+        root_partitions = planner._root_test_partitions()
+        crate_dirs = set(crate_directories(planner.ROOT))
+        for path, owner in planner.REPO_CONFIG_TEST_OWNERS.items():
+            with self.subTest(path=path, owner=owner):
+                is_root_owned = owner in root_partitions
+                is_crate_owned = any(
+                    owner.startswith(f"{directory}/") for directory in crate_dirs
+                )
+                self.assertTrue(
+                    is_root_owned or is_crate_owned,
+                    f"{owner!r} (owner of {path!r}) resolves to neither a root test "
+                    "partition nor a real crate directory",
+                )
+
+    def test_workflow_files_read_by_cli_smoke_route_to_the_smoke_test(self) -> None:
+        for workflow in (
+            "reborn-release-compile.yml",
+            "ironclaw-release.yml",
+            "code_style.yml",
+            "docker.yml",
+        ):
+            with self.subTest(workflow=workflow):
+                plan = self.plan_real_owners([f".github/workflows/{workflow}"])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertIn("ironclaw", plan["affected_packages"])
+                self.assertTrue(
+                    any(
+                        target == {"package": "ironclaw", "kind": "test", "name": "smoke"}
+                        for bucket in plan["crate_buckets"]
+                        for target in bucket["exact_targets"]
+                    ),
+                    plan["crate_buckets"],
+                )
+
+    def test_dist_build_setup_config_routes_to_the_smoke_test(self) -> None:
+        plan = self.plan_real_owners([".github/dist-build-setup.yml"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertIn("ironclaw", plan["affected_packages"])
+
+    def test_coverage_workflow_files_route_to_the_coverage_lane_headroom_test(self) -> None:
+        for workflow in ("coverage.yml", "reborn-tests.yml"):
+            with self.subTest(workflow=workflow):
+                plan = self.plan_real_owners([f".github/workflows/{workflow}"])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertIn(
+                    planner._root_test_partitions()["tests/reborn_coverage_lane_stack_headroom.rs"],
+                    plan["root_partitions"],
+                )
+
+    def test_codeowners_absence_pin_routes_to_the_supply_chain_test(self) -> None:
+        plan = self.plan_real_owners([".github/CODEOWNERS"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertIn("ironclaw_architecture_tests", plan["affected_packages"])
+
+    def test_production_change_schedules_the_workspace_scanning_architecture_tests(
+        self,
+    ) -> None:
+        """ironclaw_architecture_tests scans every crate's sources from disk but
+        depends on none of them, so the reverse-dependency closure structurally
+        cannot select it for a product change (run 32291404351 / PR #6994 / fix
+        156288d4d: a provider-name leak the queue's full plan caught that no
+        PR-time plan would have run).
+        """
+        plan = self.plan_real_owners(
+            ["crates/product/ironclaw_openai_compat/src/lib.rs"]
+        )
+        self.assertIn("ironclaw_architecture_tests", plan["affected_packages"])
+        self.assertTrue(
+            any("workspace scan" in reason for reason in plan["reasons"]),
+            plan["reasons"],
+        )
+
+        # Negative control: a package-owned test change cannot alter a scanned
+        # production source's contract, so it must not add the workspace-
+        # scanning architecture tests either — mirrors
+        # test_package_owned_test_change_does_not_run_reverse_dependents's
+        # philosophy.
+        test_only = self.plan_real_owners(
+            ["crates/product/ironclaw_openai_compat/tests/contract.rs"]
+        )
+        self.assertNotIn(
+            "ironclaw_architecture_tests", test_only["affected_packages"]
+        )
+
+    def test_workspace_scanning_packages_exist_in_the_real_tree(self) -> None:
+        """Fails loudly if a scanning package is renamed/deleted, so the
+        intersection-with-canonical-set in build_plan can never silently no-op
+        forever."""
+        for name in planner.WORKSPACE_SCANNING_TEST_PACKAGES:
+            with self.subTest(name=name):
+                planner.crate_directory(name, planner.ROOT)
 
     def test_decided_repo_root_paths_are_owned_by_other_workflows(self) -> None:
         """Repo-root files another workflow owns outright.
@@ -2177,9 +2298,12 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ROOT / ".github/workflows/regression-test-check.yml"
         ).read_text(encoding="utf-8")
 
+        # T3 Task 4: the CLI smoke job now runs on pull_request too, scoped
+        # by the same has_reborn_cli filter — it is no longer queue-only, so
+        # this pins the new unconditional-on-event form instead of the old
+        # `&& github.event_name != 'pull_request'` exclusion.
         self.assertIn(
-            "needs.changes.outputs.has_reborn_cli == 'true' && "
-            "github.event_name != 'pull_request'",
+            "if: needs.changes.outputs.has_reborn_cli == 'true'",
             code_style,
         )
         self.assertIn(
