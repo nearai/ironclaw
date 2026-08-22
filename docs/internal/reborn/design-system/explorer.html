@@ -8,8 +8,9 @@
   :root {
     --bg: #faf9fe; --surface: #ffffff; --surface-2: #f3f1fb; --text: #16151c;
     --text-dim: #5c5768; --border: #e6e2f2; --accent: #6b4eff; --accent-soft: #ece7ff;
-    --spark: #e21f7e; --good: #0f8a5f; --good-soft: #e0f3ec; --plan: #7a7488;
-    --plan-soft: #efedf5;
+    --accent-strong: #5636e8;
+    --spark: #c9146d; --on-spark: #ffffff; --good: #0a6e4b; --good-soft: #e0f3ec;
+    --plan: #5d5869; --plan-soft: #efedf5;
     --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     --radius: 14px; --maxw: 940px;
@@ -18,19 +19,24 @@
     :root {
       --bg: #100f15; --surface: #191822; --surface-2: #211f2c; --text: #ecebf3;
       --text-dim: #a29cb2; --border: #2c2938; --accent: #9a86ff; --accent-soft: #241f3a;
-      --spark: #ff6fb0; --good: #34d399; --good-soft: #123026; --plan: #9a94a8;
-      --plan-soft: #23212e;
+      --accent-strong: #b3a3ff;
+      --spark: #ff6fb0; --on-spark: #16151c; --good: #34d399; --good-soft: #123026;
+      --plan: #9a94a8; --plan-soft: #23212e;
     }
   }
   :root[data-theme="light"] {
     --bg: #faf9fe; --surface: #ffffff; --surface-2: #f3f1fb; --text: #16151c;
     --text-dim: #5c5768; --border: #e6e2f2; --accent: #6b4eff; --accent-soft: #ece7ff;
-    --spark: #e21f7e; --good: #0f8a5f; --good-soft: #e0f3ec; --plan: #7a7488; --plan-soft: #efedf5;
+    --accent-strong: #5636e8;
+    --spark: #c9146d; --on-spark: #ffffff; --good: #0a6e4b; --good-soft: #e0f3ec;
+    --plan: #5d5869; --plan-soft: #efedf5;
   }
   :root[data-theme="dark"] {
     --bg: #100f15; --surface: #191822; --surface-2: #211f2c; --text: #ecebf3;
     --text-dim: #a29cb2; --border: #2c2938; --accent: #9a86ff; --accent-soft: #241f3a;
-    --spark: #ff6fb0; --good: #34d399; --good-soft: #123026; --plan: #9a94a8; --plan-soft: #23212e;
+    --accent-strong: #b3a3ff;
+    --spark: #ff6fb0; --on-spark: #16151c; --good: #34d399; --good-soft: #123026;
+    --plan: #9a94a8; --plan-soft: #23212e;
   }
 
   * { box-sizing: border-box; }
@@ -70,7 +76,8 @@
     letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); }
   .pill.good { color: var(--good); background: var(--good-soft); border-color: transparent; }
   .pill.plan { color: var(--plan); background: var(--plan-soft); border-color: transparent; }
-  .pill.spark { color: #fff; background: var(--spark); border-color: transparent; }
+  .pill.plan a { color: inherit; border-bottom-color: currentColor; }
+  .pill.spark { color: var(--on-spark); background: var(--spark); border-color: transparent; }
 
   section { padding: 34px 0; border-top: 1px solid var(--border); }
 
@@ -134,7 +141,7 @@
   .dep .prop { font-size: 14px; color: var(--text-dim); margin: 0; }
   .dep .prop b { color: var(--text); font-weight: 600; }
   .gate { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
-    padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+    padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong); white-space: nowrap; }
 
   .dep .owner { font-size: 12.5px; color: var(--text-dim); margin: 8px 0 0; font-family: var(--mono); }
   .dep .owner b { color: var(--text); font-weight: 600; }
@@ -152,7 +159,7 @@
   ol.review li { counter-increment: step; position: relative; padding: 6px 0 6px 40px; color: var(--text-dim); }
   ol.review li::before { content: counter(step); position: absolute; left: 0; top: 4px; font-family: var(--mono);
     font-size: 12px; width: 26px; height: 26px; display: grid; place-items: center; border-radius: 999px;
-    background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+    background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
   ol.review li b { color: var(--text); font-weight: 600; }
 
   .footer { margin-top: 44px; padding-top: 22px; border-top: 1px solid var(--border);
@@ -224,7 +231,7 @@
           <div class="rung tokens">styles/app.css — @theme + --v2-* · data-theme light/dark</div>
         </div>
         <aside class="rail">
-          <div class="note"><b>DESIGN.md</b> + <b>.claude/rules/design-system.md</b> → govern the design-system + tokens <i>(lands with Phase 2 — not on <code>main</code>)</i></div>
+          <div class="note"><b>DESIGN.md</b> is the tool-neutral constitution — reachable from <b>AGENTS.md</b>, the repo's canonical agent contract; <b>.claude/rules/design-system.md</b> is the Claude-specific adapter that points at it, never a replacement. Together they govern the design-system + tokens <i>(lands with Phase 2 — not on <code>main</code>)</i></div>
           <div class="note"><b>Storybook</b> catalog + story tests → catalog &amp; regression-test design-system + components <i>(lands with Phase 1 — in review)</i></div>
         </aside>
       </div>
@@ -248,31 +255,31 @@
         <div class="num">1</div>
         <div class="body"><h3>Storybook integration + catalog</h3>
           <p>Storybook 10 wired to app.css; ~33 stories in five categories; vitest split; addon-mcp.</p></div>
-        <span class="pill plan">Epic #7038 · PR #7750 in review</span>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7038</a> · PR #7750 in review</span>
       </div>
       <div class="phase next">
         <div class="num">2</div>
         <div class="body"><h3>DESIGN.md governance &amp; guidelines</h3>
           <p>DESIGN.md constitution + appendix, Storybook Design/Guidelines page, agent rules.</p></div>
-        <span class="pill plan">Epic #7781 · #7042 · PR to follow</span>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7781</a> · #7042 · PR to follow</span>
       </div>
       <div class="phase next">
         <div class="num">3</div>
         <div class="body"><h3>Theme update &amp; UI reskin</h3>
           <p>M3 → --v2-* token values (light + dark) + assets; primitives reskinned, validated in Storybook.</p></div>
-        <span class="pill plan">Epic #7781 · Planned</span>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7781</a> · Planned</span>
       </div>
       <div class="phase">
         <div class="num">4</div>
         <div class="body"><h3>Interaction &amp; component updates</h3>
           <p>Agentic components + expressive, reduced-motion-gated interactions.</p></div>
-        <span class="pill plan">Epic #7782 · Planned</span>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7782</a> · Planned</span>
       </div>
       <div class="phase">
         <div class="num">5</div>
         <div class="body"><h3>Information architecture</h3>
           <p>Navigation / routes / page structure foregrounding agentic workflows.</p></div>
-        <span class="pill plan">Epic #7782 · Planned</span>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7782</a> · Planned</span>
       </div>
     </div>
   </section>

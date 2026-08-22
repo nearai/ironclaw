@@ -18,10 +18,10 @@
 
 1. **D-F5 carousel gate** ⚠ — the guard for when the carousel returns. Gate the landing carousel behind DEV / a feature flag (or an empty-projection read) so it never exposes mock "done for you" cards to real users. The earlier prototype's *ungated* mock path is exactly what got it rolled back — the first implementation PR that re-adds the carousel must ship it gated.
 2. **Contract reconciliation — ✅ done in this PR.** [AUTOMATION-TASKS-CONTRACT.md](AUTOMATION-TASKS-CONTRACT.md) now reflects the post-#6918 family-folder names: event log `ironclaw_event_log` + durable store `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `crates/product/ironclaw_assistant`; routes in `crates/product/ironclaw_webui/src/webui_v2/` (confirmed current). Docs-only.
-3. **Decision round #1** `[decision]` — close PROPOSAL §10 items 2 (suggestion producer), 4 (carousel gating), 5 (DESIGN.md pilot). One thread each.
-4. **(Optional) D-F6 seed** — land a first-draft `DESIGN.md` capturing the v2 token system + card taxonomy, if the pilot is approved. Docs-only, unblocks design review of later phases.
+3. **Decision round #1** `[decision]` — close PROPOSAL §10 items 2 (suggestion producer) and 4 (carousel gating). One thread each. *(Item 5, the DESIGN.md pilot, is settled — see below.)*
+4. **D-F6 — nothing to seed here.** `DESIGN.md` and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PROPOSAL §5.6); OOBE's contribution is its card taxonomy + a11y floors, offered into that program's `DESIGN.md` (#7042) rather than a local draft.
 
-*Exit criteria: the carousel-gate approach decided; contract reconciled (done); §10.2/§10.4/§10.5 decided. (Implementation is landing behind an off-by-default flag; the docs remain mergeable.)*
+*Exit criteria: the carousel-gate approach decided; contract reconciled (done); §10.2/§10.4 decided (§10.5 settled — governance owned elsewhere). (Implementation is landing behind an off-by-default flag; the docs remain mergeable.)*
 
 ## Phase F1 — Automation-task backend (D-F1) — the leverage phase
 
