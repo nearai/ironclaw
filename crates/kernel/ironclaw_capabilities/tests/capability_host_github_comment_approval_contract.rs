@@ -84,7 +84,7 @@ async fn capability_host_resumes_approved_github_comment_issue_and_dispatches_on
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     assert_eq!(fixture.dispatcher.call_count(), 1);
     let request = fixture.dispatcher.last_request().unwrap();
     assert_eq!(

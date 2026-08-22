@@ -2,17 +2,21 @@
 
 ## Purpose
 
-This directory is the **source of truth for Reborn boundary contracts** consumed by `ironclaw_host_api`, `ironclaw_capabilities`, and (after the Manifest v2 cutover) `ironclaw_extension_registry`.
+This directory is the **source of truth for Reborn boundary contracts** consumed by `ironclaw_host_api`, `ironclaw_capabilities`, and `ironclaw_extension_registry`.
 
 Files here are not implementation. They describe the vocabulary, validation rules, and capability profile contracts that Rust code in those crates must keep aligned with.
 
 ## What lives here
 
-- `host-api.md` — neutral host API vocabulary contract (IDs, scopes, paths, mounts, capability grants, host ports, capability profiles, dispatch, audit).
-- `openai-compatible-api.md` — Reborn-native OpenAI-compatible Chat Completions / Responses ingress contract.
-- `capability-access.md`, `capabilities.md`, `approvals.md`, `run-state.md`, `kernel-boundary.md` — companion contracts for caller-facing capability workflow.
-- `memory-profiles.md` — draft host-defined memory capability profiles (`memory.context_retrieval.v1`, `memory.interaction_log.v1`, `memory.document_store.v1`) plus deferred entries.
-- `schemas/memory/*.json` — extension-local relative JSON schema refs that the memory profile contracts point at. These files are **cold registry artifacts**: they must never be inlined into the hot per-turn context.
+One `.md` contract per cross-crate domain, plus `schemas/<domain>/*.json` for
+the domains whose profiles need JSON Schema refs (currently `schemas/memory/`).
+Enumerate the current set with:
+
+    ls docs/internal/reborn/contracts/*.md
+
+`_contract-freeze-index.md` is the single frozen decision index across
+all of them — start there for "who owns X" before reading an individual
+contract.
 
 ## Authority rules
 

@@ -142,7 +142,7 @@ async fn binder_routes_by_capability_id_through_the_first_party_lane() {
     assert!(
         matches!(
             undeclared,
-            ToolError::Failed {
+            ToolError::Rejected {
                 kind: RuntimeDispatchErrorKind::UndeclaredCapability,
                 ..
             }
@@ -172,14 +172,111 @@ async fn binder_preserves_the_auth_gate_payload_across_the_tool_abi() {
         .unwrap_err();
 
     match err {
-        ToolError::AuthRequired {
-            required_secrets, ..
-        } => assert_eq!(
-            required_secrets,
+        ToolError::AuthRequired { requirement } => assert_eq!(
+            requirement.required_secrets,
             vec![SecretHandle::new("fixture_token").unwrap()]
         ),
         other => panic!("expected AuthRequired, got {other:?}"),
     }
+}
+
+#[test]
+fn binder_preserves_the_raw_auth_diagnostic_across_the_tool_abi() {
+    let diagnostic =
+        "provider error code: github_api_error_status_401; provider message: Bad credentials";
+    let error = crate::services::extension_tool_binder::tool_error_from_dispatch(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("github.list_issues").unwrap(),
+            requirement: Box::new(ironclaw_host_api::dispatch::DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: Some(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                    code: None,
+                    message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                        diagnostic,
+                    )),
+                    retry_after: None,
+                }),
+            }),
+        },
+    );
+
+    let ToolError::AuthRequired { requirement } = error else {
+        panic!("binder must preserve the auth diagnostic");
+    };
+    let cause = requirement
+        .model_visible_cause
+        .expect("binder preserves auth diagnostic");
+    assert_eq!(
+        cause.message.as_ref().map(|message| message.as_str()),
+        Some(diagnostic)
+    );
+    assert!(!format!("{cause:?}").contains("Bad credentials"));
+}
+
+#[test]
+fn binder_preserves_provider_rejection_across_the_tool_abi() {
+    use ironclaw_host_api::dispatch::{
+        DispatchFailureKind, ProviderErrorCode, RuntimeDispatchErrorKind,
+    };
+
+    let error =
+        crate::services::extension_tool_binder::tool_error_from_dispatch(DispatchError::Rejected {
+            runtime: Some(ironclaw_host_api::runtime::RuntimeKind::Mcp),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client),
+            diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: Some(ProviderErrorCode::new("mcp_tool_rejected")),
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "Bad credentials",
+                )),
+                retry_after: None,
+            })),
+            detail: None,
+        });
+
+    let ToolError::Rejected {
+        diagnostic: Some(diagnostic),
+        ..
+    } = error
+    else {
+        panic!("binder must preserve typed provider rejection metadata");
+    };
+    assert_eq!(
+        diagnostic.code.as_ref().map(|code| code.as_str()),
+        Some("mcp_tool_rejected")
+    );
+    assert_eq!(
+        diagnostic.message.as_ref().map(|message| message.as_str()),
+        Some("Bad credentials")
+    );
+    assert!(!format!("{diagnostic:?}").contains("Bad credentials"));
+}
+
+#[test]
+fn binder_maps_non_rejected_failure_to_the_closed_tool_runtime_kind() {
+    use ironclaw_host_api::dispatch::DispatchFailureDetail;
+
+    let error = crate::services::extension_tool_binder::tool_error_from_dispatch(
+        DispatchError::UnknownCapability {
+            capability: CapabilityId::new("missing.tool").unwrap(),
+        },
+    );
+
+    let ToolError::Rejected {
+        kind,
+        diagnostic,
+        detail,
+    } = error
+    else {
+        panic!("non-Rejected routing failures must remain typed Rejected errors");
+    };
+    assert_eq!(kind, RuntimeDispatchErrorKind::UndeclaredCapability);
+    assert!(diagnostic.is_none());
+    assert!(matches!(
+        detail,
+        Some(DispatchFailureDetail::HostSummary { summary, detail })
+            if summary.as_str() == "unknown capability" && detail.is_none()
+    ));
 }
 
 #[tokio::test]

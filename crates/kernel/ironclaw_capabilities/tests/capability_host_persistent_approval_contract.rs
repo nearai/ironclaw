@@ -112,7 +112,7 @@ async fn persistent_grant_flips_to_allow_and_dispatches_without_gate() {
         .await
         .expect("persistent grant must authorize dispatch without an approval gate");
 
-    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert_eq!(result.output, json!({"ok": true}));
     assert!(
         dispatcher.has_request(),
         "kernel must dispatch once the persistent grant is adopted"

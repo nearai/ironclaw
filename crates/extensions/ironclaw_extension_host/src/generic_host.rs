@@ -40,8 +40,8 @@ use ironclaw_extension_registry::{
     ExtensionInstallationError, ExtensionInstallationStorePort, ExtensionManifest,
     ExtensionPackage, ResolvedExtensionManifest,
 };
-use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::path::VirtualPath;
+use ironclaw_host_api::{dispatch::RuntimeDispatchErrorKind, ids::ExtensionId};
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
 use ironclaw_resources::ResourceGovernor;
 
@@ -660,14 +660,17 @@ impl ToolAdapter for SettlingToolAdapter {
         let reservation = call.resources.reservation.take();
         let reservation = match reservation {
             Some(reservation) => reservation,
-            None => self
-                .governor
-                .reserve(scope, estimate)
-                .map_err(|_| ToolError::Failed {
-                    kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
-                    model_visible_cause: None,
-                })?,
+            None => self.governor.reserve(scope, estimate).map_err(|error| {
+                // The tool boundary deliberately exposes only the stable
+                // resource failure class. Keep the governor's cause in the
+                // host log before it is redacted from the adapter result.
+                tracing::warn!(%error, "native extension tool resource reservation failed");
+                ToolError::Rejected {
+                    kind: RuntimeDispatchErrorKind::Resource,
+                    diagnostic: None,
+                    detail: None,
+                }
+            })?,
         };
         match self.inner.invoke(call, ports).await {
             Ok(result) => {

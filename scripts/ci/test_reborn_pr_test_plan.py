@@ -233,6 +233,7 @@ def real_owner_metadata() -> dict:
 
 class RebornPrTestPlanTests(unittest.TestCase):
     def setUp(self) -> None:
+        planner._sandbox_crate_directory.cache_clear()
         self.original_bucket_packages = planner._bucket_packages
         planner._bucket_packages = lambda packages: (
             [{"name": "selected", "packages": packages}] if packages else []
@@ -241,6 +242,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         planner._bucket_packages = self.original_bucket_packages
+        planner._sandbox_crate_directory.cache_clear()
 
     def plan(
         self,
@@ -583,6 +585,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "crates/kernel/ironclaw_runtime_policy/src/planner.rs",
             "crates/kernel/ironclaw_runtime_policy/src/resolver.rs",
             "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live.rs",
+            "crates/lanes/ironclaw_sandbox/tests/support/user_sandbox_live.rs",
+            "crates/lanes/ironclaw_sandbox/tests/user_sandbox_docker_live/extra.rs",
             "tests/integration/reborn_sandbox_shell_turn.rs",
             "tests/e2e_trace_runtime_policy_serde.rs",
             "tests/fixtures/llm_traces/runtime_policy/hosted_dev_no_shell.json",
@@ -615,6 +619,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 "Cargo.toml",
                 "src/lib.rs",
                 "src/sandbox_process/command.rs",
+                "tests/support/user_sandbox_live.rs",
+                "tests/user_sandbox_docker_live/extra.rs",
             ):
                 with self.subTest(relative_path=relative_path):
                     plan = planner.build_plan(
@@ -648,6 +654,28 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(docker_only_plan["run_sandbox_docker"])
         self.assertEqual(docker_only_plan["root_partitions"], [])
         self.assertEqual(docker_only_plan["integration_lanes"], [])
+
+    def test_sandbox_worker_helpers_are_not_unclassified_docker_paths(
+        self,
+    ) -> None:
+        for path in (
+            "docker/sandbox/ironclaw-exec",
+            "docker/sandbox/ironclaw-sandbox-idle",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["mode"], "selected")
+                self.assertTrue(plan["run_sandbox_docker"])
+                self.assertEqual(plan["crate_buckets"], [])
+                self.assertEqual(plan["root_partitions"], [])
+                self.assertEqual(plan["integration_lanes"], [])
+
+        unrelated_path = "docker/unrelated-helper"
+        with (
+            self.subTest(path=unrelated_path),
+            self.assertRaisesRegex(ValueError, "unclassified pull-request path"),
+        ):
+            self.plan("pull_request", [unrelated_path])
 
     def test_empty_diff_fails_fast(self) -> None:
         with self.assertRaisesRegex(ValueError, "empty pull-request diff"):
@@ -843,6 +871,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "LICENSE-APACHE",
             "LICENSE-MIT",
             "scripts/check_no_panics.py",
+            "scripts/check-type-duplicates.py",
+            "scripts/test-check-type-duplicates.py",
             "scripts/dev_metrics.py",
             "scripts/pre-commit-safety.sh",
             "scripts/test-mutation-audit.sh",
@@ -1059,7 +1089,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertNotEqual(paired["crate_buckets"], [], path)
 
     def test_repo_wide_test_guidance_selects_no_rust_lane(self) -> None:
-        for path in ("tests/CLAUDE.md", "tests/integration/CLAUDE.md"):
+        """Every path in IGNORED_GUIDANCE_PATHS, including the `CLAUDE.md`
+        alias symlinks the AGENTS.md/CLAUDE.md rename (#7797) introduced and
+        the parity-QA support pair, must select nothing on its own.
+
+        Regression: `tests/CLAUDE.md` used to be a real file; the rename
+        converted it (and its siblings) to `CLAUDE.md -> AGENTS.md` symlinks.
+        `git diff --name-only` still reports the path as changed on that
+        conversion, and only the new `AGENTS.md` half was ever added to
+        `IGNORED_GUIDANCE_PATHS` — so the alias half fell through to the
+        unmapped-path fail-closed arm and aborted the whole `Tests (Reborn)`
+        roll-up (`unmapped test or CI path: tests/CLAUDE.md`)."""
+        for path in (
+            "tests/AGENTS.md",
+            "tests/CLAUDE.md",
+            "tests/integration/AGENTS.md",
+            "tests/integration/CLAUDE.md",
+            "tests/support/reborn_parity_qa/AGENTS.md",
+            "tests/support/reborn_parity_qa/CLAUDE.md",
+        ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
                 self.assertEqual(plan["mode"], "none")
@@ -2045,7 +2093,11 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
         self.assertIn("needs.changes.outputs.integration_lanes", workflow)
         self.assertIn("needs.changes.outputs.run_sandbox_docker", workflow)
-        self.assertIn("--test user_sandbox_docker_live", workflow)
+        self.assertIn(
+            "cargo test -p ironclaw_sandbox --test user_sandbox_docker_live "
+            "-- --nocapture --test-threads=1",
+            workflow,
+        )
         self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
         self.assertIn(
             '"${feature_args[@]}" --ignore-rust-version --all-targets',

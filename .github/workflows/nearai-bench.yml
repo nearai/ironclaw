@@ -66,6 +66,7 @@ jobs:
         || github.event.comment.body == '/benchmark'
       )
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       suite: ${{ steps.parse.outputs.suite }}
       model: ${{ steps.parse.outputs.model }}

@@ -517,7 +517,7 @@ async fn runtime_capability_terminal_milestone_failure_is_retryable_without_rewr
 }
 
 #[tokio::test]
-async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones() {
+async fn runtime_capability_failed_outcome_emits_failure_milestones() {
     let cases = [
         (
             RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
@@ -547,29 +547,6 @@ async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones(
             )),
             FailureKind::InputEncode,
             Some(RuntimeDispatchErrorKind::InputEncode.human_summary()),
-            true,
-        ),
-        (
-            RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
-                capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
-                kind: "custom_failure".to_string(),
-                message: Some("custom failure".to_string()),
-            }),
-            // Unrecognized legacy open-set tag: the closed vocabulary's
-            // total `from_tag` fallback lands on the non-retryable
-            // `Unclassified` sink.
-            FailureKind::Unclassified,
-            None,
-            false,
-        ),
-        (
-            RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
-                capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
-                kind: "custom_failure".to_string(),
-                message: None,
-            }),
-            FailureKind::from_tag("custom_failure"),
-            None,
             true,
         ),
     ];

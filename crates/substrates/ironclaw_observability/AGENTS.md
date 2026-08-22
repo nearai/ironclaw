@@ -3,7 +3,8 @@
 Target-architecture entry: PROPOSAL §6.2.5, `families/substrates.md`.
 
 Zero-cost-when-off latency-trace macros over the `ironclaw_latency` tracing
-target. 90 lines, seven consumers, **one dependency**.
+target. A small `src/lib.rs` (`wc -l` to re-derive), seven consumers, **one
+dependency**.
 
 ## The charter, stated as a test you can apply
 

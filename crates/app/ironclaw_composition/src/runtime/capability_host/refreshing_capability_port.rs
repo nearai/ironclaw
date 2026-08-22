@@ -87,6 +87,10 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     /// call site, `capability_host.rs`'s `create_capability_port`); `Some(set)`
     /// keeps exactly `set`, including `Some(empty)` = zero grants.
     pub(super) capability_id_filter: Option<HashSet<CapabilityId>>,
+    /// Runtime-unavailable builtins omitted from every refreshed grant set.
+    /// Unlike `capability_id_filter`, this production seam is a deny-list and
+    /// therefore preserves dynamically discovered extension capabilities.
+    pub(super) unavailable_capability_ids: HashSet<CapabilityId>,
     /// Synthetic grants for capability ids that neither the static builtin
     /// policy nor `extension_surface_source` produces (ad-hoc test-only
     /// `HostRuntime` backends). Applied in `build_inner` before
@@ -130,6 +134,7 @@ pub(crate) async fn create_refreshing_capability_port(
         capability_execution_mount_overrides: config.capability_execution_mount_overrides,
         additional_provider_trust: config.additional_provider_trust,
         capability_id_filter: config.capability_id_filter,
+        unavailable_capability_ids: config.unavailable_capability_ids,
         additional_capability_grants: config.additional_capability_grants,
         current: StdMutex::new(None),
         refresh_lock: AsyncMutex::new(()),
@@ -170,6 +175,7 @@ struct RefreshingCapabilityPort {
     capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,
     additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
     capability_id_filter: Option<HashSet<CapabilityId>>,
+    unavailable_capability_ids: HashSet<CapabilityId>,
     additional_capability_grants: Vec<ironclaw_host_api::capability::CapabilityGrant>,
     current: StdMutex<Option<Arc<dyn LoopCapabilityPort>>>,
     refresh_lock: AsyncMutex<()>,
@@ -248,6 +254,11 @@ impl RefreshingCapabilityPort {
                 .grants
                 .retain(|grant| filter.contains(&grant.capability));
         }
+        visible_request
+            .context
+            .grants
+            .grants
+            .retain(|grant| !self.unavailable_capability_ids.contains(&grant.capability));
         // Test-support-only extra provider-trust entries (empty in production,
         // see the config field doc-comment): merge after the canonical helper
         // has built the base provider-trust map, so the production helper
@@ -599,6 +610,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         capability_execution_mount_overrides,
         additional_provider_trust,
         capability_id_filter,
+        unavailable_capability_ids: HashSet::new(),
         additional_capability_grants,
     })
     .await

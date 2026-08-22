@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
+import "./install-translations";
 import { useLocation } from "react-router";
-import { useMutation } from "@tanstack/react-query";
 import { useT } from "../../lib/i18n";
 import { Button } from "../../design-system/button";
 import { Card } from "../../design-system/card";
@@ -32,9 +32,36 @@ export function InstallPage() {
     [location.search],
   );
 
-  const install = useMutation({
-    mutationFn: () => deliverIronhubInstall(request),
-  });
+  const [pending, setPending] = React.useState(false);
+  const [outcome, setOutcome] = React.useState(null);
+  const [failure, setFailure] = React.useState(null);
+  const alive = React.useRef(true);
+  React.useEffect(() => () => {
+    alive.current = false;
+  }, []);
+
+  const runInstall = () => {
+    if (pending) {
+      return;
+    }
+    setPending(true);
+    setOutcome(null);
+    setFailure(null);
+    deliverIronhubInstall(request).then(
+      (delivered) => {
+        if (alive.current) {
+          setOutcome(delivered);
+          setPending(false);
+        }
+      },
+      (error) => {
+        if (alive.current) {
+          setFailure(error);
+          setPending(false);
+        }
+      },
+    );
+  };
 
   if (missing.length > 0) {
     return (
@@ -69,26 +96,26 @@ export function InstallPage() {
         </div>
 
         <div className="flex items-center gap-3">
-          <Button onClick={() => install.mutate()} disabled={install.isPending}>
-            {install.isPending ? t("ironhub.install.installing") : t("ironhub.install.confirm")}
+          <Button onClick={runInstall} disabled={pending}>
+            {pending ? t("ironhub.install.installing") : t("ironhub.install.confirm")}
           </Button>
         </div>
 
-        {install.data
+        {outcome
           ? (<div className="space-y-1">
               <p className="text-xs">
-                {install.data.installed
+                {outcome.installed
                   ? t("ironhub.install.installed")
                   : t("ironhub.install.notInstalled")}
               </p>
-              {install.data.message
-                ? (<p className="text-xs text-[var(--v2-text-muted)]">{install.data.message}</p>)
+              {outcome.message
+                ? (<p className="text-xs text-[var(--v2-text-muted)]">{outcome.message}</p>)
                 : null}
             </div>)
           : null}
 
-        {install.error
-          ? (<p className="text-xs text-destructive">{t(installErrorKey(install.error))}</p>)
+        {failure
+          ? (<p className="text-xs text-destructive">{t(installErrorKey(failure))}</p>)
           : null}
       </div>
     </Card>

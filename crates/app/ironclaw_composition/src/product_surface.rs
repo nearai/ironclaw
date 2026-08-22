@@ -253,6 +253,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
     );
     api = api.with_automation_product_service(Arc::new(
         RebornAutomationProductService::new(backing.repository, active_run_lookup)
+            .with_manual_fire_runner(Arc::clone(&runtime.trigger_manual_fire_runner))
             .with_scheduler_enabled(runtime.readiness.workers.trigger_poller),
     ));
     // First-class projects + membership (ACL). Built once per runtime over the
@@ -266,6 +267,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
             )),
         ),
     ));
+    api = api.with_notification_inbox(Arc::clone(&runtime.notification_inbox));
     if let Some(resolver) = runtime.channel_delivery_resolver.clone() {
         api = api.with_notification_setup_service(Arc::new(
             ironclaw_assistant::RegistrationChannelNotificationSetupService::new(

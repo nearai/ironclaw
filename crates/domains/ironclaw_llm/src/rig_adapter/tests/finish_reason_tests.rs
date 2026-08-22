@@ -96,7 +96,7 @@ fn discarding_sink() -> Arc<dyn CompletionStreamSink> {
 /// raised *before* a response object is constructed, so retry and failover
 /// see a failure rather than a completed call.
 ///
-/// **Scope, honestly:** in rig-core 0.33 only Ollama can reach this. Its
+/// **Scope, honestly:** in rig-core 0.36 only Ollama can reach this. Its
 /// stream yields `FinalResponse` solely inside `if response.done`. OpenAI,
 /// Anthropic, Gemini, OpenRouter and DeepSeek yield their usage-only
 /// `FinalResponse` unconditionally after the SSE loop — including after a
@@ -155,7 +155,7 @@ async fn streaming_tool_call_without_terminal_frame_is_a_retryable_incomplete_st
 }
 
 /// When the provider *does* carry a finish reason on its terminal frame
-/// (rig-core 0.33: Ollama only), the adapter reports it — including over
+/// (rig-core 0.36: Ollama only), the adapter reports it — including over
 /// the tool-call shape.
 #[tokio::test]
 async fn streaming_reads_the_terminal_frames_finish_reason() {
@@ -178,7 +178,7 @@ async fn streaming_reads_the_terminal_frames_finish_reason() {
 }
 
 /// A terminal frame that carries no finish reason at all is the common
-/// case: rig-core 0.33 drops it for OpenAI, Anthropic, Gemini, OpenRouter
+/// case: rig-core 0.36 drops it for OpenAI, Anthropic, Gemini, OpenRouter
 /// and DeepSeek, whose `StreamingResponse` types hold usage only. Those
 /// five also yield that frame unconditionally, so its presence proves
 /// nothing about whether the server actually finished — shape inference

@@ -15,9 +15,7 @@ pub use event_projection::{
     turn_lifecycle_event_from_process_journal_entry, turn_status_from_process_status,
 };
 pub use loop_checkpoint::ProcessLoopCheckpointStore;
-pub use metadata::{
-    AgentTurnProcessMetadata, AgentTurnProcessStateMetadata, agent_turn_metadata_from_claimed,
-};
+pub use metadata::{AgentTurnProcessStateMetadata, agent_turn_metadata_from_claimed};
 pub use runtime::*;
 pub use store_adapter::{
     ProcessJournalStoreTurnAdapter, turn_error_from_process_journal_store_error,

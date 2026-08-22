@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     Timestamp,
     action::NetworkPolicy,
     capability::{CapabilitySet, EffectKind, GrantConstraints},
-    dispatch::{DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind},
     ids::{ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, UserId},
     mount::MountView,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage},
@@ -51,7 +51,7 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"via":"runtime-dispatcher"}));
+    assert_eq!(result.output, json!({"via":"runtime-dispatcher"}));
     let recorded = adapter.take_request();
     assert_eq!(recorded.capability_id, capability_id());
     assert_eq!(recorded.scope, scope);
@@ -149,7 +149,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"approved":true}));
+    assert_eq!(result.output, json!({"approved":true}));
     assert_eq!(adapter.request_count(), 1);
     let recorded = adapter.take_request();
     assert_eq!(recorded.scope, scope);
@@ -407,18 +407,22 @@ impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
             None => self
                 .governor
                 .reserve(request.scope, request.estimate)
-                .map_err(|_| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                    model_visible_cause: None,
+                .map_err(|_| DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                    diagnostic: None,
+                    detail: None,
                 })?,
         };
         let output_bytes = usage.output_bytes;
         let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                diagnostic: None,
+                detail: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

@@ -24,6 +24,7 @@ jobs:
     # dismissed reviews still rerun the enforcement check.
     if: github.event_name != 'pull_request_review' || github.event.review.state != 'commented'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout PR head for diffing
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4

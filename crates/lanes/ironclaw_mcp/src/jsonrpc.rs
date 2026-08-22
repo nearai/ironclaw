@@ -505,18 +505,6 @@ data: }
     }
 
     #[test]
-    fn non_2xx_http_status_reason_carries_status_code() {
-        // The 404 path is a direct `response_error(HttpStatus(..))` at the
-        // send call site; the cause-to-token mapping is the load-bearing part.
-        let reason = response_error(McpResponseErrorCause::HttpStatus(404));
-        assert_eq!(reason, "mcp_http_status_404");
-        assert!(reason.contains("404"));
-
-        let reason = response_error(McpResponseErrorCause::HttpStatus(503));
-        assert_eq!(reason, "mcp_http_status_503");
-    }
-
-    #[test]
     fn json_rpc_error_response_reason_carries_code_and_message() {
         let response = json_response(
             200,

@@ -356,7 +356,7 @@ Set the channels where IronClaw notifies this user about background runs (approv
 
 - [ ] **Step 1:** Failing frontend test: checkbox multi-select renders options, toggles, posts `{target_ids: [...]}`, renders empty-state helper.
 - [ ] **Step 2:** Implement panel/hook/api/routes/i18n/assets pins.
-- [ ] **Step 3:** `pnpm lint && pnpm test` in the frontend; `cargo test -p ironclaw_webui`; extend the Playwright served-API scenario (auth required + shape) and add its `tests/e2e/reborn_coverage_tests.txt` row per `tests/e2e/CLAUDE.md`.
+- [ ] **Step 3:** `pnpm lint && pnpm test` in the frontend; `cargo test -p ironclaw_webui`; extend the Playwright served-API scenario (auth required + shape), update the matching `tests/AGENTS.md` coverage-map row, and add its `tests/e2e/reborn_coverage_tests.txt` row per `tests/e2e/AGENTS.md`.
 - [ ] **Step 4: Commit** `feat(webui): notification channels multi-select`
 
 ### Task 11: Delete the route_current stack + web_app pseudo-target + old set tool
@@ -460,7 +460,7 @@ New ScheduledTrigger origin line (verbatim): `Run origin: scheduled trigger fire
 - Modify/Add: `tests/reborn_qa_recorded_behavior.rs` + `tests/fixtures/llm_traces/` — record two tool-choice fixtures: interactive "send me a summary of X on slack" → model calls `builtin.outbound_deliver` (not `slack.send_message`); a scheduled-fire trace with a delivery step in the prompt → same. Re-validate the two existing `assert_tool_not_called(..., "builtin.outbound_delivery_targets_list")` fixtures still hold (read tasks must still not reach for delivery tools).
 - Test: `scripts/ci/check-reborn-qa-fixtures.sh`
 
-- [ ] **Step 1:** Read `tests/support/reborn_parity_qa/CLAUDE.md` and the recording procedure used by the pushy-today commit `c8f02c2ef` (`git show c8f02c2ef` — donor for the recording workflow only).
+- [ ] **Step 1:** Read `tests/support/reborn_parity_qa/AGENTS.md` and the recording procedure used by the pushy-today commit `c8f02c2ef` (`git show c8f02c2ef` — donor for the recording workflow only).
 - [ ] **Step 2:** Record, pin assertions (`assert_tool_called` on the new capability + argument shape), run the fixture validator (no secrets/PII).
 - [ ] **Step 3: Commit** `test(qa): record explicit-delivery tool choice`
 

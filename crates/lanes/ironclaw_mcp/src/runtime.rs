@@ -14,8 +14,8 @@ use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
     ids::{ExtensionId, ResourceReservationId, SecretHandle},
     resource::{
-        CapabilityHostResult, ResourceEstimate, ResourceReservation, ResourceScope,
-        RuntimeResourceBudget, RuntimeResourceError,
+        CapabilityHostResult, ResourceEstimate, ResourceReceipt, ResourceReservation,
+        ResourceScope, ResourceUsage, RuntimeResourceBudget, RuntimeResourceError,
     },
     runtime::RuntimeKind,
 };
@@ -24,6 +24,7 @@ use crate::contract::{
     McpClient, McpClientError, McpClientRequest, McpError, McpExecutionRequest, McpExecutionResult,
     McpExecutor, McpRuntimeConfig,
 };
+use crate::diagnostics::{McpRequestDeniedCause, request_denied};
 use crate::egress::requires_host_http_egress;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +83,16 @@ where
         let output = match self.client.call_tool(client_request).await {
             Ok(output) => output,
             Err(error) => {
+                if let Some(usage) = mcp_client_attempt_usage(&error) {
+                    let usage = usage.clone();
+                    let receipt = budget.reconcile(reservation.id, usage.clone())?;
+                    return Err(mcp_error_from_accounted_client_error(
+                        error,
+                        auth_context,
+                        usage,
+                        receipt,
+                    ));
+                }
                 return Err(release_after_failure(
                     budget,
                     reservation.id,
@@ -124,6 +135,15 @@ where
         // no process and `transport` can only be `http` or `sse` by now. A
         // `process_count` bump would imply otherwise.
         let receipt = budget.reconcile(reservation.id, usage.clone())?;
+        if let Some(diagnostic) = output.provider_rejection {
+            return Err(McpError::ProviderRejected(Box::new(
+                crate::contract::McpProviderRejection {
+                    diagnostic,
+                    receipt,
+                    usage,
+                },
+            )));
+        }
         Ok(McpExecutionResult {
             result: CapabilityHostResult {
                 output: output.output,
@@ -215,12 +235,48 @@ fn mcp_error_from_client_error(error: McpClientError, auth_context: McpAuthConte
     match error {
         McpClientError::Client { reason } => McpError::Client { reason },
         McpClientError::InvalidToolCatalog { reason } => McpError::InvalidToolCatalog { reason },
-        McpClientError::AuthRequired | McpClientError::AuthChallenge { .. } => {
+        McpClientError::AuthRequired { .. } | McpClientError::AuthChallenge { .. } => {
             McpError::AuthRequired {
                 required_secrets: auth_context.required_secrets,
                 credential_requirements: auth_context.credential_requirements,
             }
         }
+        McpClientError::ProviderRejected { .. } => McpError::Client {
+            reason: request_denied(McpRequestDeniedCause::AccountingInvariant),
+        },
+    }
+}
+
+fn mcp_client_attempt_usage(error: &McpClientError) -> Option<&ResourceUsage> {
+    match error {
+        McpClientError::AuthRequired { usage }
+        | McpClientError::AuthChallenge { usage, .. }
+        | McpClientError::ProviderRejected { usage, .. } => Some(usage),
+        McpClientError::Client { .. } | McpClientError::InvalidToolCatalog { .. } => None,
+    }
+}
+
+fn mcp_error_from_accounted_client_error(
+    error: McpClientError,
+    auth_context: McpAuthContext,
+    usage: ResourceUsage,
+    receipt: ResourceReceipt,
+) -> McpError {
+    match error {
+        McpClientError::AuthRequired { .. } | McpClientError::AuthChallenge { .. } => {
+            McpError::AuthRequired {
+                required_secrets: auth_context.required_secrets,
+                credential_requirements: auth_context.credential_requirements,
+            }
+        }
+        McpClientError::ProviderRejected { diagnostic, .. } => {
+            McpError::ProviderRejected(Box::new(crate::contract::McpProviderRejection {
+                diagnostic: *diagnostic,
+                receipt,
+                usage,
+            }))
+        }
+        other => mcp_error_from_client_error(other, auth_context),
     }
 }
 

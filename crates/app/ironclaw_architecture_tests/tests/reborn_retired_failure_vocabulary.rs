@@ -45,13 +45,20 @@ const RETIRED_TYPES: &[&str] = &[
     // retried), not free text that lets a producer skip classifying.
     "CapabilityFailureKindValue",
     "FailureKindValue",
+    "DispatchError::Mcp",
+    "DispatchError::Script",
+    "DispatchError::Wasm",
+    "DispatchError::FirstParty",
+    "DispatchErrorLane",
+    "dispatch_error_lane",
+    "ToolError::Failed",
 ];
 
 // Crate paths are spelled flat (`crates/ironclaw_x/...`) and RESOLVED through
 // the crate inventory, so the family move (PROPOSAL section 5) repoints them
 // without editing the literals. Identity on today's tree - pinned by
 // `reborn_crate_inventory.rs` (CHECKLIST WS10).
-use ratchet_support::{crate_path, workspace_root};
+use ratchet_support::{crate_path, strip_comments_and_strings, workspace_root};
 
 /// Conversion helpers that existed only to move a value between two spellings
 /// of the same domain. Their absence is what proves the collapse is real
@@ -79,55 +86,6 @@ const RETIRED_MAPPERS: &[&str] = &[
 /// invent one. A retired type name inside a string literal would be
 /// stringly-typed handling of the exact domain this collapse made typed, so
 /// the blind spot is not worth a real parser.
-fn strip_comments(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut out = String::with_capacity(source.len());
-    let mut index = 0usize;
-    // Depth, not a bool: Rust block comments nest (`/* /* … */ still comment */`),
-    // so a bool would exit at the first `*/` and scan the tail as code.
-    let mut depth = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if depth > 0 {
-            if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-                depth += 1;
-                out.push(' ');
-                out.push(' ');
-                index += 2;
-                continue;
-            }
-            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                depth -= 1;
-                out.push(' ');
-                out.push(' ');
-                index += 2;
-                continue;
-            }
-            // Keep newlines so reported line numbers stay accurate.
-            out.push(if byte == b'\n' { '\n' } else { ' ' });
-            index += 1;
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            depth = 1;
-            out.push(' ');
-            out.push(' ');
-            index += 2;
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            while index < bytes.len() && bytes[index] != b'\n' {
-                out.push(' ');
-                index += 1;
-            }
-            continue;
-        }
-        out.push(byte as char);
-        index += 1;
-    }
-    out
-}
-
 /// Scan one directory tree, failing loudly on anything unreadable.
 ///
 /// A gate that silently skips a path it cannot read is a gate that passes
@@ -164,7 +122,7 @@ fn scan_dir(root: &Path, dir: &Path, hits: &mut Vec<String>) -> std::io::Result<
         }
         let contents = std::fs::read_to_string(&path)
             .map_err(|error| std::io::Error::other(format!("read {relative}: {error}")))?;
-        for (number, line) in strip_comments(&contents).lines().enumerate() {
+        for (number, line) in strip_comments_and_strings(&contents).lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
@@ -207,7 +165,7 @@ fn the_surviving_failure_vocabulary_stays_closed() {
         .unwrap_or_else(|error| panic!("read {}: {error}", result_meta.display()));
     // Same rule as the scan above: prose explaining the retired open set is
     // worth keeping, so only code is policed.
-    let contents = strip_comments(&raw);
+    let contents = strip_comments_and_strings(&raw);
 
     assert!(
         contents.contains("Unclassified"),
@@ -228,15 +186,65 @@ fn the_surviving_failure_vocabulary_stays_closed() {
     );
 }
 
+fn assert_tool_error_rejected_uses_runtime_kind(contents: &str) {
+    let rejected = contents
+        .split("pub enum ToolError")
+        .nth(1)
+        .expect("pub enum ToolError")
+        .split("Rejected {")
+        .nth(1)
+        .and_then(|tail| tail.split('}').next())
+        .expect("ToolError::Rejected variant");
+
+    assert!(
+        rejected.contains("kind: RuntimeDispatchErrorKind"),
+        "extension adapters may report runtime failures only; trusted dispatch owns control-plane kinds"
+    );
+    assert!(
+        !rejected.contains("DispatchFailureKind"),
+        "ToolError::Rejected must not accept the host's control-plane failure taxonomy"
+    );
+}
+
+#[test]
+fn extension_tool_errors_cannot_mint_control_plane_failure_kinds() {
+    let root = workspace_root();
+    let tool_adapter = crate_path(
+        &root,
+        "crates/ironclaw_extension_contracts/src/tool_adapter.rs",
+    );
+    let raw = std::fs::read_to_string(&tool_adapter)
+        .unwrap_or_else(|error| panic!("read {}: {error}", tool_adapter.display()));
+    let contents = strip_comments_and_strings(&raw);
+
+    assert_tool_error_rejected_uses_runtime_kind(&contents);
+}
+
+#[test]
+#[should_panic(expected = "extension adapters may report runtime failures only")]
+fn extension_tool_error_scope_ratchet_rejects_malformed_source() {
+    let malformed = r#"
+        enum UnrelatedError {
+            Rejected { kind: RuntimeDispatchErrorKind },
+        }
+
+        pub enum ToolError {
+            Rejected { kind: DispatchFailureKind },
+        }
+    "#;
+
+    assert_tool_error_rejected_uses_runtime_kind(malformed);
+}
+
 /// The comment contract is a promise this gate makes to every file it scans,
 /// so it gets its own coverage rather than being trusted. A guardrail whose
 /// exemption rule is untested is a guardrail that silently changes meaning.
 #[cfg(test)]
 mod strip_comments_tests {
-    use super::strip_comments;
+    use super::strip_comments_and_strings;
 
     fn scans_as_code(source: &str, term: &str) -> bool {
-        strip_comments(source).contains(term)
+        strip_comments_and_strings(source).contains(term)
     }
 
     #[test]
@@ -285,7 +293,8 @@ mod strip_comments_tests {
     #[test]
     fn line_numbers_survive_stripping() {
         // Hits are reported by line, so blanking must preserve newlines.
-        let stripped = strip_comments("/* one\ntwo\nthree */\npub enum CapabilityErrorClass {}");
+        let stripped =
+            strip_comments_and_strings("/* one\ntwo\nthree */\npub enum CapabilityErrorClass {}");
         let line = stripped
             .lines()
             .position(|line| line.contains("CapabilityErrorClass"))

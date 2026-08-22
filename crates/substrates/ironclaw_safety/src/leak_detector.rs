@@ -634,10 +634,19 @@ fn default_patterns() -> Vec<(LeakPattern, LeakPreviewPolicy)> {
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
-        // GitHub tokens
+        // GitHub tokens. Real classic/OAuth/App tokens are exactly 36
+        // trailing characters, but this stays a floor (`{16,}`), not an
+        // exact match: a credential-shaped `gh[pousr]_` value with fewer
+        // characters is still indistinguishable from a real (truncated,
+        // masked, or future-format) token, and under-matching here fails
+        // *unsafe* — the opposite of every other prefix-anchored pattern in
+        // this file. 16 sits comfortably above the `slack_token` precedent
+        // (10) while staying below any real trailing length, so ordinary
+        // non-secret identifiers sharing the 4-char prefix are still
+        // unlikely to collide.
         LeakPattern {
             name: "github_token".to_string(),
-            regex: Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,}").unwrap(), // safety: hardcoded literal
+            regex: Regex::new(r"gh[pousr]_[A-Za-z0-9_]{16,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
@@ -1390,6 +1399,36 @@ mod tests {
             "status code must survive: {redacted}"
         );
         assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_short_credential_shaped_github_token() {
+        // Regression for the gap that motivated
+        // `github_wasm_runtime_contract.rs` narrowing provider-message
+        // capture to 401 only: its CI fixture token is deliberately shorter
+        // than a real 40-char classic PAT (to avoid tripping GitHub's own
+        // push-protection scanner on the literal string in test source), and
+        // the `github_token` pattern's old 36-char floor let it slip through
+        // undetected in a non-401 body. A credential-shaped prefix is
+        // redacted regardless of how short the trailing run is.
+        let detector = LeakDetector::new();
+        let token = "ghp_fake_fixture_token";
+        let content = format!("bad credentials {token} (HTTP 403)");
+
+        let (redacted, changed) = detector.redact_all_secrets(&content);
+
+        assert!(
+            changed,
+            "a short but credential-shaped github token must be detected: {content}"
+        );
+        assert!(
+            !redacted.contains(token),
+            "token must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("HTTP 403"),
+            "status code must survive redaction: {redacted}"
+        );
     }
 
     #[test]
@@ -2373,8 +2412,16 @@ mod tests {
         #[test]
         fn zwnj_inside_github_token() {
             let detector = LeakDetector::new();
-            // ZWNJ (\u{200C}) inserted into a GitHub token
-            let content = format!("ghp_{}\u{200C}{}", "x".repeat(18), "y".repeat(18));
+            // ZWNJ (\u{200C}) inserted into a GitHub token. `github_token`'s
+            // floor is 16 trailing characters (lowered from 36 so a
+            // credential-shaped-but-short token isn't waved through — see
+            // the pattern's doc comment), so each half here is kept below
+            // that floor (10 chars) while the combined length (20) would
+            // match if the characters were contiguous. That keeps this a
+            // real demonstration of the ZWNJ splitting the
+            // `[A-Za-z0-9_]` character class, rather than a vacuous case
+            // that was already too short to match on its own.
+            let content = format!("ghp_{}\u{200C}{}", "x".repeat(10), "y".repeat(10));
             let result = detector.scan(&content);
             // ZWNJ breaks the [A-Za-z0-9_] char class — should not fully match.
             assert!(

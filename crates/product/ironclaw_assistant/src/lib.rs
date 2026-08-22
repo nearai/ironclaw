@@ -64,6 +64,7 @@ mod project_create_capability;
 pub mod projection;
 mod reborn_services;
 mod run_delivery;
+mod run_outcome_observer;
 mod scoped_fs;
 mod steering;
 mod suggestions;
@@ -123,6 +124,7 @@ pub use channel_workflow::{
     ChannelWorkflowDeliveryServices, ChannelWorkflowIdentity, RebornChannelWorkflowFactory,
     RebornChannelWorkflowServices, build_session_inbound_ledger, channel_conversation_services,
 };
+pub use run_outcome_observer::RunOutcomeProcessCommitObserver;
 // The conversation-binding family moved to
 // `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's
 // workflow factory hands a live binding service back to a caller that sits
@@ -270,10 +272,11 @@ pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY,
     AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_PAUSE_COMMAND, AUTOMATION_RENAME_CAPABILITY,
     AUTOMATION_RENAME_CAPABILITY_ID, AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_CAPABILITY,
-    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RESUME_COMMAND,
-    AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATIONS_VIEW, AutomationListRequest, AutomationProductService, CANCEL_RUN_COMMAND,
-    CREATE_THREAD_COMMAND, ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
+    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_CAPABILITY,
+    AUTOMATION_RUN_CAPABILITY_ID, AUTOMATION_RUN_COMMAND, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
+    AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATIONS_VIEW, AutomationListRequest,
+    AutomationProductService, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
+    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
     ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest,
     ChannelNotificationSetupService, DeliveryClientBootstrap, DeliveryClientBootstrapError,
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY,
@@ -330,6 +333,7 @@ pub use reborn_services::{
     RebornAttachmentRequest, RebornAuthAccount, RebornAutomationActiveHold,
     RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
+    RebornAutomationRunMutationResult, RebornAutomationRunMutationStatus,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornCommandRejection, RebornCreateProjectRequest, RebornCreateThreadResponse,

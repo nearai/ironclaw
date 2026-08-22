@@ -1313,9 +1313,14 @@ async fn replay_routine_phrase_fires(case: &QaPhrase, cron_fragment: &str) {
         }
     }
 
-    // Read the fired run's persisted reply while the runtime is still up; the
-    // assertion happens after the clearer fire-progress asserts below.
-    let fired_reply = fired_routine_finalized_reply(&runtime, &tenant_id, trigger_id).await;
+    // Fire acceptance sets the trigger status before the scheduled turn has
+    // necessarily persisted its final reply. Observe that user-visible result
+    // within the same bounded deadline instead of racing turn finalization.
+    let mut fired_reply = fired_routine_finalized_reply(&runtime, &tenant_id, trigger_id).await;
+    while fired_reply.is_none() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        fired_reply = fired_routine_finalized_reply(&runtime, &tenant_id, trigger_id).await;
+    }
 
     runtime.shutdown().await.expect("runtime shutdown");
 

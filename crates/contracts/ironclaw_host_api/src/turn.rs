@@ -859,6 +859,21 @@ impl From<RunOriginAdapter> for String {
     }
 }
 
+/// Why a run was created on its thread. Set once at run creation and immutable
+/// thereafter — the derived activation-streak caps read bounded windows of this
+/// field instead of maintaining a stored counter.
+///
+/// `Human` is the ordinary case and resets both streaks. `ParentAgent` tags a
+/// parent re-activating one of its own children. `System` tags a background
+/// subagent completion waking its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationProvenance {
+    Human,
+    ParentAgent,
+    System,
+}
+
 /// The lifecycle position of one turn run. Terminal, gate-parked, and in-flight
 /// statuses are distinguished by the predicates below rather than by scattered
 /// match tables at the call sites.
@@ -1184,6 +1199,26 @@ pub enum SubmitTurnResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_provenance_wire_strings_are_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ActivationProvenance::Human).expect("serialize"),
+            serde_json::json!("human")
+        );
+        assert_eq!(
+            serde_json::to_value(ActivationProvenance::ParentAgent).expect("serialize"),
+            serde_json::json!("parent_agent")
+        );
+        assert_eq!(
+            serde_json::to_value(ActivationProvenance::System).expect("serialize"),
+            serde_json::json!("system")
+        );
+
+        let round_tripped: ActivationProvenance =
+            serde_json::from_value(serde_json::json!("parent_agent")).expect("deserialize");
+        assert_eq!(round_tripped, ActivationProvenance::ParentAgent);
+    }
 
     #[test]
     fn blocked_external_tool_status_is_non_terminal_and_keeps_lock() {

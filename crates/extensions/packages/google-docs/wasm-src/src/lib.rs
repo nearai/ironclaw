@@ -54,19 +54,15 @@ wit_bindgen::generate!({
     path: "../../../../lanes/ironclaw_wasm/wit/tool.wit",
 });
 
+use exports::near::agent::tool::{ErrorKind, GuestFailure, Response};
+
 struct GoogleDocsTool;
 
 impl exports::near::agent::tool::Guest for GoogleDocsTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
         match execute_inner(&req.params, req.context.as_deref()) {
-            Ok(result) => exports::near::agent::tool::Response {
-                output: Some(result),
-                error: None,
-            },
-            Err(e) => exports::near::agent::tool::Response {
-                output: None,
-                error: Some(e),
-            },
+            Ok(result) => Response::Success(result),
+            Err(failure) => Response::Failure(failure),
         }
     }
 
@@ -91,11 +87,25 @@ impl exports::near::agent::tool::Guest for GoogleDocsTool {
     }
 }
 
-fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
+/// Build an `input`-kind guest failure with a stable code and no free-text
+/// message (the code alone is the actionable signal for these host-plumbing
+/// failures).
+fn input_failure(code: &'static str) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some(code.to_string()),
+        message: None,
+    }
+}
+
+fn execute_inner(params: &str, context: Option<&str>) -> Result<String, GuestFailure> {
     let action_name = action_from_context(context)?;
     let params = params_with_action(params, action_name)?;
-    let action: GoogleDocsAction =
-        serde_json::from_value(params).map_err(|e| format!("Invalid parameters: {}", e))?;
+    let action: GoogleDocsAction = serde_json::from_value(params).map_err(|e| GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some("invalid_parameters".to_string()),
+        message: Some(api::bounded_message(&e.to_string())),
+    })?;
 
     crate::near::agent::host::log(
         crate::near::agent::host::LogLevel::Debug,
@@ -105,17 +115,17 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     let result = match action {
         GoogleDocsAction::CreateDocument { title } => {
             let result = api::create_document(&title)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::GetDocument { document_id } => {
             let result = api::get_document(&document_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::ReadContent { document_id } => {
             let result = api::read_content(&document_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::InsertText {
@@ -125,7 +135,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             segment_id,
         } => {
             let result = api::insert_text(&document_id, &text, index, &segment_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::DeleteContent {
@@ -135,7 +145,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             segment_id,
         } => {
             let result = api::delete_content(&document_id, start_index, end_index, &segment_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::ReplaceText {
@@ -145,7 +155,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             match_case,
         } => {
             let result = api::replace_text(&document_id, &find, &replace, match_case)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::FormatText {
@@ -174,7 +184,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 foreground_color: foreground_color.as_deref(),
                 background_color: background_color.as_deref(),
             })?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::FormatParagraph {
@@ -193,7 +203,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 alignment.as_deref(),
                 line_spacing,
             )?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::InsertTable {
@@ -203,7 +213,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             index,
         } => {
             let result = api::insert_table(&document_id, rows, columns, index)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::CreateList {
@@ -213,7 +223,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             bullet_preset,
         } => {
             let result = api::create_list(&document_id, start_index, end_index, &bullet_preset)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleDocsAction::BatchUpdate {
@@ -221,17 +231,17 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             requests,
         } => {
             let result = api::batch_update(&document_id, requests)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
     };
 
     Ok(result)
 }
 
-fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
-    let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
+fn action_from_context(context: Option<&str>) -> Result<&'static str, GuestFailure> {
+    let context = context.ok_or_else(|| input_failure("missing_invocation_context"))?;
     let context: ToolContext =
-        serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
+        serde_json::from_str(context).map_err(|_| input_failure("invalid_invocation_context"))?;
     match context.capability_id.as_str() {
         "google-docs.create_document" => Ok("create_document"),
         "google-docs.get_document" => Ok("get_document"),
@@ -244,21 +254,21 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         "google-docs.insert_table" => Ok("insert_table"),
         "google-docs.create_list" => Ok("create_list"),
         "google-docs.batch_update" => Ok("batch_update"),
-        _ => Err("unsupported_google_docs_capability".to_string()),
+        _ => Err(input_failure("unsupported_google_docs_capability")),
     }
 }
 
-fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, String> {
+fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, GuestFailure> {
     let mut params: serde_json::Value = if params.trim().is_empty() {
         serde_json::json!({})
     } else {
-        serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?
+        serde_json::from_str(params).map_err(|_| input_failure("invalid_parameters"))?
     };
     let obj = params
         .as_object_mut()
-        .ok_or_else(|| "invalid_parameters".to_string())?;
+        .ok_or_else(|| input_failure("invalid_parameters"))?;
     if obj.contains_key("action") {
-        return Err("invalid_parameters".to_string());
+        return Err(input_failure("invalid_parameters"));
     }
     obj.insert(
         "action".to_string(),
@@ -273,10 +283,14 @@ mod tests {
 
     #[test]
     fn params_with_action_rejects_caller_supplied_action() {
-        let result =
-            params_with_action(r#"{"action":"delete_all","document_id":"doc-1"}"#, "get_document");
+        let error = params_with_action(
+            r#"{"action":"delete_all","document_id":"doc-1"}"#,
+            "get_document",
+        )
+        .unwrap_err();
 
-        assert_eq!(result, Err("invalid_parameters".to_string()));
+        assert_eq!(error.kind, ErrorKind::Input);
+        assert_eq!(error.code.as_deref(), Some("invalid_parameters"));
     }
 }
 

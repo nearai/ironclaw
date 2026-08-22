@@ -38,6 +38,7 @@ jobs:
   changes:
     name: Detect code changes
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
       has_guidance: ${{ steps.non_pr.outputs.has_guidance || steps.diff.outputs.has_guidance }}
@@ -82,7 +83,7 @@ jobs:
             echo "has_clippy=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|deny\.toml$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$|\.github/workflows/ironclaw-release\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|deny\.toml$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|scripts/(check|test-check)-type-duplicates\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$|\.github/workflows/ironclaw-release\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -153,6 +154,7 @@ jobs:
     # governs; every other lane keys on `has_code` alone.
     if: needs.changes.outputs.has_code == 'true' || needs.changes.outputs.has_guidance == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -199,6 +201,7 @@ jobs:
           scripts/ci/test-check-wasm-artifact-freshness.sh
           scripts/ci/test-package-feature-flags.sh
           scripts/ci/test-quality-gate-runner.sh
+          scripts/ci/test-install-ci-apt-packages.sh
           python3 scripts/ci/test_changed_workspace_packages.py
           scripts/ci/test-reborn-crate-test-buckets.sh
           scripts/ci/test-main-ci-slack-alerts.sh
@@ -206,6 +209,7 @@ jobs:
           python3 scripts/ci/test_ws12_workflow_contracts.py
           python3 scripts/ci/test-check-target-tree.py
           python3 scripts/ci/test-check-guidance.py
+          python3 scripts/test-check-type-duplicates.py
           python3 scripts/ci/test_check_h2_advisory_exception.py
           python3 scripts/ci/test_cut_ironclaw_release.py
           scripts/ci/test-hermetic-test-process.sh
@@ -264,6 +268,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -338,6 +343,7 @@ jobs:
       needs.changes.outputs.has_code == 'true' &&
       (github.event_name != 'pull_request' || needs.changes.outputs.has_clippy == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -439,6 +445,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push'
     runs-on: windows-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -489,6 +496,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.has_reborn_cli == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -542,6 +550,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.has_docs == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -559,6 +568,7 @@ jobs:
   code-style:
     name: Code Style (fmt + clippy)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     needs:
       - changes

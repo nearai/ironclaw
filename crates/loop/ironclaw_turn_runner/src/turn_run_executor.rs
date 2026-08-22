@@ -112,7 +112,7 @@ enum DriverInvocationError {
         reason: String,
     },
     HostFinalizationFailed {
-        error: AgentLoopHostError,
+        error: Box<AgentLoopHostError>,
         cumulative_usage: Option<LoopModelUsage>,
     },
     DriverError {
@@ -405,7 +405,7 @@ impl RebornTurnRunExecutor {
             Ok(exit) => match host.finalize_terminal_output(&exit).await {
                 Ok(()) => Ok(exit),
                 Err(error) => Err(DriverInvocationError::HostFinalizationFailed {
-                    error,
+                    error: Box::new(error),
                     cumulative_usage: loop_exit_model_usage(&exit).or(claimed.state.model_usage),
                 }),
             },

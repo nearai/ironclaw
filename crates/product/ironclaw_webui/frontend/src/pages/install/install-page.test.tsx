@@ -3,7 +3,6 @@
 import assert from "node:assert/strict";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { test, vi } from "vitest";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -13,7 +12,7 @@ let currentSearch = "";
 vi.mock("react-router", () => ({
   useLocation: () => ({ search: currentSearch }),
 }));
-vi.mock("../../lib/i18n", () => ({ useT: () => (key) => key }));
+vi.mock("../../lib/i18n", () => ({ useT: () => (key) => key, registerPack: () => {} }));
 
 const { InstallPage } = await import("./install-page");
 
@@ -23,18 +22,9 @@ const SIGNED =
 
 function render(search) {
   currentSearch = search;
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
   const container = document.createElement("div");
   document.body.append(container);
-  act(() =>
-    createRoot(container).render(
-      <QueryClientProvider client={client}>
-        <InstallPage />
-      </QueryClientProvider>,
-    ),
-  );
+  act(() => createRoot(container).render(<InstallPage />));
   return container;
 }
 

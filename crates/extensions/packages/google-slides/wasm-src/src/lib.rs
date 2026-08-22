@@ -59,19 +59,15 @@ wit_bindgen::generate!({
     path: "../../../../lanes/ironclaw_wasm/wit/tool.wit",
 });
 
+use exports::near::agent::tool::{ErrorKind, GuestFailure, Response};
+
 struct GoogleSlidesTool;
 
 impl exports::near::agent::tool::Guest for GoogleSlidesTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
         match execute_inner(&req.params, req.context.as_deref()) {
-            Ok(result) => exports::near::agent::tool::Response {
-                output: Some(result),
-                error: None,
-            },
-            Err(e) => exports::near::agent::tool::Response {
-                output: None,
-                error: Some(e),
-            },
+            Ok(result) => Response::Success(result),
+            Err(failure) => Response::Failure(failure),
         }
     }
 
@@ -98,11 +94,25 @@ impl exports::near::agent::tool::Guest for GoogleSlidesTool {
     }
 }
 
-fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
+/// Build an `input`-kind guest failure with a stable code and no free-text
+/// message (the code alone is the actionable signal for these host-plumbing
+/// failures).
+fn input_failure(code: &'static str) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some(code.to_string()),
+        message: None,
+    }
+}
+
+fn execute_inner(params: &str, context: Option<&str>) -> Result<String, GuestFailure> {
     let action_name = action_from_context(context)?;
     let params = params_with_action(params, action_name)?;
-    let action: GoogleSlidesAction =
-        serde_json::from_value(params).map_err(|e| format!("Invalid parameters: {}", e))?;
+    let action: GoogleSlidesAction = serde_json::from_value(params).map_err(|e| GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some("invalid_parameters".to_string()),
+        message: Some(api::bounded_message(&e.to_string())),
+    })?;
 
     crate::near::agent::host::log(
         crate::near::agent::host::LogLevel::Debug,
@@ -112,12 +122,12 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     let result = match action {
         GoogleSlidesAction::CreatePresentation { title } => {
             let result = api::create_presentation(&title)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::GetPresentation { presentation_id } => {
             let result = api::get_presentation(&presentation_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::GetThumbnail {
@@ -125,7 +135,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             slide_object_id,
         } => {
             let result = api::get_thumbnail(&presentation_id, &slide_object_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::CreateSlide {
@@ -134,7 +144,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             layout,
         } => {
             let result = api::create_slide(&presentation_id, insertion_index, &layout)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::DeleteObject {
@@ -142,7 +152,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             object_id,
         } => {
             let result = api::delete_object(&presentation_id, &object_id)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::InsertText {
@@ -152,7 +162,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             insertion_index,
         } => {
             let result = api::insert_text(&presentation_id, &object_id, &text, insertion_index)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::DeleteText {
@@ -162,7 +172,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             end_index,
         } => {
             let result = api::delete_text(&presentation_id, &object_id, start_index, end_index)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::ReplaceAllText {
@@ -172,7 +182,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             match_case,
         } => {
             let result = api::replace_all_text(&presentation_id, &find, &replace, match_case)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::CreateShape {
@@ -193,7 +203,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 width,
                 height,
             )?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::InsertImage {
@@ -214,7 +224,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 width,
                 height,
             )?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::FormatText {
@@ -241,7 +251,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 font_family: font_family.as_deref(),
                 foreground_color: foreground_color.as_deref(),
             })?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::FormatParagraph {
@@ -258,7 +268,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 start_index,
                 end_index,
             )?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::ReplaceShapesWithImage {
@@ -269,7 +279,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
         } => {
             let result =
                 api::replace_shapes_with_image(&presentation_id, &find, &image_url, match_case)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
 
         GoogleSlidesAction::BatchUpdate {
@@ -277,17 +287,17 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             requests,
         } => {
             let result = api::batch_update(&presentation_id, requests)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
     };
 
     Ok(result)
 }
 
-fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
-    let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
+fn action_from_context(context: Option<&str>) -> Result<&'static str, GuestFailure> {
+    let context = context.ok_or_else(|| input_failure("missing_invocation_context"))?;
     let context: ToolContext =
-        serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
+        serde_json::from_str(context).map_err(|_| input_failure("invalid_invocation_context"))?;
     match context.capability_id.as_str() {
         "google-slides.create_presentation" => Ok("create_presentation"),
         "google-slides.get_presentation" => Ok("get_presentation"),
@@ -303,27 +313,44 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         "google-slides.format_paragraph" => Ok("format_paragraph"),
         "google-slides.replace_shapes_with_image" => Ok("replace_shapes_with_image"),
         "google-slides.batch_update" => Ok("batch_update"),
-        _ => Err("unsupported_google_slides_capability".to_string()),
+        _ => Err(input_failure("unsupported_google_slides_capability")),
     }
 }
 
-fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, String> {
+fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, GuestFailure> {
     let mut params: serde_json::Value = if params.trim().is_empty() {
         serde_json::json!({})
     } else {
-        serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?
+        serde_json::from_str(params).map_err(|_| input_failure("invalid_parameters"))?
     };
     let obj = params
         .as_object_mut()
-        .ok_or_else(|| "invalid_parameters".to_string())?;
+        .ok_or_else(|| input_failure("invalid_parameters"))?;
     if obj.contains_key("action") {
-        return Err("invalid_parameters".to_string());
+        return Err(input_failure("invalid_parameters"));
     }
     obj.insert(
         "action".to_string(),
         serde_json::Value::String(action.to_string()),
     );
     Ok(params)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn params_with_action_rejects_caller_supplied_action() {
+        let error = params_with_action(
+            r#"{"action":"delete_all","presentation_id":"presentation-1"}"#,
+            "create_slide",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::Input);
+        assert_eq!(error.code.as_deref(), Some("invalid_parameters"));
+    }
 }
 
 export!(GoogleSlidesTool);

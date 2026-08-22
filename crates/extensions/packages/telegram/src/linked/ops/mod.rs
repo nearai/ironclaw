@@ -14,7 +14,9 @@
 //! where available") is stated in the vendor addendum.
 
 use ironclaw_extension_contracts::tool_adapter::ToolError;
-use ironclaw_host_api::messaging::StandardMessagingErrorCode;
+use ironclaw_host_api::{
+    dispatch::RuntimeDispatchErrorKind, messaging::StandardMessagingErrorCode,
+};
 use serde_json::Value;
 
 use super::{
@@ -138,13 +140,11 @@ where
 // and silently substituting an empty string would send a message nobody asked
 // for.
 
-fn missing_field(field: &str) -> ToolError {
-    ToolError::Failed {
-        kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Unknown,
-        safe_summary: Some(format!(
-            "the telegram adapter received input without its required {field} field"
-        )),
-        model_visible_cause: None,
+fn missing_field(_field: &str) -> ToolError {
+    ToolError::Rejected {
+        kind: RuntimeDispatchErrorKind::Unknown,
+        diagnostic: None,
+        detail: None,
     }
 }
 

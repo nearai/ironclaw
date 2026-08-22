@@ -1691,12 +1691,13 @@ impl RebornIntegrationHarness {
         }
         let seen: Vec<String> = results
             .iter()
-            .map(|result| result.capability_id.as_str().to_string())
+            .map(|result| {
+                let output = result.output.to_string();
+                let preview: String = output.chars().take(4096).collect();
+                format!("{}={preview}", result.capability_id.as_str())
+            })
             .collect();
-        Err(format!(
-            "no recorded capability result containing {needle:?}; saw results for {seen:?}"
-        )
-        .into())
+        Err(format!("no recorded capability result containing {needle:?}; saw {seen:?}").into())
     }
 
     /// Return the parsed JSON `output` of the MOST RECENT recorded capability

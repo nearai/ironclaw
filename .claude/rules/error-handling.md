@@ -15,9 +15,12 @@ Existing rules forbid `.unwrap()` / `.expect()` in production. The footguns belo
 - `if let Err(e) = ... { warn!(...) }` followed by caching, inserting, or
   continuing — poisons downstream state with a half-initialized value.
 - `.map_err(|_| OtherError)` — discards the cause. A sanitized
-  `RebornServicesError` may hide details from the client, but the server-side
-  chain must retain/log the source. Use a cause-preserving constructor such as
-  `RebornServicesError::internal_from`, or log the bound source before mapping.
+  `ProductSurfaceError` may hide details from the client, but the server-side
+  chain must retain/log the source. `ProductSurfaceError::internal_from` is not
+  cause-preserving in the chained-`Error::source()` sense — it logs the source via
+  `tracing::error!` and returns a sanitized error with no source field — so use it
+  (or log the bound source before mapping) to satisfy the "log the source"
+  requirement, not to satisfy a requirement for true cause propagation.
 
 **Required pattern — fail loud by default:**
 
@@ -33,7 +36,7 @@ let cached = optional_cache.refresh().await.unwrap_or_default(); // silent-ok: o
 
 Review flag: added lines containing `unwrap_or_default()`, `.ok()?`, or `else { return` / `else { return None }` on a DB/IO/workspace/boundary call must carry a `// silent-ok: <reason>` comment or be rejected.
 
-A `map_err(|_| …)` (a closure discarding the error binding) is **not** `silent-ok`-exemptible — a comment does not make the dropped cause reappear. Fix it by carrying the cause (`.map_err(ErrorType::constructor)` / `RebornServicesError::internal_from`) or by logging the bound error before mapping. Reject the line otherwise.
+A `map_err(|_| …)` (a closure discarding the error binding) is **not** `silent-ok`-exemptible — a comment does not make the dropped cause reappear. Fix it by carrying the cause (`.map_err(ErrorType::constructor)` / `ProductSurfaceError::internal_from`) or by logging the bound error before mapping. Reject the line otherwise.
 
 ## Persist-Then-Reload Atomicity
 
@@ -52,7 +55,7 @@ product-facing settings caller.
 No internal identifier, traceback, or transport error may cross a channel boundary to the user. Map at the source:
 
 - `LlmError::BadGateway` / raw HTTP 5xx → "provider temporarily unavailable"
-- `LlmError::ContextOverflow` / HTTP 413 → "message too large — summarizing" (every direct-HTTP provider must detect 413)
+- `LlmError::ContextLengthExceeded` / HTTP 413 → "message too large — summarizing" (every direct-HTTP provider must detect 413)
 - Filesystem / workspace errors → "can't access your workspace file" (never expose paths)
 - Runtime adapter/process failures → a stable sanitized category plus opaque
   invocation ID for correlation.

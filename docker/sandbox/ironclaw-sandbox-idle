@@ -1,0 +1,25 @@
+#!/bin/sh
+
+set -u
+
+sleeper=
+
+shutdown() {
+    trap - TERM INT
+    if [ -n "$sleeper" ]; then
+        kill "$sleeper" >/dev/null 2>&1 || :
+        wait "$sleeper" >/dev/null 2>&1 || :
+    fi
+    exit 0
+}
+
+trap shutdown TERM INT
+
+# Keep one interruptible sleep as the init child. tini forwards TERM here and
+# reaps any command descendants that are orphaned to the container init.
+while :; do
+    sleep 86400 &
+    sleeper=$!
+    wait "$sleeper" || :
+    sleeper=
+done
