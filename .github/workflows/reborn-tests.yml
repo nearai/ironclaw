@@ -222,7 +222,7 @@ jobs:
       RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}
+      max-parallel: ${{ github.event_name == 'pull_request' && 6 || 14 }}
       matrix:
         bucket: ${{ fromJSON(needs.changes.outputs.crate_buckets) }}
     steps:
@@ -248,6 +248,11 @@ jobs:
         with:
           toolchain: nightly-2025-11-01
           components: llvm-tools-preview
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest@0.9.143
 
       - name: Resolve bucket settings
         id: bucket-settings
@@ -405,6 +410,7 @@ jobs:
             echo "::endgroup::"
           else
             echo "::group::cargo test affected bucket ${BUCKET_NAME}"
+            mkdir -p junit-reports
             if [[ "$(jq 'length' <<< "${EXACT_TARGETS}")" -gt 0 ]]; then
               while IFS=$'\t' read -r package kind name; do
                 target_feature_args=()
@@ -412,23 +418,32 @@ jobs:
                 if [[ -n "${feature_flags}" ]]; then
                   read -ra target_feature_args <<< "${feature_flags}"
                 fi
-                scripts/ci/run-hermetic-deterministic-suite.sh command \
-                  timeout --signal=INT --kill-after=30s 28m \
-                  "${incremental_env[@]}" cargo test \
-                    -p "${package}" "--${kind}" "${name}" \
-                    "${target_feature_args[@]}" --ignore-rust-version -- --nocapture
+                REPRO="scripts/ci/run-hermetic-deterministic-suite.sh command timeout --signal=INT --kill-after=30s 28m ${incremental_env[*]} cargo nextest run --profile ci -p ${package} --${kind} ${name} ${target_feature_args[*]} --all-targets --ignore-rust-version"
+                echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
+                eval "${REPRO}"
+                cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-${name}.xml" 2>/dev/null || true
               done < <(
                 jq -r '.[] | [.package, .kind, .name] | @tsv' \
                   <<< "${EXACT_TARGETS}"
               )
             else
-              scripts/ci/run-hermetic-deterministic-suite.sh command \
-                timeout --signal=INT --kill-after=30s 28m \
-                "${incremental_env[@]}" cargo test "${package_args[@]}" \
-                  "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
+              REPRO="scripts/ci/run-hermetic-deterministic-suite.sh command timeout --signal=INT --kill-after=30s 28m ${incremental_env[*]} cargo nextest run --profile ci ${package_args[*]} ${feature_args[*]} --all-targets --ignore-rust-version"
+              echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
+              eval "${REPRO}"
+              cp target/nextest/ci/junit.xml "junit-reports/${BUCKET_NAME}-bulk.xml" 2>/dev/null || true
             fi
             echo "::endgroup::"
           fi
+
+      - name: Local repro for this job
+        if: failure()
+        run: |
+          {
+            echo "### Local repro for this job"
+            echo '```bash'
+            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bucket lcov artifact
         if: needs.changes.outputs.run_coverage == 'true'
@@ -437,6 +452,14 @@ jobs:
           name: reborn-crate-cov-bucket-${{ matrix.bucket.name }}
           path: bucket-${{ matrix.bucket.name }}.lcov
           if-no-files-found: error
+
+      - name: Upload JUnit reports
+        if: always() && needs.changes.outputs.run_coverage != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-junit-bucket-${{ matrix.bucket.name }}
+          path: junit-reports/
+          if-no-files-found: ignore
 
   root-reborn-parity-tests:
     name: Reborn root tests (${{ matrix.partition }})
@@ -452,7 +475,7 @@ jobs:
       OPENAI_API_KEY: ""
       REBORN_ROOT_TEST_PARTITIONS: 4
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
-      REBORN_ROOT_TEST_TIMEOUT: 28m
+      REBORN_ROOT_TEST_TIMEOUT: 40m
       CARGO_INCREMENTAL: "0"
       # The QA smoke binaries build a full Reborn runtime and drive whole
       # turns on the libtest current-thread stack; the combined debug async
@@ -462,7 +485,7 @@ jobs:
       RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'pull_request' && 1 || 4 }}
+      max-parallel: ${{ github.event_name == 'pull_request' && 2 || 4 }}
       matrix:
         partition: ${{ fromJSON(needs.changes.outputs.root_partitions) }}
     steps:
@@ -482,6 +505,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest@0.9.143
 
       - name: Install mold and clang
         run: |
@@ -528,10 +556,28 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn root tests
-        run: >-
-          scripts/ci/run-hermetic-deterministic-suite.sh
-          command
-          scripts/ci/run-reborn-root-partition.sh
+        run: |
+          REPRO='REBORN_ROOT_TEST_PARTITIONS=4 REBORN_ROOT_TEST_PARTITION=${{ matrix.partition }} RUST_MIN_STACK=67108864 scripts/ci/run-hermetic-deterministic-suite.sh command scripts/ci/run-reborn-root-partition.sh'
+          echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
+          eval "${REPRO}"
+
+      - name: Local repro for this job
+        if: failure()
+        run: |
+          {
+            echo "### Local repro for this job"
+            echo '```bash'
+            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-junit-root-${{ matrix.partition }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
 
   reborn-group-tests:
     name: Reborn group tests
@@ -624,7 +670,20 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn group tests
-        run: scripts/ci/run-hermetic-deterministic-suite.sh groups
+        run: |
+          REPRO='scripts/ci/run-hermetic-deterministic-suite.sh groups'
+          echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
+          eval "${REPRO}"
+
+      - name: Local repro for this job
+        if: failure()
+        run: |
+          {
+            echo "### Local repro for this job"
+            echo '```bash'
+            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   sandbox-docker-tests:
     name: Reborn user-sandbox Docker tests
@@ -666,16 +725,16 @@ jobs:
           docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
 
       - name: Verify production local-sandbox profile wiring
-        run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required -- --nocapture
+        run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required --no-fail-fast -- --nocapture
 
       - name: Run real-Docker user sandbox contract
         # Each test creates a transport that reconciles the daemon-wide user-container
         # inventory. Run this shared-Docker contract serially so one test's sweeper
         # cannot adopt and stop another test's intentionally active container.
-        run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture --test-threads=1
+        run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live --no-fail-fast -- --nocapture --test-threads=1
 
       - name: Run full-turn sandbox shell integration
-        run: cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
+        run: cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn --no-fail-fast -- --nocapture
 
   reborn-integration-coverage:
     name: Reborn integration tests (${{ matrix.lane }})
@@ -708,7 +767,7 @@ jobs:
       RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'pull_request' && 1 || 5 }}
+      max-parallel: ${{ github.event_name == 'pull_request' && 2 || 5 }}
       matrix:
         lane: ${{ fromJSON(needs.changes.outputs.integration_lanes) }}
     steps:
@@ -737,6 +796,11 @@ jobs:
         with:
           toolchain: nightly-2025-11-01
           components: llvm-tools-preview
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest@0.9.143
 
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm
@@ -816,10 +880,22 @@ jobs:
             # matrix leg. Clear only profiling data, not compiled binaries.
             cargo llvm-cov clean --profraw-only
           fi
+          REPRO="REBORN_COV_COLLECT=false REBORN_COV_LANE_MODE=${REBORN_COV_LANE_MODE} REBORN_COV_LANE_PARTITIONS=4 REBORN_COV_LANE_INDEX=${REBORN_COV_LANE_INDEX} scripts/ci/run-hermetic-deterministic-suite.sh command scripts/ci/reborn-coverage-lane-run.sh /tmp/repro.lcov"
+          echo "REPRO=${REPRO}" >> "$GITHUB_ENV"
           scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
           IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1 \
             scripts/ci/run-hermetic-deterministic-suite.sh command \
             scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
+
+      - name: Local repro for this job
+        if: failure()
+        run: |
+          {
+            echo "### Local repro for this job"
+            echo '```bash'
+            echo "${REPRO:-<no REPRO recorded — see the failing step's own output above>}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload lane lcov artifact
         if: needs.changes.outputs.run_coverage == 'true'
@@ -827,6 +903,14 @@ jobs:
         with:
           name: reborn-integration-cov-part-${{ matrix.lane }}
           path: part-${{ matrix.lane }}.lcov
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-junit-lane-${{ matrix.lane }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
           if-no-files-found: error
 
   coverage-report:
@@ -1135,6 +1219,7 @@ jobs:
             cargo test \
             -p ironclaw_integration_tests \
             --test reborn_qa_recorded_behavior \
+            --no-fail-fast \
             -- \
             --nocapture
 
@@ -1265,3 +1350,34 @@ jobs:
           if [[ "${plan_mode}" == "none" ]]; then
             echo "No affected Reborn test surface — baseline recorded replay ran as planned"
           fi
+
+      - name: Download JUnit reports
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: reborn-junit-*
+          path: junit-reports
+          merge-multiple: true
+
+      - name: Roll up per-job results and per-test failures
+        if: always()
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          {
+            echo "### Tests (Reborn) — job roll-up"
+            echo ""
+            echo "Non-nextest jobs (group suites, sandbox Docker, QA replay have no"
+            echo "per-test report; see their own job logs for failures):"
+            echo ""
+            echo "| Job | Result |"
+            echo "|---|---|"
+            jq -r 'to_entries[] | select(.key == "reborn-group-tests" or .key == "sandbox-docker-tests" or .key == "qa-recorded-fixtures") | "| \(.key) | \(.value.result) |"' <<< "${NEEDS_JSON}"
+            if compgen -G "junit-reports/*.xml" > /dev/null; then
+              python3 scripts/ci/junit_summary.py junit-reports/*.xml
+            else
+              echo ""
+              echo "_No JUnit reports were downloaded (nextest jobs may not have run yet, or all passed with no artifact needed)._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

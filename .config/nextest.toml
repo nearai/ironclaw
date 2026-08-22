@@ -18,12 +18,30 @@ leak-timeout = "100ms"
 [profile.ci]
 # One flake shouldn't mask other real failures.
 fail-fast = false
+# Determinism over green-washing: no automatic retries in CI.
+retries = 0
 # Inline failures, suppress passing noise, keep Actions logs scannable.
 failure-output = "immediate-final"
 success-output = "never"
-# Stricter CI timeout: a hung test should crash the job fast, not sit
-# against the workflow-level 25-minute cap.
-slow-timeout = { period = "60s", terminate-after = 3 }
+# Per-test hang ceiling: warn every 60s, kill after 10 missed warnings
+# (10m). Replaces the old per-BINARY 28m `timeout` as the hang backstop,
+# catching a stuck test at test granularity instead of job granularity
+# (the 91-122min queue hangs the gate-audit measured were bounded only by
+# a 90m job timeout).
+slow-timeout = { period = "60s", terminate-after = 10 }
+# 2-core/~7GB runners: bound concurrent test PROCESSES to the actual core
+# count. nextest's built-in default already resolves to logical-CPU
+# count, but leaving it implicit makes "RUST_MIN_STACK=64MiB (job env) x
+# concurrent per-test tokio runtimes" an unreviewable number. Pin it.
+test-threads = "num-cpus"
+
+[profile.ci.junit]
+# One JUnit report per nextest invocation. Job steps copy it out before
+# the next invocation in the same step would overwrite it (crate-tests'
+# exact-targets loop runs nextest more than once per step) -- see Tasks
+# 3-5's recipes. Consumed by scripts/ci/junit_summary.py in the required
+# aggregator (Task 1) to report failing TEST names, not just job names.
+path = "junit.xml"
 
 # Per-test windows for the handful of scenarios that genuinely need more
 # than 60s (live-recorded fixtures + heavy integration).
@@ -34,3 +52,13 @@ slow-timeout = { period = "300s", terminate-after = 2 }
 [[profile.ci.overrides]]
 filter = "test(~e2e_thread_scheduling) | test(~heavy_integration)"
 slow-timeout = { period = "300s", terminate-after = 2 }
+
+# Root/integration-tier suites drive whole Reborn turns; give them a
+# 20-minute per-test ceiling (still far under the old 28m per-binary cap).
+# Must stay BELOW the test-name override above: nextest takes the first
+# matching [[profile.ci.overrides]] block, and a package-level filter
+# would otherwise shadow the two named-test overrides for suites inside
+# ironclaw_integration_tests.
+[[profile.ci.overrides]]
+filter = "package(ironclaw_integration_tests)"
+slow-timeout = { period = "120s", terminate-after = 10 }

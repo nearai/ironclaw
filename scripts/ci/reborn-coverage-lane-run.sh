@@ -138,10 +138,29 @@ if [[ "${collect_coverage}" == "true" ]]; then
     cargo llvm-cov --branch --skip-functions --workspace test "${test_args[@]}" \
       --lcov --output-path "${output_lcov}" \
       --ignore-rust-version -- --nocapture
+  echo "::endgroup::"
 else
-  echo "::group::cargo test -p ironclaw_integration_tests ${test_args[*]}"
-  timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test -p ironclaw_integration_tests "${test_args[@]}" \
-      --ignore-rust-version -- --nocapture
+  if [[ "${mode}" == "group" ]]; then
+    # Decision 3 (T2 plan): this mode selects the identical reborn_group_*
+    # set as the dedicated group job (see the comment on
+    # scripts/ci/run-reborn-group-tests.sh) -- force cargo regardless of
+    # what select_test_runner would otherwise pick, so a nextest install
+    # in this job never silently pulls group suites into the pool.
+    runner="cargo"
+  else
+    source "${script_dir}/lib/select-test-runner.sh"
+    runner="$(select_test_runner require-in-ci)"
+  fi
+  if [[ "${runner}" == "nextest" ]]; then
+    echo "::group::cargo nextest run --profile ci -p ironclaw_integration_tests ${test_args[*]}"
+    timeout --signal=INT --kill-after=30s "${test_timeout}" \
+      cargo nextest run --profile ci -p ironclaw_integration_tests "${test_args[@]}" \
+        --ignore-rust-version
+  else
+    echo "::group::cargo test -p ironclaw_integration_tests ${test_args[*]}"
+    timeout --signal=INT --kill-after=30s "${test_timeout}" \
+      cargo test -p ironclaw_integration_tests "${test_args[@]}" \
+        --ignore-rust-version -- --nocapture
+  fi
+  echo "::endgroup::"
 fi
-echo "::endgroup::"

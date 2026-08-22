@@ -42,22 +42,35 @@ if [ "${#test_names[@]}" -eq 0 ]; then
   exit 1
 fi
 
-selected=false
+selected_names=()
 for index in "${!test_names[@]}"; do
   if (( index % partition_count_int != partition_index_int )); then
     continue
   fi
-
-  selected=true
-  test_name="${test_names[$index]}"
-  echo "::group::cargo test --test ${test_name}"
-  timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture
-  echo "::endgroup::"
+  selected_names+=("${test_names[$index]}")
 done
 
-if [ "${selected}" != true ]; then
+if [ "${#selected_names[@]}" -eq 0 ]; then
   # Empty partitions are valid when the matrix has more partitions than tests
   # or when the sorted test list leaves a sparse tail for this partition.
   echo "No Reborn root tests assigned to partition ${partition_index_int} of ${partition_count_int}; passing by design"
+  exit 0
+fi
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/select-test-runner.sh"
+runner="$(select_test_runner require-in-ci)"
+test_args=(); for name in "${selected_names[@]}"; do test_args+=(--test "${name}"); done
+if [[ "${runner}" == "nextest" ]]; then
+  echo "::group::cargo nextest run --profile ci (partition ${partition_index_int}/${partition_count_int}: ${selected_names[*]})"
+  timeout --signal=INT --kill-after=30s "${test_timeout}" \
+    cargo nextest run --profile ci -p ironclaw_integration_tests \
+      "${test_args[@]}" --ignore-rust-version
+  echo "::endgroup::"
+else
+  for test_name in "${selected_names[@]}"; do
+    echo "::group::cargo test --test ${test_name}"
+    timeout --signal=INT --kill-after=30s "${test_timeout}" \
+      cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture
+    echo "::endgroup::"
+  done
 fi

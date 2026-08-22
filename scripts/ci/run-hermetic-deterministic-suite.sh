@@ -76,23 +76,40 @@ discover_reborn_packages() {
 }
 
 run_crate_tests() {
-  local package feature_flags
+  local package feature_flags runner
   prepare_postgres_test_image
+  source "${repo_root}/scripts/ci/lib/select-test-runner.sh"
+  runner="$(select_test_runner optional)"
   while IFS= read -r package; do
     feature_flags="$("${repo_root}/scripts/ci/package-feature-flags.sh" "${package}")"
-    # shellcheck disable=SC2086 # feature_flags is the checked-in CI argument list.
-    run cargo test -p "${package}" ${feature_flags} --all-targets -- --nocapture
+    if [[ "${runner}" == "nextest" ]]; then
+      # shellcheck disable=SC2086 # feature_flags is the checked-in CI argument list.
+      run cargo nextest run --profile ci -p "${package}" ${feature_flags} --all-targets --ignore-rust-version
+    else
+      # shellcheck disable=SC2086
+      run cargo test -p "${package}" ${feature_flags} --all-targets -- --nocapture
+    fi
   done < <(discover_reborn_packages)
 }
 
 run_integration_tier() {
-  local test_name
+  local test_name runner
+  local -a test_args=()
   prepare_postgres_test_image
+  source "${repo_root}/scripts/ci/lib/select-test-runner.sh"
+  runner="$(select_test_runner optional)"
   while IFS= read -r test_name; do
     [[ "${test_name}" == --test ]] && continue
-    run cargo test -p ironclaw_integration_tests \
-      --test "${test_name}" -- --nocapture
+    test_args+=(--test "${test_name}")
   done < <("${repo_root}/scripts/ci/reborn-coverage-int-tier-tests.sh")
+  if [[ "${runner}" == "nextest" ]]; then
+    run cargo nextest run --profile ci -p ironclaw_integration_tests "${test_args[@]}" --ignore-rust-version
+  else
+    for test_name in "${test_args[@]}"; do
+      [[ "${test_name}" == --test ]] && continue
+      run cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture
+    done
+  fi
 }
 
 run_python_e2e() {

@@ -411,4 +411,64 @@ if ! grep -Fq "resolve_webui_frontend_dir" "${repo_root}/scripts/ci/run-hermetic
   exit 1
 fi
 
+# Negative control: prove cargo-nextest's own child-process spawn path
+# (not just a directly-launched probe binary) inherits the hermetic
+# network guard. See tests/hermetic_network_guard_probe.rs.
+#
+# NOTE on exit codes: scripts/ci/hermetic-network-runner.sh (the target
+# runner) forces its own exit to 86 whenever ANY non-loopback connection
+# attempt is observed via IRONCLAW_HERMETIC_NETWORK_VIOLATIONS -- even one
+# the guard's interposer correctly EPERM'd. That is deliberate defense in
+# depth (no process should reach for the network at all, guarded or not),
+# but it means the *process* exit code cannot distinguish "guard blocked
+# the connect and the test's own assertion passed" from "nothing blocked
+# it and the test's own assertion failed" -- both exit non-zero. The real
+# signal is the test's own reported OUTCOME, captured in nextest's stdout:
+# "... ok" / "1 passed" when the interposer's EPERM satisfied the test's
+# assertion, vs a panic (mismatched error kind, e.g. TimedOut instead of
+# PermissionDenied) when it did not. Empirically verified locally
+# (2026-08-21): guarded run exits 86 but stdout shows "test
+# nextest_child_process_is_network_guarded ... ok" / "1 passed"; sabotaged
+# run exits non-zero via a genuine panic: "assertion `left == right`
+# failed: ... left: TimedOut, right: PermissionDenied".
+if command -v cargo-nextest >/dev/null 2>&1; then
+  set +e
+  guarded_output="$(
+    IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
+      "${runner}" -- cargo nextest run --profile ci -p ironclaw_integration_tests \
+        --test hermetic_network_guard_probe --run-ignored ignored-only \
+        --ignore-rust-version 2>&1
+  )"
+  set -e
+  if [[ "${guarded_output}" != *"nextest_child_process_is_network_guarded ... ok"* ]]; then
+    echo "nextest negative control: guarded run's own test assertion should have PASSED (EPERM from the guard) but it did not" >&2
+    printf '%s\n' "${guarded_output}" >&2
+    exit 1
+  fi
+
+  set +e
+  unguarded_output="$(
+    IRONCLAW_HERMETIC_SABOTAGE=network \
+      "${runner}" -- cargo nextest run --profile ci -p ironclaw_integration_tests \
+        --test hermetic_network_guard_probe --run-ignored ignored-only \
+        --ignore-rust-version 2>&1
+  )"
+  set -e
+  if [[ "${unguarded_output}" == *"nextest_child_process_is_network_guarded ... ok"* ]]; then
+    echo "nextest negative control: run with the guard SABOTAGED should have FAILED the test's own assertion (nothing should have blocked the connect) but it passed -- this proves the guarded run's pass above was not caused by the guard" >&2
+    printf '%s\n' "${unguarded_output}" >&2
+    exit 1
+  fi
+  if [[ "${unguarded_output}" != *"PermissionDenied"* ]]; then
+    echo "nextest negative control: sabotaged run failed, but not with the expected PermissionDenied-mismatch panic -- investigate before trusting this control" >&2
+    printf '%s\n' "${unguarded_output}" >&2
+    exit 1
+  fi
+elif [[ "${CI:-}" == "true" ]]; then
+  echo "cargo-nextest is required in CI for the nextest negative control but was not found on PATH" >&2
+  exit 1
+else
+  echo "WARNING: cargo-nextest not installed locally; skipping the nextest negative control (it still runs in CI)" >&2
+fi
+
 echo "hermetic test-process self-test: OK"

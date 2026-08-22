@@ -71,6 +71,18 @@ delegation, redaction, retry, or policy behavior survives every wrapper.
 - Extend an existing suite when it owns the same seam.
 - Use `tempfile` for test files and directories. Never hardcode system
   temporary-directory paths.
+- `lock_env()`/`EnvGuard` (`crates/contracts/ironclaw_common/src/env_helpers.rs`,
+  enforced by `scripts/ci/check-hermetic-env.sh`) serializes raw
+  `std::env::set_var`/`remove_var` against sibling tests **that share a
+  process** — the classic `cargo test` thread-per-test model. Under
+  `cargo nextest` (root partitions, crate buckets, uninstrumented
+  integration lanes — see `.config/nextest.toml [profile.ci]`), each test
+  is its own process, so this specific cross-test race cannot happen for
+  nextest-run binaries; the guard is still required for any test that
+  itself spawns multiple threads mutating env within one process. Do not
+  treat the guard's presence as proof of cross-test serialization under
+  nextest, and do not delete it as "now redundant" — confirm which
+  process model actually applies to the binary in question first.
 - Avoid ignored or TODO-pinned tests; landed tests run in CI.
 - Prefer real in-memory implementations, deterministic fakes, or recording
   adapters over mocks that duplicate internal behavior.

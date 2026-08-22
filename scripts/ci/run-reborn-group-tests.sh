@@ -32,9 +32,24 @@ if [ "${#test_names[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# Sequential loop retained (Decision 3, T2 plan): every reborn_group_*
+# binary shares one libsql-backed group store; PR #5751 traced a real
+# SIGABRT to concurrent access against that shape, and the fix required a
+# 90-run soak (50 libsql + 40 in-memory, 0 flakes) to trust
+# (tests/integration/group_approvals/main.rs:9-12). Each binary already
+# runs its own scenarios sequentially by construction; this job's whole
+# purpose is keeping DIFFERENT group binaries from running concurrently
+# against each other, which is exactly what a nextest pool would do.
+#
+# Full-signal (R1): run every group binary before exiting non-zero.
+failed=0
 for test_name in "${test_names[@]}"; do
   echo "::group::cargo test --test ${test_name}"
-  timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture
+  if ! timeout --signal=INT --kill-after=30s "${test_timeout}" \
+    cargo test -p ironclaw_integration_tests --test "${test_name}" --no-fail-fast -- --nocapture; then
+    echo "::error::group suite failed: ${test_name}"
+    failed=1
+  fi
   echo "::endgroup::"
 done
+exit "${failed}"
