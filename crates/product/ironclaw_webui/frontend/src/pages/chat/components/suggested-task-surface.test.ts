@@ -300,6 +300,13 @@ test("the drawer offers a connect entry into the extensions surface", () => {
   // the heading at 375px), so the accessible name has to come from the
   // attribute rather than the text node.
   assert.equal(connect.props["aria-label"], "chat.oobe.action.connect");
+  const connectLabel = findAllByType(connect, "span").find(
+    (span) => span.props.className === "hidden sm:inline",
+  );
+  assert.ok(
+    connectLabel,
+    "the header label stays hidden below sm, or the 375px wrap returns",
+  );
 });
 
 test("the empty CTA pairs generate with the connect entry, generate first", () => {
@@ -315,6 +322,11 @@ test("the empty CTA pairs generate with the connect entry, generate first", () =
   buttons[0].props.onClick();
   assert.deepEqual(generateCalls, [true], "the first CTA is generate");
   assert.equal(buttons[1].props.to, EXTENSIONS_ROUTE, "the second is connect");
+  assert.equal(
+    buttons[1].props.as,
+    components.Link,
+    "connect navigates client-side rather than rendering a plain button",
+  );
 });
 
 test("the failed CTA keeps the connect entry alongside retry", () => {
@@ -327,4 +339,5 @@ test("the failed CTA keeps the connect entry alongside retry", () => {
   const buttons = findAllByType(tree, components.Button);
   assert.equal(buttons.length, 2);
   assert.equal(buttons[1].props.to, EXTENSIONS_ROUTE);
+  assert.equal(buttons[1].props.as, components.Link);
 });
