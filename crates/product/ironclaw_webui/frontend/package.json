@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "5.87.4",
-    "dompurify": "3.4.12",
+    "dompurify": "3.4.13",
     "event-source-plus": "0.1.15",
     "gemoji": "8.0.0",
     "highlight.js": "11.11.1",
