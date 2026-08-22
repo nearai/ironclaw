@@ -996,6 +996,11 @@ def build_plan(
             root_partitions.add(root_inventory[path])
             reasons.append(f"root test changed: {path}")
             continue
+        suite_root = f"tests/{Path(path).parts[1]}.rs" if len(Path(path).parts) > 2 else ""
+        if path.startswith("tests/") and suite_root in root_inventory:
+            root_partitions.add(root_inventory[suite_root])
+            reasons.append(f"root suite member changed: {path}")
+            continue
         if (
             path.startswith("tests/support/reborn_parity_qa/")
             or path == "tests/support_unit_tests.rs"

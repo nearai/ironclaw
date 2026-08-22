@@ -1665,6 +1665,22 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(plan["mode"], "selected")
                 self.assertEqual(plan["root_partitions"], [inventory[reader]])
 
+    def test_suite_member_file_selects_owning_root_partition(self) -> None:
+        """A file inside a root-suite member directory maps to the owning
+        fat binary's partition (e.g. `tests/reborn_scope_isolation_suite/
+        reborn_agent_scope_isolation_parity.rs` -> `tests/
+        reborn_scope_isolation_suite.rs`'s partition), not an unmapped path.
+        """
+        plan = self.plan(
+            "pull_request",
+            ["tests/reborn_scope_isolation_suite/reborn_agent_scope_isolation_parity.rs"],
+        )
+        inventory = planner._root_test_partitions()
+        self.assertEqual(
+            plan["root_partitions"],
+            [inventory["tests/reborn_scope_isolation_suite.rs"]],
+        )
+
     def test_sibling_container_inputs_still_require_a_decision(self) -> None:
         """`docker/` is classified per-file for the same reason repo-root
         `scripts/` is: a blanket prefix would silently absorb paths with no

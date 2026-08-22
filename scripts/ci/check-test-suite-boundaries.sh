@@ -97,6 +97,43 @@ if [ -d tests/integration ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 2b. Partition guard, suite-member variant: a root suite's member files
+#     (e.g. tests/reborn_scope_isolation_suite/*.rs) don't carry the mount
+#     themselves -- it moves to the owning fat binary (tests/<suite>.rs,
+#     T2's consolidation convention). A member that uses a parity_qa_support
+#     module requires its owning tests/<dir>.rs to exist and declare the
+#     mount.
+# ---------------------------------------------------------------------------
+
+mapfile -t suite_member_files < <(
+  find tests -mindepth 2 -maxdepth 2 -type f -name '*.rs' -path 'tests/reborn_*' | LC_ALL=C sort
+)
+
+for file in "${suite_member_files[@]}"; do
+  uses_parity_qa_module=false
+  for module in "${parity_qa_modules[@]}"; do
+    if grep -qE "parity_qa_support::${module}\b" "${file}"; then
+      uses_parity_qa_module=true
+      break
+    fi
+  done
+
+  if [ "${uses_parity_qa_module}" != true ]; then
+    continue
+  fi
+
+  suite_dir="$(dirname "${file}")"
+  owning_root="${suite_dir}.rs"
+  if [ ! -f "${owning_root}" ]; then
+    fail "${file} references a parity_qa_support module but its owning root" \
+      "binary ${owning_root} does not exist"
+  elif ! grep -qE "${mount_pattern}" "${owning_root}"; then
+    fail "${file} references a parity_qa_support module but its owning root" \
+      "binary ${owning_root} does not declare the #[path = \"support/reborn_parity_qa/mod.rs\"] mount"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # 3. Regression guard: the pre-restructure tests/support/reborn/ dir must not
 #    reappear (superseded by tests/support/reborn_parity_qa/).
 # ---------------------------------------------------------------------------

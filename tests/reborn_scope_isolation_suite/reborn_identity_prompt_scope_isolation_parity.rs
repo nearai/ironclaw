@@ -1,16 +1,11 @@
-#[allow(dead_code)]
-#[path = "support/reborn_parity_qa/mod.rs"]
-mod parity_qa_support;
-#[allow(dead_code)]
-#[path = "integration/support/mod.rs"]
-mod reborn_support;
-mod support;
-
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
+use crate::parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
+use crate::parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use crate::reborn_support::harness::RecordingTestCapabilityPort;
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
@@ -20,9 +15,6 @@ use ironclaw_loop_host::{
     IdentityApplicability, IdentityFileName,
 };
 use ironclaw_turns::{LoopMessageRef, TurnStatus};
-use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
-use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
-use reborn_support::harness::RecordingTestCapabilityPort;
 
 const ALICE_IDENTITY: &str = "Alice is a software engineer who lives in Seattle.";
 const BOB_IDENTITY: &str = "Bob is a marine biologist who lives in Miami.";

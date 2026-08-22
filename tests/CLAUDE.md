@@ -63,7 +63,7 @@ Tier-selection rule: `.claude/rules/testing.md`.
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
 Totals: **59** group scenarios · **62** flat integration bins (55 in
-`tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
+`tests/integration/`, 7 in `tests/integration/auth/`) · **30** top-level Rust bins ·
 **102** Python scenario files (**870** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
@@ -303,7 +303,7 @@ channel-delivery journeys (two-lane model):
 
 ---
 
-## 5. Binary, parity & QA-trace bins — `tests/*.rs` (39)
+## 5. Binary, parity & QA-trace bins — `tests/*.rs` (30)
 
 **QA workflow phrases** — real manual-QA sentences, replayed against the Reborn binary.
 | The user asks… | Evidence |
@@ -326,16 +326,20 @@ channel-delivery journeys (two-lane model):
 | The shipped Docker image has a usable runtime home | `dockerfile_runtime_home.rs` (19) |
 | Live GitHub API contracts still hold (ignored canary, needs a real PAT) | `reborn_live_github_pat_contract.rs` |
 
-**Scope isolation parity** — one bin per boundary; each proves data from one scope is
-unreachable from another: `reborn_agent_scope_isolation_parity.rs`,
-`reborn_project_scope_isolation_parity.rs`,
-`reborn_identity_{tenant,project,prompt}_scope_isolation_parity.rs`,
-`reborn_tenant_binding_scope_isolation_parity.rs`,
-`reborn_thread_binding_isolation_parity.rs`,
-`reborn_direct_chat_user_scope_isolation_parity.rs`,
-`reborn_http_network_scope_isolation_parity.rs`,
-`reborn_adapter_installation_scope_isolation_parity.rs`,
-`reborn_wrong_scope_access_isolation_parity.rs`.
+**Scope isolation parity** — one module per boundary, consolidated into the single
+`reborn_scope_isolation_suite.rs` fat binary (T2 consolidation: 11 former standalone
+bins now link as one, via `#[path]`-mounted modules under
+`tests/reborn_scope_isolation_suite/`); each proves data from one scope is
+unreachable from another:
+`tests/reborn_scope_isolation_suite/reborn_agent_scope_isolation_parity.rs`,
+`tests/reborn_scope_isolation_suite/reborn_project_scope_isolation_parity.rs`,
+`tests/reborn_scope_isolation_suite/reborn_identity_{tenant,project,prompt}_scope_isolation_parity.rs`,
+`tests/reborn_scope_isolation_suite/reborn_tenant_binding_scope_isolation_parity.rs`,
+`tests/reborn_scope_isolation_suite/reborn_thread_binding_isolation_parity.rs`,
+`tests/reborn_scope_isolation_suite/reborn_direct_chat_user_scope_isolation_parity.rs`,
+`tests/reborn_scope_isolation_suite/reborn_http_network_scope_isolation_parity.rs`,
+`tests/reborn_scope_isolation_suite/reborn_adapter_installation_scope_isolation_parity.rs`,
+`tests/reborn_scope_isolation_suite/reborn_wrong_scope_access_isolation_parity.rs`.
 
 **Trace parity** — recorded-trace equivalence for tool families and error paths:
 `reborn_trace_core_builtin_tools_parity.rs`, `reborn_trace_file_tools_parity.rs`,

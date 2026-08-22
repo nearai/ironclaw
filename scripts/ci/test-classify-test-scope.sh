@@ -225,6 +225,14 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn root suite member (T2 consolidation: tests/reborn_*'s prefix match already covers member-dir paths)" \
+  "tests/reborn_scope_isolation_suite/reborn_agent_scope_isolation_parity.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn qa trace fixture" \
   "tests/fixtures/llm_traces/reborn_qa/routine_health_ping.json" \
   "docs_only=false

@@ -1,20 +1,12 @@
-#[allow(dead_code)]
-#[path = "support/reborn_parity_qa/mod.rs"]
-mod parity_qa_support;
-#[allow(dead_code)]
-#[path = "integration/support/mod.rs"]
-mod reborn_support;
-mod support;
-
+use crate::parity_qa_support::{
+    binary_e2e::{RebornBinaryE2EHarness, trace_tool_call_response},
+    model_replay::RebornTraceReplayModelGateway,
+};
+use crate::reborn_support::harness::RecordingTestCapabilityPort;
 use ironclaw_host_api::ids::{TenantId, UserId};
 use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{TurnActor, TurnScope, TurnStatus};
-use parity_qa_support::{
-    binary_e2e::{RebornBinaryE2EHarness, trace_tool_call_response},
-    model_replay::RebornTraceReplayModelGateway,
-};
-use reborn_support::harness::RecordingTestCapabilityPort;
 
 #[tokio::test]
 async fn reborn_wrong_scope_access_isolation_parity() {

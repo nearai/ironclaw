@@ -159,4 +159,4 @@ async fn reborn_qa_slack_bug_prefix_message_runs_logging_action() {
 // part Sent), the `DeliveryCoordinator` suite in
 // `crates/product/ironclaw_assistant/tests/outbound_delivery_contract.rs`
 // (`coordinator_notice_is_source_routed_and_persists_before_egress` et al.),
-// and `tests/reborn_adapter_installation_scope_isolation_parity.rs`.
+// and `tests/reborn_scope_isolation_suite/reborn_adapter_installation_scope_isolation_parity.rs`.

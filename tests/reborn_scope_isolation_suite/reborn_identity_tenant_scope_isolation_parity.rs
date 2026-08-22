@@ -1,14 +1,12 @@
-#[allow(dead_code)]
-#[path = "support/reborn_parity_qa/mod.rs"]
-mod parity_qa_support;
-#[allow(dead_code)]
-#[path = "integration/support/mod.rs"]
-mod reborn_support;
-mod support;
-
 use std::{collections::HashMap, sync::Arc};
 
+use tokio::sync::{RwLock, watch};
+
+use crate::parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};
+use crate::parity_qa_support::model_replay::RebornTraceReplayModelGateway;
+use crate::reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_loop_contracts::{LoopRunContext, PromptMode};
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -16,102 +14,101 @@ use ironclaw_loop_host::{
     IdentityApplicability, IdentityFileName,
 };
 use ironclaw_turns::{LoopMessageRef, TurnStatus};
-use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};
-use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
-use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
-use tokio::sync::{RwLock, watch};
 
-const PROJECT_ALPHA_IDENTITY: &str = "Alice project alpha identity: carries amber notebook.";
-const PROJECT_BETA_IDENTITY: &str = "Alice project beta identity: carries violet notebook.";
+const TENANT_ALPHA_IDENTITY: &str = "Alice alpha tenant identity: likes rust ferris.";
+const TENANT_BETA_IDENTITY: &str = "Alice beta tenant identity: likes neon orchids.";
 
 #[tokio::test]
-async fn reborn_identity_project_scope_isolation_parity() {
-    const ROOM: &str = "room-project-identity-shared";
+async fn reborn_identity_tenant_scope_isolation_parity() {
+    const ROOM: &str = "room-tenant-identity-shared";
 
     let shared_storage = RebornHarnessSharedStorage::new().expect("shared storage");
-    let identity_source = Arc::new(ProjectIdentitySource::default());
-    let project_alpha = test_product_scope(
-        "tenant-project-identity-e2e",
+    let identity_source = Arc::new(TenantIdentitySource::default());
+    let tenant_alpha = test_product_scope(
+        "tenant-alpha-identity-e2e",
         "host-user",
         "agent-e2e",
-        Some("project-alpha-e2e"),
+        Some("project-e2e"),
     );
-    let project_beta = test_product_scope(
-        "tenant-project-identity-e2e",
+    let tenant_beta = test_product_scope(
+        "tenant-beta-identity-e2e",
         "host-user",
         "agent-e2e",
-        Some("project-beta-e2e"),
+        Some("project-e2e"),
     );
 
     let mut alpha = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
-            "project alpha identity reply",
+            "tenant alpha identity reply",
         )]),
         RecordingTestCapabilityPort::echo(),
-        project_alpha,
+        tenant_alpha,
         identity_source.clone(),
-        ironclaw_extension_contracts::channel_adapter::ProductTriggerReason::DirectChat,
+        ProductTriggerReason::DirectChat,
         "reborn-test",
         "install-1",
         "alice",
         shared_storage.clone(),
     )
     .await
-    .expect("project alpha harness");
+    .expect("tenant alpha harness");
     let mut beta = RebornBinaryE2EHarness::with_model_gateway_scope_identity_source_trigger_installation_shared_storage(
         ROOM,
         RebornTraceReplayModelGateway::with_responses([HostManagedModelResponse::assistant_reply(
-            "project beta identity reply",
+            "tenant beta identity reply",
         )]),
         RecordingTestCapabilityPort::echo(),
-        project_beta,
+        tenant_beta,
         identity_source.clone(),
-        ironclaw_extension_contracts::channel_adapter::ProductTriggerReason::DirectChat,
+        ProductTriggerReason::DirectChat,
         "reborn-test",
         "install-1",
         "alice",
         shared_storage,
     )
     .await
-    .expect("project beta harness");
+    .expect("tenant beta harness");
 
     let alpha_turn = alpha
-        .submit_text_for(ROOM, "alice", "event-project-alpha-identity", "alpha asks")
+        .submit_text_for(ROOM, "alice", "event-tenant-alpha-identity", "alpha asks")
         .await
-        .expect("submit project alpha turn");
+        .expect("submit tenant alpha turn");
+    let beta_turn = beta
+        .submit_text_for(ROOM, "alice", "event-tenant-beta-identity", "beta asks")
+        .await
+        .expect("submit tenant beta turn");
 
     identity_source
         .set_identity(
-            &ProjectIdentityKey::from_turn(&alpha_turn),
-            PROJECT_ALPHA_IDENTITY,
+            alpha_turn.scope.tenant_id.as_str(),
+            alpha_turn.actor.user_id.as_str(),
+            TENANT_ALPHA_IDENTITY,
+        )
+        .await;
+    identity_source
+        .set_identity(
+            beta_turn.scope.tenant_id.as_str(),
+            beta_turn.actor.user_id.as_str(),
+            TENANT_BETA_IDENTITY,
         )
         .await;
 
     alpha.start();
+    beta.start();
+
     alpha
         .wait_for_submitted_status(&alpha_turn, TurnStatus::Completed)
         .await
-        .expect("project alpha completed");
-    alpha.shutdown().await;
-
-    let beta_turn = beta
-        .submit_text_for(ROOM, "alice", "event-project-beta-identity", "beta asks")
-        .await
-        .expect("submit project beta turn");
-    identity_source
-        .set_identity(
-            &ProjectIdentityKey::from_turn(&beta_turn),
-            PROJECT_BETA_IDENTITY,
-        )
-        .await;
-
-    beta.start();
+        .expect("tenant alpha completed");
     beta.wait_for_submitted_status(&beta_turn, TurnStatus::Completed)
         .await
-        .expect("project beta completed");
+        .expect("tenant beta completed");
 
-    assert_ne!(alpha_turn.scope.project_id, beta_turn.scope.project_id);
+    assert_ne!(
+        alpha_turn.scope.tenant_id, beta_turn.scope.tenant_id,
+        "test must exercise distinct tenant scopes"
+    );
 
     let alpha_prompts: Vec<String> = alpha
         .model_requests()
@@ -126,23 +123,24 @@ async fn reborn_identity_project_scope_isolation_parity() {
 
     assert_prompt_contains_only(
         &alpha_prompts,
-        PROJECT_ALPHA_IDENTITY,
-        PROJECT_BETA_IDENTITY,
-        "project alpha",
+        TENANT_ALPHA_IDENTITY,
+        TENANT_BETA_IDENTITY,
+        "tenant alpha",
     );
     assert_prompt_contains_only(
         &beta_prompts,
-        PROJECT_BETA_IDENTITY,
-        PROJECT_ALPHA_IDENTITY,
-        "project beta",
+        TENANT_BETA_IDENTITY,
+        TENANT_ALPHA_IDENTITY,
+        "tenant beta",
     );
 
     let seen = identity_source.seen_keys().await;
-    assert!(seen.contains(&ProjectIdentityKey::from_turn(&alpha_turn)));
-    assert!(seen.contains(&ProjectIdentityKey::from_turn(&beta_turn)));
+    assert!(seen.contains(&TenantIdentityKey::from_turn(&alpha_turn)));
+    assert!(seen.contains(&TenantIdentityKey::from_turn(&beta_turn)));
 
     alpha.assert_model_exhausted();
     beta.assert_model_exhausted();
+    alpha.shutdown().await;
     beta.shutdown().await;
 }
 
@@ -162,38 +160,32 @@ fn assert_prompt_contains_only(prompts: &[String], expected: &str, forbidden: &s
             && prompts
                 .iter()
                 .all(|prompt| prompt.contains(expected) && !prompt.contains(forbidden)),
-        "{label} prompt should contain only matching project identity; prompts={prompts:#?}"
+        "{label} prompt should contain only matching tenant identity; prompts={prompts:#?}"
     );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ProjectIdentityKey {
+struct TenantIdentityKey {
     tenant_id: String,
     user_id: String,
-    project_id: Option<String>,
 }
 
-impl ProjectIdentityKey {
-    fn from_turn(turn: &parity_qa_support::binary_e2e::SubmittedTurn) -> Self {
+impl TenantIdentityKey {
+    fn from_turn(turn: &crate::parity_qa_support::binary_e2e::SubmittedTurn) -> Self {
         Self {
             tenant_id: turn.scope.tenant_id.as_str().to_string(),
             user_id: turn.actor.user_id.as_str().to_string(),
-            project_id: turn
-                .scope
-                .project_id
-                .as_ref()
-                .map(|id| id.as_str().to_string()),
         }
     }
 }
 
-struct ProjectIdentitySource {
-    identities: RwLock<HashMap<ProjectIdentityKey, HostIdentityContextCandidate>>,
-    seen: RwLock<Vec<ProjectIdentityKey>>,
+struct TenantIdentitySource {
+    identities: RwLock<HashMap<TenantIdentityKey, HostIdentityContextCandidate>>,
+    seen: RwLock<Vec<TenantIdentityKey>>,
     identity_changed: watch::Sender<()>,
 }
 
-impl Default for ProjectIdentitySource {
+impl Default for TenantIdentitySource {
     fn default() -> Self {
         let (identity_changed, _) = watch::channel(());
         Self {
@@ -204,25 +196,31 @@ impl Default for ProjectIdentitySource {
     }
 }
 
-impl ProjectIdentitySource {
-    async fn set_identity(&self, key: &ProjectIdentityKey, content: &str) {
+impl TenantIdentitySource {
+    async fn set_identity(&self, tenant_id: &str, user_id: &str, content: &str) {
         let name = IdentityFileName::new("IDENTITY.md").expect("identity file name");
         let candidate = HostIdentityContextCandidate::new_installed_summary_only(
             name,
             content.to_string(),
             IdentityApplicability::Always,
         );
-        self.identities.write().await.insert(key.clone(), candidate);
+        self.identities.write().await.insert(
+            TenantIdentityKey {
+                tenant_id: tenant_id.to_string(),
+                user_id: user_id.to_string(),
+            },
+            candidate,
+        );
         let _ = self.identity_changed.send(());
     }
 
-    async fn seen_keys(&self) -> Vec<ProjectIdentityKey> {
+    async fn seen_keys(&self) -> Vec<TenantIdentityKey> {
         self.seen.read().await.clone()
     }
 }
 
 #[async_trait]
-impl HostIdentityContextSource for ProjectIdentitySource {
+impl HostIdentityContextSource for TenantIdentitySource {
     async fn load_identity_candidates(
         &self,
         run_context: &LoopRunContext,
@@ -231,14 +229,9 @@ impl HostIdentityContextSource for ProjectIdentitySource {
         let actor = run_context
             .actor()
             .ok_or(HostIdentityContextBuildError::SourceUnavailable)?;
-        let key = ProjectIdentityKey {
+        let key = TenantIdentityKey {
             tenant_id: run_context.scope.tenant_id.as_str().to_string(),
             user_id: actor.user_id.as_str().to_string(),
-            project_id: run_context
-                .scope
-                .project_id
-                .as_ref()
-                .map(|id| id.as_str().to_string()),
         };
         {
             let mut seen = self.seen.write().await;
