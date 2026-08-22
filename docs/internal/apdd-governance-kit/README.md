@@ -5,7 +5,9 @@ stack-agnostic governance framework for building UI software with an AI coding
 agent — and a proposal + phased plan for integrating it into IronClaw.
 
 **Source evaluated:** [`rdisandro/apdd-kit`](https://github.com/rdisandro/apdd-kit)
-@ `61daaa2` (evaluated from a local clone).
+@ `61daaa2` (evaluated from a local clone). The kit repository is **private**;
+[EVALUATION.md](EVALUATION.md) §1 is the self-contained description of what was
+evaluated for reviewers without access.
 
 ## TL;DR — the decision
 
@@ -38,7 +40,9 @@ A visual, diagram-first overview of the kit's benefits, functionality, and the
 agentic-OS framework — plus the IronClaw overlap/gap map and rollout — lives in
 [explorer.html](explorer.html): a **self-contained** page (no build step; open
 in any browser, or render it without cloning via
-[html-preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/eval/apdd-governance-kit/docs/internal/apdd-governance-kit/explorer.html)).
+[html-preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/main/docs/internal/apdd-governance-kit/explorer.html) —
+that link resolves once this lands on `main`; before then, open the file from
+the PR branch).
 It is a convenience view; the Markdown in this folder is the source of truth.
 
 ## What this branch contains

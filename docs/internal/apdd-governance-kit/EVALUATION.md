@@ -3,7 +3,11 @@
 **Status:** Evaluation (no code changes proposed in this branch — docs only)
 **Date:** 2026-08-04
 **Author:** Ron (with Claude Code)
-**Source:** [`rdisandro/apdd-kit`](https://github.com/rdisandro/apdd-kit) @ `61daaa2` ("APDD Kit"), evaluated from a local clone.
+**Source:** [`rdisandro/apdd-kit`](https://github.com/rdisandro/apdd-kit) @ `61daaa2`
+("APDD Kit"), evaluated from a local clone. **The kit repository is private** —
+reviewers without access should treat this document (and the quoted structure in
+§1) as the reproducible description of what was evaluated; ask the author for
+access to diff it against the source.
 
 > This document evaluates the **APDD Kit** ("Agent Product Design &
 > Development") as a candidate governance framework for IronClaw. It describes
@@ -116,12 +120,13 @@ everywhere because they are VCS/CI features, not agent features.
 IronClaw is **not** a greenfield adopter. It has independently converged on a
 large fraction of the kit's model. Concretely, in this repo today:
 
-- **Path-scoped auto-loading rules already exist** — `.claude/rules/` holds 14
+- **Path-scoped auto-loading rules already exist** — `.claude/rules/` holds 15
   rules (`architecture.md`, `cargo-features.md`, `database.md`,
-  `error-handling.md`, `gateway-events.md`, `lifecycle.md`,
+  `error-handling.md`, `events.md`, `guidance-maintenance.md`, `lifecycle.md`,
   `review-discipline.md`, `safety-and-sandbox.md`, `skills.md`, `testing.md`,
   `tool-evidence.md`, `tools.md`, `type-placement.md`, `types.md`). This *is* the
-  kit's Layer ②.
+  kit's Layer ②. (Inventory verified against this branch's tree; `ls .claude/rules/`
+  is the live list — the count moves, the mechanism does not.)
 - **Rule 2 is already enforced deterministically** — the commit-msg hook and
   [`.github/workflows/regression-test-check.yml`](../../../.github/workflows/regression-test-check.yml)
   require a regression test with every bug fix; [`.claude/rules/testing.md`](../../../.claude/rules/testing.md)
@@ -162,15 +167,20 @@ The WebUI frontend ([`crates/product/ironclaw_webui/frontend`](../../../crates/p
 is **React 19 + Vite + Tailwind v4 + TypeScript + Vitest** — precisely the stack
 the design track targets. It already has:
 
-- an emerging **`src/design-system/`** (`theme.ts`, `theme.test.tsx`) and
-  `src/styles/theme-colors.test.ts` — a design system *without a constitution*;
+- a real, growing **`src/design-system/`** — ~15 shipped primitives
+  (`button`, `input`, `select-menu`, `search-field`, `switch`, `modal`,
+  `confirm-dialog`, `card`, `badge`, `inline-notice`, `spinner`, `icons`,
+  `primitives`, plus `theme.ts`/`types.ts`), each with unit tests, and
+  `src/styles/theme-colors.test.ts` — a design system *without a constitution*
+  and without an isolated workbench;
 - **no Storybook configured** — no `.storybook/`, and Storybook is a declared
   dependency of **neither `package.json` nor `pnpm-lock.yaml`**. (A stray
   `storybook`/`@storybook` copy exists in the gitignored local `node_modules`,
   but it is not lockfile-backed — a clean `pnpm install` would not restore it,
   so it signals nothing about intent);
-- a real component/page tree (`src/components/`, `src/pages/{chat,missions,
-  projects,settings,extensions,onboarding,…}`), and light/dark theming.
+- a real component/page tree (`src/components/`, `src/pages/{chat,automations,
+  jobs,workspace,projects,settings,extensions,onboarding,admin,…}`), and
+  light/dark theming.
 
 In other words, the single biggest gap the kit fills (design governance) lands
 on a frontend that is a small, well-understood step from adopting it — a pinned
@@ -187,7 +197,7 @@ informal / not wired as the kit does) · **❌ Gap** (absent).
 
 | Kit component | Layer | IronClaw today | Verdict |
 |---|---|---|---|
-| Path-scoped `.claude/rules/*.md` (`paths:` auto-load) | ② | 14 rules in `.claude/rules/` | **✅ Have** — same mechanism |
+| Path-scoped `.claude/rules/*.md` (`paths:` auto-load) | ② | 15 rules in `.claude/rules/` | **✅ Have** — same mechanism |
 | Rule 2: critical fix → regression test + doc update | ①/④ | commit-msg hook + `regression-test-check.yml` enforce a **regression test or reviewed exemption** (not the doc-update, which stays convention in `testing.md`/CLAUDE.md) | **✅ Have** — the *test* is CI-gated (stronger than kit); the doc-update half is convention |
 | Enforcement: hooks + CI, self-skipping, aggregate gate | ④ | ~30 workflows, path-filtered jobs | **✅ Have** |
 | Reusable, user-invocable skills | — | `.claude/skills/` (reborn-feature, testing, review…) | **✅ Have** |
@@ -205,7 +215,7 @@ informal / not wired as the kit does) · **❌ Gap** (absent).
 | Design/UX auto-loading rules (styling, a11y, taxonomy) | design | none | **❌ Gap** |
 | Component taxonomy (5-tier purity model) | design | implicit in `components/` vs `pages/` | **◑ Partial** — not codified |
 | Design tokens governance (no raw hex, light+dark) | design | `design-system/theme.ts` exists, ungoverned | **◑ Partial** |
-| Storybook workbench + MCP + stories-as-tests | design | in `node_modules`, **unconfigured** | **❌ Gap** (high-value, low-friction) |
+| Storybook workbench + MCP + stories-as-tests | design | **not a declared dependency** (absent from `package.json` and `pnpm-lock.yaml`); no `.storybook/`, no `*.stories.*` | **❌ Gap** (high-value, low-friction — a pinned `pnpm add -D` away) |
 | Accessibility gate (contrast, focus, semantics) | design | none formal | **❌ Gap** |
 | Codebase knowledge graph + `openwiki/` | — | present | **Kit lacks this** — IronClaw is ahead |
 

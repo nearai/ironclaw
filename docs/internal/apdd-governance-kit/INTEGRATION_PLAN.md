@@ -18,7 +18,7 @@ renamed later.
 | Step | Action | Target |
 |---|---|---|
 | 0.1 | Decide **`DESIGN.md` location**. Recommendation: **`docs/internal/design/DESIGN.md`** — under the `internal/` tree already fenced by `.mintignore`, so it versions with the code and stays out of the public docs site, consistent with IronClaw's "new internal docs live under `docs/internal/`" rule. **Do not** use `docs/design/DESIGN.md`: an unfenced `.md` under `docs/` (not in `docs.json` nav or marked `hidden:`) gets published. Alternative: repo-root `DESIGN.md` if the team treats it as a peer of `CLAUDE.md`/`AGENTS.md` (root files are boundary-exempt). Either way, add a one-line pointer from CLAUDE.md. | — |
-| 0.2 | Decide **feature-docs home** for WebUI features: recommend `docs/features/<slug>/` (distinct from the dated `docs/internal/plans/`), or the lightweight `FEATURE.md` tier. | — |
+| 0.2 | Decide **feature-docs home** for WebUI features: recommend `docs/internal/features/<slug>/` (distinct from the dated `docs/internal/plans/`), or the lightweight `FEATURE.md` tier. | — |
 | 0.3 | Decide **token prefix** and confirm the design-system substitutions (React, Tailwind v4 CSS-config, `ironclaw` prefix). | `src/design-system/` |
 | 0.4 | Confirm **skip list** (backend MVVM rules, kit CI/hooks, N/A modules) with reviewers. | — |
 
@@ -90,11 +90,11 @@ Rule 1 discoverability — without bureaucratizing backend work.
 
 | Step | Action | Target |
 |---|---|---|
-| 3.1 | Create `docs/features/_templates/` from the kit's `FEATURE_SPEC` / `IMPLEMENTATION_PLAN` / `TEST_PLAN` / `FEATURE_LITE` / `FEATURE_REGISTRY` templates (substitute IronClaw terms). | `docs/features/_templates/` |
-| 3.2 | Pilot with **one real WebUI feature** — e.g. adopt an existing surface (onboarding, chat, or the agent-activity-streaming work) into a `docs/features/<slug>/FEATURE.md` (lightweight tier) to prove the flow end-to-end. | `docs/features/<slug>/` |
+| 3.1 | Create `docs/internal/features/_templates/` from the kit's `FEATURE_SPEC` / `IMPLEMENTATION_PLAN` / `TEST_PLAN` / `FEATURE_LITE` / `FEATURE_REGISTRY` templates (substitute IronClaw terms). | `docs/internal/features/_templates/` |
+| 3.2 | Pilot with **one real WebUI feature** — e.g. adopt an existing surface (onboarding, chat, or the agent-activity-streaming work) into a `docs/internal/features/<slug>/FEATURE.md` (lightweight tier) to prove the flow end-to-end. | `docs/internal/features/<slug>/` |
 | 3.3 | Add a **`feature-workflow` design-scoped rule** (adapted from `apdd-kit/rules/feature-workflow.md`) with `paths:` limited to `crates/product/ironclaw_webui/frontend/src/**` (+ product-surface crates if desired) — so Rule 1 fires only where a spec pays for itself. | `.claude/rules/` |
 | 3.4 | Add lightweight `// Feature: <slug>` headers to **frontend** feature files only; keep backend discovery on the knowledge graph + `openwiki/`. | frontend `src/**` |
-| 3.5 | Seed the registry; document that the feature-doc header `Status` is canonical and the registry mirrors it. | `docs/features/_templates/README.md` |
+| 3.5 | Seed the registry; document that the feature-doc header `Status` is canonical and the registry mirrors it. | `docs/internal/features/_templates/README.md` |
 
 **Exit:** one feature fully governed by the workflow; the rule auto-loads on
 frontend edits; clear scoping note that backend uses the existing model.
@@ -111,9 +111,9 @@ regression if Phase 2 proved its worth.
 
 | Step | Action | Target |
 |---|---|---|
-| 4.1 | Catalog real CUJs in `CRITICAL_FLOWS.md`: onboarding/pairing, a chat turn end-to-end, extension auth (Slack/Telegram/Gmail), mission/routine run, notification delivery — each with hot-path files + a smoke checklist. Cross-reference existing e2e/Playwright coverage. | `docs/qa/CRITICAL_FLOWS.md` |
+| 4.1 | Catalog real CUJs in `CRITICAL_FLOWS.md`: onboarding/pairing, a chat turn end-to-end, extension auth (Slack/Telegram/Gmail), automation/job run, notification delivery — each with hot-path files + a smoke checklist. Cross-reference existing e2e/Playwright coverage. | `docs/internal/qa/CRITICAL_FLOWS.md` |
 | 4.2 | Add `.claude/rules/critical-flows.md` with `paths:` = the hot-path files, requiring the matching CUJ be run/considered before "done." | `.claude/rules/` |
-| 4.3 | Map each CUJ to its existing automated coverage (`reborn-e2e`, `reborn-playwright`) and flag any CUJ with no automation as a coverage gap. | `docs/qa/CRITICAL_FLOWS.md` |
+| 4.3 | Map each CUJ to its existing automated coverage (`reborn-e2e`, `reborn-playwright`) and flag any CUJ with no automation as a coverage gap. | `docs/internal/qa/CRITICAL_FLOWS.md` |
 | 4.4 | *(Optional)* Add **Chromatic** visual regression for Storybook stories if Phase 2 adoption is healthy and the CI budget allows. | `.storybook/` + CI |
 
 **Exit:** a named regression baseline tied to real automation; a hot-path edit
@@ -168,13 +168,13 @@ deleting only the added docs would leave stale pointers and active rules behind.
 **Added files to delete** — delete **only the exact files this rollout added**,
 never a blanket glob (each phase records the files it introduces; do not delete
 feature docs or stories authored by other work). Paths below assume the Phase 0
-defaults (§0.1 `docs/internal/design/DESIGN.md`, §0.2 `docs/features/`); **if Phase 0
+defaults (§0.1 `docs/internal/design/DESIGN.md`, §0.2 `docs/internal/features/`); **if Phase 0
 resolves a different location, record it in the decisions note and list that
 exact path here instead**:
 - `docs/internal/design/DESIGN.md` *(or the §0.1-resolved location)*
 - `.claude/rules/design.md` (and `design-a11y.md` if created), `.claude/rules/feature-workflow.md`, `.claude/rules/critical-flows.md`
-- `docs/qa/CRITICAL_FLOWS.md`
-- the `docs/features/_templates/` scaffold and the specific piloted `docs/features/<slug>/` folder(s) this rollout created *(or the §0.2-resolved location)* — **not** a blanket `docs/features/` delete
+- `docs/internal/qa/CRITICAL_FLOWS.md`
+- the `docs/internal/features/_templates/` scaffold and the specific piloted `docs/internal/features/<slug>/` folder(s) this rollout created *(or the §0.2-resolved location)* — **not** a blanket `docs/internal/features/` delete
 - the specific `.storybook/` files this rollout creates — `main.ts`, `preview.ts`, `vitest.setup.ts` (under `crates/product/ironclaw_webui/frontend/.storybook/`) — plus the specific `*.stories.tsx` files this rollout added. `.storybook/` does **not** exist in the frontend today, so removing the directory is safe **only after verifying it is still rollout-created** — otherwise delete just the listed files. **Not** every `*.stories.tsx`.
 
 **Edits to existing files to revert with targeted patches** (revert only the
@@ -205,7 +205,7 @@ here** (those are Check 2):
 
 ```bash
 rg --hidden --glob '!.git' --glob '!**/node_modules/**' --glob '!docs/internal/apdd-governance-kit/**' -n \
-  'DESIGN\.md|CRITICAL_FLOWS|docs/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md'
+  'DESIGN\.md|CRITICAL_FLOWS|docs/internal/features|\.storybook|design\.md|design-a11y\.md|feature-workflow\.md|critical-flows\.md'
 ```
 
 If Phase 0 (§0.1/§0.2) resolved non-default `DESIGN.md`/feature-docs locations,
@@ -236,7 +236,7 @@ the backstop.
 ## Open questions for reviewers
 
 1. **`DESIGN.md` at `docs/internal/design/` (recommended) or repo-root** (as a `CLAUDE.md`/`AGENTS.md` peer)? `docs/design/` is ruled out by the publication boundary — an unfenced `docs/` page would be published.
-2. **Feature-docs home** — `docs/features/<slug>/` vs. folding into `docs/internal/plans/`?
+2. **Feature-docs home** — `docs/internal/features/<slug>/` vs. folding into `docs/internal/plans/`?
 3. **Chromatic** — is a paid visual-regression service in scope, or stay on the
    free Vitest/a11y subset?
 4. **Scope of the docs-first `paths:`** — frontend only, or include specific
