@@ -1,0 +1,40 @@
+schema_version = "reborn.extension_manifest.v3"
+id = "xquik"
+name = "Xquik"
+version = "0.1.0"
+description = "Search tweets and X (Twitter) profiles, read timelines, run monitors and exports, and perform approved account actions through Xquik MCP."
+trust = "third_party"
+
+[mcp]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+server = "https://xquik.com/mcp"
+namespace = "xquik"
+max_tools = 8
+default_permission = "ask"
+effects = ["network", "use_secret", "external_write"]
+
+[[mcp.credentials]]
+handle = "mcp_xquik_access_token"
+vendor = "xquik"
+scopes = ["mcp:tools"]
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+# Xquik supports OAuth 2.1 dynamic client registration. Omitting
+# client_credentials makes IronClaw register a public PKCE client.
+[auth.xquik]
+method = "oauth2_code"
+display_name = "Xquik account"
+authorization_endpoint = "https://xquik.com/api/oauth/authorize"
+token_endpoint = "https://xquik.com/api/oauth/token"
+pkce = "s256"
+scopes = ["mcp:tools"]
+
+# Access tokens expire after one hour. Refresh tokens rotate on every use.
+[auth.xquik.refresh]
+rotates_refresh_token = true
+
+[auth.xquik.token_response]
+access_token = "/access_token"
+refresh_token = "/refresh_token"
+expires_in = "/expires_in"
+scope = { path = "/scope", missing = "fallback_to_requested" }

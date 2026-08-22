@@ -1597,6 +1597,46 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
     }
 
     #[test]
+    fn bundled_xquik_extension_projects_its_dynamic_oauth_recipe() {
+        let bundles = crate::test_support::first_party_bundles_from_inventory();
+        let recipes = AvailableExtensionCatalog::bundled_vendor_recipes(&bundles).unwrap();
+        let xquik = recipes
+            .iter()
+            .find(|recipe| recipe.vendor == "xquik")
+            .expect("Xquik OAuth recipe should be available before installation");
+
+        assert_eq!(
+            xquik.token_exchange_resource.as_deref(),
+            Some("https://xquik.com/mcp")
+        );
+        let ironclaw_extension_contracts::recipe::VendorAuthRecipe::Oauth2Code(recipe) =
+            &xquik.recipe
+        else {
+            panic!("Xquik should use the OAuth authorization-code flow");
+        };
+        assert_eq!(
+            recipe.authorization_endpoint.to_string(),
+            "https://xquik.com/api/oauth/authorize"
+        );
+        assert_eq!(
+            recipe.token_endpoint.to_string(),
+            "https://xquik.com/api/oauth/token"
+        );
+        assert_eq!(recipe.scopes, ["mcp:tools"]);
+        assert_eq!(
+            recipe.pkce,
+            ironclaw_extension_contracts::recipe::PkceMode::S256
+        );
+        assert!(recipe.client_credentials.is_none());
+        assert!(
+            recipe
+                .refresh
+                .as_ref()
+                .is_some_and(|refresh| refresh.rotates_refresh_token)
+        );
+    }
+
+    #[test]
     fn admin_configuration_projection_includes_uninstalled_bundled_packages() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let uses = catalog.admin_configuration_uses();
