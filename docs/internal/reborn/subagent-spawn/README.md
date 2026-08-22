@@ -538,7 +538,7 @@ the append-model design review.
   cancellation semantics (including held reservations and
   already-appended partial results) are *documented contracts* carried by
   already-owned records — budgets and deadlines on run records and the
-  reservation ledger (the `spawn_tree_descendant_cap` precedent), 
+  reservation ledger (the `spawn_tree_descendant_cap` precedent),
   cancellation through the edge's existing `Abandoned` path plus the
   `reservation_release` tri-state — with R5/R8/R9 consuming them; the R2
   edge schema itself carries only the delivery lifecycle (§4.1). Lifecycle taxonomy beyond terminal states

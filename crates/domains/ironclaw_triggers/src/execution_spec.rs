@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{MAX_TRIGGER_PROMPT_BYTES, TriggerError, TriggerRecordValidationKind};
 
-const EXECUTION_SPEC_VERSION: u16 = 1;
 const MAX_GOAL_BYTES: usize = 4 * 1024;
 const MAX_SUCCESS_CRITERIA: usize = 32;
 const MAX_SUCCESS_CRITERIA_BYTES: usize = 8 * 1024;
@@ -25,16 +24,25 @@ pub struct TriggerExecutionSpec {
     pub success_criteria: Vec<String>,
     pub output_instructions: String,
     pub no_result_text: String,
+    /// Optional exact capabilities whose successful completion is required
+    /// before a run can be presented as evidence-backed. This is advanced
+    /// verification metadata, not an execution plan or allowlist;
+    /// `policy.allowed_capability_ids` remains the authority boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_capability_ids: Vec<ironclaw_host_api::ids::CapabilityId>,
     #[serde(default)]
     pub policy: TurnExecutionPolicy,
 }
 
 impl TriggerExecutionSpec {
+    pub const VERSION: u16 = 1;
+
     pub fn validate(&self) -> Result<(), TriggerError> {
-        if self.version != EXECUTION_SPEC_VERSION {
+        if self.version != Self::VERSION {
             return invalid(format!(
-                "unsupported execution spec version {}; expected {EXECUTION_SPEC_VERSION}",
-                self.version
+                "unsupported execution spec version {}; expected {}",
+                self.version,
+                Self::VERSION,
             ));
         }
         validate_text("goal", &self.goal, MAX_GOAL_BYTES)?;
@@ -66,6 +74,7 @@ impl TriggerExecutionSpec {
             &self.no_result_text,
             MAX_NO_RESULT_TEXT_BYTES,
         )?;
+        validate_required_capabilities(self)?;
         validate_policy(&self.policy)?;
         if self.render_prompt().len() > MAX_TRIGGER_PROMPT_BYTES {
             return invalid(format!(
@@ -101,6 +110,19 @@ impl TriggerExecutionSpec {
             ],
         )
     }
+}
+
+fn validate_required_capabilities(spec: &TriggerExecutionSpec) -> Result<(), TriggerError> {
+    if spec.required_capability_ids.len() > MAX_ALLOWED_CAPABILITIES {
+        return invalid(format!(
+            "required_capability_ids must contain at most {MAX_ALLOWED_CAPABILITIES} items"
+        ));
+    }
+    let unique = spec.required_capability_ids.iter().collect::<HashSet<_>>();
+    if unique.len() != spec.required_capability_ids.len() {
+        return invalid("required_capability_ids must not contain duplicates");
+    }
+    Ok(())
 }
 
 /// Substitutes every placeholder in one pass over the template, so text

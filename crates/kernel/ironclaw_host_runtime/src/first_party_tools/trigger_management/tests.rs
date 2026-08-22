@@ -1,39 +1,383 @@
 use chrono::{Datelike, TimeZone};
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
-use ironclaw_turns::TurnRunId;
+use ironclaw_host_api::turn::TurnRunId;
 
 use super::*;
-
-/// Accept-all preflight for tests that pin persistence/round-trip behavior of
-/// restrictive policies, which `NoopTriggerCreateHook` now fails closed on.
-#[derive(Debug)]
-struct AcceptAllTriggerCreateHook;
-
-#[async_trait]
-impl TriggerCreateHook for AcceptAllTriggerCreateHook {
-    async fn validate_execution_policy(
-        &self,
-        _scope: &ResourceScope,
-        _policy: &TurnExecutionPolicy,
-    ) -> Result<(), TriggerError> {
-        Ok(())
-    }
-
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
 
 fn execution_contract(goal: impl Into<String>) -> Value {
     let goal = goal.into();
     json!({
-        "version": 1,
         "goal": goal,
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
         "no_result_text": "No result",
         "policy": { "result_delivery": "deliver" }
     })
+}
+
+struct StaticRunEvidenceSource {
+    evidence: Vec<TriggerCapabilityExecutionEvidence>,
+    observed_scope: Arc<std::sync::Mutex<Option<TriggerRunEvidenceScope>>>,
+    observed_run_ids: Arc<std::sync::Mutex<Vec<TurnRunId>>>,
+}
+
+#[async_trait::async_trait]
+impl TriggerRunEvidenceSource for StaticRunEvidenceSource {
+    async fn list_capability_evidence(
+        &self,
+        scope: &TriggerRunEvidenceScope,
+        run_ids: &[TurnRunId],
+    ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, ironclaw_triggers::TriggerRunEvidenceError>
+    {
+        *self.observed_scope.lock().expect("scope capture lock") = Some(scope.clone());
+        *self.observed_run_ids.lock().expect("run id capture lock") = run_ids.to_vec();
+        Ok(self.evidence.clone())
+    }
+}
+
+struct PendingRunEvidenceSource;
+
+#[async_trait::async_trait]
+impl TriggerRunEvidenceSource for PendingRunEvidenceSource {
+    async fn list_capability_evidence(
+        &self,
+        _scope: &TriggerRunEvidenceScope,
+        _run_ids: &[TurnRunId],
+    ) -> Result<Vec<TriggerCapabilityExecutionEvidence>, ironclaw_triggers::TriggerRunEvidenceError>
+    {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn trigger_list_exposes_deterministic_required_action_assessment() {
+    use ironclaw_triggers::ClearActiveFireRequest;
+
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let mut scope = ResourceScope::local_default(
+        UserId::new("evidence-status-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    scope.thread_id =
+        Some(ironclaw_host_api::ids::ThreadId::new("evidence-status-thread").expect("thread id"));
+    let capability_id = CapabilityId::new("builtin.outbound_deliver").expect("capability id");
+    let fire_slot = Utc::now() - chrono::Duration::minutes(1);
+    let run_id = TurnRunId::new();
+    let mut record = test_record(Some(fire_slot));
+    record.tenant_id = scope.tenant_id.clone();
+    record.creator_user_id = scope.user_id.clone();
+    record.agent_id = scope.agent_id.clone();
+    record.project_id = scope.project_id.clone();
+    record.active_run_ref = Some(run_id);
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Deliver the report".to_string(),
+        success_criteria: vec!["The report is delivered".to_string()],
+        output_instructions: "Confirm delivery".to_string(),
+        no_result_text: "No report".to_string(),
+        required_capability_ids: vec![capability_id.clone()],
+        policy: TurnExecutionPolicy::default(),
+    };
+    record.prompt = spec.render_prompt();
+    record.execution_spec = Some(spec);
+    repository
+        .upsert_trigger(record.clone())
+        .await
+        .expect("seed structured trigger");
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("settle trigger run")
+        .expect("active run matches");
+    let evidence = vec![TriggerCapabilityExecutionEvidence {
+        run_id,
+        capability_id,
+        status: ironclaw_triggers::TriggerCapabilityExecutionStatus::Succeeded,
+        error_kind: None,
+    }];
+    let observed_scope = Arc::new(std::sync::Mutex::new(None));
+    let observed_run_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let handler = TriggerManagementToolHandler {
+        repository,
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        run_evidence: Arc::new(StaticRunEvidenceSource {
+            evidence,
+            observed_scope: Arc::clone(&observed_scope),
+            observed_run_ids: Arc::clone(&observed_run_ids),
+        }),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
+    };
+    let request = FirstPartyCapabilityRequest::request_for_test(
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
+        scope.clone(),
+        json!({"run_limit": 1}),
+        None,
+    );
+
+    let result = handler.dispatch(request).await.expect("list routines");
+    let assessment = &result.output["triggers"][0]["recent_runs"][0]["assessment"];
+
+    assert_eq!(assessment["status"], json!("appears_successful"));
+    assert_eq!(assessment["capabilities"][0]["status"], json!("succeeded"));
+    let observed_scope = observed_scope
+        .lock()
+        .expect("scope capture lock")
+        .clone()
+        .expect("evidence lookup scope");
+    assert_eq!(observed_scope.tenant_id, scope.tenant_id);
+    assert_eq!(observed_scope.user_id, scope.user_id);
+    assert_eq!(observed_scope.agent_id, scope.agent_id);
+    assert_eq!(observed_scope.project_id, scope.project_id);
+    assert_eq!(
+        *observed_run_ids.lock().expect("run id capture lock"),
+        vec![run_id]
+    );
+}
+
+#[tokio::test]
+async fn trigger_list_reports_dynamic_run_evidence_without_claiming_verification() {
+    use ironclaw_triggers::ClearActiveFireRequest;
+
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let scope = ResourceScope::local_default(
+        UserId::new("dynamic-evidence-status-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let capability_id = CapabilityId::new("builtin.outbound_deliver").expect("capability id");
+    let fire_slot = Utc::now() - chrono::Duration::minutes(1);
+    let run_id = TurnRunId::new();
+    let mut record = test_record(Some(fire_slot));
+    record.tenant_id = scope.tenant_id.clone();
+    record.creator_user_id = scope.user_id.clone();
+    record.agent_id = scope.agent_id.clone();
+    record.project_id = scope.project_id.clone();
+    record.active_run_ref = Some(run_id);
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Discover how to deliver the report".to_string(),
+        success_criteria: vec!["The report is delivered".to_string()],
+        output_instructions: "Confirm delivery".to_string(),
+        no_result_text: "No report".to_string(),
+        required_capability_ids: Vec::new(),
+        policy: TurnExecutionPolicy::default(),
+    };
+    record.prompt = spec.render_prompt();
+    record.execution_spec = Some(spec);
+    repository
+        .upsert_trigger(record.clone())
+        .await
+        .expect("seed structured trigger");
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("settle trigger run")
+        .expect("active run matches");
+    let handler = TriggerManagementToolHandler {
+        repository,
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        run_evidence: Arc::new(StaticRunEvidenceSource {
+            evidence: vec![TriggerCapabilityExecutionEvidence {
+                run_id,
+                capability_id,
+                status: ironclaw_triggers::TriggerCapabilityExecutionStatus::Succeeded,
+                error_kind: None,
+            }],
+            observed_scope: Arc::new(std::sync::Mutex::new(None)),
+            observed_run_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
+    };
+    let request = FirstPartyCapabilityRequest::request_for_test(
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
+        scope,
+        json!({"run_limit": 1}),
+        None,
+    );
+
+    let result = handler.dispatch(request).await.expect("list routines");
+    let assessment = &result.output["triggers"][0]["recent_runs"][0]["assessment"];
+
+    assert_eq!(assessment["status"], json!("unverified"));
+    assert_eq!(assessment["capabilities"][0]["status"], json!("succeeded"));
+}
+
+#[tokio::test]
+async fn trigger_list_returns_unverified_when_capability_evidence_stalls() {
+    use ironclaw_triggers::ClearActiveFireRequest;
+
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let scope = ResourceScope::local_default(
+        UserId::new("stalled-evidence-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let capability_id = CapabilityId::new("builtin.outbound_deliver").expect("capability id");
+    let fire_slot = Utc::now() - chrono::Duration::minutes(1);
+    let run_id = TurnRunId::new();
+    let mut record = test_record(Some(fire_slot));
+    record.tenant_id = scope.tenant_id.clone();
+    record.creator_user_id = scope.user_id.clone();
+    record.agent_id = scope.agent_id.clone();
+    record.project_id = scope.project_id.clone();
+    record.active_run_ref = Some(run_id);
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Deliver the report".to_string(),
+        success_criteria: vec!["The report is delivered".to_string()],
+        output_instructions: "Confirm delivery".to_string(),
+        no_result_text: "No report".to_string(),
+        required_capability_ids: vec![capability_id],
+        policy: TurnExecutionPolicy::default(),
+    };
+    record.prompt = spec.render_prompt();
+    record.execution_spec = Some(spec);
+    repository
+        .upsert_trigger(record.clone())
+        .await
+        .expect("seed structured trigger");
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("settle trigger run")
+        .expect("active run matches");
+    let handler = TriggerManagementToolHandler {
+        repository,
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        run_evidence: Arc::new(PendingRunEvidenceSource),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
+    };
+    let request = FirstPartyCapabilityRequest::request_for_test(
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
+        scope,
+        json!({"run_limit": 1}),
+        None,
+    );
+
+    let result = tokio::time::timeout(
+        ACTIVE_HOLD_LOOKUP_TIMEOUT + std::time::Duration::from_secs(1),
+        handler.dispatch(request),
+    )
+    .await
+    .expect("trigger list must bound a stalled evidence read")
+    .expect("list routines despite stalled evidence");
+    let assessment = &result.output["triggers"][0]["recent_runs"][0]["assessment"];
+
+    assert_eq!(assessment["status"], json!("unverified"));
+    assert_eq!(
+        assessment["capabilities"][0]["status"],
+        json!("unavailable")
+    );
+}
+
+#[tokio::test]
+async fn trigger_list_does_not_read_evidence_for_running_only_history() {
+    use ironclaw_triggers::{ClaimDueFireRequest, FireAcceptedRequest};
+
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let scope = ResourceScope::local_default(
+        UserId::new("running-evidence-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let fire_slot = Utc::now() - chrono::Duration::minutes(1);
+    let run_id = TurnRunId::new();
+    let mut record = test_record(None);
+    record.next_run_at = fire_slot;
+    record.tenant_id = scope.tenant_id.clone();
+    record.creator_user_id = scope.user_id.clone();
+    record.agent_id = scope.agent_id.clone();
+    record.project_id = scope.project_id.clone();
+    record.execution_spec = Some(TriggerExecutionSpec {
+        version: 1,
+        goal: "Deliver the report".to_string(),
+        success_criteria: vec!["The report is delivered".to_string()],
+        output_instructions: "Confirm delivery".to_string(),
+        no_result_text: "No report".to_string(),
+        required_capability_ids: Vec::new(),
+        policy: TurnExecutionPolicy::default(),
+    });
+    repository
+        .upsert_trigger(record.clone())
+        .await
+        .expect("seed structured trigger");
+    repository
+        .claim_due_fire(ClaimDueFireRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            now: fire_slot,
+        })
+        .await
+        .expect("claim trigger fire");
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: scope.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+            fire_slot,
+            run_id,
+            thread_id: ironclaw_host_api::ids::ThreadId::new("running-evidence-thread")
+                .expect("thread id"),
+            submitted_at: fire_slot,
+        })
+        .await
+        .expect("record running trigger");
+
+    let observed_scope = Arc::new(std::sync::Mutex::new(None));
+    let observed_run_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let handler = TriggerManagementToolHandler {
+        repository,
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        run_evidence: Arc::new(StaticRunEvidenceSource {
+            evidence: Vec::new(),
+            observed_scope: Arc::clone(&observed_scope),
+            observed_run_ids: Arc::clone(&observed_run_ids),
+        }),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
+    };
+    let request = FirstPartyCapabilityRequest::request_for_test(
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability id"),
+        scope,
+        json!({"run_limit": 1}),
+        None,
+    );
+
+    handler.dispatch(request).await.expect("list routines");
+
+    assert!(observed_scope.lock().expect("scope capture lock").is_none());
+    assert!(
+        observed_run_ids
+            .lock()
+            .expect("run id capture lock")
+            .is_empty()
+    );
 }
 
 /// Delivery is now a step the structured contract owns, not a stored routing field: a
@@ -63,6 +407,12 @@ fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_tar
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("no memory of this conversation"),
         "trigger_create description must say the fire has no memory of this conversation: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("discover the tools it needs dynamically")
+            && !TRIGGER_CREATE_DESCRIPTION.contains("allowed_capability_ids")
+            && !TRIGGER_CREATE_DESCRIPTION.contains("required_capability_ids"),
+        "trigger_create must preserve dynamic capability discovery without exposing exact-ID fields: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION
@@ -224,7 +574,6 @@ fn trigger_create_input_accepts_cron_schedule() {
     let input = serde_json::json!({
         "name": "daily",
         "execution_contract": {
-            "version": 1,
             "goal": "Check mail",
             "success_criteria": ["Report the mail check result"],
             "output_instructions": "Return a concise summary",
@@ -269,13 +618,11 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
     let input = serde_json::json!({
         "name": "daily failures",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failed payments",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
             "policy": {
-                "allowed_capability_ids": ["stripe.list_payments"],
                 "required_skills": ["payment-operations"],
                 "result_delivery": "suppress_when_nothing_to_report"
             }
@@ -285,9 +632,100 @@ fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
 
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("structured input");
     assert_eq!(parsed.execution_contract.version, 1);
+    assert!(parsed.execution_contract.required_capability_ids.is_empty());
+    assert!(
+        parsed
+            .execution_contract
+            .policy
+            .allowed_capability_ids
+            .is_none(),
+        "new model-authored routines must retain dynamic capability discovery"
+    );
     assert_eq!(
         parsed.execution_contract.policy.result_delivery,
         ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+    );
+}
+
+#[tokio::test]
+async fn trigger_create_rejects_model_authored_capability_ids_before_persistence() {
+    let repository = InMemoryTriggerRepository::default();
+    let scope = ResourceScope::local_default(
+        UserId::new("model-authored-capability-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let required = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "required_capability_ids": ["stripe.list_payments"],
+            "policy": { "result_delivery": "deliver" }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+    let allowed = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "result_delivery": "deliver"
+            }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    for input in [required, allowed] {
+        create_trigger(
+            &repository,
+            &NoopTriggerCreateHook,
+            &scope,
+            input,
+            Utc::now(),
+        )
+        .await
+        .expect_err("model-authored capability IDs must be rejected");
+
+        let records = repository
+            .list_triggers(scope.tenant_id.clone())
+            .await
+            .expect("list records after rejected input");
+        assert!(
+            records.is_empty(),
+            "a rejected model-authored capability field must not persist a trigger"
+        );
+    }
+}
+
+#[test]
+fn trigger_create_input_rejects_model_authored_contract_version() {
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": { "result_delivery": "deliver" }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    let error = match serde_json::from_value::<TriggerCreateInput>(input) {
+        Ok(_) => panic!("the host, not the model, must select the contract version"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("unknown field `version`"),
+        "the rejected field should be identifiable: {error}"
     );
 }
 
@@ -297,7 +735,6 @@ fn trigger_create_input_rejects_legacy_prompt_and_missing_contract() {
         "name": "invalid",
         "prompt": "legacy",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failures",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
@@ -326,22 +763,18 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
     let input = serde_json::json!({
         "name": "daily failures",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failed payments",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
-            "policy": {
-                "allowed_capability_ids": ["stripe.list_payments"],
-                "result_delivery": "deliver"
-            }
+            "policy": { "result_delivery": "deliver" }
         },
         "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
     });
 
     let output = create_trigger(
         &repository,
-        &AcceptAllTriggerCreateHook,
+        &NoopTriggerCreateHook,
         &scope,
         input,
         Utc::now(),
@@ -358,14 +791,16 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
     let spec = record.execution_spec.as_ref().expect("stored contract");
     assert_eq!(record.prompt, spec.render_prompt());
     assert!(record.prompt.contains("## Success criteria"));
+    assert!(spec.required_capability_ids.is_empty());
+    assert!(spec.policy.allowed_capability_ids.is_none());
 }
 
 #[tokio::test]
 async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
     // The compatibility registration path (`NoopTriggerCreateHook`) has no
-    // preflight service; a contract carrying capability/skill restrictions
-    // must fail closed at creation instead of persisting unvalidated
-    // restrictions that every fired run would then trip over.
+    // preflight service; a contract carrying required skills must fail closed
+    // at creation instead of persisting unvalidated requirements that every
+    // fired run would then trip over.
     let repository = InMemoryTriggerRepository::default();
     let scope = ResourceScope::local_default(
         UserId::new("preflightless-user").expect("user"),
@@ -375,13 +810,12 @@ async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
     let input = serde_json::json!({
         "name": "daily failures",
         "execution_contract": {
-            "version": 1,
             "goal": "Find failed payments",
             "success_criteria": ["Include every failure"],
             "output_instructions": "Return Markdown",
             "no_result_text": "No failed payments",
             "policy": {
-                "allowed_capability_ids": ["stripe.list_payments"],
+                "required_skills": ["payment-operations"],
                 "result_delivery": "deliver"
             }
         },
@@ -575,7 +1009,7 @@ fn active_hold_json_maps_claimed_but_unaccepted_to_other() {
 #[test]
 fn trigger_output_omits_active_hold_key_when_none() {
     let record = test_record(None);
-    let output = trigger_output(&record, &[], None);
+    let output = trigger_output(&record, &[], None, None);
     assert!(output.get("active_hold").is_none());
 }
 
@@ -583,7 +1017,7 @@ fn trigger_output_omits_active_hold_key_when_none() {
 fn trigger_output_includes_active_hold_when_present() {
     let record = test_record(Some(Utc::now()));
     let hold = json!({"reason": "auth", "since": null, "elapsed_occurrences": null, "elapsed_occurrences_capped": false});
-    let output = trigger_output(&record, &[], Some(hold));
+    let output = trigger_output(&record, &[], Some(hold), None);
     assert_eq!(output["active_hold"]["reason"], "auth");
 }
 
@@ -629,6 +1063,7 @@ fn origin_test_handler(create_hook: Arc<dyn TriggerCreateHook>) -> TriggerManage
         create_hook,
         clock: Arc::new(SystemTriggerManagementClock),
         active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        run_evidence: Arc::new(MissingTriggerRunEvidenceSource),
         manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
     }
 }

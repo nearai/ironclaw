@@ -1,3 +1,4 @@
+mod evidence;
 mod mutation_tests;
 mod resolver_tests;
 
@@ -20,6 +21,7 @@ use crate::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     Timestamp,
+    execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy},
     ids::{AgentId, ApprovalRequestId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
 };
 use ironclaw_product_contracts::inbound_requests::ProductListThreadsRequest;
@@ -37,18 +39,13 @@ use ironclaw_triggers::{
     TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
     TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
-use ironclaw_turns::{DefaultTurnCoordinator, TurnRunId};
+use ironclaw_turns::{
+    DefaultTurnCoordinator, TurnRunId, test_support::in_memory_agent_turn_runtime,
+};
 
 use super::RebornAutomationProductService;
 
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
-
-/// Service over `repo` with no run-state source (`Missing` lookup): hold
-/// derivation stays inert so pre-#5886 expectations hold. Hold-specific tests
-/// construct the service with a scripted lookup instead.
+/// Service with missing run-state lookup; holds stay inert for pre-#5886 expectations.
 fn service_over(repo: Arc<dyn TriggerRepository>) -> RebornAutomationProductService {
     RebornAutomationProductService::new(repo, missing_lookup())
 }
@@ -720,7 +717,7 @@ async fn automation_service_maps_run_history_and_skips_batch_when_run_limit_zero
     // Verify mapped run fields by constructing a run record directly and
     // using the private mapping helper.
     let run = make_run_record(id, TriggerRunHistoryStatus::Ok);
-    let mapped = super::map_recent_run(&run).expect("map_recent_run");
+    let mapped = super::map_recent_run(&run, None, None).expect("map_recent_run");
     assert_eq!(mapped.status, RebornAutomationRecentRunStatus::Ok);
     assert!(mapped.run_id.is_some());
     assert!(mapped.submitted_at <= chrono::Utc::now());
@@ -825,7 +822,7 @@ async fn automation_service_maps_trigger_run_status_and_last_status() {
 
     // Verify Running status mapping via run record helper
     let run = make_run_record(id, TriggerRunHistoryStatus::Running);
-    let mapped = super::map_recent_run(&run).expect("map_recent_run");
+    let mapped = super::map_recent_run(&run, None, None).expect("map_recent_run");
     assert_eq!(mapped.status, RebornAutomationRecentRunStatus::Running);
 }
 

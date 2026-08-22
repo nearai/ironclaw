@@ -314,6 +314,12 @@ pub struct CapabilityActivityProjection {
     pub updated_at: Timestamp,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityActivityProjectionWindow {
+    pub activities: Vec<CapabilityActivityProjection>,
+    pub truncated: bool,
+}
+
 impl CapabilityActivityProjection {
     pub fn activity_order_cursor(&self) -> EventCursor {
         if self.first_cursor == EventCursor::origin() {
@@ -638,6 +644,13 @@ pub trait EventProjectionService: Send + Sync {
         &self,
         request: ProjectionRequest,
     ) -> Result<ProjectionReplay, ProjectionError>;
+
+    async fn capability_activities_for_runs(
+        &self,
+        scope: ProjectionScope,
+        run_ids: &[InvocationId],
+        limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError>;
 }
 
 #[derive(Clone)]
@@ -962,6 +975,39 @@ impl EventProjectionService for ReplayEventProjectionService {
             capability_activities,
             next_cursor: page.next_cursor,
             truncated: page.truncated,
+        })
+    }
+
+    async fn capability_activities_for_runs(
+        &self,
+        scope: ProjectionScope,
+        run_ids: &[InvocationId],
+        limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        if limit == 0 {
+            return Err(ProjectionError::InvalidRequest {
+                reason: "limit must be greater than zero",
+            });
+        }
+        if limit > MAX_PROJECTION_PAGE_LIMIT {
+            return Err(ProjectionError::InvalidRequest {
+                reason: "limit exceeds MAX_PROJECTION_PAGE_LIMIT",
+            });
+        }
+        if run_ids.is_empty() {
+            return Ok(CapabilityActivityProjectionWindow {
+                activities: Vec::new(),
+                truncated: false,
+            });
+        }
+        let run_ids = run_ids.iter().copied().collect::<HashSet<_>>();
+        let mut folded = self.fold_runtime_to_head(&scope, usize::MAX).await?;
+        folded.retain_capability_activities_for_runs(&run_ids);
+        let truncated = folded.capability_activity_count() > limit;
+        let (_, activities) = folded.with_output_limit(limit).into_parts();
+        Ok(CapabilityActivityProjectionWindow {
+            activities,
+            truncated,
         })
     }
 }

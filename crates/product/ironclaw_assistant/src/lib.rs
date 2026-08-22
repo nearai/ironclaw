@@ -113,7 +113,9 @@ pub use auth_interaction::{
 // auth's own vocabulary, and the extension host implements the challenge port.
 // No re-export here — consumers import from the owner
 // (`.claude/rules/type-placement.md`).
-pub use automation_product_service::RebornAutomationProductService;
+pub use automation_product_service::{
+    ProjectedTriggerRunEvidenceSource, RebornAutomationProductService,
+};
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
     thread_metadata_is_automation_trigger,
@@ -329,8 +331,10 @@ pub use reborn_services::{
     RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserRequest,
     RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentBytes,
     RebornAttachmentRequest, RebornAuthAccount, RebornAutomationActiveHold,
-    RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
+    RebornAutomationAssessmentStatus, RebornAutomationCapabilityEvidence,
+    RebornAutomationCapabilityEvidenceStatus, RebornAutomationHoldReason, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunAssessment,
     RebornAutomationRunMutationResult, RebornAutomationRunMutationStatus,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,

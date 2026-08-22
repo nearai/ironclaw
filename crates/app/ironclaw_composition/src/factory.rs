@@ -160,7 +160,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_package,
 };
 use ironclaw_host_runtime::{
-    builtin_first_party_handlers_with_trigger_services_for_process_backend,
+    builtin_first_party_handlers_with_trigger_services_and_evidence_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
 use ironclaw_identity::projects::ProjectRepository;
@@ -1220,13 +1220,15 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    run_evidence: Arc<dyn ironclaw_triggers::TriggerRunEvidenceSource>,
     manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_services_for_process_backend(
+    builtin_first_party_handlers_with_trigger_services_and_evidence_for_process_backend(
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
+        run_evidence,
         manual_fire_runner,
         process_backend,
     )

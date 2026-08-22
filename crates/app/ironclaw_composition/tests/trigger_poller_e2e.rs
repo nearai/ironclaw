@@ -42,9 +42,8 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TRIGGER_RUN_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -79,7 +78,6 @@ const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
 
 fn trigger_execution_contract(goal: impl Into<String>) -> Value {
     json!({
-        "version": 1,
         "goal": goal.into(),
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
@@ -553,76 +551,6 @@ impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
                 "",
             ))
         }
-    }
-}
-
-#[derive(Default)]
-struct CapabilityProbeGateway {
-    outcome: TokioMutex<Option<Result<(), String>>>,
-}
-
-impl CapabilityProbeGateway {
-    async fn outcome(&self) -> Option<Result<(), String>> {
-        self.outcome.lock().await.clone()
-    }
-}
-
-#[async_trait]
-impl HostManagedModelGateway for CapabilityProbeGateway {
-    async fn stream_model(
-        &self,
-        _request: HostManagedModelRequest,
-    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-        Ok(HostManagedModelResponse::assistant_reply(
-            "structured trigger probe had no capability port".to_string(),
-        ))
-    }
-
-    async fn stream_model_with_capabilities(
-        &self,
-        _request: HostManagedModelRequest,
-        capabilities: Arc<dyn LoopCapabilityPort>,
-    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-        let call = ProviderToolCall {
-            provider_id: "structured-trigger-e2e-provider".to_string(),
-            provider_model_id: "structured-trigger-e2e-model".to_string(),
-            turn_id: Some("structured-trigger-e2e-turn".to_string()),
-            id: "structured-trigger-list-probe".to_string(),
-            name: ProviderToolName::new(provider_tool_name_for_capability_id(
-                TRIGGER_LIST_CAPABILITY_ID,
-            ))
-            .expect("trigger-list provider tool name"),
-            arguments: json!({}),
-            response_reasoning: None,
-            reasoning: None,
-            signature: None,
-        };
-        let outcome = capabilities
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
-            .await
-            .map(|_| ())
-            .map_err(|error| error.safe_summary);
-        *self.outcome.lock().await = Some(outcome);
-        Ok(HostManagedModelResponse::assistant_reply(
-            "structured trigger capability probe complete".to_string(),
-        ))
-    }
-}
-
-async fn wait_for_capability_probe(
-    gateway: &CapabilityProbeGateway,
-    deadline: Duration,
-) -> Result<(), String> {
-    let stop = Instant::now() + deadline;
-    loop {
-        if let Some(outcome) = gateway.outcome().await {
-            return outcome;
-        }
-        assert!(
-            Instant::now() < stop,
-            "capability probe did not reach the model"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -1587,6 +1515,7 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         success_criteria: vec!["Report only when changes exist".to_string()],
         output_instructions: "Return a concise change summary".to_string(),
         no_result_text: "No changes".to_string(),
+        required_capability_ids: Vec::new(),
         policy: TurnExecutionPolicy {
             result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
             ..TurnExecutionPolicy::default()
@@ -2445,9 +2374,9 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
 }
 
 #[tokio::test]
-async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no_tools() {
+async fn structured_trigger_creation_rejects_capability_pinning_and_missing_skills() {
     let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(CapabilityProbeGateway::default());
+    let gateway = Arc::new(RecordingGateway::default());
     let runtime = build_runtime_with_tool_disclosure(
         &root,
         Arc::clone(&gateway),
@@ -2460,13 +2389,40 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let repo = runtime.trigger_repository();
 
-    let invalid = invoke_trigger_create_outcome(
+    let required_capability = invoke_trigger_create_outcome(
         &runtime,
         json!({
-            "name": "structured-missing-capability",
+            "name": "structured-required-capability",
             "execution_contract": {
-                "version": 1,
-                "goal": "Use a missing capability",
+                "goal": "Use a pinned capability",
+                "success_criteria": ["Return a result"],
+                "output_instructions": "Return concise Markdown",
+                "no_result_text": "No result is available",
+                "required_capability_ids": ["missing.capability"],
+                "policy": { "result_delivery": "deliver" }
+            },
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(required_capability, RuntimeCapabilityOutcome::Failed(_)),
+        "creation must reject model-authored required capability IDs: {required_capability:?}"
+    );
+    assert!(
+        repo.list_triggers(tenant_id.clone())
+            .await
+            .expect("list triggers after rejected required capability")
+            .is_empty(),
+        "a rejected required capability must not persist a trigger"
+    );
+
+    let allowed_capability = invoke_trigger_create_outcome(
+        &runtime,
+        json!({
+            "name": "structured-allowed-capability",
+            "execution_contract": {
+                "goal": "Use a pinned capability surface",
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",
                 "no_result_text": "No result is available",
@@ -2480,22 +2436,22 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
     )
     .await;
     assert!(
-        matches!(invalid, RuntimeCapabilityOutcome::Failed(_)),
-        "creation preflight must reject an unavailable capability before persistence: {invalid:?}"
+        matches!(allowed_capability, RuntimeCapabilityOutcome::Failed(_)),
+        "creation must reject model-authored capability allowlists: {allowed_capability:?}"
     );
     assert!(
         repo.list_triggers(tenant_id.clone())
             .await
-            .expect("list triggers after rejected preflight")
+            .expect("list triggers after rejected capability allowlist")
             .is_empty(),
-        "a failed creation preflight must not persist a trigger"
+        "a rejected capability allowlist must not persist a trigger"
     );
+
     let missing_skill = invoke_trigger_create_outcome(
         &runtime,
         json!({
             "name": "structured-missing-skill",
             "execution_contract": {
-                "version": 1,
                 "goal": "Use a missing skill",
                 "success_criteria": ["Return a result"],
                 "output_instructions": "Return concise Markdown",
@@ -2521,49 +2477,12 @@ async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no
         "a failed skill preflight must not persist a trigger"
     );
 
-    let created = invoke_trigger_create(
-        &runtime,
-        json!({
-            "name": "structured-empty-tool-surface",
-            "execution_contract": {
-                "version": 1,
-                "goal": "Report trigger status",
-                "success_criteria": ["Return a definitive status"],
-                "output_instructions": "Return concise Markdown",
-                "no_result_text": "No trigger status is available",
-                "policy": {
-                    "allowed_capability_ids": [],
-                    "result_delivery": "deliver"
-                }
-            },
-            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
-        }),
-    )
-    .await;
-    let trigger_id = TriggerId::parse(
-        created["trigger"]["trigger_id"]
-            .as_str()
-            .expect("created trigger id"),
-    )
-    .expect("valid trigger id");
-    let mut record = repo
-        .get_trigger(tenant_id.clone(), trigger_id)
-        .await
-        .expect("get structured trigger")
-        .expect("structured trigger persisted");
-    assert!(record.execution_spec.is_some(), "contract must persist");
-    record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
-    repo.upsert_trigger(record)
-        .await
-        .expect("make structured trigger due");
-
-    let outcome = wait_for_capability_probe(gateway.as_ref(), Duration::from_secs(15)).await;
     runtime.shutdown().await.expect("runtime shutdown");
-
-    assert_eq!(
-        outcome,
-        Err("provider tool call is outside the visible capability surface".to_string()),
-        "Some([]) must reach the scheduled run as an empty tool surface"
+    assert!(
+        repo.list_triggers(tenant_id)
+            .await
+            .expect("list triggers after rejected restrictions")
+            .is_empty()
     );
 }
 

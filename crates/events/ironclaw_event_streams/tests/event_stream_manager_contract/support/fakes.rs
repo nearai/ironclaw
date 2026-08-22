@@ -3,6 +3,13 @@ struct TestManager {
     update_source: Arc<InMemoryProjectionUpdateSource>,
 }
 
+fn unsupported_targeted_capability_activity_read(
+) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+    Err(ProjectionError::Source {
+        operation: "targeted capability activity read in event-stream test fake",
+    })
+}
+
 impl std::ops::Deref for TestManager {
     type Target = EventStreamManager;
 
@@ -200,6 +207,15 @@ impl InitialSnapshotRebaseProjectionService {
 
 #[async_trait]
 impl EventProjectionService for InitialSnapshotRebaseProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         request: ProjectionRequest,
@@ -239,6 +255,15 @@ impl EventProjectionService for InitialSnapshotRebaseProjectionService {
 
 #[async_trait]
 impl EventProjectionService for FakeProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         request: ProjectionRequest,
@@ -275,6 +300,15 @@ impl ScopeMismatchProjectionService {
 
 #[async_trait]
 impl EventProjectionService for ScopeMismatchProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         _request: ProjectionRequest,
@@ -294,6 +328,15 @@ struct PayloadThreadMismatchProjectionService;
 
 #[async_trait]
 impl EventProjectionService for PayloadThreadMismatchProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         request: ProjectionRequest,
@@ -313,6 +356,15 @@ struct ActivityThreadMismatchProjectionService;
 
 #[async_trait]
 impl EventProjectionService for ActivityThreadMismatchProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         request: ProjectionRequest,
@@ -341,6 +393,15 @@ struct ActivityTransitionThreadMismatchProjectionService;
 
 #[async_trait]
 impl EventProjectionService for ActivityTransitionThreadMismatchProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         request: ProjectionRequest,
@@ -367,6 +428,15 @@ struct FailingUpdatesProjectionService {
 
 #[async_trait]
 impl EventProjectionService for FailingUpdatesProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         request: ProjectionRequest,
@@ -404,6 +474,15 @@ struct FailingSnapshotProjectionService {
 
 #[async_trait]
 impl EventProjectionService for FailingSnapshotProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         _request: ProjectionRequest,
@@ -460,6 +539,15 @@ impl TruncatedProjectionService {
 
 #[async_trait]
 impl EventProjectionService for TruncatedProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         _request: ProjectionRequest,
@@ -492,6 +580,15 @@ impl SnapshotPublishingProjectionService {
 
 #[async_trait]
 impl EventProjectionService for SnapshotPublishingProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         request: ProjectionRequest,
@@ -526,6 +623,15 @@ impl StaticSnapshotProjectionService {
 
 #[async_trait]
 impl EventProjectionService for StaticSnapshotProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         _request: ProjectionRequest,
@@ -555,6 +661,15 @@ impl ChangingSnapshotProjectionService {
 
 #[async_trait]
 impl EventProjectionService for ChangingSnapshotProjectionService {
+    async fn capability_activities_for_runs(
+        &self,
+        _scope: ProjectionScope,
+        _run_ids: &[InvocationId],
+        _limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        unsupported_targeted_capability_activity_read()
+    }
+
     async fn snapshot(
         &self,
         request: ProjectionRequest,

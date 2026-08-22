@@ -99,7 +99,6 @@ use serde_json::{Value, json};
 
 fn trigger_execution_contract(goal: impl Into<String>) -> Value {
     json!({
-        "version": 1,
         "goal": goal.into(),
         "success_criteria": ["Complete the requested task"],
         "output_instructions": "Return a concise result",
@@ -695,7 +694,6 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
     assert_eq!(
         schema["properties"]["execution_contract"]["required"],
         json!([
-            "version",
             "goal",
             "success_criteria",
             "output_instructions",
@@ -1382,7 +1380,6 @@ async fn builtin_trigger_create_requires_explicit_result_delivery_before_persist
         json!({
             "name": "Ambiguous notification",
             "execution_contract": {
-                "version": 1,
                 "goal": "Check whether example.com is reachable",
                 "success_criteria": ["Reachability checked"],
                 "output_instructions": "Return the result",
@@ -1699,7 +1696,6 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             json!({
                 "name": "Bad result delivery",
                 "execution_contract": {
-                    "version": 1,
                     "goal": "Run work",
                     "success_criteria": ["Work completed"],
                     "output_instructions": "Return the result",
@@ -1711,6 +1707,24 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             vec![(
                 "execution_contract.policy.result_delivery",
                 DispatchInputIssueCode::TypeMismatch,
+            )],
+        ),
+        (
+            "unsupported result delivery",
+            json!({
+                "name": "Bad result delivery",
+                "execution_contract": {
+                    "goal": "Run work",
+                    "success_criteria": ["Work completed"],
+                    "output_instructions": "Return the result",
+                    "no_result_text": "No change",
+                    "policy": { "result_delivery": "always" }
+                },
+                "schedule": { "kind": "cron", "expression": "*/3 * * * *", "timezone": "UTC" }
+            }),
+            vec![(
+                "execution_contract.policy.result_delivery",
+                DispatchInputIssueCode::InvalidValue,
             )],
         ),
         (

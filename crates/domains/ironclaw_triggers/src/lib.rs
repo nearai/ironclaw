@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 mod automation;
+mod evidence;
 mod execution_spec;
 mod fire_access;
 mod in_memory;
@@ -40,6 +41,12 @@ mod worker;
 /// `ironclaw_common`, which must hold no domain vocabulary); `MAX_TRIGGER_NAME_BYTES`
 /// below is the same bound under this crate's own noun.
 pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+pub use evidence::{
+    MissingTriggerRunEvidenceSource, TriggerCapabilityExecutionEvidence,
+    TriggerCapabilityExecutionStatus, TriggerCapabilityRequirementAssessment,
+    TriggerCapabilityRequirementStatus, TriggerRunAssessment, TriggerRunAssessmentStatus,
+    TriggerRunEvidenceError, TriggerRunEvidenceScope, TriggerRunEvidenceSource, assess_trigger_run,
+};
 pub use execution_spec::TriggerExecutionSpec;
 /// Fire-time access: the check contract plus the checkers that are pure
 /// trigger-scope policy. The deployment *grant* value and the identity-directory

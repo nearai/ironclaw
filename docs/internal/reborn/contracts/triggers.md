@@ -80,22 +80,27 @@ The `TriggerSchedule::Cron` variant stores both `expression` and `timezone` as t
 
 ### 3.3 Structured execution contracts
 
-New trigger creation requires a versioned `execution_contract`; the create
-surface does not accept or advertise the legacy raw `prompt` field. A
-structured contract stores canonical JSON in `execution_spec_json` and stores
-its rendered prompt alongside it.
+New trigger creation requires a structured `execution_contract`; the create
+surface does not accept or advertise either the legacy raw `prompt` field or a
+caller-selected contract version. The host assigns the current durable version
+before validation. The resulting contract stores canonical JSON in
+`execution_spec_json` and stores its rendered prompt alongside it.
 
 This is a new-write rule, not a destructive migration. Existing rows with a
 raw prompt retain `NULL` in `execution_spec_json`, remain readable, and continue
 to execute their frozen prompt without interpretation or backfill.
 
-The v1 contract contains a goal, one or more success criteria, output
-instructions, no-result text, an optional capability allowlist, and required
-skill names. The trigger domain validates and renders this contract before
-persistence. Production creation also resolves capability references against
-the current model-visible catalog and required skills through the normal skill
-selector before writing the trigger. The scheduler continues to submit the
-frozen prompt; only the neutral execution policy crosses the trusted-trigger
+The durable v1 contract contains a goal, one or more success criteria, output
+instructions, no-result text, required skill names, and legacy/internal fields
+for a capability allowlist and explicit capability-evidence requirements. The
+model-facing `trigger_create` surface neither advertises nor accepts the two
+capability-ID fields or the durable version field. New model-authored routines
+therefore store v1, an absent allowlist, and no explicit capability
+requirements, allowing each future run to discover the capabilities needed for
+that run. The trigger domain validates and renders the contract before
+persistence. Production creation resolves required skills through the normal
+skill selector before writing the trigger. The scheduler continues to submit
+the frozen prompt; only the neutral execution policy crosses the trusted-trigger
 turn boundary.
 
 New `trigger_create` calls must explicitly select
@@ -130,12 +135,33 @@ configured notification channel remains `NoDefaultConfigured`. Failed,
 cancelled, blocked, and recovery-required runs never qualify for suppression;
 their existing visible notification behavior is unchanged.
 
-Capability allowlists are intersections: absent preserves the scheduled
-surface, an empty list exposes no capabilities, and a non-empty list can only
-narrow the surface. Global and scheduled-trigger denials still win. Required
-skills resolve through the normal skill activation catalog before model context
-is built; missing, ambiguous, untrusted, unready, or over-budget requirements
-fail closed and never widen capabilities.
+For backward compatibility, previously persisted or internally constructed
+contracts may still carry capability fields. Their semantics are unchanged:
+an allowlist is an intersection with the scheduled surface, global and
+scheduled-trigger denials still win, and explicit requirements contribute to
+runtime-evidence assessment. These fields remain readable and enforceable but
+cannot be authored through `trigger_create`; no data migration is required.
+Required skills remain part of the creation surface and resolve through the
+normal skill activation catalog before model context is built. Missing,
+ambiguous, untrusted, unready, or over-budget requirements fail closed and
+never widen capabilities.
+
+Terminal structured runs receive a deterministic assessment when read through
+the WebUI automation service or `trigger_list`. The assessment folds the run's
+terminal state and the canonical runtime capability projection for the exact
+`TurnRunId`. Evidence reads are scoped by trigger owner, agent, and project;
+they must not inherit the thread, mission, or invocation identity of the
+conversation that asks for status, because each scheduled run executes in its
+own thread. The assessment never infers an action from final-answer prose. A required
+capability that failed yields `needs_attention`, a missing/incomplete or
+unavailable fact yields `unverified`, and a completed run whose explicit
+requirements all report success yields `appears_successful`. With no explicit
+requirements, observed capability calls are still reported; any observed
+failure yields `needs_attention`, while an otherwise completed run remains
+`unverified` because runtime facts alone cannot prove semantic success. The
+assessment is deliberately not a provider read-back guarantee, and textual
+criteria are not model-judged in this phase. Legacy raw-prompt and active runs
+have no assessment.
 
 ### 3.4 Trigger state
 
@@ -563,7 +589,8 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
   The shared service preserves the conversation store's mutation lock across
   both paths and avoids racing optimistic durable-state writes.
 - `trigger_list` is caller-scoped and surfaces the current schedule state plus
-  `last_status` and a bounded `recent_runs` projection. Omitted `run_limit`
+  `last_status` and a bounded `recent_runs` projection, including deterministic
+  required-action assessments for terminal structured runs. Omitted `run_limit`
   defaults to 25 recent runs per trigger; callers that do not need embedded run
   history pass `run_limit = 0`.
 - `trigger_remove` is caller-scoped delete.

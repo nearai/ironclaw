@@ -19,6 +19,7 @@ fn structured_execution_spec_validates_and_renders_a_frozen_prompt() {
         ],
         output_instructions: "Return a Markdown table and total.".to_string(),
         no_result_text: "No failed payments were found yesterday.".to_string(),
+        required_capability_ids: Vec::new(),
         policy: TurnExecutionPolicy {
             allowed_capability_ids: Some(vec![
                 CapabilityId::new("stripe.list_payments").expect("capability id"),
@@ -49,6 +50,7 @@ fn structured_execution_spec_renders_placeholders_in_one_pass() {
         success_criteria: vec!["INJECTED".to_string()],
         output_instructions: "Return Markdown".to_string(),
         no_result_text: "Nothing to report".to_string(),
+        required_capability_ids: Vec::new(),
         policy: TurnExecutionPolicy::default(),
     };
 
@@ -72,6 +74,7 @@ fn structured_execution_spec_requests_typed_no_result_completion_for_explicit_su
         success_criteria: vec!["Report new messages".to_string()],
         output_instructions: "Return Markdown, including when no messages are found".to_string(),
         no_result_text: "No new messages.".to_string(),
+        required_capability_ids: Vec::new(),
         policy: TurnExecutionPolicy::default(),
     };
     assert!(spec.render_prompt().contains("No new messages."));
@@ -105,6 +108,7 @@ fn stored_structured_prompt_survives_template_revisions() {
         success_criteria: vec!["Include every failed payment exactly once.".to_string()],
         output_instructions: "Return a Markdown table.".to_string(),
         no_result_text: "No failed payments were found.".to_string(),
+        required_capability_ids: Vec::new(),
         policy: TurnExecutionPolicy::default(),
     });
     record.prompt = "prompt rendered by an older template revision".to_string();
@@ -124,6 +128,7 @@ fn structured_execution_spec_rejects_duplicate_policy_references() {
         success_criteria: vec!["Report every failure".to_string()],
         output_instructions: "Return Markdown".to_string(),
         no_result_text: "No failures".to_string(),
+        required_capability_ids: Vec::new(),
         policy: TurnExecutionPolicy {
             allowed_capability_ids: Some(vec![capability.clone(), capability]),
             required_skills: vec![skill.clone(), skill],
@@ -139,6 +144,31 @@ fn structured_execution_spec_rejects_duplicate_policy_references() {
             ..
         }
     ));
+}
+
+#[test]
+fn legacy_execution_spec_remains_readable_when_requirement_is_outside_allowed_surface() {
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Send the weekly report".to_string(),
+        success_criteria: vec!["Deliver the report".to_string()],
+        output_instructions: "Confirm the outcome".to_string(),
+        no_result_text: "No report was available".to_string(),
+        required_capability_ids: vec![
+            CapabilityId::new("builtin.outbound_deliver").expect("capability id"),
+        ],
+        policy: TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![
+                CapabilityId::new("stripe.list_payments").expect("capability id"),
+            ]),
+            required_skills: Vec::new(),
+            result_delivery: ResultDeliveryPolicy::Deliver,
+        },
+    };
+
+    spec.validate().expect(
+        "legacy capability requirements outside the allowlist remain readable; runtime policy still prevents execution",
+    );
 }
 
 fn ts(seconds: i64) -> Timestamp {

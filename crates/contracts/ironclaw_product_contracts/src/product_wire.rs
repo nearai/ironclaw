@@ -28,7 +28,7 @@
 // arch-exempt: large_file, one contract surface — splitting by feature area at move time would give the same names two import paths, plan #7008
 use chrono::{DateTime, Utc};
 use ironclaw_extension_contracts::state::LifecyclePublicState;
-use ironclaw_host_api::ids::{ThreadId, UserId};
+use ironclaw_host_api::ids::{CapabilityId, ThreadId, UserId};
 use ironclaw_host_api::turn::{AcceptedMessageRef, EventCursor, TurnRunId, TurnStatus};
 use secrecy::SecretString;
 use serde::ser::SerializeStruct;
@@ -1080,6 +1080,67 @@ pub enum RebornAutomationRecentRunStatus {
     Unknown,
 }
 
+/// One headline answering whether durable runtime facts support the run's
+/// declared contract. This is deterministic and does not include model
+/// judgment about prose quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationAssessmentStatus {
+    AppearsSuccessful,
+    NeedsAttention,
+    Unverified,
+    RunFailed,
+}
+
+impl RebornAutomationAssessmentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AppearsSuccessful => "appears_successful",
+            Self::NeedsAttention => "needs_attention",
+            Self::Unverified => "unverified",
+            Self::RunFailed => "run_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationCapabilityEvidenceStatus {
+    Succeeded,
+    Failed,
+    Missing,
+    Incomplete,
+    Unavailable,
+}
+
+impl RebornAutomationCapabilityEvidenceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Missing => "missing",
+            Self::Incomplete => "incomplete",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationCapabilityEvidence {
+    pub capability_id: CapabilityId,
+    pub status: RebornAutomationCapabilityEvidenceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationRunAssessment {
+    pub status: RebornAutomationAssessmentStatus,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<RebornAutomationCapabilityEvidence>,
+}
+
 /// Client-safe automation run projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornAutomationRecentRunInfo {
@@ -1097,6 +1158,10 @@ pub struct RebornAutomationRecentRunInfo {
     pub submitted_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<DateTime<Utc>>,
+    /// Present for terminal structured runs. Legacy prompt runs and active
+    /// runs have no deterministic contract assessment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<RebornAutomationRunAssessment>,
 }
 
 /// Allowlisted client-visible state for automation list projections.
@@ -1978,6 +2043,34 @@ pub enum SettingsToolPermissionState {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn automation_assessment_status_renderers_match_wire_tokens() {
+        for status in [
+            RebornAutomationAssessmentStatus::AppearsSuccessful,
+            RebornAutomationAssessmentStatus::NeedsAttention,
+            RebornAutomationAssessmentStatus::Unverified,
+            RebornAutomationAssessmentStatus::RunFailed,
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).expect("serialize assessment status"),
+                json!(status.as_str())
+            );
+        }
+
+        for status in [
+            RebornAutomationCapabilityEvidenceStatus::Succeeded,
+            RebornAutomationCapabilityEvidenceStatus::Failed,
+            RebornAutomationCapabilityEvidenceStatus::Missing,
+            RebornAutomationCapabilityEvidenceStatus::Incomplete,
+            RebornAutomationCapabilityEvidenceStatus::Unavailable,
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).expect("serialize evidence status"),
+                json!(status.as_str())
+            );
+        }
+    }
 
     /// The outbound-delivery display newtypes are the only fence between an
     /// operator-supplied target label and the browser that renders it, and the

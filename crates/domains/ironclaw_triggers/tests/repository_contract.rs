@@ -4,7 +4,7 @@ use ironclaw_host_api::turn::TurnRunId;
 use ironclaw_host_api::{
     Timestamp,
     execution_policy::{RequiredSkill, TurnExecutionPolicy},
-    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
     path::VirtualPath,
 };
 use ironclaw_libsql_runtime::LibSqlRuntime;
@@ -81,6 +81,9 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
         success_criteria: vec!["Include every unread message".to_string()],
         output_instructions: "Return concise Markdown".to_string(),
         no_result_text: "There is no unread mail.".to_string(),
+        required_capability_ids: vec![
+            CapabilityId::new("builtin.outbound_deliver").expect("capability id"),
+        ],
         policy: TurnExecutionPolicy {
             allowed_capability_ids: None,
             required_skills: vec![RequiredSkill::new("mail-summary").expect("skill")],

@@ -474,9 +474,9 @@ fn assert_routine_contract(case: &QaPhrase, cron_fragment: &str) {
 }
 
 fn assert_structured_trigger_create(trace: &LlmTrace) {
-    // Every recorded creation call must satisfy the versioned contract —
-    // substring checks on the first call would let a later legacy call or a
-    // malformed `execution_contract: null` slip through.
+    // Every recorded creation call must satisfy the model-facing contract.
+    // The host, not the model, stamps the durable version and capability
+    // metadata before validating and persisting TriggerExecutionSpec.
     let creates = recorded_tool_calls(trace)
         .into_iter()
         .filter(|(name, _)| name == "builtin.trigger_create")
@@ -499,10 +499,33 @@ fn assert_structured_trigger_create(trace: &LlmTrace) {
                 "routine creation fixtures must exercise the structured execution contract: {arguments}"
             )
         });
+        let mut contract = contract
+            .as_object()
+            .cloned()
+            .unwrap_or_else(|| panic!("execution_contract must be an object: {arguments}"));
+        for host_owned_field in ["version", "required_capability_ids"] {
+            assert!(
+                !contract.contains_key(host_owned_field),
+                "model-facing execution_contract must omit host-owned {host_owned_field}: {arguments}"
+            );
+        }
+        if let Some(policy) = contract
+            .get("policy")
+            .and_then(serde_json::Value::as_object)
+        {
+            assert!(
+                !policy.contains_key("allowed_capability_ids"),
+                "model-facing execution_contract must omit host-owned allowed_capability_ids: {arguments}"
+            );
+        }
+        contract.insert(
+            "version".to_string(),
+            serde_json::Value::from(TriggerExecutionSpec::VERSION),
+        );
         let spec: TriggerExecutionSpec =
-            serde_json::from_value(contract.clone()).unwrap_or_else(|error| {
+            serde_json::from_value(serde_json::Value::Object(contract)).unwrap_or_else(|error| {
                 panic!(
-                    "execution_contract must deserialize as the versioned TriggerExecutionSpec ({error}): {arguments}"
+                    "host-stamped execution_contract must deserialize as TriggerExecutionSpec ({error}): {arguments}"
                 )
             });
         spec.validate().unwrap_or_else(|error| {

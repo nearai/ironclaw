@@ -716,6 +716,7 @@ pub struct RebornRuntime {
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     #[cfg(any(test, feature = "test-support"))]
     interaction_service_test_parts: Option<InteractionServiceTestParts>,
+    pub(crate) webui_event_log: Arc<dyn DurableEventLog>,
     runtime_event_sink: Arc<dyn NonBlockingEventSink>,
     default_run_profile_id: String,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
@@ -4612,6 +4613,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         auth_interaction_service,
         #[cfg(any(test, feature = "test-support"))]
         interaction_service_test_parts,
+        webui_event_log: event_log,
         runtime_event_sink,
         default_run_profile_id,
         send_locks: Mutex::new(HashMap::new()),

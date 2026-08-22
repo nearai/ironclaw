@@ -162,6 +162,9 @@ Reducer rules:
 - transport adapters may bound activity fan-out per projection item; bounded
   snapshots must prefer the most recently updated activity facts and keep
   reconnect cursors resumable
+- run-targeted capability activity reads must filter by the requested parent
+  run identities before applying their output bound; unrelated activity in the
+  same authorized scope must not make evidence for those runs unavailable
 - may cache output, but cache is not source of truth
 - must tolerate unknown future event types by ignoring or preserving them according to version policy
 

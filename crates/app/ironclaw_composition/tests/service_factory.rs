@@ -1430,7 +1430,6 @@ async fn standalone_services_dispatch_trigger_management_through_composed_runtim
         json!({
             "name": "Daily production summary",
             "execution_contract": {
-                "version": 1,
                 "goal": "Summarize production state",
                 "success_criteria": ["Complete the requested task"],
                 "output_instructions": "Return a concise result",

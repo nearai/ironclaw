@@ -27,7 +27,9 @@ One flat `lib.rs` plus two private modules (`runtime_projection`,
   `ProjectionRequest`/`Cursor`/`Snapshot`/`Replay` and the audit variants; a
   bounded replay page size and a rebase ceiling past which a consumer must
   request a fresh snapshot (an explicit rebase-required error, never silent
-  skipping).
+  skipping). Run-targeted capability activity windows apply their bound after
+  filtering to the requested parent run identities, so unrelated activity
+  cannot evict evidence for the requested runs.
 - Read-model DTOs: `ThreadTimeline`/`TimelineEntry`,
   `RunStatusProjection`/`RunProjectionStatus`,
   `CapabilityActivityProjection`; `pub use

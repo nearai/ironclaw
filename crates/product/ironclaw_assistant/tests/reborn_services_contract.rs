@@ -1805,6 +1805,7 @@ fn automation_info(
             status: RebornAutomationRecentRunStatus::Ok,
             submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
             completed_at: Some("2026-06-03T09:00:42Z".parse().expect("completed at")),
+            assessment: None,
         }],
         is_active: true,
         created_at: Some("2026-06-02T18:00:00Z".parse().expect("created at")),
@@ -8396,6 +8397,7 @@ fn reborn_automation_recent_run_info_round_trips_typed_ids_and_preserves_unknown
         status: RebornAutomationRecentRunStatus::Running,
         submitted_at: "2026-06-03T09:00:01Z".parse().expect("submitted at"),
         completed_at: None,
+        assessment: None,
     };
 
     let serialized = serde_json::to_value(&recent_run).expect("serialize recent run");
@@ -9566,6 +9568,7 @@ async fn get_timeline_succeeds_for_own_automation_trigger_thread() {
                 status: RebornAutomationRecentRunStatus::Ok,
                 submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
                 completed_at: Some("2026-06-09T09:00:42Z".parse().expect("completed_at")),
+                assessment: None,
             }],
             is_active: true,
             created_at: None,
@@ -9681,6 +9684,7 @@ async fn read_attachment_reads_trigger_thread_bytes_under_creator_scope() {
                 status: RebornAutomationRecentRunStatus::Ok,
                 submitted_at: "2026-06-09T09:00:01Z".parse().expect("submitted_at"),
                 completed_at: Some("2026-06-09T09:00:42Z".parse().expect("completed_at")),
+                assessment: None,
             }],
             is_active: true,
             created_at: None,
@@ -10138,6 +10142,7 @@ fn automation_service_with_trigger_thread(
                 status: RebornAutomationRecentRunStatus::Ok,
                 submitted_at: "2026-06-10T09:00:01Z".parse().expect("submitted_at"),
                 completed_at: None,
+                assessment: None,
             }],
             is_active: true,
             created_at: None,
@@ -10621,6 +10626,7 @@ async fn get_timeline_rejects_thread_id_absent_from_callers_automations() {
                 status: RebornAutomationRecentRunStatus::Ok,
                 submitted_at: "2026-06-10T12:00:00Z".parse().expect("submitted_at"),
                 completed_at: Some("2026-06-10T12:01:00Z".parse().expect("completed_at")),
+                assessment: None,
             }],
             is_active: true,
             created_at: None,
