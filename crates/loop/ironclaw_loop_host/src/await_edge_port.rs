@@ -1,5 +1,9 @@
 //! Dependency-inversion seam for subagent await-edge delivery.
 //!
+//! `§`-references in this module's doc comments cite
+//! `docs/internal/reborn/subagent-spawn/README.md`, the canonical subagent
+//! design/roadmap document.
+//!
 //! `ironclaw_loop_host` owns `SubagentSpawnDeps` (see `subagent_spawn_port.rs`)
 //! but cannot depend on `ironclaw_turn_runner`, which owns the agent-specific
 //! process-dependency projection and resolver
@@ -7,7 +11,7 @@
 //! the two traits that seam crosses — `AwaitEdgeWriter` (recovery admission and
 //! post-submit rollback) and `AwaitEdgeSettler` (completion-time
 //! settle/resume/drain, consumed by `ironclaw_turn_runner`'s completion path) —
-//! per the design's §4.1 crate-placement ruling (permanent seam, category 2
+//! per the design's §2.4 crate-placement ruling (permanent seam, category 2
 //! of `.claude/rules/type-placement.md`, no `arch-exempt`).
 //!
 //! Process dependency persistence is owned by `ironclaw_processes`.
@@ -22,7 +26,7 @@ use ironclaw_turns::{
 use ironclaw_loop_contracts::AgentLoopHostError;
 
 /// Retryable rejection returned by [`AwaitEdgeWriter::check_scope_recovered`]
-/// when a scope's boot/lazy recovery task is in flight (§5.3). Callers treat
+/// when a scope's boot/lazy recovery task is in flight (§2.5). Callers treat
 /// this exactly like `ThreadBusy` — retry/backoff, no special-casing.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("subagent await-edge scope recovery in progress, retry after {retry_after_hint:?}")]
@@ -36,7 +40,7 @@ pub struct ScopeRecoveryInProgress {
 /// filesystem/CAS semantics needed).
 #[async_trait]
 pub trait AwaitEdgeWriter: Send + Sync {
-    /// Lazy-recovery admission gate (§5.3): called before opening a new edge
+    /// Lazy-recovery admission gate (§2.5): called before opening a new edge
     /// for `scope`. `Err(ScopeRecoveryInProgress)` if this scope's boot/lazy
     /// recovery task is in flight. The in-memory test fixture always admits.
     async fn check_scope_recovered(
@@ -57,27 +61,27 @@ pub trait AwaitEdgeWriter: Send + Sync {
     ) -> Result<(), AgentLoopHostError>;
 }
 
-/// Per-child (or per-settle-group, §5.6's `gate_ref` grouping) outcome of one
+/// Per-child (or per-settle-group, §2.6's `gate_ref` grouping) outcome of one
 /// [`AwaitEdgeSettler::on_child_terminal`] call, folded into a scope's
-/// [`ResolveReport`] (§5.4).
+/// [`ResolveReport`] (§6, R4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveOutcome {
     /// This settle drained its group and resumed the parent.
     Resumed,
     /// This settle completed drain/close but the parent resume was already
-    /// satisfied by a prior attempt (idempotent replay, §5.2).
+    /// satisfied by a prior attempt (idempotent replay, §2.3).
     Drained,
-    /// The edge was abandoned (mode-scoped, §2) rather than delivered.
+    /// The edge was abandoned (mode-scoped, §4.4) rather than delivered.
     Abandoned,
     /// A benign re-observation of already-closed state (`NotFound`, or
-    /// `InvalidTransition` with `from` in the benign set, §5.2).
+    /// `InvalidTransition` with `from` in the benign set, §2.3).
     AlreadyClosed,
     /// This child is not a subagent child (no lineage) — not an error, just
     /// a no-op observation.
     NotApplicable,
 }
 
-/// Per-scope observability counters (§5.4), accumulated across a boot pass
+/// Per-scope observability counters (§6, R4), accumulated across a boot pass
 /// or a batch of lazy resolutions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResolveReport {
@@ -104,9 +108,9 @@ impl ResolveReport {
     }
 }
 
-/// Completion-side settle seam (§3 replacement for the gate store's terminal
+/// Completion-side settle seam (§2.3 replacement for the gate store's terminal
 /// handling; implemented by `AwaitEdgeResolver` in `ironclaw_turn_runner`). Named
-/// per the design doc's §4.1/§3 explicit choice — kept distinct from the
+/// per the design doc's §2.4/§2.3 explicit choice — kept distinct from the
 /// crate's `*Store`/`*Writer`/`*Resolver` naming convention deliberately,
 /// since the certified design doc names this exact trait `AwaitEdgeSettler`.
 #[async_trait]
@@ -144,6 +148,37 @@ pub trait AwaitEdgeSettler: Send + Sync {
         &self,
         result_writer: Arc<dyn crate::LoopCapabilityResultWriter>,
     ) -> Result<(), TurnError>;
+
+    /// Bind the host input-enqueue port late, mirroring `bind_result_writer`'s
+    /// deferred-binding pattern — composition builds the input queue after
+    /// this resolver is already erased into `Arc<dyn AwaitEdgeSettler>` (its
+    /// own generic backend type parameter is no longer nameable at that
+    /// point) (Task 5, 2b). The background-mode delivery tail uses this port
+    /// to enqueue a settled child's result as steering input for a live
+    /// parent run. A runtime that never binds one (no live-queue reader
+    /// wired at all) is a legitimate deployment shape, not a bug: the
+    /// delivery tail treats an unbound port exactly like a refused enqueue —
+    /// it parks the edge in `ResultAppended` rather than erroring.
+    fn bind_input_enqueue(
+        &self,
+        port: Arc<dyn crate::HostInputEnqueuePort>,
+    ) -> Result<(), TurnError>;
+
+    /// Run-start sweep (§4.2): heals background await-edges left mid-delivery
+    /// for `scope`'s thread — a crash between settle and delivery, or a
+    /// streak-capped edge waiting for a permitted start. Bounded (at most
+    /// `MAX_QUEUED_INPUTS_PER_RUN` edges); implemented by
+    /// `AwaitEdgeResolver::sweep_thread_on_run_start`. `human_initiated` is
+    /// whether the run now starting is human/permitted (absent or `Human`
+    /// activation provenance) rather than `System`/`ParentAgent` — only a
+    /// permitted start may drain an `AttentionDeferredStreakCap` edge forward.
+    /// The caller (`RebornTurnRunExecutor::execute_claimed_run`) treats any
+    /// `Err` as non-fatal to the run start: log and continue.
+    async fn sweep_thread_on_run_start(
+        &self,
+        scope: &TurnScope,
+        human_initiated: bool,
+    ) -> Result<(), AgentLoopHostError>;
 
     /// Adapter to the turn projection observer seam
     /// (the process journal observer needs a `TurnCommittedEventObserver`, not

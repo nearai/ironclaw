@@ -1175,28 +1175,46 @@ where
         request: ProcessDependencyQuery,
     ) -> Result<Vec<ProcessDependencyRecord>, Self::Error> {
         self.ensure_materialized().await?;
-        let mut records = rows::dependencies_for_scope(
+        // `after`/`limit` both `None` is the pre-existing unbounded query,
+        // preserved byte-for-byte: full scope drain, in-memory filter, sort.
+        if request.after.is_none() && request.limit.is_none() {
+            let mut records = rows::dependencies_for_scope(
+                self.filesystem.as_ref(),
+                &request.scope,
+                request.dependent_process_id,
+            )
+            .await?
+            .into_iter()
+            .filter(|record| {
+                request
+                    .group_ref
+                    .as_ref()
+                    .is_none_or(|group_ref| record.group_ref.as_ref() == Some(group_ref))
+            })
+            .filter(|record| request.include_closed || !record.state.is_closed())
+            .collect::<Vec<_>>();
+            records.sort_by_key(|record| {
+                (
+                    record.dependent_process_id.as_uuid(),
+                    record.dependency_process_id.as_uuid(),
+                )
+            });
+            return Ok(records);
+        }
+        // Bounded mode: page the canonical-order index directly, applying
+        // filters before the cursor/limit bound (`ProcessDependencyQuery`'s
+        // documented ordering contract), stopping once `limit` matching rows
+        // are collected.
+        rows::dependencies_for_scope_canonical_order(
             self.filesystem.as_ref(),
             &request.scope,
             request.dependent_process_id,
+            request.group_ref.as_deref(),
+            request.include_closed,
+            request.after,
+            request.limit.unwrap_or(u32::MAX),
         )
-        .await?
-        .into_iter()
-        .filter(|record| {
-            request
-                .group_ref
-                .as_ref()
-                .is_none_or(|group_ref| record.group_ref.as_ref() == Some(group_ref))
-        })
-        .filter(|record| request.include_closed || !record.state.is_closed())
-        .collect::<Vec<_>>();
-        records.sort_by_key(|record| {
-            (
-                record.dependent_process_id.as_uuid(),
-                record.dependency_process_id.as_uuid(),
-            )
-        });
-        Ok(records)
+        .await
     }
 
     async fn unresolved_process_dependencies(

@@ -709,6 +709,15 @@ impl SessionThreadService for InMemorySessionThreadService {
                 return Ok(message.clone());
             }
         }
+        // D14: a subagent result row is terminal on arrival. The queue's
+        // best-effort Submitted flip must treat it as already-settled, not as a
+        // transition violation — an already-terminal row has nothing to flip.
+        {
+            let message = &thread.messages[message_index];
+            if message.status == MessageStatus::Finalized {
+                return Ok(message.clone());
+            }
+        }
         let was_queued = {
             let message = &thread.messages[message_index];
             ensure_user_accepted(message, "mark_message_submitted")?;

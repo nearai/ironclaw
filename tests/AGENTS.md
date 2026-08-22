@@ -236,6 +236,11 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
+| Two background children settle independently while the parent keeps running: each gets its own framed transcript row and its own queued `SubagentSettled` input, in settle order (D6) | `subagent_await_edge.rs::background_child_result_is_delivered_per_child_while_parent_runs` |
+| A background result's live-run enqueue racing `RunClosed` (the parent terminalized mid-delivery) is healed by a System-provenance `activate`, not lost | `subagent_await_edge.rs::run_closed_race_is_healed_by_activation` |
+| A background result settling against a parked/completed parent wakes it via `activate` with `ActivationProvenance::System`, pinned on the submitted run's journaled `subagent_activation_provenance` | `subagent_await_edge.rs::parked_parent_is_activated_with_system_provenance` |
+| Re-driving background delivery after a scripted crash mid-append replays idempotently — exactly one transcript row and one queued attention outcome, never two | `subagent_await_edge.rs::background_delivery_replay_is_idempotent` |
+| A background result parked by the autonomous-wake streak cap (`AttentionDeferredStreakCap`) stays unclosed and immune to autonomous re-drive until a human-provenance run start sweeps, drains, and closes it | `subagent_await_edge.rs::streak_capped_result_waits_for_human` |
 | A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread belongs to the calling user (stored under their owner scope, foreign-owner run-state reads rejected) yet never appears in conversation listings | `unbound_turns.rs` |
 
 **Suggestions**

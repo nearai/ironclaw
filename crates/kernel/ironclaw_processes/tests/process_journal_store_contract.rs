@@ -2937,11 +2937,110 @@ async fn explicit_dependency_open_is_idempotent_scope_bound_and_abandonable() {
                 dependent_process_id: Some(root_id),
                 group_ref: Some("gate:explicit-open".to_string()),
                 include_closed: false,
+                after: None,
+                limit: None,
             })
             .await
             .expect("query open dependencies")
             .is_empty()
     );
+}
+
+/// Task 7 (2c) bounded query: `ProcessDependencyQuery::after`/`limit` page the
+/// filtered, canonically-sorted `(dependent_process_id, dependency_process_id)`
+/// sequence — noise dependencies under a different `group_ref` prove the
+/// filter applies before the bound, a `limit` page proves the canonical
+/// order, resuming from the last returned pair proves the keyset cursor, and
+/// an unbounded (`None`, `None`) query proves today's behavior is untouched.
+#[tokio::test]
+async fn query_process_dependencies_bounded_mode_pages_the_filtered_canonical_order() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let root_scope = scope();
+    let dependent_a = ProcessId::new();
+    let dependent_b = ProcessId::new();
+    submit_internal_process(&store, &root_scope, dependent_a).await;
+    submit_internal_process(&store, &root_scope, dependent_b).await;
+
+    let mut expected: Vec<ProcessDependencyRecord> = Vec::new();
+    for dependent in [dependent_a, dependent_b] {
+        for _ in 0..3 {
+            let record = store
+                .open_process_dependency(OpenProcessDependencyRequest {
+                    dependent_process_id: dependent,
+                    dependency_process_id: ProcessId::new(),
+                    root_process_id: dependent,
+                    scope: root_scope.clone(),
+                    group_ref: Some("paging-test".to_string()),
+                    created_at: Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+                .expect("open paged dependency");
+            expected.push(record);
+        }
+        // Noise sharing the dependent but a different group_ref: the bound
+        // must skip it via the filter, not miscount it against `limit`.
+        store
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: ProcessId::new(),
+                root_process_id: dependent,
+                scope: root_scope.clone(),
+                group_ref: Some("other-group".to_string()),
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("open noise dependency");
+    }
+    expected.sort_by_key(|record| {
+        (
+            record.dependent_process_id.as_uuid(),
+            record.dependency_process_id.as_uuid(),
+        )
+    });
+    assert_eq!(expected.len(), 6);
+
+    let base_query = ProcessDependencyQuery {
+        scope: root_scope.clone(),
+        dependent_process_id: None,
+        group_ref: Some("paging-test".to_string()),
+        include_closed: false,
+        after: None,
+        limit: None,
+    };
+
+    // Unbounded (None, None): byte-for-byte the pre-existing full-drain output.
+    let unbounded = store
+        .query_process_dependencies(base_query.clone())
+        .await
+        .expect("unbounded query");
+    assert_eq!(unbounded, expected);
+
+    // Bounded: a limited page returns exactly N in canonical order.
+    let first_page = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            limit: Some(4),
+            ..base_query.clone()
+        })
+        .await
+        .expect("first bounded page");
+    assert_eq!(first_page, expected[..4]);
+
+    // The last pair from the first page resumes to exactly the rest.
+    let cursor = (
+        first_page[3].dependent_process_id,
+        first_page[3].dependency_process_id,
+    );
+    let second_page = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            after: Some(cursor),
+            limit: Some(10),
+            ..base_query
+        })
+        .await
+        .expect("second bounded page");
+    assert_eq!(second_page, expected[4..]);
 }
 
 #[tokio::test]
@@ -3019,6 +3118,8 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
                 dependent_process_id: Some(root_id),
                 group_ref: Some("gate:rejected".to_string()),
                 include_closed: true,
+                after: None,
+                limit: None,
             })
             .await
             .expect("query rejected dependency")
@@ -3066,6 +3167,8 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
             dependent_process_id: Some(root_id),
             group_ref: Some("gate:batch".to_string()),
             include_closed: true,
+            after: None,
+            limit: None,
         })
         .await
         .expect("query closed dependency");
@@ -3162,6 +3265,8 @@ where
             dependent_process_id: Some(dependent),
             group_ref: None,
             include_closed: true,
+            after: None,
+            limit: None,
         })
         .await
         .expect("query dependencies")
@@ -3536,6 +3641,8 @@ async fn consume_closes_a_delivered_edge_only_once_attention_is_scheduled() {
                 dependent_process_id: Some(dependent),
                 group_ref: None,
                 include_closed: false,
+                after: None,
+                limit: None,
             })
             .await
             .expect("query succeeds");
@@ -3639,6 +3746,8 @@ async fn new_substates_are_not_treated_as_closed() {
                 dependent_process_id: Some(dependent),
                 group_ref: None,
                 include_closed: false,
+                after: None,
+                limit: None,
             })
             .await
             .expect("query succeeds");
