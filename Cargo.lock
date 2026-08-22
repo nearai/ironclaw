@@ -4801,6 +4801,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_memory_mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_host_api",
+ "ironclaw_memory",
+ "ironclaw_memory_mcp",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_memory_mem0"
 version = "0.1.0"
 dependencies = [
