@@ -406,6 +406,8 @@ fn install_ctrl_c_cancellation() -> CancellationToken {
 pub(crate) enum RuntimeInputCaller {
     Run,
     Serve,
+    /// ACP stdio server — like Run (single-user, no web) but uses multi_thread runtime.
+    AcpServe,
 }
 
 #[cfg(test)]
