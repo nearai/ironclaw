@@ -34,7 +34,15 @@ const SAVED_OUTPUT_SCOPED_DIR: &str = "command-outputs";
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         SHELL_CAPABILITY_ID,
-        "Execute shell commands with copied v1 validation and saved-file references for large local output",
+        // The two hints after the first sentence are the model-facing calling
+        // convention, not decoration: `command` takes a whole shell command
+        // line, and `workdir` is per-call. Without them the model treats this
+        // as one-primitive-per-call and pays a round trip per `ls`/`cat`.
+        "Execute shell commands with copied v1 validation and saved-file references for large local \
+         output. One call runs a full shell command line, so related steps belong in a single call \
+         (`a && b`, a `for` loop over ids, a heredoc script) rather than one call per step. Pass \
+         `workdir` instead of a leading `cd` — the working directory is per-call and does not carry \
+         over between calls.",
         vec![
             EffectKind::DispatchCapability,
             EffectKind::SpawnProcess,
@@ -307,6 +315,62 @@ mod tests {
             FirstPartyCapabilityError::Dispatch { safe_summary, .. } => safe_summary.as_deref(),
             FirstPartyCapabilityError::AuthRequired { .. } => None,
         }
+    }
+
+    #[test]
+    fn the_manifest_tells_the_model_how_to_call_the_tool_not_only_what_it_does() {
+        // Regression: the description used to state only what the tool does,
+        // so the model treated it as one-primitive-per-call and paid a round
+        // trip per `ls`/`cat` (~2.2x the tool calls of harnesses whose shell
+        // description carries calling guidance, for the same work).
+        // Each assertion pins one instruction, not just a keyword: a
+        // description that names `workdir` while dropping "instead of a
+        // leading cd" has lost the guidance and must still fail here.
+        let description = manifest().expect("shell manifest builds").description;
+        for required in [
+            "full shell command line",
+            "single call",
+            "rather than one call per step",
+            "workdir",
+            "instead of a leading `cd`",
+            "does not carry over",
+        ] {
+            assert!(
+                description.contains(required),
+                "description lost the calling guidance ({required:?} missing): {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_recommended_command_forms_pass_validation_and_workdir_parsing() {
+        // Scope is deliberately validation + parsing, the two gates a batched
+        // call meets before dispatch. Execution is not covered: this handler's
+        // scoped-path branch fails closed pending a process backend that can
+        // take a virtual cwd, so there is no executor here to assert against.
+        //
+        // The description tells the model to batch with `&&`, loops, and
+        // heredocs, and to pass `workdir`. If validation is ever tightened to
+        // reject composition, that advice becomes a lie the model cannot
+        // discover except by burning a rejected call — so pin the forms here.
+        for command in [
+            "ls -la && cat notes.md",
+            "for id in 1 2 3; do curl -s \"http://svc.test/items/$id\"; done",
+            "sh <<'EOF'\nls -la\ncat notes.md\nEOF",
+            "grep -r needle . | head -20",
+        ] {
+            assert!(
+                shell_core::validate_command(command, false).is_ok(),
+                "description recommends this form, so it must validate: {command}"
+            );
+        }
+
+        let request = shell_core::parse_shell_request(&serde_json::json!({
+            "command": "cat notes.md",
+            "workdir": "/workspace/sub",
+        }))
+        .expect("workdir is a per-call parameter");
+        assert_eq!(request.workdir.as_deref(), Some("/workspace/sub"));
     }
 
     #[test]
