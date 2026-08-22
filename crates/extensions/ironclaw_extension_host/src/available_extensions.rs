@@ -1597,8 +1597,52 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
     }
 
     #[test]
-    fn bundled_xquik_extension_projects_its_dynamic_oauth_recipe() {
+    fn bundled_xquik_extension_projects_policy_and_dynamic_oauth_recipe() {
         let bundles = crate::test_support::first_party_bundles_from_inventory();
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "xquik").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let mcp = package
+            .resolved_manifest
+            .mcp
+            .as_ref()
+            .expect("Xquik should resolve as a hosted MCP package");
+
+        assert_eq!(mcp.max_tools, 8);
+        assert_eq!(mcp.default_permission, PermissionMode::Ask);
+        assert_eq!(
+            mcp.effects,
+            [
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ExternalWrite,
+            ]
+        );
+        let [connection_template] = package.resolved_manifest.tools.as_slice() else {
+            panic!("Xquik should resolve one hosted MCP connection template");
+        };
+        assert_eq!(connection_template.default_permission, PermissionMode::Ask);
+        assert_eq!(
+            connection_template.effects,
+            [
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ExternalWrite,
+            ]
+        );
+        let origin_gate_matrix = connection_template
+            .origin_gate_matrix
+            .as_ref()
+            .expect("Xquik should declare every invocation-origin gate");
+        assert_eq!(
+            origin_gate_matrix.loop_run,
+            OriginGatePolicy::GatedUnlessGranted
+        );
+        assert_eq!(origin_gate_matrix.product, OriginGatePolicy::Forbidden);
+        assert_eq!(origin_gate_matrix.automation, OriginGatePolicy::Forbidden);
+
         let recipes = AvailableExtensionCatalog::bundled_vendor_recipes(&bundles).unwrap();
         let xquik = recipes
             .iter()
