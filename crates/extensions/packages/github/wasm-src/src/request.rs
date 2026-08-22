@@ -5,6 +5,33 @@ const GITHUB_API_VERSION: &str = "2026-03-10";
 #[cfg(not(test))]
 const HTTP_TIMEOUT_MS: u32 = 10_000;
 
+thread_local! {
+    /// The provider's bounded `message` field from the most recent `401`
+    /// GitHub API response body, if any. `github_request` stashes it here
+    /// immediately before returning its `Err(code)` so `lib.rs::execute`
+    /// can attach it to the typed `guest-failure.message` alongside the
+    /// stable `code` for the auth-required diagnostic the host carries onto
+    /// the auth gate — the host scrubs and bounds it before it becomes
+    /// guest-visible, so this only needs to carry the raw text out. Scoped
+    /// to `401` only: other provider error bodies are not validated end to
+    /// end onto a model-visible surface and echoing them verbatim would
+    /// widen what a guest-authored response body can put in front of the
+    /// model without the same scrutiny.
+    static LAST_ERROR_MESSAGE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Take (and clear) the provider message captured alongside the most recent
+/// `github_request` error, if any.
+pub(crate) fn take_last_error_message() -> Option<String> {
+    LAST_ERROR_MESSAGE.with(|cell| cell.borrow_mut().take())
+}
+
+fn set_last_error_message(body: &[u8]) {
+    let message = provider_error_message(body);
+    LAST_ERROR_MESSAGE.with(|cell| *cell.borrow_mut() = message);
+}
+
 #[cfg(not(test))]
 pub(crate) fn github_request(
     method: &str,
@@ -27,7 +54,7 @@ pub(crate) fn github_request(
         body_bytes.as_deref(),
         Some(HTTP_TIMEOUT_MS),
     )
-    .map_err(|error| sanitize_host_error(&error))?;
+    .map_err(|failure| host_failure_code(&failure))?;
 
     if (200..300).contains(&response.status) {
         if response.body.is_empty() {
@@ -38,12 +65,12 @@ pub(crate) fn github_request(
         return Ok(body);
     }
 
-    if response.status == 401 {
-        return Err(unauthorized_error_payload(&response.body));
-    }
-
     if response.status == 422 && is_github_validation_error_body(&response.body) {
         return Err("github_api_error_status_422_validation".to_string());
+    }
+
+    if response.status == 401 {
+        set_last_error_message(&response.body);
     }
 
     Err(format!("github_api_error_status_{}", response.status))
@@ -53,23 +80,6 @@ pub(crate) fn github_request(
 /// guest error envelope -- keeps the payload small independent of the
 /// host's own `MAX_WASM_GUEST_MESSAGE_BYTES` backstop.
 const MAX_PROVIDER_MESSAGE_CHARS: usize = 512;
-
-/// Build the structured guest error envelope for a 401 response, carrying the
-/// provider's rejection `message` (when the body has one) alongside the
-/// stable `code`/`kind` pair. This is a pre-built envelope -- unlike other
-/// error codes in this module, which are plain stable strings wrapped later
-/// by `guest_error_payload` -- so `guest_error_payload` recognizes and passes
-/// it through unchanged instead of re-wrapping it.
-pub(crate) fn unauthorized_error_payload(body: &[u8]) -> String {
-    let mut payload = serde_json::json!({
-        "code": "github_api_error_status_401",
-        "kind": "auth_required",
-    });
-    if let Some(message) = provider_error_message(body) {
-        payload["message"] = serde_json::Value::String(message);
-    }
-    payload.to_string()
-}
 
 fn provider_error_message(body: &[u8]) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_slice(body).ok()?;
@@ -95,28 +105,22 @@ pub(crate) fn github_request(
         .unwrap_or_else(|| Err("github_test_missing_mock_response".to_string()))
 }
 
-pub(crate) fn sanitize_host_error(error: &str) -> String {
-    let lower = error.to_ascii_lowercase();
-    if lower.contains("auth")
-        || lower.contains("credential")
-        || lower.contains("secret")
-        || lower.contains("token")
-    {
-        return "AuthRequired".to_string();
+fn host_failure_code(failure: &crate::near::agent::host::HttpFailure) -> String {
+    use crate::near::agent::host::HttpErrorKind;
+
+    match failure.kind {
+        HttpErrorKind::AuthRequired => "AuthRequired",
+        HttpErrorKind::Input => "invalid_parameters",
+        HttpErrorKind::OutputTooLarge => "github_api_body_limit",
+        HttpErrorKind::Executor => "github_api_executor_failed",
+        HttpErrorKind::NetworkDenied => "github_api_egress_denied",
+        HttpErrorKind::Client => "github_api_request_failed",
+        HttpErrorKind::OperationFailed => failure
+            .code
+            .as_deref()
+            .unwrap_or("github_api_request_failed"),
     }
-    if lower.contains("timeout") || lower.contains("deadline") {
-        return "github_api_timeout".to_string();
-    }
-    if lower.contains("redirect") {
-        return "github_api_redirect_denied".to_string();
-    }
-    if lower.contains("body") || lower.contains("size") || lower.contains("large") {
-        return "github_api_body_limit".to_string();
-    }
-    if lower.contains("deny") || lower.contains("allow") || lower.contains("host") {
-        return "github_api_egress_denied".to_string();
-    }
-    "github_api_request_failed".to_string()
+    .to_string()
 }
 
 fn is_github_validation_error_body(body: &[u8]) -> bool {
@@ -184,50 +188,48 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_github_validation_error_body, unauthorized_error_payload};
+    use super::{
+        is_github_validation_error_body, provider_error_message, set_last_error_message,
+        take_last_error_message,
+    };
 
     #[test]
-    fn unauthorized_error_payload_carries_the_provider_message() {
-        let payload = unauthorized_error_payload(br#"{"message":"Bad credentials"}"#);
-        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+    fn provider_error_message_carries_the_rejection_text() {
+        let message = provider_error_message(br#"{"message":"Bad credentials"}"#);
 
-        assert_eq!(value["code"], "github_api_error_status_401");
-        assert_eq!(value["kind"], "auth_required");
-        assert_eq!(value["message"], "Bad credentials");
+        assert_eq!(message.as_deref(), Some("Bad credentials"));
     }
 
     #[test]
-    fn unauthorized_error_payload_degrades_gracefully_without_a_message() {
+    fn provider_error_message_degrades_gracefully_without_usable_text() {
         for body in [
             &b"{}"[..],
             b"not json",
             br#"{"message":""}"#,
+            br#"{"message":"   "}"#,
             br#"{"message":123}"#,
         ] {
-            let payload = unauthorized_error_payload(body);
-            let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
-
-            assert_eq!(value["code"], "github_api_error_status_401");
-            assert_eq!(value["kind"], "auth_required");
             assert!(
-                value.get("message").is_none(),
-                "no message field expected for body {body:?}, got {value:?}"
+                provider_error_message(body).is_none(),
+                "no message expected for body {body:?}"
             );
         }
     }
 
     #[test]
-    fn unauthorized_error_payload_bounds_the_message_to_512_chars() {
-        let long_message = "a".repeat(1000);
-        let body = serde_json::json!({ "message": long_message }).to_string();
+    fn provider_error_message_bounds_the_message_to_512_chars() {
+        let body = serde_json::json!({ "message": "a".repeat(1000) }).to_string();
 
-        let payload = unauthorized_error_payload(body.as_bytes());
-        let value: serde_json::Value = serde_json::from_str(&payload).expect("valid json");
+        let message = provider_error_message(body.as_bytes()).expect("message present");
 
-        assert_eq!(
-            value["message"].as_str().expect("message string").len(),
-            512
-        );
+        assert_eq!(message.chars().count(), 512);
+    }
+
+    #[test]
+    fn production_capture_uses_the_validated_provider_message_parser() {
+        set_last_error_message(br#"{"message":"   "}"#);
+
+        assert!(take_last_error_message().is_none());
     }
 
     #[test]

@@ -9,18 +9,10 @@ use super::{AgentLoopExecutorError, ExecutorStage, StageContext, TurnCompletedSt
 /// Owns post-capability lifecycle — the seam between `CapabilityStage`
 /// and `StopStage.observe()`.
 ///
-/// **R1 (active):** proactive compaction policy evaluation. Reads
-/// per-capability byte accumulation on
-/// `state.post_capability_state.pending_capability_bytes` (populated by
-/// `push_completed_result`) and decides whether the next prompt build
-/// should compact-then-skip-the-model.
-///
-/// **R2 (owner of record, no-op until #4474):** mailbox drain for
-/// settled background-mode subagent children. Producer side (durable
-/// settlement log + `LoopBackgroundChildPort`) lands in WU-C through
-/// WU-E. Until then `drain_settled` returns an empty `Vec` — this stage
-/// owns the seam so all post-capability responsibilities live in one
-/// file (single-seam thesis per the WU-A design doc).
+/// Proactive compaction policy evaluation. Reads per-capability byte
+/// accumulation on `state.post_capability_state.pending_capability_bytes`
+/// (populated by `push_completed_result`) and decides whether the next
+/// prompt build should compact-then-skip-the-model.
 #[derive(Clone)]
 pub(crate) struct PostCapabilityStage {
     compaction_force: Arc<dyn CompactionForceStrategy>,
@@ -29,13 +21,6 @@ pub(crate) struct PostCapabilityStage {
 impl PostCapabilityStage {
     pub(crate) fn new(compaction_force: Arc<dyn CompactionForceStrategy>) -> Self {
         Self { compaction_force }
-    }
-
-    /// R2 — drain settled background-mode subagent results.
-    /// Returns an empty `Vec` until durable settlement log +
-    /// `LoopBackgroundChildPort` land (#4474).
-    fn drain_settled(&self) -> Vec<()> {
-        Vec::new()
     }
 }
 
@@ -61,16 +46,13 @@ impl ExecutorStage<TurnCompletedStep> for PostCapabilityStage {
         input: TurnCompletedStep,
     ) -> Result<TurnCompletedStep, AgentLoopExecutorError> {
         // Exit terminates the loop — state is discarded, no future reuse possible.
-        // R2 drain and R1 policy check both apply only to the Continue path which
-        // carries state forward.
+        // The compaction policy check below applies only to the Continue path
+        // which carries state forward.
         let TurnCompletedStep::Continue { mut state, summary } = input else {
             return Ok(input);
         };
 
-        // R2: drain settled background children (no-op until producers exist).
-        let _drained = self.drain_settled();
-
-        // R1: proactive compaction policy check.
+        // Proactive compaction policy check.
         // Only consult policy if any capability bytes accumulated this turn.
         // AssistantReply turns reach here with an empty map and gain nothing
         // from the policy scan + Arc<dyn> virtual dispatch.
@@ -220,7 +202,7 @@ mod tests {
         );
     }
 
-    /// Exit variant passes through untouched — R1 and R2 skipped.
+    /// Exit variant passes through untouched — compaction policy skipped.
     #[tokio::test]
     async fn exit_passes_through_untouched() {
         // Even with a policy that would trip compaction, an Exit input is

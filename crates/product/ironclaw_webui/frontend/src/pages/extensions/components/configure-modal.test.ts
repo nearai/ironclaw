@@ -31,6 +31,18 @@ const webCodeSurfaces = [
   },
 ];
 const toolSurfaces = [{ kind: "tool" }];
+const botAndPersonalSurfaces = [
+  { kind: "auth" },
+  {
+    kind: "channel",
+    inbound: true,
+    outbound: true,
+    connection: {
+      strategy: "web_generated_code",
+      instructions: "Open the workspace bot and send the generated code.",
+    },
+  },
+];
 
 function configureModalSourceForTest() {
   const source = readFileSync(new URL("./configure-modal.tsx", import.meta.url), "utf8");
@@ -423,6 +435,26 @@ function findHandler(node, bodyMarker, seen = new Set()) {
   return null;
 }
 
+
+function capturedValuesAfter(node, marker, seen = new Set()) {
+  if (!node || typeof node !== "object" || seen.has(node)) return [];
+  seen.add(node);
+
+  const matches = [];
+  if (Array.isArray(node.strings) && Array.isArray(node.values)) {
+    node.strings.forEach((part, index) => {
+      if (part.includes(marker) && index < node.values.length) {
+        matches.push(node.values[index]);
+      }
+    });
+  }
+
+  const children = Array.isArray(node) ? node : Object.values(node);
+  for (const child of children) {
+    matches.push(...capturedValuesAfter(child, marker, seen));
+  }
+  return matches;
+}
 
 function renderedContainsComponent(rendered, component) {
   if (!rendered || typeof rendered !== "object") {
@@ -1094,17 +1126,17 @@ test("ConfigureModal starts the OAuth flow when the popup pre-open succeeds", ()
   );
 });
 
-test("ConfigureModal routes a device-link credential to the link panel, never a paste box", () => {
-  // `RebornExtensionCredentialSetup::DeviceLink` has no secret for the user to
-  // paste: the vendor issues the payload and the host takes custody of the
-  // resulting session. Falling back to the manual-token form here would ask
-  // for a value that does not exist.
+test("ConfigureModal explains independent bot and personal onboarding before connecting", () => {
   const view = renderModal({
-    surfaces: [{ kind: "auth" }],
+    surfaces: botAndPersonalSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     displayName: "Telegram",
     installationState: "setup_needed",
     setupResult: {
+      phase: "setup_needed",
+      blockers: [
+        { kind: "auth", ref_id: "internal-auth-correlation" },
+      ],
       secrets: [
         {
           name: "telegram_linked_session",
@@ -1120,17 +1152,26 @@ test("ConfigureModal routes a device-link credential to the link panel, never a 
     },
   });
 
+  const body = JSON.stringify(view.rendered);
+  assert.match(body, /extensions\.connectionChoice\.title/);
+  assert.match(body, /extensions\.connectionChoice\.workspaceBot/);
+  assert.match(body, /extensions\.connectionChoice\.personalAccount/);
+  assert.doesNotMatch(body, /extensions\.connectionChoice\.adminRequired/);
+  const readiness = renderFirstComponent(view.rendered, view.SetupReadiness);
+  const readinessBody = JSON.stringify(readiness);
+  assert.match(readinessBody, /extensions\.setupPhase\.setup_needed/);
+  assert.match(readinessBody, /extensions\.setupBlocker\.auth/);
+  assert.doesNotMatch(readinessBody, /internal-auth-correlation/);
   assert.equal(
     renderedContainsComponent(view.rendered, view.DeviceLinkPanel),
-    true,
-    "a device-link credential must render the multi-step link panel",
+    false,
+    "opening Configure must not start personal-account linking",
   );
   assert.equal(
     renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
     false,
-    "a device link is not a host-issued pairing code",
+    "opening Configure must not mint a workspace-bot pairing code",
   );
-  const body = JSON.stringify(view.rendered);
   assertAdminSetupFieldsNotice(view);
   assert.doesNotMatch(body, /Tenant URL/);
   assert.ok(!body.includes("pairing.placeholder"), "no secret paste box");
@@ -1138,6 +1179,129 @@ test("ConfigureModal routes a device-link credential to the link panel, never a 
     !body.includes("extensions.noConfigRequired"),
     "device-link Configure must never claim no configuration is required",
   );
+  assert.deepEqual(
+    capturedValuesAfter(view.rendered, "checked="),
+    [false, false],
+    "both connection options must start unchecked",
+  );
+  assert.deepEqual(
+    capturedValuesAfter(view.rendered, "disabled="),
+    [true],
+    "Continue must stay disabled until the user chooses",
+  );
+});
+
+test("ConfigureModal starts personal-account linking only after Continue", () => {
+  const setup = {
+    surfaces: botAndPersonalSurfaces,
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+    installationState: "setup_needed",
+    setupResult: {
+      secrets: [
+        {
+          name: "telegram_linked_session",
+          provider: "telegram",
+          prompt: "Link your Telegram account",
+          provided: false,
+          setup: { kind: "device_link" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+  };
+  const choice = renderModal({
+    ...setup,
+    initialState: [undefined, undefined, "personal_account", null],
+  });
+
+  const continueSetup = findHandler(choice.rendered, "setActiveConnection");
+  assert.ok(continueSetup, "the selected personal-account option can continue");
+  continueSetup();
+  assert.ok(choice.stateSets.includes("personal_account"));
+  assert.equal(renderedContainsComponent(choice.rendered, choice.DeviceLinkPanel), false);
+
+  const linking = renderModal({
+    ...setup,
+    initialState: [undefined, undefined, "personal_account", "personal_account"],
+  });
+  assert.equal(
+    renderedContainsComponent(linking.rendered, linking.DeviceLinkPanel),
+    true,
+    "the personal DeviceLinkPanel renders only after Continue",
+  );
+  assert.equal(renderedContainsComponent(linking.rendered, linking.PairingWebCodePanel), false);
+});
+
+test("ConfigureModal starts workspace-bot pairing without personal device linking", () => {
+  const setup = {
+    surfaces: botAndPersonalSurfaces,
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+    installationState: "setup_needed",
+    setupResult: {
+      secrets: [
+        {
+          name: "telegram_linked_session",
+          provider: "telegram",
+          prompt: "Link your Telegram account",
+          provided: false,
+          setup: { kind: "device_link" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+  };
+  const choice = renderModal({
+    ...setup,
+    initialState: [undefined, undefined, "workspace_bot", null],
+  });
+
+  const continueSetup = findHandler(choice.rendered, "setActiveConnection");
+  assert.ok(continueSetup, "the selected workspace-bot option can continue");
+  continueSetup();
+  assert.ok(choice.stateSets.includes("workspace_bot"));
+
+  const pairing = renderModal({
+    ...setup,
+    initialState: [undefined, undefined, "workspace_bot", "workspace_bot"],
+  });
+  assert.equal(
+    renderedContainsComponent(pairing.rendered, pairing.PairingWebCodePanel),
+    true,
+    "workspace-bot pairing starts only after Continue",
+  );
+  assert.equal(renderedContainsComponent(pairing.rendered, pairing.DeviceLinkPanel), false);
+});
+
+test("ConfigureModal keeps an auth-only device link on its existing direct flow", () => {
+  const view = renderModal({
+    surfaces: [{ kind: "auth" }],
+    packageRef: { kind: "extension", id: "provider-neutral-device-link" },
+    displayName: "Provider Neutral",
+    installationState: "setup_needed",
+    setupResult: {
+      secrets: [
+        {
+          name: "linked_session",
+          provider: "provider-neutral",
+          prompt: "Link your account",
+          provided: false,
+          setup: { kind: "device_link" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  assert.equal(renderedContainsComponent(view.rendered, view.DeviceLinkPanel), true);
+  assert.doesNotMatch(JSON.stringify(view.rendered), /extensions\.connectionChoice\.title/);
 });
 
 test("ConfigureModal leaves a manual-token credential on the paste form", () => {

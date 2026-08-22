@@ -1,14 +1,15 @@
 # Telegram Linked Device as Channel Identity
 
-**Status:** Draft for implementation review
+**Status:** Superseded on 2026-08-20 by issue #7715
 
 **Date:** 2026-08-13
 
 **Builds on:** [PROPOSAL.md](PROPOSAL.md) and
 [ADR-device-link-auth-hook.md](ADR-device-link-auth-hook.md)
 
-**Supersedes:** the Telegram-specific decision that bot proof-code pairing and
-personal device linking remain separate user actions
+**Superseded by:** the current product decision that workspace-bot pairing and
+personal device linking are separate, optional user actions. The historical
+design below must not be used as current implementation guidance.
 
 ## 1. Problem and motivation
 

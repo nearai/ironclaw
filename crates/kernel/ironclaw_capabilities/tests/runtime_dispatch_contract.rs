@@ -23,7 +23,8 @@ use ironclaw_capabilities::{
 use ironclaw_host_api::{
     authorized::Authorized,
     dispatch::{
-        CapabilityDispatchRequest, CapabilityDispatcher, DispatchError, RuntimeDispatchErrorKind,
+        CapabilityDispatchRequest, CapabilityDispatcher, DispatchError, DispatchFailureKind,
+        RuntimeDispatchErrorKind,
     },
     ids::{
         ActivityId, CapabilityId, CorrelationId, ExtensionId, InvocationId, MissionId, ProductKind,
@@ -102,9 +103,11 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
 async fn dispatcher_redacts_binding_failure_details() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let binding = RecordingBinding::failing(
-        || DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure,
-            model_visible_cause: None,
+        || DispatchError::Rejected {
+            runtime: Some(RuntimeKind::Script),
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure),
+            diagnostic: None,
+            detail: None,
         },
         Arc::clone(&governor),
     );
@@ -121,8 +124,8 @@ async fn dispatcher_redacts_binding_failure_details() {
 
     assert!(matches!(
         err,
-        DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure),
             ..
         }
     ));
@@ -313,16 +316,24 @@ async fn dispatcher_fails_closed_when_prepared_reservation_was_revoked_before_bi
         .await
         .unwrap_err();
 
-    let DispatchError::Wasm {
-        kind: RuntimeDispatchErrorKind::Resource,
-        model_visible_cause: Some(cause),
+    let DispatchError::Rejected {
+        runtime: Some(RuntimeKind::Wasm),
+        kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+        diagnostic: Some(diagnostic),
+        ..
     } = &err
     else {
         panic!("expected resource failure with preserved cause, got {err:?}");
     };
+    let cause = diagnostic
+        .message
+        .as_ref()
+        .expect("resource failure must preserve a cause")
+        .as_str();
     assert!(cause.contains("resource reservation"));
     assert!(
-        err.to_string().contains("WASM dispatch failed: Resource"),
+        err.to_string()
+            .contains("provider dispatch rejected: Resource"),
         "dispatch error remains redacted at the public surface"
     );
     assert!(binding.requests().is_empty());
@@ -495,17 +506,21 @@ impl BoundCapabilityAdapter for RecordingBinding {
             None => self
                 .governor
                 .reserve(request.scope.clone(), request.estimate.clone())
-                .map_err(|_| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                    model_visible_cause: None,
+                .map_err(|_| DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                    diagnostic: None,
+                    detail: None,
                 })?,
         };
         let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                diagnostic: None,
+                detail: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),

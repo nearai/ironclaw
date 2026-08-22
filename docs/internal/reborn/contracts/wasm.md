@@ -4,20 +4,58 @@ The Reborn WASM runtime executes sandboxed extension components through the cano
 
 ## ABI
 
-- Tool components implement world `near:agent/sandboxed-tool@0.3.0`.
-- The host imports are the `near:agent/host@0.3.0` interface:
+- Tool components implement world `near:agent/sandboxed-tool@0.4.1`.
+- The host imports are the `near:agent/host@0.4.1` interface:
   - `log`
   - `now-millis`
   - `workspace-read`
   - `http-request`
   - `tool-invoke`
   - `secret-exists`
-- Tool components export `near:agent/tool@0.3.0`:
+- Tool components export `near:agent/tool@0.4.1`:
   - `description() -> string`
   - `schema() -> string`
   - `execute(request) -> response`
 
 The abandoned JSON pointer/length ABI (`alloc`, `invoke_json`, `output_ptr`, `output_len`, and runtime-specific HTTP imports such as `http_request_utf8`) is not part of Reborn.
+
+### Typed tool response (0.4.1)
+
+`near:agent@0.4.1` replaced the untyped JSON-string `execute` return value with
+a typed `wit-result`-shaped `variant response`:
+
+- `success(string)` — the JSON-encoded tool output.
+- `failure(guest-failure)` — a structured failure record instead of an
+  ad-hoc error string, with:
+  - `kind: error-kind` — a closed enum (`auth-required`, `input`,
+    `output-too-large`, `executor`, `network-denied`, `client`,
+    `operation-failed`) that mirrors the host-side
+    `RuntimeDispatchErrorKind` mapping 1:1, plus `auth-required` mapping to
+    `DispatchError::AuthRequired`.
+  - `code: option<string>` — a stable, short provider/tool error identifier
+    when the guest has one (e.g. a Slack `channel_not_found` code).
+  - `message: option<string>` — human-readable failure detail.
+
+`code` and `message` are free-text carriers: the host scrubs both for
+secret-shaped values at the sandbox-exit chokepoint before either is visible
+outside the guest. Each scrubbed failure field and each buffered guest log
+record is UTF-8-safely bounded to 4 KiB at that boundary;
+`ironclaw_host_runtime` redacts and applies the canonical
+`MODEL_DIAGNOSTIC_MAX_BYTES` bound before tracing, then narrows typed provider
+messages to 2 KiB before they enter dispatch metadata and are re-validated at
+the model-visible seam.
+
+`near:agent@0.4.1` typed responses are the sole supported tool contract.
+Components targeting another WIT contract version fail closed during
+instantiation with `WasmError::UnsupportedContract`; unrelated or unknown
+imports remain `WasmError::InstantiationFailed`.
+
+The same ABI revision makes `host.http-request` failures typed. Its coarse
+`http-error-kind` mirrors the guest failure categories; provider-specific
+detail remains optional `code`/`message` data, and `request-sent` exists only
+for resource accounting. Adding WASM, MCP, CLI, or native extensions does not
+widen this enum: non-WASM lanes continue normalizing through the canonical
+host dispatch contracts.
 
 ## Runtime invariants
 

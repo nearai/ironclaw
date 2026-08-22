@@ -577,7 +577,8 @@ async fn real_docker_resolves_a_production_user_container() {
     let container_name = key.container_name();
     let config = super::super::RebornSandboxConfig::new(temp.path().join("workspaces"))
         .with_image(image)
-        .with_network_enabled();
+        .with_managed_egress_proxy()
+        .expect("managed egress policy is valid");
     let transport = super::super::RebornScopedSandboxCommandTransport::connect(config)
         .await
         .expect("production sandbox transport connects");
@@ -602,14 +603,14 @@ async fn real_docker_resolves_a_production_user_container() {
         )
         .await
         .expect("production user container remains available for attribution");
-    let network_name = "bridge";
+    let network_name = key.network_name();
     let ip: IpAddr = inspected
         .network_settings
         .and_then(|settings| settings.networks)
-        .and_then(|networks| networks.get(network_name).cloned())
+        .and_then(|networks| networks.get(&network_name).cloned())
         .and_then(|endpoint| endpoint.ip_address)
         .filter(|ip| !ip.is_empty())
-        .expect("production user container has an IP on the Docker bridge")
+        .expect("production user container has an IP on its private Docker network")
         .parse()
         .expect("production user-container IP parses");
     let resolver = ConnectionAttributionResolver::new(docker.clone(), network_name, PREFIX);

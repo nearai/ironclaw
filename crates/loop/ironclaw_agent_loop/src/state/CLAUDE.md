@@ -4,9 +4,14 @@ Owns the typed, resumable state carried by the canonical loop executor.
 
 ## Files
 
+Re-derive this list with `ls crates/loop/ironclaw_agent_loop/src/state/`
+before trusting it.
+
 - `state.rs` defines `LoopExecutionState`, checkpoint payload constants, and
   constructors.
 - `slots.rs` defines per-strategy state slots.
+- `budget_ledger.rs` owns the three per-run budget counters that used to be
+  bare public fields on `LoopExecutionState`.
 - `bounded_ring.rs` defines fixed-window observation history.
 - `signature.rs` defines repeat-detection signatures for capability calls.
 - `model_recovery.rs` defines checkpointed, typed model-recovery controls.

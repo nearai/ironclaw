@@ -278,6 +278,9 @@ impl ProcessJournalMaterializedState {
             StoredProcessCommand::SettleDependency(request) => {
                 self.apply_settle_dependency(request)
             }
+            StoredProcessCommand::TransitionDependency(request) => {
+                self.apply_transition_dependency(request)
+            }
             StoredProcessCommand::ConsumeDependency(request) => {
                 self.apply_close_dependency(request, false)
             }
@@ -443,6 +446,7 @@ impl ProcessJournalMaterializedState {
                     created_at: snapshot.created_at,
                     settled_at: None,
                     consumed_at: None,
+                    transitioned_at: None,
                     metadata: dependency.metadata,
                 },
             );
@@ -1116,6 +1120,7 @@ impl ProcessJournalMaterializedState {
             created_at: request.created_at,
             settled_at: None,
             consumed_at: None,
+            transitioned_at: None,
             metadata: request.metadata,
         };
         self.dependencies.insert(key, record.clone());
@@ -1147,6 +1152,82 @@ impl ProcessJournalMaterializedState {
         Ok(StoredCommandOutcome::Dependency(Some(record.clone())))
     }
 
+    /// Compare-and-swap over one dependency's state column, gated by
+    /// `ProcessDependencyState::legal_predecessors`.
+    ///
+    /// A transition that already landed replays as a success without
+    /// re-applying its payload; a stored state that is not a legal predecessor
+    /// of `next` is a typed error rather than a silent no-op, because either
+    /// the caller's view of the lifecycle is wrong or it lost a race.
+    fn apply_transition_dependency(
+        &mut self,
+        request: crate::TransitionProcessDependencyRequest,
+    ) -> Result<StoredCommandOutcome, ProcessJournalStoreError> {
+        // Closing an edge and releasing its descendant reservation are one
+        // journal command (crate AGENTS.md). This CAS writes the state column
+        // only, so letting it reach a terminal state would be a compensating
+        // dual write that leaks the reservation.
+        let terminal_door = match request.next {
+            crate::ProcessDependencyState::Consumed => Some("consume_process_dependency"),
+            crate::ProcessDependencyState::Abandoned => Some("abandon_process_dependency"),
+            // Enumerated, not a wildcard: a new terminal variant must fail to
+            // compile here, in the one file that owns the paired release.
+            crate::ProcessDependencyState::Open
+            | crate::ProcessDependencyState::Settled
+            | crate::ProcessDependencyState::ResultAppended
+            | crate::ProcessDependencyState::AttentionScheduled
+            | crate::ProcessDependencyState::AttentionDeferred => None,
+        };
+        if let Some(door) = terminal_door {
+            return Err(ProcessJournalStoreError::InvalidRequest(format!(
+                "process dependency transition cannot close an edge: use {door}, which releases \
+                 the descendant reservation in the same journal command"
+            )));
+        }
+        // Validated before any mutation: a rejected command must leave the
+        // materialized state exactly as it found it.
+        let merged_metadata = match request.metadata {
+            Some(serde_json::Value::Object(fields)) => Some(fields),
+            Some(_) => {
+                return Err(ProcessJournalStoreError::InvalidRequest(
+                    "process dependency transition metadata must be a JSON object".to_string(),
+                ));
+            }
+            None => None,
+        };
+        let key = (request.dependent_process_id, request.dependency_process_id);
+        let Some(record) = self.dependencies.get_mut(&key) else {
+            return Ok(StoredCommandOutcome::Dependency(None));
+        };
+        if !same_lineage_scope(&record.scope, &request.scope) {
+            return Err(ProcessJournalStoreError::UnauthorizedScope);
+        }
+        // A double-drive of the same step lands here; a racer that arrives
+        // late finds a state the relation below refuses.
+        if record.state == request.next {
+            return Ok(StoredCommandOutcome::Dependency(Some(record.clone())));
+        }
+        let legal = request.next.legal_predecessors();
+        if !legal.contains(&record.state) {
+            return Err(ProcessJournalStoreError::InvalidRequest(format!(
+                "process dependency transition to {:?} is legal only from {:?}, but the \
+                 dependency is {:?}",
+                request.next, legal, record.state
+            )));
+        }
+        record.state = request.next;
+        record.transitioned_at = Some(request.transitioned_at);
+        // Shallow merge: a delivery step records its own facts without
+        // discarding the ones the edge already carries.
+        if let Some(fields) = merged_metadata {
+            match record.metadata.as_object_mut() {
+                Some(existing) => existing.extend(fields),
+                None => record.metadata = serde_json::Value::Object(fields),
+            }
+        }
+        Ok(StoredCommandOutcome::Dependency(Some(record.clone())))
+    }
+
     fn apply_close_dependency(
         &mut self,
         request: crate::CloseProcessDependencyRequest,
@@ -1164,16 +1245,19 @@ impl ProcessJournalMaterializedState {
         } else {
             crate::ProcessDependencyState::Consumed
         };
-        if matches!(
-            existing.state,
-            crate::ProcessDependencyState::Consumed | crate::ProcessDependencyState::Abandoned
-        ) {
+        if existing.state.is_closed() {
             return Ok(StoredCommandOutcome::Dependency(Some(existing.clone())));
         }
-        if !abandon && existing.state != crate::ProcessDependencyState::Settled {
-            return Err(ProcessJournalStoreError::InvalidRequest(
-                "only a settled process dependency can be consumed".to_string(),
-            ));
+        // The same relation the state-column CAS reads: one lifecycle, both
+        // closing doors. Abandoning is legal from every in-flight state;
+        // consuming is not, because `ResultAppended` has no attention recorded
+        // yet and `AttentionDeferred` is parked for a later sweep.
+        let legal = target.legal_predecessors();
+        if !legal.contains(&existing.state) {
+            return Err(ProcessJournalStoreError::InvalidRequest(format!(
+                "a process dependency can only enter {:?} from {:?}, but it is {:?}",
+                target, legal, existing.state
+            )));
         }
         let root_process_id = existing.root_process_id;
         self.release_dependency_reservation(root_process_id, request.dependency_process_id)?;

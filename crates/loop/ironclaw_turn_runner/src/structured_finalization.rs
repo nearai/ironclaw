@@ -26,10 +26,14 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::AgentTurnSpawnTreeRuntimePort;
 
-// Keep a stuck provider call inside the default process lease. Otherwise a
-// successor can legitimately reclaim the run and repeat the final inference
-// before the predecessor reaches its post-inference ownership fence.
-const FINALIZATION_DEADLINE_MS: u64 = 75_000;
+// Bounds the complete structured-finalization operation at 500 seconds: enough
+// for four default attempts at 60 seconds to first semantic progress plus a
+// 60-second semantic-idle window each, with 8.75 seconds of maximum jittered
+// backoff. Active semantic progress has no per-attempt total cap; this outer
+// deadline remains authoritative for a finite headless run. The process
+// supervisor heartbeat and durable lease fences still apply: a stale executor
+// is rejected before durable publication.
+const FINALIZATION_DEADLINE_MS: u64 = 500_000;
 
 #[async_trait]
 pub(crate) trait StructuredFinalizationPort: Send + Sync {

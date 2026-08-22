@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -13,6 +13,7 @@ use bollard::{
     exec::{CreateExecOptions, StartExecOptions, StartExecResults},
     models::ContainerInspectResponse,
 };
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use ironclaw_host_api::{
     ids::{TenantId, UserId},
@@ -21,6 +22,7 @@ use ironclaw_host_api::{
 
 use super::{
     ContainerWorkdir, RebornScopedSandboxCommandTransport, append_with_limit,
+    managed_egress::ManagedEgressRuntime,
     registry::{
         ExistingContainerDecision, SandboxActivityRegistry, existing_container_decision,
         label_tenant, label_user,
@@ -54,20 +56,32 @@ impl UserContainerSweeper {
     pub(super) fn spawn(
         docker: Docker,
         registry: Arc<SandboxActivityRegistry>,
+        managed_egress: Option<Arc<ManagedEgressRuntime>>,
         idle_timeout: Duration,
+        retention_timeout: Duration,
     ) -> Arc<Self> {
         let (shutdown, mut receiver) = tokio::sync::watch::channel(false);
         let interval = idle_timeout
+            .min(retention_timeout)
             .checked_div(2)
             .unwrap_or(Duration::from_millis(50))
             .clamp(Duration::from_millis(50), Duration::from_secs(60));
+        let task_docker = docker.clone();
+        let task_managed_egress = managed_egress.clone();
         let task = tokio::spawn(async move {
-            reconcile_labeled_user_containers(&docker, &registry).await;
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
-                    _ = ticker.tick() => sweep_idle_user_containers(&docker, &registry, idle_timeout).await,
+                    _ = ticker.tick() => {
+                        sweep_idle_user_containers(
+                            &task_docker,
+                            &registry,
+                            task_managed_egress.as_deref(),
+                            idle_timeout,
+                            retention_timeout,
+                        ).await;
+                    }
                     changed = receiver.changed() => {
                         if changed.is_err() || *receiver.borrow() {
                             break;
@@ -140,8 +154,26 @@ pub(super) async fn ensure_user_container(
     for attempt in 0..2 {
         if let Some(inspected) = inspect_user_container(&transport.docker, &name).await? {
             match user_container_adoption_decision(&inspected, &launch.labels) {
-                ExistingContainerDecision::ReuseRunning => return Ok(name),
+                ExistingContainerDecision::ReuseRunning => {
+                    if transport.managed_egress.is_some() {
+                        super::managed_egress::ensure_user_container_attached(
+                            &transport.docker,
+                            key,
+                            &name,
+                        )
+                        .await?;
+                    }
+                    return Ok(name);
+                }
                 ExistingContainerDecision::StartStopped => {
+                    if transport.managed_egress.is_some() {
+                        super::managed_egress::ensure_user_container_attached(
+                            &transport.docker,
+                            key,
+                            &name,
+                        )
+                        .await?;
+                    }
                     start_user_container(&transport.docker, &name).await?;
                     return Ok(name);
                 }
@@ -202,6 +234,7 @@ pub(super) async fn execute_in_user_container(
     container_name: &str,
     command: String,
     workdir: ContainerWorkdir,
+    env: Vec<String>,
     timeout: Duration,
 ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
     let started_at = Instant::now();
@@ -224,6 +257,7 @@ pub(super) async fn execute_in_user_container(
                 ]),
                 privileged: Some(false),
                 working_dir: Some(workdir.into_string()),
+                env: Some(env),
                 ..Default::default()
             },
         )
@@ -444,9 +478,10 @@ fn docker_status(error: &bollard::errors::Error) -> Option<u16> {
     }
 }
 
-async fn reconcile_labeled_user_containers(
+pub(super) async fn reconcile_labeled_user_containers(
     docker: &Docker,
     registry: &Arc<SandboxActivityRegistry>,
+    managed_egress: Option<&ManagedEgressRuntime>,
 ) {
     let tenant_label = label_tenant(LABEL_PREFIX);
     let user_label = label_user(LABEL_PREFIX);
@@ -468,7 +503,9 @@ async fn reconcile_labeled_user_containers(
             return;
         }
     };
+    let mut discovered_keys = HashSet::new();
     for container in containers {
+        let stopped_at = discovered_stopped_at(docker, &container).await;
         let Some(labels) = container.labels else {
             continue;
         };
@@ -484,7 +521,12 @@ async fn reconcile_labeled_user_containers(
             continue;
         };
         let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
-        if let Err(error) = registry.register_discovered_container(key, labels) {
+        // Every valid labeled worker counts as live for orphan detection,
+        // even when the activity registry is at capacity: reconciliation
+        // must never treat a real worker's egress bundle as orphaned just
+        // because its entry did not fit.
+        discovered_keys.insert(key.clone());
+        if let Err(error) = registry.register_discovered_container(key, labels, stopped_at) {
             tracing::warn!(
                 ?error,
                 container_id = container.id.as_deref().unwrap_or("<unknown>"),
@@ -492,21 +534,65 @@ async fn reconcile_labeled_user_containers(
             );
         }
     }
+    if let Some(managed) = managed_egress
+        && let Err(error) = managed
+            .reconcile_orphaned_bundles(docker, &discovered_keys)
+            .await
+    {
+        tracing::warn!(
+            ?error,
+            "sandbox managed-egress orphan reconciliation failed"
+        );
+    }
+}
+
+async fn discovered_stopped_at(
+    docker: &Docker,
+    container: &bollard::models::ContainerSummary,
+) -> Option<DateTime<Utc>> {
+    if container.state.as_deref() == Some("running") {
+        return None;
+    }
+    let id = container.id.as_deref()?;
+    let inspected = docker
+        .inspect_container(id, None::<InspectContainerOptions>)
+        .await
+        // silent-ok: Docker stop-time discovery retries on the next sweep when
+        // container inspection is unavailable.
+        .ok()?;
+    inspected
+        .state?
+        .finished_at?
+        .parse::<DateTime<Utc>>()
+        // silent-ok: an unparseable Docker finished_at defers retention until
+        // a later sweep can re-read a valid daemon timestamp.
+        .ok()
+        .filter(|finished_at| *finished_at <= Utc::now())
 }
 
 async fn sweep_idle_user_containers(
     docker: &Docker,
     registry: &Arc<SandboxActivityRegistry>,
+    managed_egress: Option<&ManagedEgressRuntime>,
     idle_timeout: Duration,
+    retention_timeout: Duration,
 ) {
-    for (key, expected_labels) in registry.sweep_candidates(Instant::now(), idle_timeout) {
+    for (key, expected_labels) in
+        registry.sweep_candidates(Instant::now(), idle_timeout, Utc::now(), retention_timeout)
+    {
         let Some(gate) = registry.gate(&key) else {
             continue;
         };
         let Ok(_gate) = gate.try_lock() else {
             continue;
         };
-        if !registry.sweep_eligible(&key, Instant::now(), idle_timeout) {
+        if !registry.sweep_eligible(
+            &key,
+            Instant::now(),
+            idle_timeout,
+            Utc::now(),
+            retention_timeout,
+        ) {
             continue;
         }
         let name = key.container_name();
@@ -518,10 +604,24 @@ async fn sweep_idle_user_containers(
             }
         };
         let Some(inspected) = inspected else {
+            // The worker is gone (e.g. execution-driven recycle); the
+            // managed-egress bundle must not outlive this registry entry or
+            // the proxy and private network leak until the next transport
+            // reconnect runs orphan reconciliation.
+            if let Some(managed) = managed_egress
+                && let Err(error) = managed.remove_bundle(docker, &key, &name).await
+            {
+                tracing::debug!(
+                    ?error,
+                    container_name = name,
+                    "missing-worker sandbox egress cleanup failed"
+                );
+                continue;
+            }
             registry.forget_if_inactive(&key);
             continue;
         };
-        match user_container_adoption_decision(&inspected, &expected_labels) {
+        let stopped = match user_container_adoption_decision(&inspected, &expected_labels) {
             ExistingContainerDecision::ReuseRunning => {
                 if let Err(error) = docker
                     .stop_container(
@@ -535,14 +635,72 @@ async fn sweep_idle_user_containers(
                     tracing::debug!(?error, container_name = name, "idle sandbox stop failed");
                     continue;
                 }
-                registry.forget_if_inactive(&key);
+                if let Some(managed) = managed_egress
+                    && let Err(error) = managed.suspend_bundle(docker, &key).await
+                {
+                    tracing::debug!(
+                        ?error,
+                        container_name = name,
+                        "idle sandbox egress cleanup failed"
+                    );
+                    continue;
+                }
+                true
             }
             ExistingContainerDecision::StartStopped => {
-                registry.forget_if_inactive(&key);
+                if let Some(managed) = managed_egress
+                    && let Err(error) = managed.suspend_bundle(docker, &key).await
+                {
+                    tracing::debug!(
+                        ?error,
+                        container_name = name,
+                        "stopped sandbox egress cleanup failed"
+                    );
+                    continue;
+                }
+                registry.mark_egress_suspended(&key);
+                true
             }
             ExistingContainerDecision::Recreate => {
                 if let Err(error) = remove_user_container(docker, &name).await {
                     tracing::debug!(?error, container_name = name, "idle sandbox recycle failed");
+                    continue;
+                }
+                if let Some(managed) = managed_egress
+                    && let Err(error) = managed.remove_bundle(docker, &key, &name).await
+                {
+                    tracing::debug!(
+                        ?error,
+                        container_name = name,
+                        "idle sandbox egress recycle failed"
+                    );
+                    continue;
+                }
+                registry.forget_if_inactive(&key);
+                false
+            }
+        };
+        if stopped {
+            let now = Utc::now();
+            registry.mark_stopped(&key, now);
+            registry.mark_egress_suspended(&key);
+            if registry.retention_eligible(&key, now, retention_timeout) {
+                if let Some(managed) = managed_egress
+                    && let Err(error) = managed.remove_bundle(docker, &key, &name).await
+                {
+                    tracing::debug!(
+                        ?error,
+                        container_name = name,
+                        "retained sandbox egress removal failed"
+                    );
+                    continue;
+                }
+                if let Err(error) = remove_user_container(docker, &name).await {
+                    tracing::debug!(
+                        ?error,
+                        container_name = name,
+                        "retained sandbox removal failed"
+                    );
                     continue;
                 }
                 registry.forget_if_inactive(&key);

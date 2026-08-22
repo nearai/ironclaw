@@ -660,8 +660,10 @@ jobs:
           shared-key: reborn-sandbox-docker-tests
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
-      - name: Build Python sandbox worker
-        run: docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
+      - name: Prepare sandbox worker and proxy images
+        run: |
+          docker pull ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da
+          docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
 
       - name: Verify production local-sandbox profile wiring
         run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required -- --nocapture

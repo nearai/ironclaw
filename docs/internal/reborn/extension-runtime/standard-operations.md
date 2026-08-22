@@ -301,26 +301,26 @@ The spec's Appendix framing suggested an unmapped vendor error's "raw code
 passes through in detail." Landed behavior is narrower, because of the shape
 of the channel these codes actually ride:
 
-- **WASM guests** (Slack, and any future WASM channel extension) return a
-  structured error over `StructuredWasmGuestError { code, kind }`
-  (`crates/kernel/ironclaw_host_runtime/src/services/wasm_execution.rs`) —
-  **exactly two fields**, sanitized to a `[A-Za-z0-9_.-]{,64}` code and one
-  of seven `kind` values (`AuthRequired | Input | OutputTooLarge | Executor |
-  NetworkDenied | Client | OperationFailed`, matching
-  `StructuredWasmGuestErrorKind` — not the spec's illustrative class-column
-  labels verbatim). There is no separate "detail" slot alongside `code`. The
+- **WASM guests** (Slack, and any future WASM channel extension) return the
+  WIT `guest-failure { kind, code, message }` record
+  (`crates/lanes/ironclaw_wasm/wit/tool.wit`). Its closed `kind` is one of
+  seven values (`auth-required | input | output-too-large | executor |
+  network-denied | client | operation-failed`); `code` is an optional stable
+  provider/tool identifier, and `message` is optional scrubbed human-readable
+  detail. The kind remains vendor-neutral while optional fields let new guests
+  preserve useful provider context without extending the host enum. The
   Slack WASM module (`slack_error_to_standard_code` in
   `crates/extensions/packages/slack/wasm-src/src/api.rs`) therefore puts the **canonical**
   `messaging.*` string into `code` and never the raw Slack error — the raw
   vendor code is consumed by the mapping function but does not cross the
   guest→host boundary on this channel at all.
-- **First-party adapters** use `ToolError::Failed`'s `safe_summary` /
-  `model_visible_cause` (`ironclaw_host_api::tool_adapter`), which has more
-  room in principle (`model_visible_cause` is a free-form string, not a fixed
-  two-field struct). The landed `acme-messenger` conformance fixture still
-  puts only the canonical code in `safe_summary`
+- **First-party adapters** use `ToolError::Rejected`'s typed
+  `DispatchFailureDetail::HostSummary` / `ProviderDiagnostic`
+  (`ironclaw_extension_contracts::tool_adapter`). The landed `acme-messenger`
+  conformance fixture still puts only the canonical code in `HostSummary`
   (`"acme vendor rejected the request: <canonical code>"`), for parity with
-  the WASM transport's behavior — not because the shape forces it.
+  the WASM transport's behavior. A vendor-derived cause, when needed, rides
+  `ProviderDiagnostic` separately and is scrubbed at the model boundary.
 
 Net: **the canonical `messaging.*` code is what reaches the model-visible
 summary on every landed implementation; a raw vendor code is never threaded

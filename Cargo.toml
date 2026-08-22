@@ -164,6 +164,7 @@ ironclaw_extension_host = { path = "crates/extensions/ironclaw_extension_host", 
 # test drives moved to the manager with the product face it builds.
 ironclaw_extension_manager = { path = "crates/extensions/ironclaw_extension_manager", version = "0.1.0", features = ["test-support"] }
 ironclaw_filesystem = { path = "crates/substrates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_notifications = { path = "crates/domains/ironclaw_notifications", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/lanes/ironclaw_mcp", version = "0.1.0" }
 ironclaw_extension_support = { path = "crates/extensions/ironclaw_extension_support", version = "0.1.0" }
 # W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
@@ -294,6 +295,10 @@ path = "tests/integration/attach.rs"
 [[test]]
 name = "reborn_integration_document_edit"
 path = "tests/integration/document_edit.rs"
+
+[[test]]
+name = "reborn_integration_notification_inbox_user_isolation"
+path = "tests/integration/notification_inbox_user_isolation.rs"
 
 [[test]]
 name = "reborn_integration_sandbox_shell_turn"

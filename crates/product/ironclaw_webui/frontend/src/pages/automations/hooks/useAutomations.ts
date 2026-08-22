@@ -13,6 +13,7 @@ import {
   pauseAutomation,
   renameAutomation,
   resumeAutomation,
+  runAutomation,
 } from "../../../lib/api";
 import { useI18n } from "../../../lib/i18n";
 import { dismissToast, toast } from "../../../lib/toast";
@@ -225,6 +226,12 @@ export function useAutomations(includeCompleted = false) {
       mutationLifecycle
     )
   );
+  const runMutation = useMutation(
+    createAutomationMutationConfig(
+      (automationId: string) => runAutomation({ automationId }),
+      mutationLifecycle
+    )
+  );
   const resumeMutation = useMutation(
     createAutomationMutationConfig(
       (automationId: string) => resumeAutomation({ automationId }),
@@ -256,6 +263,7 @@ export function useAutomations(includeCompleted = false) {
     isRefreshing: query.isFetching || completedSummaryQuery.isFetching,
     isFilterTransition: query.isPlaceholderData,
     isMutating:
+      runMutation.isPending ||
       pauseMutation.isPending ||
       resumeMutation.isPending ||
       renameMutation.isPending ||
@@ -267,6 +275,7 @@ export function useAutomations(includeCompleted = false) {
     summaryError:
       includeCompleted ? null : completedSummaryQuery.error || null,
     pauseAutomation: pauseMutation.mutate,
+    runAutomation: runMutation.mutate,
     resumeAutomation: resumeMutation.mutate,
     renameAutomation: renameMutation.mutate,
     deleteAutomation: deleteMutation.mutate,

@@ -83,7 +83,10 @@ const LOCALES = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt-BR", "uk", 
 //
 // A new sidecar must be added here, or its keys silently fall back to English
 // in all ten other locales.
-const ENGLISH_SIDECAR_PACKS = ["../pages/chat/inspector/inspector-translations.ts"];
+const ENGLISH_SIDECAR_PACKS = [
+  "../components/device-link-translations.ts",
+  "../pages/chat/inspector/inspector-translations.ts",
+];
 
 function runPackSource(specifier, onRegister) {
   const source = readFileSync(new URL(specifier, import.meta.url), "utf8")
@@ -168,6 +171,8 @@ test("non-English locale packs localize exposed workflow copy", () => {
         key === "extensions.addCustomMcp" ||
         key === "extensions.emptyToolsTitle" ||
         key === "extensions.emptyToolsDesc" ||
+        key.startsWith("extensions.connectionChoice.") ||
+        key.startsWith("deviceLink.") ||
         key.startsWith("extensions.customMcp")),
   );
 

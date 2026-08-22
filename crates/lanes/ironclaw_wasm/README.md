@@ -32,9 +32,12 @@ permitted to hold one.
   `WasmRuntimeCredentialProvider`).
 - `wasm_sandbox_core` — engine setup, epoch ticker, minimal WASI p2 linker,
   limits, store-core helpers; deliberately domain-free.
-- The ABI: `wit/tool.wit` (`near:agent@0.3.0`) and `wit/channel.wit`
-  (`near:agent@0.3.1`) — the same WIT package name at two versions, so bindgen
-  is always handed the single file, never the directory.
+- The ABI: `wit/tool.wit` (`near:agent@0.4.1`, typed `wit-result`-shaped
+  `WitToolOutcome::Success`/`Failure` responses) is the sole supported tool
+  contract. `wit/channel.wit` remains `near:agent@0.3.1`; the same WIT package
+  name at two versions means bindgen is always handed the single file, never
+  the directory. Components targeting another tool contract version fail
+  closed during instantiation.
 
 ## Depends on / consumed by
 
@@ -56,11 +59,12 @@ permitted to hold one.
   capabilities composition explicitly wires, nothing by omission.
 - **Fresh store per call**, aggregate memory accounting across multi-memory
   components, fuel/epoch/table/instance ceilings (via the shared limiter).
-- **Bounded guest diagnostics:** guest-authored execution errors are scrubbed
-  at the sandbox-exit boundary and bounded to the canonical
-  `MODEL_DIAGNOSTIC_MAX_BYTES` budget; recognized structured JSON envelopes
-  retain a parseable kind/code/message shape while unstructured text truncates
-  on a UTF-8 boundary.
+- **Guest diagnostic safety:** each guest-authored failure code and message is
+  scrubbed and bounded to 4 KiB at the sandbox-exit boundary without splitting
+  UTF-8, and each buffered guest log record has the same bound. The host-runtime diagnostic seam applies the
+  canonical `MODEL_DIAGNOSTIC_MAX_BYTES` bound again before tracing; typed
+  provider messages are narrowed further before they enter dispatch metadata.
+  Structured JSON envelopes retain their parseable kind/code/message shape.
 - **`wasm_sandbox_core` stays domain-free** — no product, capability,
   registry, filesystem, network, secrets, host-runtime, or composition
   references; scanned by

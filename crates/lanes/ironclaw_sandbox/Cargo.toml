@@ -29,6 +29,8 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 serde_json = "1"
 thiserror = "2"
+tar = "0.4"
+tempfile = "3"
 tokio = { version = "1", features = ["io-util", "process", "rt", "sync", "time"] }
 tracing = "0.1"
 url = "2"
@@ -48,6 +50,5 @@ ironclaw_extension_registry = { path = "../../extensions/ironclaw_extension_regi
 # up. Do not re-add this under `[dependencies]`.
 ironclaw_resources = { path = "../../kernel/ironclaw_resources" }
 rust_decimal_macros = "1"
-tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
 x509-parser = { version = "0.18", features = ["verify"] }

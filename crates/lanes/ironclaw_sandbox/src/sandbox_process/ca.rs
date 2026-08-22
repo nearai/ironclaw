@@ -1,22 +1,13 @@
 //! Internal per-tenant CA for the sandbox egress proxy (W5 — design doc
 //! `docs/internal/plans/2026-07-26-sandbox-credential-firewall-design.md` §4).
 //!
-//! Generates a root key/cert pair **in memory only**, at construction, and
-//! signs short-lived leaf certificates for hosts the credential firewall
-//! (W6) intercepts. The root private key never touches disk, is never
-//! serialized anywhere this module returns to a caller, and is never part
-//! of anything mounted into a container — only
-//! [`SandboxCertificateAuthority::root_certificate_pem`] (the public trust
-//! anchor) is meant to reach the container filesystem, as a read-only
-//! bind mount (W5's remaining trust-distribution work, see the design
-//! doc's `update-ca-certificates` note). This is the same "secret material
-//! never enters the container, in any form, even transiently" invariant
-//! the rest of the credential firewall enforces, applied to the CA itself.
+//! Generates a root key/cert pair in memory at construction and signs
+//! short-lived leaf certificates for the older host-mediated credential
+//! firewall path. The public root certificate can be installed in an
+//! untrusted user container. This module never serializes or exports the root
+//! private key.
 //!
-//! **W6 is the consumer, not built yet.** Nothing in this crate calls
-//! [`SandboxCertificateAuthority`] today; the proxy's TLS termination for
-//! bound hosts will call [`SandboxCertificateAuthority::issue_leaf_for_host`]
-//! per intercepted CONNECT, per the design doc's D1/W6 gating.
+//! Managed egress uses the upstream proxy's own leaf issuance instead.
 
 use std::{
     collections::HashMap,
@@ -113,11 +104,9 @@ struct CachedLeaf {
 }
 
 /// In-memory root CA plus a bounded, TTL-scoped cache of per-host leaf
-/// certificates. See the module doc for the "root key never leaves the
-/// host" invariant this type exists to uphold: the root signing key lives
-/// only in the private `issuer` field below, and no method on this type
-/// returns it.
-#[allow(dead_code)] // consumed by W6; not wired yet
+/// certificates. The root signing key stays private to this module; callers
+/// can export only the public root certificate.
+#[allow(dead_code)] // consumed by the older host-mediated credential-firewall path
 pub(crate) struct SandboxCertificateAuthority {
     root_cert_pem: String,
     issuer: Issuer<'static, KeyPair>,
@@ -147,12 +136,10 @@ impl std::fmt::Debug for SandboxCertificateAuthority {
 }
 
 impl SandboxCertificateAuthority {
-    /// Generates a fresh root key + self-signed CA certificate **in
-    /// memory** and returns a CA ready to issue leaf certs, using the
-    /// production leaf TTL and cache bound. The root private key lives
-    /// only in this process's memory for the lifetime of the returned
-    /// value — it is never written to disk, never serialized, and never
-    /// handed to a caller.
+    /// Generates a fresh root key + self-signed CA certificate in memory and
+    /// returns a CA ready to issue leaf certs. The root private key remains in
+    /// process memory except while an in-memory archive is uploaded directly
+    /// to a trusted proxy sidecar.
     #[allow(dead_code)] // consumed by W6; not wired yet
     pub(crate) fn generate() -> Result<Self, RuntimeProcessError> {
         Self::generate_with(DEFAULT_LEAF_TTL, DEFAULT_MAX_CACHE_ENTRIES)

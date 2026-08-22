@@ -33,6 +33,37 @@ pub(crate) use active_run_lookup::{
 
 pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Default)]
+pub(crate) struct LateBoundTriggerManualFireRunner {
+    runner: OnceLock<Arc<dyn ironclaw_triggers::TriggerManualFireRunner>>,
+}
+
+impl LateBoundTriggerManualFireRunner {
+    pub(crate) fn bind(
+        &self,
+        runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
+    ) -> Result<(), TriggerError> {
+        self.runner.set(runner).map_err(|_| TriggerError::Backend {
+            reason: "manual trigger fire runner was already bound".to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl ironclaw_triggers::TriggerManualFireRunner for LateBoundTriggerManualFireRunner {
+    async fn run_manual_fire(
+        &self,
+        tenant_id: ironclaw_host_api::ids::TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
+        now: ironclaw_host_api::Timestamp,
+    ) -> Result<ironclaw_triggers::TriggerManualFireOutcome, TriggerError> {
+        let runner = self.runner.get().ok_or_else(|| TriggerError::Backend {
+            reason: "manual trigger fire runner is not available".to_string(),
+        })?;
+        runner.run_manual_fire(tenant_id, trigger_id, now).await
+    }
+}
+
 pub(crate) struct TriggerPollerRuntimeHandle {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
@@ -73,6 +104,7 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) materializer: Arc<dyn TriggerPromptMaterializer>,
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    pub(crate) manual_fire_runner: Arc<LateBoundTriggerManualFireRunner>,
     /// Late-binding slot for the post-submit delivery hook.
     pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
@@ -90,7 +122,7 @@ pub(crate) fn spawn_trigger_poller(
         PostSubmitHookObserver::new(deps.post_submit_hook_slot, cancel.clone()),
     );
     let trusted_submitter = deps.trusted_submitter;
-    let worker = TriggerPollerWorker::new(
+    let worker = Arc::new(TriggerPollerWorker::new(
         settings.worker.clone(),
         TriggerPollerWorkerDeps {
             repository: deps.repository,
@@ -100,7 +132,8 @@ pub(crate) fn spawn_trigger_poller(
             active_run_lookup: deps.active_run_lookup,
             fire_settlement_observer,
         },
-    )?;
+    )?);
+    deps.manual_fire_runner.bind(worker.clone())?;
     let task_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
         run_trigger_poller(worker, settings, task_cancel).await;
@@ -255,7 +288,7 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
 }
 
 async fn run_trigger_poller(
-    worker: TriggerPollerWorker,
+    worker: Arc<TriggerPollerWorker>,
     settings: TriggerPollerSettings,
     cancel: CancellationToken,
 ) {

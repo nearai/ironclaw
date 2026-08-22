@@ -22,8 +22,15 @@ use ironclaw_extension_contracts::tool_adapter::{
 };
 use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_host_api::{
-    capability::CapabilityDescriptor, dispatch::DispatchError, ids::CapabilityId,
-    lane::RuntimeLane, runtime::RuntimeKind, runtime_policy::EffectiveRuntimePolicy,
+    capability::CapabilityDescriptor,
+    dispatch::{
+        DispatchError, DispatchFailureDetail, DispatchFailureKind, RuntimeDispatchErrorKind,
+    },
+    ids::CapabilityId,
+    lane::RuntimeLane,
+    runtime::RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
+    safe_summary::SafeSummary,
 };
 use ironclaw_resources::ResourceGovernor;
 
@@ -139,10 +146,10 @@ where
         _ports: &ToolPorts<'_>,
     ) -> Result<ToolResult, ToolError> {
         let Some(descriptor) = self.descriptors.get(&call.capability_id) else {
-            return Err(ToolError::Failed {
-                kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::UndeclaredCapability,
-                safe_summary: None,
-                model_visible_cause: None,
+            return Err(ToolError::Rejected {
+                kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+                diagnostic: None,
+                detail: None,
             });
         };
         let execution = self
@@ -190,45 +197,46 @@ where
 pub(super) fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
     match error {
         DispatchError::AuthRequired { requirement, .. } => ToolError::AuthRequired { requirement },
-        DispatchError::Wasm {
-            kind,
-            model_visible_cause,
-        }
-        | DispatchError::Mcp {
-            kind,
-            model_visible_cause,
-        }
-        | DispatchError::Script {
-            kind,
-            model_visible_cause,
-        } => ToolError::Failed {
-            kind,
-            safe_summary: None,
-            model_visible_cause,
-        },
-        DispatchError::FirstParty {
-            kind, safe_summary, ..
-        } => ToolError::Failed {
-            kind,
-            safe_summary,
-            model_visible_cause: None,
-        },
         DispatchError::Rejected {
-            runtime,
             kind,
             diagnostic,
             detail,
+            ..
         } => ToolError::Rejected {
-            runtime,
-            kind,
+            kind: tool_runtime_error_kind(kind),
             diagnostic,
             detail,
         },
-        other => ToolError::Failed {
-            kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Client,
-            safe_summary: Some(other.event_kind().replace('_', " ")),
-            model_visible_cause: None,
-        },
+        other => {
+            let summary = other.event_kind().replace('_', " ");
+            let summary = match SafeSummary::new(summary) {
+                Ok(summary) => summary,
+                Err(_) => SafeSummary::placeholder(),
+            };
+            ToolError::Rejected {
+                kind: tool_runtime_error_kind(other.failure_kind()),
+                diagnostic: None,
+                detail: Some(DispatchFailureDetail::HostSummary {
+                    summary,
+                    detail: None,
+                }),
+            }
+        }
+    }
+}
+
+fn tool_runtime_error_kind(kind: DispatchFailureKind) -> RuntimeDispatchErrorKind {
+    match kind {
+        DispatchFailureKind::Runtime(kind) => kind,
+        DispatchFailureKind::UnknownCapability => RuntimeDispatchErrorKind::UndeclaredCapability,
+        DispatchFailureKind::UnknownProvider => RuntimeDispatchErrorKind::Manifest,
+        DispatchFailureKind::RuntimeMismatch => RuntimeDispatchErrorKind::ExtensionRuntimeMismatch,
+        DispatchFailureKind::MissingRuntimeBackend | DispatchFailureKind::UnsupportedRuntime => {
+            RuntimeDispatchErrorKind::UnsupportedRunner
+        }
+        // Auth gates use `DispatchError::AuthRequired`; this category inside
+        // `Rejected` is malformed and retains no control-plane authority.
+        DispatchFailureKind::AuthRequired => RuntimeDispatchErrorKind::Unknown,
     }
 }
 

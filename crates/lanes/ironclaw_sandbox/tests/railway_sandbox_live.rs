@@ -81,7 +81,6 @@ async fn railway_workspace_survives_transport_restart_without_credentials() {
         std::env::var("IRONCLAW_REBORN_RAILWAY_CLI_PATH").unwrap_or_else(|_| "railway".to_string());
     let config = RailwayPreviewSandboxConfig::new(project_id.clone(), environment_id.clone())
         .expect("Railway canary configuration is valid")
-        .with_network_enabled()
         .with_cli_path(cli.clone())
         .with_idle_timeout_minutes(5)
         .expect("canary idle timeout is valid");
@@ -124,6 +123,8 @@ async fn railway_workspace_survives_transport_restart_without_credentials() {
             format!(
                 "python - <<'PY'\n\
                  import os\n\
+                 import socket\n\
+                 import urllib.parse\n\
                  import urllib.request\n\
                  from pathlib import Path\n\
                  assert os.getuid() == 1000\n\
@@ -131,10 +132,16 @@ async fn railway_workspace_survives_transport_restart_without_credentials() {
                  assert not Path('/var/run/docker.sock').exists()\n\
                  root = next(line.split() for line in Path('/proc/mounts').read_text().splitlines() if line.split()[1] == '/')\n\
                  assert 'ro' in root[3].split(',')\n\
-                 routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]\n\
-                 assert any(route[1] == '00000000' for route in routes)\n\
-                 assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'direct'\n\
-                 response = urllib.request.urlopen('https://example.com', timeout=15)\n\
+                 assert os.environ['IRONCLAW_REBORN_NETWORK_MODE'] == 'brokered'\n\
+                 proxy = urllib.parse.urlparse(os.environ['HTTPS_PROXY']).hostname\n\
+                 for host, port in [('1.1.1.1', 443), ('169.254.169.254', 80), (proxy, 8080)]:\n\
+                     try:\n\
+                         connection = socket.create_connection((host, port), timeout=1)\n\
+                     except OSError:\n\
+                         continue\n\
+                     connection.close()\n\
+                     raise AssertionError(f'unexpected direct route to {{host}}:{{port}}')\n\
+                 response = urllib.request.urlopen('https://pypi.org', timeout=15)\n\
                  assert response.status == 200\n\
                  response.close()\n\
                  Path('/tmp/ironclaw-write-probe').write_text('tmpfs-ok')\n\

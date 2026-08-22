@@ -17,6 +17,7 @@ import {
   queryOperatorLogs,
   renameAutomation,
   resumeAutomation,
+  runAutomation,
   getNotificationSetupStatus,
   setNotificationChannels,
   setupExtension,
@@ -228,6 +229,7 @@ test("automation mutations use encoded v2 automation routes", async () => {
     });
   };
 
+  await runAutomation({ automationId: "automation/needs encoding" });
   await pauseAutomation({ automationId: "automation/needs encoding" });
   await resumeAutomation({ automationId: "automation/needs encoding" });
   await renameAutomation({
@@ -236,28 +238,33 @@ test("automation mutations use encoded v2 automation routes", async () => {
   });
   await deleteAutomation({ automationId: "automation/needs encoding" });
 
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
   assert.equal(
     calls[0].path,
-    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/pause",
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/run",
   );
   assert.equal(calls[0].options.method, "POST");
   assert.equal(
     calls[1].path,
-    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/resume",
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/pause",
   );
   assert.equal(calls[1].options.method, "POST");
   assert.equal(
     calls[2].path,
-    "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/resume",
   );
   assert.equal(calls[2].options.method, "POST");
-  assert.equal(calls[2].options.body, JSON.stringify({ name: "Renamed status" }));
   assert.equal(
     calls[3].path,
     "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
   );
-  assert.equal(calls[3].options.method, "DELETE");
+  assert.equal(calls[3].options.method, "POST");
+  assert.equal(calls[3].options.body, JSON.stringify({ name: "Renamed status" }));
+  assert.equal(
+    calls[4].path,
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
+  );
+  assert.equal(calls[4].options.method, "DELETE");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });
 
@@ -426,6 +433,7 @@ test("automation state mutations reject before fetch when automation id is missi
   };
 
   await assert.rejects(pauseAutomation(), /automationId is required/);
+  await assert.rejects(runAutomation(), /automationId is required/);
   await assert.rejects(resumeAutomation({}), /automationId is required/);
   await assert.rejects(renameAutomation({ name: "Renamed" }), /automationId is required/);
   await assert.rejects(

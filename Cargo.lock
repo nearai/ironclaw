@@ -4599,6 +4599,7 @@ dependencies = [
  "ironclaw_memory",
  "ironclaw_memory_native",
  "ironclaw_network",
+ "ironclaw_notifications",
  "ironclaw_openai_compat",
  "ironclaw_outbound",
  "ironclaw_processes",
@@ -5088,6 +5089,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
  "tempfile",
  "thiserror 2.0.20",
  "time",
@@ -7803,9 +7805,9 @@ dependencies = [
 
 [[package]]
 name = "rig-core"
-version = "0.33.0"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a529b9b72f51a46a9ea87c9ba8031e36593de7a89461983f01d8c24462f9eb06"
+checksum = "9ac7d75266ac1f79b1faeff611c85cb40be00a0a983db10036591424f0433dc1"
 dependencies = [
  "as-any",
  "async-stream",
@@ -8859,6 +8861,17 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
 
 [[package]]
 name = "target-lexicon"

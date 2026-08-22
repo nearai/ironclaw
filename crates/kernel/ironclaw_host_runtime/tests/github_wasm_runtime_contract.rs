@@ -45,8 +45,9 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
-    PreparedWitTool, RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution,
-    WitToolHost, WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    PreparedWitTool, RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitErrorKind,
+    WitGuestFailure, WitToolExecution, WitToolHost, WitToolOutcome, WitToolRequest, WitToolRuntime,
+    WitToolRuntimeConfig,
 };
 use serde_json::json;
 
@@ -946,6 +947,83 @@ async fn host_runtime_services_routes_google_slides_wasm_get_presentation_with_s
 }
 
 #[tokio::test]
+async fn host_runtime_services_maps_google_docs_sheets_and_slides_wasm_401_to_auth_required() {
+    let cases = [
+        (
+            "google-docs",
+            "google-docs.get_document",
+            "docs.googleapis.com",
+            "https://www.googleapis.com/auth/documents.readonly",
+            json!({"document_id": "doc-1"}),
+        ),
+        (
+            "google-sheets",
+            "google-sheets.get_spreadsheet",
+            "sheets.googleapis.com",
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+            json!({"spreadsheet_id": "sheet-1"}),
+        ),
+        (
+            "google-slides",
+            "google-slides.get_presentation",
+            "slides.googleapis.com",
+            "https://www.googleapis.com/auth/presentations.readonly",
+            json!({"presentation_id": "slides-1"}),
+        ),
+    ];
+
+    for (package_id, capability, host, required_scope, input) in cases {
+        let capability_id = CapabilityId::new(capability).unwrap();
+        let scope = sample_scope(InvocationId::new());
+        let network = RecordingNetworkHttpEgress::with_status_body(
+            401,
+            br#"{"error":{"status":"UNAUTHENTICATED","message":"Invalid Credentials"}}"#.to_vec(),
+        );
+        let secret_store = Arc::new(SecretStore::ephemeral());
+        let account_access_secret = SecretHandle::new("google_artifact_401_access").unwrap();
+        let required_scopes = vec![required_scope.to_string()];
+        let services = google_wasm_services_for_test!(
+            package_id,
+            google_policy(host),
+            network.clone(),
+            Arc::clone(&secret_store),
+            account_access_secret.clone(),
+            required_scopes.clone(),
+        );
+        secret_store
+            .put(
+                scope.clone(),
+                account_access_secret,
+                SecretMaterial::from("ya29.expired_fixture_token"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let outcome = services
+            .host_runtime_for_local_testing()
+            .invoke_capability(wasm_runtime_request_for_scope(
+                capability_id.clone(),
+                scope,
+                input,
+            ))
+            .await
+            .unwrap();
+
+        let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
+            panic!("{package_id}: expected auth-required outcome, got {outcome:?}");
+        };
+        assert_eq!(gate.capability_id, capability_id);
+        assert_eq!(gate.credential_requirements.len(), 1);
+        let requirement = &gate.credential_requirements[0];
+        assert_eq!(requirement.provider, VendorId::new("google").unwrap());
+        assert_eq!(requirement.requester_extension.as_str(), package_id);
+        assert_eq!(requirement.provider_scopes, required_scopes);
+        assert_eq!(network.requests().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() {
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
     let scope = sample_scope(InvocationId::new());
@@ -1334,10 +1412,9 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
         json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
         Arc::clone(&search_http),
     );
-    assert_eq!(search.error, None);
+    assert_eq!(wasm_typed_failure(&search), None);
     let search_output: serde_json::Value = serde_json::from_str(
-        search
-            .output_json
+        wasm_output_json(&search)
             .as_deref()
             .expect("search should return compact JSON"),
     )
@@ -1363,9 +1440,9 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
         json!({"owner": "nearai", "repo": "ironclaw", "issue_number": 2}),
         Arc::clone(&get_issue_http),
     );
-    assert_eq!(get_issue.error, None);
+    assert_eq!(wasm_typed_failure(&get_issue), None);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(get_issue.output_json.as_deref().unwrap())
+        serde_json::from_str::<serde_json::Value>(wasm_output_json(&get_issue).as_deref().unwrap())
             .unwrap()["number"],
         json!(2)
     );
@@ -1391,10 +1468,10 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
         }),
         Arc::clone(&comment_http),
     );
-    assert_eq!(comment.error, None);
+    assert_eq!(wasm_typed_failure(&comment), None);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(comment.output_json.as_deref().unwrap()).unwrap()
-            ["body"],
+        serde_json::from_str::<serde_json::Value>(wasm_output_json(&comment).as_deref().unwrap())
+            .unwrap()["body"],
         json!("Reborn WASM comment")
     );
     assert_single_wasm_request(
@@ -1424,7 +1501,7 @@ async fn bundled_github_wasm_builds_query_from_structured_search_fields() {
         Arc::clone(&http),
     );
 
-    assert_eq!(execution.error, None);
+    assert_eq!(wasm_typed_failure(&execution), None);
     assert_single_wasm_request(
         &http,
         "GET",
@@ -1453,9 +1530,10 @@ async fn bundled_github_wasm_replies_to_pull_request_comment_under_pr_path() {
         Arc::clone(&http),
     );
 
-    assert_eq!(reply.error, None);
+    assert_eq!(wasm_typed_failure(&reply), None);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(reply.output_json.as_deref().unwrap()).unwrap()["body"],
+        serde_json::from_str::<serde_json::Value>(wasm_output_json(&reply).as_deref().unwrap())
+            .unwrap()["body"],
         json!("Reply from Reborn")
     );
     assert_single_wasm_request(
@@ -1486,9 +1564,9 @@ async fn bundled_github_wasm_returns_json_for_empty_success_responses() {
         Arc::clone(&http),
     );
 
-    assert_eq!(dispatch.error, None);
+    assert_eq!(wasm_typed_failure(&dispatch), None);
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(dispatch.output_json.as_deref().unwrap())
+        serde_json::from_str::<serde_json::Value>(wasm_output_json(&dispatch).as_deref().unwrap())
             .unwrap(),
         json!({"status": 204})
     );
@@ -1612,7 +1690,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         }),
         Arc::clone(&create_repo_http),
     );
-    assert_eq!(create_repo.error, None);
+    assert_eq!(wasm_typed_failure(&create_repo), None);
     assert_single_wasm_request_json_body(
         &create_repo_http,
         "POST",
@@ -1635,7 +1713,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         json!({"limit": 2}),
         Arc::clone(&list_my_repos_http),
     );
-    assert_eq!(list_my_repos.error, None);
+    assert_eq!(wasm_typed_failure(&list_my_repos), None);
     assert_single_wasm_request(
         &list_my_repos_http,
         "GET",
@@ -1659,7 +1737,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         }),
         Arc::clone(&fork_http),
     );
-    assert_eq!(fork.error, None);
+    assert_eq!(wasm_typed_failure(&fork), None);
     assert_single_wasm_request_json_body(
         &fork_http,
         "POST",
@@ -1691,7 +1769,7 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
         }),
         Arc::clone(&release_http),
     );
-    assert_eq!(release.error, None);
+    assert_eq!(wasm_typed_failure(&release), None);
     assert_single_wasm_request_json_body(
         &release_http,
         "POST",
@@ -1721,9 +1799,9 @@ async fn bundled_github_wasm_get_authenticated_user_uses_user_endpoint() {
         Arc::clone(&http),
     );
 
-    assert_eq!(user.error, None);
+    assert_eq!(wasm_typed_failure(&user), None);
     let user: serde_json::Value =
-        serde_json::from_str(user.output_json.as_deref().unwrap()).unwrap();
+        serde_json::from_str(wasm_output_json(&user).as_deref().unwrap()).unwrap();
     assert_eq!(user["login"], json!("serrrfirat"));
     assert_eq!(user["type"], json!("User"));
     assert_single_wasm_request(&http, "GET", "https://api.github.com/user", None);
@@ -1815,23 +1893,23 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
             RecordingWasmHostHttp::err(WasmHostError::Unavailable(
                 "missing auth token ghp_fake_fixture_token".to_string(),
             )),
-            "AuthRequired",
+            "github_api_executor_failed",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Failed(
                 "deadline exceeded while token ghp_fake_fixture_token was present".to_string(),
             )),
-            "AuthRequired",
+            "github_api_request_failed",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Failed("redirect blocked".to_string())),
-            "github_api_redirect_denied",
+            "github_api_request_failed",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::FailedAfterRequestSent(
                 "response body too large".to_string(),
             )),
-            "github_api_body_limit",
+            "github_api_request_failed",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Denied(
@@ -1874,6 +1952,48 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
     }
 }
 
+/// The 401 auth-required path is the one status GitHub's guest carries a
+/// provider `message` onto the typed `guest-failure` for (see
+/// `request.rs::LAST_ERROR_MESSAGE`), specifically so the auth gate has a
+/// diagnostic. That message is guest-authored, sandbox-exit-scrubbed text —
+/// unlike the generic host-transport cases above (asserted via `Debug`),
+/// this pins the scrub against the actual `guest-failure.message` field a
+/// 401 body can carry a credential-shaped token in.
+#[tokio::test]
+async fn bundled_github_wasm_scrubs_credential_shaped_token_from_401_message() {
+    let leaked_token = "ghp_fakefixturetoken1234567890abcdefghij";
+    let http = RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 401,
+        headers_json: "{}".to_string(),
+        body: format!(r#"{{"message":"Bad credentials: {leaked_token}"}}"#).into_bytes(),
+    });
+
+    let execution = execute_bundled_github_wasm(
+        "github.search_issues",
+        json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        Arc::new(http),
+    );
+
+    assert_eq!(
+        structured_wasm_error_code(&execution).as_deref(),
+        Some("github_api_error_status_401")
+    );
+    let failure = wasm_typed_failure(&execution).expect("401 must produce a typed failure");
+    assert_eq!(failure.kind, WitErrorKind::AuthRequired);
+    let message = failure
+        .message
+        .as_deref()
+        .expect("401 body message must be carried onto the guest-failure");
+    assert!(
+        !message.contains(leaked_token),
+        "gate diagnostic message must not leak the credential-shaped token, got: {message:?}"
+    );
+    assert!(
+        !format!("{execution:?}").contains(leaked_token),
+        "guest-visible failure must not leak credential material"
+    );
+}
+
 #[tokio::test]
 async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
     let execution = execute_bundled_github_wasm(
@@ -1886,8 +2006,8 @@ async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
         })),
     );
 
-    assert_eq!(execution.output_json.as_deref(), Some("not-json"));
-    assert_eq!(execution.error, None);
+    assert_eq!(wasm_output_json(&execution).as_deref(), Some("not-json"));
+    assert_eq!(wasm_typed_failure(&execution), None);
 }
 
 #[tokio::test]
@@ -1902,7 +2022,7 @@ async fn bundled_github_wasm_rejects_malformed_compacted_search_response() {
         })),
     );
 
-    assert_eq!(execution.output_json, None);
+    assert_eq!(wasm_output_json(&execution), None);
     assert_eq!(
         structured_wasm_error_code(&execution).as_deref(),
         Some("github_api_invalid_response")
@@ -1919,14 +2039,14 @@ fn bundled_google_drive_wasm_rejects_invalid_context_derived_dispatch_inputs() {
 
     let missing_context = execute_bundled_google_drive_wasm(json!({}), None, Arc::clone(&http));
     assert_eq!(
-        wasm_error_code_or_text(&missing_context).as_deref(),
+        structured_wasm_error_code(&missing_context).as_deref(),
         Some("missing_invocation_context")
     );
 
     let malformed_context =
         execute_bundled_google_drive_wasm(json!({}), Some("not-json"), Arc::clone(&http));
     assert_eq!(
-        wasm_error_code_or_text(&malformed_context).as_deref(),
+        structured_wasm_error_code(&malformed_context).as_deref(),
         Some("invalid_invocation_context")
     );
 
@@ -1936,7 +2056,7 @@ fn bundled_google_drive_wasm_rejects_invalid_context_derived_dispatch_inputs() {
         Arc::clone(&http),
     );
     assert_eq!(
-        wasm_error_code_or_text(&unsupported_capability).as_deref(),
+        structured_wasm_error_code(&unsupported_capability).as_deref(),
         Some("unsupported_google_drive_capability")
     );
 
@@ -1946,7 +2066,7 @@ fn bundled_google_drive_wasm_rejects_invalid_context_derived_dispatch_inputs() {
         Arc::clone(&http),
     );
     assert_eq!(
-        wasm_error_code_or_text(&action_collision).as_deref(),
+        structured_wasm_error_code(&action_collision).as_deref(),
         Some("invalid_parameters")
     );
 
@@ -1963,25 +2083,27 @@ fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: Failu
     }
 }
 
-fn structured_wasm_error_code(execution: &WitToolExecution) -> Option<String> {
-    let error = execution.error.as_deref()?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(error).expect("WASM guest errors are structured JSON");
-    assert!(
-        parsed["kind"].as_str().is_some_and(|kind| !kind.is_empty()),
-        "structured WASM guest error must include a non-empty kind"
-    );
-    parsed["code"].as_str().map(str::to_string)
+/// The bundled `github.wasm`/`google-drive.wasm` fixtures are compiled
+/// against the typed near:agent@0.4.1 world, so every execution in this file
+/// lands in `WitToolOutcome::Success`/`Failure` — the only two variants
+/// `WitToolOutcome` has.
+fn wasm_output_json(execution: &WitToolExecution) -> Option<String> {
+    match &execution.outcome {
+        WitToolOutcome::Success(output) => Some(output.clone()),
+        WitToolOutcome::Failure(_) => None,
+    }
 }
 
-fn wasm_error_code_or_text(execution: &WitToolExecution) -> Option<String> {
-    let error = execution.error.as_deref()?;
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(error)
-        && let Some(code) = parsed["code"].as_str()
-    {
-        return Some(code.to_string());
+fn wasm_typed_failure(execution: &WitToolExecution) -> Option<&WitGuestFailure> {
+    match &execution.outcome {
+        WitToolOutcome::Failure(failure) => Some(failure),
+        WitToolOutcome::Success(_) => None,
     }
-    Some(error.to_string())
+}
+
+fn structured_wasm_error_code(execution: &WitToolExecution) -> Option<String> {
+    let failure = wasm_typed_failure(execution)?;
+    failure.code.clone()
 }
 
 #[derive(Debug, Clone)]

@@ -608,14 +608,6 @@ reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contract
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
-[[exemption]]
-path = "crates/loop/ironclaw_loop_host/src/system_inference.rs"
-lines = [374, 395, 429, 443]
-owner = "@nearai/reborn"
-reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-10-31"
-
 # ---------------------------------------------------------------------------
 # WS1.3 extension-contracts extraction (PR #6977). Every line below was derived
 # from this PR's own gate output, not guessed: the failing run's merged lcov

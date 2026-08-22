@@ -14,12 +14,10 @@ use ironclaw_extension_contracts::tool_adapter::{
 };
 use ironclaw_host_api::{
     capability::CapabilityDescriptor,
-    dispatch::{
-        CapabilityDispatchRequest, DispatchError, DispatchFailureDetail, RuntimeDispatchErrorKind,
-    },
+    dispatch::{CapabilityDispatchRequest, DispatchError, DispatchFailureKind},
     ids::{CapabilityId, ExtensionId},
     resource::{ReservationStatus, ResourceReceipt, ResourceUsage},
-    runtime::{DispatchErrorLane, RuntimeKind},
+    runtime::RuntimeKind,
 };
 
 use crate::dispatch::{
@@ -178,47 +176,17 @@ fn tool_error_to_dispatch_error(
             requirement,
         },
         ToolError::Rejected {
-            runtime,
             kind,
             diagnostic,
             detail,
+            ..
         } => DispatchError::Rejected {
-            runtime,
-            kind,
+            // Runtime provenance belongs to the trusted registry binding, not
+            // to the extension-supplied error payload.
+            runtime: Some(runtime),
+            kind: DispatchFailureKind::Runtime(kind),
             diagnostic,
             detail,
-        },
-        ToolError::Failed {
-            kind,
-            safe_summary,
-            model_visible_cause,
-        } => runtime_dispatch_error(runtime, kind, safe_summary, model_visible_cause),
-    }
-}
-
-fn runtime_dispatch_error(
-    runtime: RuntimeKind,
-    kind: RuntimeDispatchErrorKind,
-    safe_summary: Option<String>,
-    model_visible_cause: Option<String>,
-) -> DispatchError {
-    match runtime.dispatch_error_lane() {
-        DispatchErrorLane::Mcp => DispatchError::Mcp {
-            kind,
-            model_visible_cause,
-        },
-        DispatchErrorLane::Wasm => DispatchError::Wasm {
-            kind,
-            model_visible_cause,
-        },
-        DispatchErrorLane::Script => DispatchError::Script {
-            kind,
-            model_visible_cause,
-        },
-        DispatchErrorLane::FirstParty => DispatchError::FirstParty {
-            kind,
-            safe_summary,
-            detail: model_visible_cause.map(|text| DispatchFailureDetail::Diagnostic { text }),
         },
     }
 }
@@ -257,8 +225,9 @@ mod tests {
     use ironclaw_host_api::{
         capability::{CapabilityDescriptor, EffectKind, PermissionMode},
         dispatch::{
-            CapabilityDispatchRequest, DispatchError, DispatchFailureKind, ProviderDiagnostic,
-            ProviderErrorCode, UntrustedProviderMessage,
+            CapabilityDispatchRequest, DispatchError, DispatchFailureDetail, DispatchFailureKind,
+            ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
+            UntrustedProviderMessage,
         },
         ids::{ExtensionId, InvocationId, ProductKind, TenantId, UserId},
         invocation::InvocationOrigin,
@@ -418,8 +387,7 @@ mod tests {
             _ports: &ToolPorts<'_>,
         ) -> Result<ToolResult, ToolError> {
             Err(ToolError::Rejected {
-                runtime: Some(RuntimeKind::FirstParty),
-                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied),
+                kind: RuntimeDispatchErrorKind::PolicyDenied,
                 diagnostic: Some(Box::new(ProviderDiagnostic {
                     code: Some(ProviderErrorCode::new("channel_not_found")),
                     message: Some(UntrustedProviderMessage::new("no such channel")),
@@ -475,8 +443,12 @@ mod tests {
 
         match error {
             DispatchError::Rejected {
-                kind, diagnostic, ..
+                runtime,
+                kind,
+                diagnostic,
+                ..
             } => {
+                assert_eq!(runtime, Some(RuntimeKind::FirstParty));
                 assert_eq!(
                     kind,
                     DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied)
@@ -496,5 +468,119 @@ mod tests {
             }
             other => panic!("expected DispatchError::Rejected, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn tool_adapter_rejection_keeps_host_summary_separate_from_vendor_cause() {
+        struct RejectedToolAdapter;
+
+        #[async_trait]
+        impl ToolAdapter for RejectedToolAdapter {
+            async fn invoke(
+                &self,
+                _call: ToolCall,
+                _ports: &ToolPorts<'_>,
+            ) -> Result<ToolResult, ToolError> {
+                Err(ToolError::Rejected {
+                    kind: RuntimeDispatchErrorKind::Backend,
+                    diagnostic: Some(Box::new(ProviderDiagnostic {
+                        code: None,
+                        message: Some(UntrustedProviderMessage::new("vendor backend returned 503")),
+                        retry_after: None,
+                    })),
+                    detail: Some(DispatchFailureDetail::HostSummary {
+                        summary: ironclaw_host_api::safe_summary::SafeSummary::new(
+                            "the tool's backend failed",
+                        )
+                        .unwrap(),
+                        detail: None,
+                    }),
+                })
+            }
+        }
+
+        let mut registry = CapabilityDispatchRegistry::new();
+        registry
+            .register_extension(extension("provider-a", Some(Arc::new(RejectedToolAdapter))))
+            .expect("extension registration");
+        let resolved = registry
+            .resolve(&CapabilityId::new("provider-a.echo").expect("capability id"))
+            .expect("resolved");
+
+        let error = resolved
+            .adapter
+            .dispatch_json(sample_dispatch_request("provider-a.echo"))
+            .await
+            .expect_err("failure propagated");
+        let DispatchError::Rejected {
+            diagnostic, detail, ..
+        } = error
+        else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert_eq!(
+            diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.message.as_ref())
+                .map(|message| message.as_str()),
+            Some("vendor backend returned 503")
+        );
+        assert!(matches!(
+            detail,
+            Some(DispatchFailureDetail::HostSummary { summary, detail })
+                if summary.as_str() == "the tool's backend failed" && detail.is_none()
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_adapter_rejection_without_host_summary_carries_only_vendor_cause() {
+        struct RejectedToolAdapter;
+
+        #[async_trait]
+        impl ToolAdapter for RejectedToolAdapter {
+            async fn invoke(
+                &self,
+                _call: ToolCall,
+                _ports: &ToolPorts<'_>,
+            ) -> Result<ToolResult, ToolError> {
+                Err(ToolError::Rejected {
+                    kind: RuntimeDispatchErrorKind::Guest,
+                    diagnostic: Some(Box::new(ProviderDiagnostic {
+                        code: None,
+                        message: Some(UntrustedProviderMessage::new("guest trapped")),
+                        retry_after: None,
+                    })),
+                    detail: None,
+                })
+            }
+        }
+
+        let mut registry = CapabilityDispatchRegistry::new();
+        registry
+            .register_extension(extension("provider-a", Some(Arc::new(RejectedToolAdapter))))
+            .expect("extension registration");
+        let resolved = registry
+            .resolve(&CapabilityId::new("provider-a.echo").expect("capability id"))
+            .expect("resolved");
+
+        let error = resolved
+            .adapter
+            .dispatch_json(sample_dispatch_request("provider-a.echo"))
+            .await
+            .expect_err("failure propagated");
+        let DispatchError::Rejected {
+            diagnostic, detail, ..
+        } = error
+        else {
+            panic!("expected Rejected dispatch error");
+        };
+        assert_eq!(
+            diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.message.as_ref())
+                .map(|message| message.as_str()),
+            Some("guest trapped")
+        );
+        assert_eq!(detail, None);
     }
 }

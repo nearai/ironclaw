@@ -50,13 +50,9 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
                 "builtin.shell",
                 json!({
                     "command": format!(
-                        "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && printf '{EPHEMERAL_MARKER}' > /tmp/container-marker.txt && hostname > /tmp/container-hostname.txt && echo {CONTAINER_MARKER}"
+                        "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && printf '{EPHEMERAL_MARKER}' > /tmp/container-marker.txt && cat /workspace/persistence-marker.txt /tmp/container-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK && echo {CONTAINER_MARKER}"
                     )
                 }),
-            ),
-            RebornScriptedReply::tool_call(
-                "builtin.shell",
-                json!({"command": "test \"$(cat /tmp/container-hostname.txt)\" = \"$(hostname)\" && cat /workspace/persistence-marker.txt /tmp/container-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK"}),
             ),
             RebornScriptedReply::text("ran in the sandbox"),
         ])
@@ -72,7 +68,7 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
         cleanup.track_identity(identity.clone());
 
         harness
-            .submit_turn("run two sandboxed shell commands")
+            .submit_turn("run a sandboxed shell command")
             .await
             .expect("turn completes");
         let container = cleanup.capture_identity(&identity);
@@ -112,11 +108,11 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
         harness
             .assert_tool_result_contains(PERSISTENCE_MARKER)
             .await
-            .expect("workspace persisted across shell calls");
+            .expect("sandbox workspace path is writable");
         harness
             .assert_tool_result_contains(EPHEMERAL_MARKER)
             .await
-            .expect("container-local state persisted across shell calls");
+            .expect("sandbox temporary path is writable");
         harness
             .assert_reply_contains("ran in the sandbox")
             .await

@@ -12,6 +12,8 @@ use ironclaw_host_api::{
 use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
 pub(crate) const USER_CONTAINER_NAME_PREFIX: &str = "ironclaw-reborn-sandbox-user-";
+pub(crate) const USER_PROXY_NAME_PREFIX: &str = "ironclaw-reborn-sandbox-proxy-";
+pub(crate) const USER_NETWORK_NAME_PREFIX: &str = "ironclaw-reborn-sandbox-net-";
 pub(crate) const USER_CONTAINER_DIGEST_HEX_LEN: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -45,11 +47,21 @@ impl RebornSandboxUserKey {
     }
 
     pub fn container_name(&self) -> String {
-        let digest_prefix = self
-            .digest
+        format!("{USER_CONTAINER_NAME_PREFIX}{}", self.digest_prefix())
+    }
+
+    pub(crate) fn proxy_name(&self) -> String {
+        format!("{USER_PROXY_NAME_PREFIX}{}", self.digest_prefix())
+    }
+
+    pub(crate) fn network_name(&self) -> String {
+        format!("{USER_NETWORK_NAME_PREFIX}{}", self.digest_prefix())
+    }
+
+    fn digest_prefix(&self) -> &str {
+        self.digest
             .get(..USER_CONTAINER_DIGEST_HEX_LEN)
-            .unwrap_or(self.digest.as_str());
-        format!("{USER_CONTAINER_NAME_PREFIX}{digest_prefix}")
+            .unwrap_or(self.digest.as_str())
     }
 }
 
@@ -84,6 +96,8 @@ mod tests {
 
         assert_eq!(a.workspace_path(root), b.workspace_path(root));
         assert_eq!(a.container_name(), b.container_name());
+        assert_eq!(a.proxy_name(), b.proxy_name());
+        assert_eq!(a.network_name(), b.network_name());
     }
 
     #[test]
@@ -94,6 +108,8 @@ mod tests {
 
         assert_ne!(left.workspace_path(root), right.workspace_path(root));
         assert_ne!(left.container_name(), right.container_name());
+        assert_ne!(left.proxy_name(), right.proxy_name());
+        assert_ne!(left.network_name(), right.network_name());
     }
 
     #[test]

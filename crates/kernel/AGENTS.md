@@ -66,7 +66,7 @@ nothing above the perimeter can fabricate one.
 | `Authorized` witness (`ironclaw_host_api::authorized`: `CapabilityAuthorizer` grant trait :60, zero-sized `AuthorizationGrant(())` :74, `Authorized` :101) | `ironclaw_capabilities` — the sole `CapabilityAuthorizer` impl (`src/host/mod.rs:107`) | grant-gated construction + `reborn_authorized_seal_ratchet.rs::capability_authorizer_is_implemented_only_by_the_kernel` |
 | Effective trust ceiling (`EffectiveTrustClass`) | `ironclaw_trust::TrustPolicy::evaluate` — privileged variants have no public constructor and no `Deserialize` (`src/decision.rs:18-33`) | crate-scoped visibility; host_api's `#[serde(skip_deserializing)]` guards the wire half |
 | Fingerprinted approval lease | `ironclaw_approvals::ApprovalResolver` issues into `ironclaw_authorization`'s lease store; decision persisted **before** the lease (`ironclaw_approvals/src/lib.rs:240`) | the issuing port is public, so the mint restriction is charter + the stage `BoundaryRule`s (approvals may not name capabilities/host_runtime; nothing above the kernel may name the store crates around the membrane) — **not** a type seal |
-| Verified-inbound evidence | the ingress verifier colocated in `ironclaw_extension_host` (T2) — **outside this directory but inside the conceptual perimeter**; the kernel consumes it as sealed input | `reborn_sealed_evidence_mint_ratchet.rs` (19 tests: sole-implementor census, mint-fn ownership, retired-feature absence) + `ironclaw_extension_contracts` `verified_inbound_seal` |
+| Verified-inbound evidence | the ingress verifier colocated in `ironclaw_extension_host` (T2) — **outside this directory but inside the conceptual perimeter**; the kernel consumes it as sealed input | `reborn_sealed_evidence_mint_ratchet.rs` (re-derive test count: `grep -cF '#[test]' crates/app/ironclaw_architecture_tests/tests/reborn_sealed_evidence_mint_ratchet.rs` — a sole-implementor census: mint-fn ownership, retired-feature absence) + `ironclaw_extension_contracts` `verified_inbound_seal` |
 
 ## What never belongs here
 
@@ -149,8 +149,9 @@ change: `cargo test -p ironclaw_architecture_tests`.
 - **The witness seal.** `reborn_authorized_seal_ratchet.rs::capability_authorizer_is_implemented_only_by_the_kernel`
   — `CapabilityAuthorizer` implemented by `ironclaw_capabilities` and nowhere
   else, workspace-wide, with self-tests that the scan cannot silently degrade.
-- **The evidence-mint seal.** `reborn_sealed_evidence_mint_ratchet.rs` (19
-  tests) — sole-implementor census for the mint grant traits, mint functions
+- **The evidence-mint seal.** `reborn_sealed_evidence_mint_ratchet.rs`
+  (re-derive test count: `grep -cF '#[test]' crates/app/ironclaw_architecture_tests/tests/reborn_sealed_evidence_mint_ratchet.rs`)
+  — sole-implementor census for the mint grant traits, mint functions
   named only by their owners, the retired `host-auth-mint` feature pinned
   absent across every manifest, script, and workflow.
 - **Kernel never reaches the assembly root.**
