@@ -107,10 +107,10 @@ against the documented tree (PROPOSAL §5); on 2026-08-18 it reports:
 documented exclusion(s), 0 owned exception(s))` (re-derived after adding the
 notification inbox crate).
 
-Under `crates/extensions/packages/`, 15 package directories: 5 are workspace
-crates (`slack`, `telegram`, `web-app`, `memory-native`, `mem0`) and 10 are data-only
+Under `crates/extensions/packages/`, 16 package directories: 5 are workspace
+crates (`slack`, `telegram`, `web-app`, `memory-native`, `mem0`) and 11 are data-only
 (manifest + prompts/schemas, some with prebuilt WASM): github, gmail, the
-five google-*, nearai-mcp, notion-mcp, web-access. Every package directory —
+five google-*, nearai-mcp, notion-mcp, web-access, xquik-mcp. Every package directory —
 data-only ones included — carries its own `README.md`, so the read order
 above applies at package level too: `crates/extensions/AGENTS.md` →
 `crates/extensions/packages/<pkg>/README.md`.
