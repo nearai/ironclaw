@@ -24,6 +24,7 @@ use crate::ironhub::{
 
 const MAX_SEARCH_DESCRIPTION_BYTES: usize = 120;
 const SEARCH_DESCRIPTION_ELLIPSIS: char = '…';
+const MAX_ARTIFACT_REQUEST_BYTES: u64 = 8 * 1024;
 
 pub(crate) fn verify_signed_manifest(envelope_bytes: &[u8]) -> Result<Vec<u8>, String> {
     verify_signed_manifest_with_keys(envelope_bytes, MANIFEST_VERIFY_KEYS)
@@ -456,8 +457,6 @@ fn validate_artifact_url_for_origin(
     }
     Ok(())
 }
-
-const MAX_ARTIFACT_REQUEST_BYTES: u64 = 8 * 1024;
 
 pub(crate) fn network_policy_for_url_from_origin(
     value: &str,

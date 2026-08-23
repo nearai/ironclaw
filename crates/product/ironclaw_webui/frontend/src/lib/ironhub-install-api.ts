@@ -52,7 +52,6 @@ export function installErrorKey(error) {
   }
 }
 
-// -> { installed, slug, message }
 export function deliverIronhubInstall(request) {
   return apiFetch("/api/webchat/v2/ironhub/install", {
     method: "POST",
