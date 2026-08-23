@@ -894,7 +894,17 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // unit variants and a serde derive, no behavior. The 35-line delta is
         // from the merged `turn.rs`; the resulting ceiling is re-captured from
         // this test's own report, never counted by eye.
-        ("ironclaw_host_api", 20_516),
+        // 20_516 -> 20_632 (2026-08-23, #7812): +116 lines for the
+        // `PreparedTurnDeclarations::require_no_approval` narrowing flag and the
+        // `CapabilitySurfacePolicy::without_approval_gated` builder, plus their
+        // inline tests. Both are contract vocabulary with no logic: the flag is
+        // a defaulted bool DTO field, and the builder sets an existing field of
+        // the type that already owns it, matching the sibling
+        // `deny_capability_ids`/`narrow_to_capability_ids` builders. The
+        // behavior that reads them lives in `ironclaw_turn_runner`, so there is
+        // no lower crate to move this to. Count read from this test's own
+        // failure message, never counted by eye.
+        ("ironclaw_host_api", 20_632),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

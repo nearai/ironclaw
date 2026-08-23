@@ -350,6 +350,8 @@ async fn submit_suggestion_generation(
             )],
         }],
         tools: tools.to_vec(),
+        // Mechanical: the declaration field exists but nothing reads it yet.
+        require_no_approval: false,
         output: output.clone(),
         requested_model: None,
         idempotency_key: accept_key.to_string(),

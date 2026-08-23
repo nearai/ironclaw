@@ -112,6 +112,7 @@ fn structured_declarations() -> PreparedTurnDeclarations {
             }),
         },
         limits: Default::default(),
+        require_no_approval: false,
     }
 }
 
@@ -668,6 +669,7 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
             output: OutputContract::AssistantMessage,
             requested_model: None,
             idempotency_key: "unbound-owner-accept".to_string(),
+            require_no_approval: false,
         })
         .await?;
     let ironclaw_product_contracts::inbound::ProductInboundAck::Accepted {
