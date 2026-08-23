@@ -1,6 +1,7 @@
 use ironclaw_product_contracts::ironhub::IronhubLinkError;
 use ironclaw_product_contracts::surface::{
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceValidationCode,
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind,
+    ProductSurfaceValidationCode,
 };
 
 pub(super) fn ironhub_link_unavailable() -> ProductSurfaceError {
@@ -9,11 +10,24 @@ pub(super) fn ironhub_link_unavailable() -> ProductSurfaceError {
 
 pub(super) fn map_ironhub_link_error(error: IronhubLinkError) -> ProductSurfaceError {
     match error {
-        IronhubLinkError::InvalidSignature
-        | IronhubLinkError::StaleTimestamp
-        | IronhubLinkError::Replay => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
-        }
+        IronhubLinkError::InvalidSignature => ProductSurfaceError::from_status_kind(
+            ProductSurfaceErrorCode::Forbidden,
+            ProductSurfaceErrorKind::ParticipantDenied,
+            403,
+            false,
+        ),
+        IronhubLinkError::StaleTimestamp => ProductSurfaceError::from_status_kind(
+            ProductSurfaceErrorCode::Forbidden,
+            ProductSurfaceErrorKind::Expired,
+            403,
+            false,
+        ),
+        IronhubLinkError::Replay => ProductSurfaceError::from_status_kind(
+            ProductSurfaceErrorCode::Forbidden,
+            ProductSurfaceErrorKind::Duplicate,
+            403,
+            false,
+        ),
         IronhubLinkError::Install { reason } => {
             tracing::error!(%reason, "ironhub link install failed");
             ProductSurfaceError::internal_invariant()
@@ -62,5 +76,20 @@ mod tests {
         assert_eq!(unavailable.code, ProductSurfaceErrorCode::Unavailable);
         assert_eq!(unavailable.status_code, 503);
         assert!(!unavailable.retryable);
+    }
+
+    #[test]
+    fn each_rejected_link_reason_stays_distinguishable_on_the_wire() {
+        let signature = map_ironhub_link_error(IronhubLinkError::InvalidSignature).kind;
+        let stale = map_ironhub_link_error(IronhubLinkError::StaleTimestamp).kind;
+        let replay = map_ironhub_link_error(IronhubLinkError::Replay).kind;
+
+        assert_eq!(signature, ProductSurfaceErrorKind::ParticipantDenied);
+        assert_eq!(stale, ProductSurfaceErrorKind::Expired);
+        assert_eq!(replay, ProductSurfaceErrorKind::Duplicate);
+
+        assert_ne!(signature, stale);
+        assert_ne!(stale, replay);
+        assert_ne!(signature, replay);
     }
 }

@@ -1676,5 +1676,20 @@ registerPack("ar", {
   "deviceLink.error.identity_conflict": "هذا الحساب مرتبط بالفعل. ألغِ ربطه من حساب IronClaw المتصل به، ثم حاول مرة أخرى.",
   "deviceLink.error.vendor_unavailable": "الخدمة غير متاحة مؤقتًا.",
   "deviceLink.error.custody_failed": "تعذّر حفظ الربط بأمان.",
-  "deviceLink.error.internal": "حدث خطأ ما أثناء الربط."
+  "deviceLink.error.internal": "حدث خطأ ما أثناء الربط.",
+  "ironhub.install.title": "التثبيت من IronHub",
+  "ironhub.install.description": "راجع ما يثبّته هذا الرابط قبل الموافقة عليه.",
+  "ironhub.install.name": "الاسم",
+  "ironhub.install.version": "الإصدار",
+  "ironhub.install.digest": "بصمة العنصر",
+  "ironhub.install.privateSource": "مصدر بيان خاص",
+  "ironhub.install.confirm": "تثبيت",
+  "ironhub.install.installing": "جارٍ التثبيت...",
+  "ironhub.install.installed": "تم التثبيت.",
+  "ironhub.install.notInstalled": "أفاد المركز بأنه لم يتم تثبيت أي شيء.",
+  "ironhub.install.linkInvalid": "رابط التثبيت هذا غير مكتمل أو غير صالح.",
+  "ironhub.install.rejected": "رابط التثبيت هذا غير موقّع لهذا الوكيل.",
+  "ironhub.install.expired": "انتهت صلاحية رابط التثبيت هذا. ابدأ التثبيت من جديد من المركز.",
+  "ironhub.install.alreadyUsed": "تم استخدام رابط التثبيت هذا من قبل. ابدأ التثبيت من جديد من المركز.",
+  "ironhub.install.failed": "تعذّر إكمال التثبيت."
 });

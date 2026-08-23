@@ -1676,5 +1676,20 @@ registerPack("hi", {
   "deviceLink.error.identity_conflict": "यह खाता पहले से लिंक है। जिस IronClaw खाते से यह जुड़ा है, वहाँ से इसे अनलिंक करें और फिर कोशिश करें।",
   "deviceLink.error.vendor_unavailable": "सेवा फ़िलहाल उपलब्ध नहीं है।",
   "deviceLink.error.custody_failed": "लिंक सुरक्षित रूप से सहेजा नहीं जा सका।",
-  "deviceLink.error.internal": "लिंक करते समय कुछ गड़बड़ हो गई।"
+  "deviceLink.error.internal": "लिंक करते समय कुछ गड़बड़ हो गई।",
+  "ironhub.install.title": "IronHub से इंस्टॉल करें",
+  "ironhub.install.description": "स्वीकृति देने से पहले देखें कि यह लिंक क्या इंस्टॉल करता है।",
+  "ironhub.install.name": "नाम",
+  "ironhub.install.version": "संस्करण",
+  "ironhub.install.digest": "आर्टिफ़ैक्ट डाइजेस्ट",
+  "ironhub.install.privateSource": "निजी मैनिफ़ेस्ट स्रोत",
+  "ironhub.install.confirm": "इंस्टॉल करें",
+  "ironhub.install.installing": "इंस्टॉल हो रहा है...",
+  "ironhub.install.installed": "इंस्टॉल हो गया।",
+  "ironhub.install.notInstalled": "हब ने बताया कि कुछ भी इंस्टॉल नहीं हुआ।",
+  "ironhub.install.linkInvalid": "यह इंस्टॉल लिंक अधूरा या ख़राब है।",
+  "ironhub.install.rejected": "यह इंस्टॉल लिंक इस एजेंट के लिए हस्ताक्षरित नहीं है।",
+  "ironhub.install.expired": "यह इंस्टॉल लिंक समाप्त हो चुका है। हब से इंस्टॉल फिर से शुरू करें।",
+  "ironhub.install.alreadyUsed": "यह इंस्टॉल लिंक पहले ही उपयोग हो चुका है। हब से इंस्टॉल फिर से शुरू करें।",
+  "ironhub.install.failed": "इंस्टॉल पूरा नहीं हो सका।"
 });

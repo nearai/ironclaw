@@ -1676,5 +1676,20 @@ registerPack("ko", {
   "deviceLink.error.identity_conflict": "이 계정은 이미 연결되어 있습니다. 연결된 IronClaw 계정에서 연결을 해제한 후 다시 시도하세요.",
   "deviceLink.error.vendor_unavailable": "서비스를 일시적으로 사용할 수 없습니다.",
   "deviceLink.error.custody_failed": "연결을 안전하게 저장하지 못했습니다.",
-  "deviceLink.error.internal": "연결 중 문제가 발생했습니다."
+  "deviceLink.error.internal": "연결 중 문제가 발생했습니다.",
+  "ironhub.install.title": "IronHub에서 설치",
+  "ironhub.install.description": "승인하기 전에 이 링크가 설치하는 항목을 확인하세요.",
+  "ironhub.install.name": "이름",
+  "ironhub.install.version": "버전",
+  "ironhub.install.digest": "아티팩트 다이제스트",
+  "ironhub.install.privateSource": "비공개 매니페스트 소스",
+  "ironhub.install.confirm": "설치",
+  "ironhub.install.installing": "설치 중...",
+  "ironhub.install.installed": "설치되었습니다.",
+  "ironhub.install.notInstalled": "허브가 아무것도 설치되지 않았다고 보고했습니다.",
+  "ironhub.install.linkInvalid": "이 설치 링크가 불완전하거나 형식이 올바르지 않습니다.",
+  "ironhub.install.rejected": "이 설치 링크는 이 에이전트용으로 서명되지 않았습니다.",
+  "ironhub.install.expired": "이 설치 링크가 만료되었습니다. 허브에서 설치를 다시 시작하세요.",
+  "ironhub.install.alreadyUsed": "이 설치 링크는 이미 사용되었습니다. 허브에서 설치를 다시 시작하세요.",
+  "ironhub.install.failed": "설치를 완료할 수 없습니다."
 });

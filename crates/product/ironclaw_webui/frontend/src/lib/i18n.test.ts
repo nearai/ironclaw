@@ -86,6 +86,7 @@ const LOCALES = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt-BR", "uk", 
 const ENGLISH_SIDECAR_PACKS = [
   "../components/device-link-translations.ts",
   "../pages/chat/inspector/inspector-translations.ts",
+  "../pages/install/install-translations.ts",
 ];
 
 function runPackSource(specifier, onRegister) {

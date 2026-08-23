@@ -252,6 +252,7 @@ pub enum ProductSurfaceErrorKind {
     Duplicate,
     Busy,
     ParticipantDenied,
+    Expired,
     BlockedApproval,
     BlockedAuthentication,
     BlockedResource,
