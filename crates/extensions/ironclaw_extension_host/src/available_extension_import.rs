@@ -870,6 +870,45 @@ setup_url = "{expected_url}"
         );
     }
 
+    /// A v3 tool bound to a standard messaging op. The host synthesizes its
+    /// schema refs after validating the binding, and `standard_op` is v3-only,
+    /// so the v2 bundle fixture above cannot express this shape.
+    const STANDARD_OP_BUNDLE_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "uploaded-standard"
+name = "Uploaded Standard"
+version = "0.1.0"
+description = "fixture: an imported tool bound to a standard messaging op"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/tool.wasm"
+
+[[tools]]
+standard_op = "send_message"
+id = "uploaded-standard.send_message"
+description = "Sends a message"
+effects = ["external_write"]
+default_permission = "ask"
+visibility = "model"
+"#;
+
+    #[test]
+    fn an_imported_bundle_omits_host_synthesized_standard_schemas() {
+        imported_extension_package(
+            vec![
+                (
+                    "manifest.toml".to_string(),
+                    STANDARD_OP_BUNDLE_FIXTURE.as_bytes().to_vec(),
+                ),
+                ("wasm/tool.wasm".to_string(), b"\0asm\x0d\0\x01\0".to_vec()),
+            ],
+            &[],
+        )
+        .expect("a synthesized standard schema ref has no asset for the bundle to carry");
+    }
+
     #[tokio::test]
     async fn imported_bundle_reloads_as_installed_local_after_restart() {
         let fs = InMemoryBackend::default();

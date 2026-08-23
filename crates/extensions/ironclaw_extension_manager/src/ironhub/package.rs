@@ -740,4 +740,46 @@ setup_url = "https://app.attio.com/settings/developers""#,
             "got {error}"
         );
     }
+
+    /// The host synthesizes these schemas, so a catalog never publishes them.
+    #[test]
+    fn a_capability_on_a_standard_schema_ref_installs_without_a_published_asset() {
+        let manifest = String::from_utf8(published_manifest("attio", &api_key_auth("attio", "")))
+            .expect("published manifest is utf8")
+            .replace("[[tools]]\n", "[[tools]]\nstandard_op = \"send_message\"\n")
+            .replace("id = \"attio.invoke\"", "id = \"attio.send_message\"")
+            .replace(
+                "effects = [\"network\", \"use_secret\"]",
+                "effects = [\"network\", \"use_secret\", \"external_write\"]",
+            )
+            .replace(
+                "input_schema_ref = \"schemas/attio/invoke.input.v1.json\"\n",
+                "",
+            )
+            .replace(
+                "output_schema_ref = \"schemas/attio/raw_output.v1.json\"\n",
+                "",
+            );
+
+        let package = ironhub_tool_package(
+            &entry_named("attio"),
+            manifest.into_bytes(),
+            component(),
+            Some(b"{}".to_vec()),
+            Vec::new(),
+            Vec::new(),
+            &[],
+        )
+        .expect("a host-synthesized schema ref has no published asset to match");
+
+        let paths: Vec<&str> = package
+            .assets
+            .iter()
+            .map(|asset| asset.path.as_str())
+            .collect();
+        assert!(
+            !paths.iter().any(|path| path.starts_with("standard:")),
+            "a standard ref must not become an installed asset path, got {paths:?}"
+        );
+    }
 }
