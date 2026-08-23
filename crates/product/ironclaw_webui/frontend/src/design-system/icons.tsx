@@ -140,6 +140,11 @@ const paths = {
 
 export type IconName = string;
 
+// Canonical list of the glyphs `Icon` can render, derived from `paths` so the
+// gallery/selector can never drift from the supported names. `Icon` still
+// accepts any string and falls back to `spark` for an unknown name.
+export const iconNames = Object.keys(paths) as IconName[];
+
 export type IconProps = Omit<
   ComponentPropsWithoutRef<"svg">,
   "children" | "strokeWidth"
