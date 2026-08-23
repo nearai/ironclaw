@@ -228,7 +228,15 @@ observed_date = "2026-08-08"
 # mirrored `COMPOSITION_ABSOLUTE_SRC_LOC` constant in
 # crates/app/ironclaw_architecture_tests/tests/reborn_restructure_baselines.rs
 # all move to this figure together, per this file's own re-capture instruction.
-loc_ceiling = 41991
+#
+# Re-measured 42198 -> 42198 on 2026-08-19 after merging main into
+# fix/7681-private-connect-nudge-with-one-click-link. Main's own growth
+# (#7712's CheckpointPolicy field, #7717's libSQL write-lane fix) had already
+# consumed the entire prior ceiling+tolerance window on its own; this branch's
+# delta is the #7681 connect-link notice wiring in extension_host_assembly.rs
+# (~11 lines), predating that growth. Measured on the merged tree with
+# `bash scripts/ci/check-composition-budget.sh --print`, not summed.
+loc_ceiling = 42198
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -239,8 +247,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 41991
-loc_observed_date = "2026-08-14"
+loc_observed = 42198
+loc_observed_date = "2026-08-19"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

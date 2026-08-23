@@ -10,12 +10,13 @@ The rest of this file is Claude-specific.
 - Project skills live in `.claude/skills/` — start from
   `ironclaw-reborn-orientation`; use `reborn-feature` for cross-layer product
   work, `reborn-extension-surfaces` for integrations,
-  `ironclaw-reborn-testing` for test tiers,
-  `ironclaw-reborn-architecture-review` for boundary changes, and
-  `ironclaw-reborn-skill-maintainer` before editing any guidance file.
+  `ironclaw-reborn-testing` for test tiers, and
+  `ironclaw-reborn-architecture-review` for boundary changes.
 - Path-scoped rules in `.claude/rules/*.md` load automatically when you read
   matching files — they are canonical for their topics (testing, database,
-  types, cargo-features, review discipline, …); do not restate them here.
+  types, cargo-features, review discipline, guidance maintenance, …); do not
+  restate them here. Guidance edits (`.claude/**`, any `AGENTS.md`/`CLAUDE.md`,
+  runtime `skills/`) are governed by `.claude/rules/guidance-maintenance.md`.
 
 ## Codebase knowledge graph (MCP)
 

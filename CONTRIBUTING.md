@@ -86,7 +86,8 @@ Before asking for review:
 - Fill out the PR template with a clear summary, validation notes, and impact assessment
 - If your change affects tracked behavior, update `FEATURE_PARITY.md` in the same branch
 - If onboarding or setup behavior changes, update the relevant setup docs in the same branch
-- If you are using a coding agent and it supports them, run `review-pr` or `pr-shepherd --fix` before opening or updating the PR
+- If you are using a coding agent and it supports them, run `pr-shepherd` before opening or updating the PR
+- For bug-issue fixes there is no dedicated repo command: follow the test-first discipline in `AGENTS.md` (pin the bug in a failing test at the right tier, then fix), and let CI's review bot plus `codex review` cover the review pass
 - `codex review --base origin/main` is also encouraged before requesting review
 
 ## Review Follow-Through

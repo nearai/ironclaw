@@ -82,6 +82,19 @@ pub trait ChannelReply: Send + Sync {
         envelope: OutboundEnvelope,
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError>;
+
+    /// Whether this adapter actually delivers an
+    /// [`OutboundVisibility::EphemeralTo`] reply privately, through a vendor
+    /// endpoint that shows it to that one actor. Defaults to `false`, so a
+    /// host decision that
+    /// depends on privacy — such as whether a connect notice may carry a
+    /// setup link into a shared conversation (#7681) — fails closed for every
+    /// adapter that has not declared the capability. Delivery itself stays
+    /// fail-open: an adapter that returns `false` still posts the reply
+    /// publicly rather than dropping it.
+    fn supports_private_delivery(&self) -> bool {
+        false
+    }
 }
 
 /// **Delivery** — reaching someone out of band, target-resolved. Pairs with
@@ -465,6 +478,27 @@ pub struct OutboundEnvelope {
     /// rely on rather than discovering the emptiness inside the vendor path.
     #[allow(clippy::doc_markdown)]
     pub registrations: Vec<DeliveryRegistration>,
+    /// Who may see this delivery.
+    pub visibility: OutboundVisibility,
+}
+
+/// Who may see an [`OutboundEnvelope`] delivery. A hint, not a guarantee: an
+/// adapter that cannot honor a non-`Public` request must still deliver
+/// publicly rather than drop the message — a notice is never silently lost.
+///
+/// Because it is a hint, a host decision that depends on the delivery actually
+/// staying private (such as whether a connect notice may carry a setup link
+/// into a shared conversation) must consult
+/// [`ChannelReply::supports_private_delivery`] and fail closed, never infer
+/// privacy from having requested it.
+#[derive(Debug, Clone, Default)]
+pub enum OutboundVisibility {
+    /// The vendor's normal shared delivery.
+    #[default]
+    Public,
+    /// Visible only to this external actor within the target conversation
+    /// (e.g. a vendor's ephemeral-post API).
+    EphemeralTo(ExternalActorRef),
 }
 
 /// A resolved outbound target for one delivery.

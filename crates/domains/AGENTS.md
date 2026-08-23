@@ -1,8 +1,8 @@
 # `crates/domains/` — one crate per business-record grammar, no authority decisions
 
-**Layer(s):** `substrates` (all 13 manifests declare it; checked by
+**Layer(s):** `substrates` (all 14 manifests declare it; checked by
 `reborn_workspace_crates_declare_layers_and_follow_layer_matrix`) ·
-**Crates:** 13 · **May depend on:** `contracts/`, `substrates/`, `events/`,
+**Crates:** 14 · **May depend on:** `contracts/`, `substrates/`, `events/`,
 plus five inventoried in-family edges (below) · **Depended on by:** `kernel/`,
 `loop/`, `extensions/`, `product/`, `app/` — every tier above wires against
 these contracts.
@@ -31,6 +31,7 @@ no other crate in the family may acquire either property.
 | [`ironclaw_identity`](./ironclaw_identity) | External identity → stable `UserId` minting, the user profile/directory, and the `projects` records + access-gating service | Resolving who a login or actor is, admin user management, or project membership/ACL |
 | [`ironclaw_llm`](./ironclaw_llm) | The `LlmProvider` contract, one adapter per model vendor, provider auth/sessions, registry, reliability decorators, recording — the family's vendor cone | Adding a model provider, changing provider selection/reliability, or trace recording of model calls |
 | [`ironclaw_memory`](./ironclaw_memory) | The provider-neutral `MemoryService` contract, memory path/scope grammar, prompt-write-safety vocabulary, and the shared conformance suite | Changing what memory *means*; provider implementations live in `extensions/packages/memory-native` and `…/mem0` |
+| [`ironclaw_notifications`](./ironclaw_notifications) | Durable, metadata-only user notification inbox records and lifecycle over `ScopedFilesystem` | Changing notification identity, pagination, retention bounds, or read/resolved/archived state |
 | [`ironclaw_outbound`](./ironclaw_outbound) | Metadata-only outbound authority: sealed access grants, at-most-once delivery-attempt reservation, delivery resolution, preferences and subscription cursors — never a transport | Deciding *whether/where* something may be pushed, or recording a delivery attempt |
 | [`ironclaw_skills`](./ironclaw_skills) | Skill parsing, validation, deterministic selection scoring, scoped filesystem management, and the pure learning path | Changing skill grammar, selection, install records, or learning prompts |
 | [`ironclaw_threads`](./ironclaw_threads) | The canonical transcript service: `SessionThreadService` (filesystem + in-memory), message ordering/status/redaction, tool-result records, display projections | Reading or writing thread/message history or transcript-derived views |

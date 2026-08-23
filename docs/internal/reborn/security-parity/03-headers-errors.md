@@ -13,7 +13,8 @@ sanitized-auth/validation-error slice; see `01-auth.md` and
   `WebUiV2HttpError` type (`ironclaw_webui/src/error.rs`), and the
   axum `Json` extractor (validation).
 
-Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
+Status and decision legend as in `01-auth.md`: historical migration-parity
+record (v1 removed); **Keep** / **Change** / **Beta-break**.
 
 ## Decision table
 

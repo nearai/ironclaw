@@ -19,7 +19,7 @@ wiring for a route or local contract that its crate-level caller test can
 cover. Never add test-only wiring for behavior production does not wire.
 
 Read `.claude/skills/ironclaw-reborn-testing/SKILL.md` and
-`tests/integration/CLAUDE.md` before adding a cross-layer scenario.
+`tests/integration/AGENTS.md` before adding a cross-layer scenario.
 
 ## Test tiers
 

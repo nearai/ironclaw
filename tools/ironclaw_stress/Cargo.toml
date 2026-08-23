@@ -41,7 +41,7 @@ tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-rig = { package = "rig-core", version = "0.33" }
+rig = { package = "rig-core", version = "0.36" }
 ironclaw_auth = { path = "../../crates/domains/ironclaw_auth" }
 ironclaw_composition = { path = "../../crates/app/ironclaw_composition", features = ["test-support"] }
 ironclaw_libsql_runtime = { path = "../../crates/substrates/ironclaw_libsql_runtime" }

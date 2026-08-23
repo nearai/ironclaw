@@ -33,6 +33,10 @@ pub const WEBUI_V2_ROUTE_DELETE_THREAD: &str = "webui.v2.delete_thread";
 pub const WEBUI_V2_ROUTE_GET_SESSION: &str = "webui.v2.get_session";
 pub const WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE: &str = "webui.v2.session_channel_message";
 pub const WEBUI_V2_ROUTE_LIST_THREADS: &str = "webui.v2.list_threads";
+pub const WEBUI_V2_ROUTE_LIST_NOTIFICATIONS: &str = "webui.v2.list_notifications";
+pub const WEBUI_V2_ROUTE_MARK_NOTIFICATION_READ: &str = "webui.v2.mark_notification_read";
+pub const WEBUI_V2_ROUTE_MARK_ALL_NOTIFICATIONS_READ: &str = "webui.v2.mark_all_notifications_read";
+pub const WEBUI_V2_ROUTE_ARCHIVE_NOTIFICATION: &str = "webui.v2.archive_notification";
 pub const WEBUI_V2_ROUTE_GET_TIMELINE: &str = "webui.v2.get_timeline";
 pub const WEBUI_V2_ROUTE_GET_RUN_ARTIFACT: &str = "webui.v2.get_run_artifact";
 pub const WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT: &str = "webui.v2.get_thread_artifact";
@@ -42,6 +46,7 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_LIST_COMMANDS: &str = "webui.v2.list_commands";
 pub const WEBUI_V2_ROUTE_EXECUTE_COMMAND: &str = "webui.v2.execute_command";
 pub const WEBUI_V2_ROUTE_LIST_AUTOMATIONS: &str = "webui.v2.list_automations";
+pub const WEBUI_V2_ROUTE_RUN_AUTOMATION: &str = "webui.v2.run_automation";
 pub const WEBUI_V2_ROUTE_PAUSE_AUTOMATION: &str = "webui.v2.pause_automation";
 pub const WEBUI_V2_ROUTE_RESUME_AUTOMATION: &str = "webui.v2.resume_automation";
 pub const WEBUI_V2_ROUTE_RENAME_AUTOMATION: &str = "webui.v2.rename_automation";
@@ -152,6 +157,13 @@ pub const WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT: &str =
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
+pub const WEBUI_V2_PATTERN_LIST_NOTIFICATIONS: &str = "/api/webchat/v2/notifications";
+pub const WEBUI_V2_PATTERN_MARK_NOTIFICATION_READ: &str =
+    "/api/webchat/v2/notifications/{notification_id}/read";
+pub const WEBUI_V2_PATTERN_MARK_ALL_NOTIFICATIONS_READ: &str =
+    "/api/webchat/v2/notifications/read-all";
+pub const WEBUI_V2_PATTERN_ARCHIVE_NOTIFICATION: &str =
+    "/api/webchat/v2/notifications/{notification_id}/archive";
 pub const WEBUI_V2_PATTERN_DELETE_THREAD: &str = "/api/webchat/v2/threads/{thread_id}";
 pub const WEBUI_V2_PATTERN_GET_SESSION: &str = "/api/webchat/v2/session";
 pub const WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE: &str =
@@ -169,6 +181,7 @@ pub const WEBUI_V2_PATTERN_STREAM_EVENTS_WS: &str = "/api/webchat/v2/threads/{th
 pub const WEBUI_V2_PATTERN_LIST_COMMANDS: &str = "/api/webchat/v2/commands";
 pub const WEBUI_V2_PATTERN_EXECUTE_COMMAND: &str = "/api/webchat/v2/threads/{thread_id}/commands";
 pub const WEBUI_V2_PATTERN_LIST_AUTOMATIONS: &str = "/api/webchat/v2/automations";
+pub const WEBUI_V2_PATTERN_RUN_AUTOMATION: &str = "/api/webchat/v2/automations/{automation_id}/run";
 pub const WEBUI_V2_PATTERN_PAUSE_AUTOMATION: &str =
     "/api/webchat/v2/automations/{automation_id}/pause";
 pub const WEBUI_V2_PATTERN_RESUME_AUTOMATION: &str =
@@ -322,6 +335,10 @@ pub fn webui_v2_routes_with_artifact_flags(
         delete_thread_descriptor(),
         session_channel_message_descriptor(),
         list_threads_descriptor(),
+        list_notifications_descriptor(),
+        mark_notification_read_descriptor(),
+        mark_all_notifications_read_descriptor(),
+        archive_notification_descriptor(),
         get_timeline_descriptor(),
         logs_descriptor(),
         get_attachment_descriptor(),
@@ -334,6 +351,7 @@ pub fn webui_v2_routes_with_artifact_flags(
         execute_command_descriptor(),
         list_automations_descriptor(),
         pause_automation_descriptor(),
+        run_automation_descriptor(),
         resume_automation_descriptor(),
         rename_automation_descriptor(),
         delete_automation_descriptor(),
@@ -1033,6 +1051,62 @@ fn list_threads_descriptor() -> IngressRouteDescriptor {
     )
 }
 
+fn list_notifications_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_NOTIFICATIONS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_NOTIFICATIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn mark_notification_read_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_MARK_NOTIFICATION_READ,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_MARK_NOTIFICATION_READ,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn mark_all_notifications_read_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_MARK_ALL_NOTIFICATIONS_READ,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_MARK_ALL_NOTIFICATIONS_READ,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn archive_notification_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ARCHIVE_NOTIFICATION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_ARCHIVE_NOTIFICATION,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
 fn stream_events_ws_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_STREAM_EVENTS_WS,
@@ -1084,6 +1158,20 @@ fn list_automations_descriptor() -> IngressRouteDescriptor {
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductSurface,
             StreamingMode::None,
+        ),
+    )
+}
+
+fn run_automation_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_RUN_AUTOMATION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_RUN_AUTOMATION,
+        mutation_policy(
+            BodyLimitPolicy::NoBody,
+            rate_limit_per_caller(12, 60),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
         ),
     )
 }

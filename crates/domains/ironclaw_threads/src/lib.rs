@@ -20,6 +20,7 @@ mod prepared_context;
 mod service;
 mod stored_message;
 mod structured_finalization;
+mod subagent_result;
 mod summary_artifacts;
 mod title;
 mod tool_result_records;
@@ -38,17 +39,17 @@ pub use capability_display_preview::{
     CapabilityDisplayPreviewStatus,
 };
 pub use contract::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
-    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
-    ContextImageAttachment, ContextMessage, ContextMessages, ContextWindow,
-    ContextWindowTruncation, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
-    EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, GOAL_STATEMENT_MAX_CHARS,
-    GoalStatement, InboundMessageReplayMetadata, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    PublishStructuredFinalizationMessageRequest, PutToolResultRecordRequest,
+    AcceptInboundMessageRequest, AcceptSubagentResultRequest, AcceptedInboundMessage,
+    AcceptedInboundMessageReplay, AcceptedSubagentResult, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, BoundedThreadMessageSnapshot, BoundedThreadMessages,
+    BoundedThreadMessagesRequest, ContextImageAttachment, ContextMessage, ContextMessages,
+    ContextWindow, ContextWindowTruncation, CreateSummaryArtifactRequest,
+    DeleteToolResultRecordRequest, EnsureThreadRequest, FinalizedAssistantMessageByRunRequest,
+    GOAL_STATEMENT_MAX_CHARS, GoalStatement, InboundMessageReplayMetadata,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, PublishStructuredFinalizationMessageRequest, PutToolResultRecordRequest,
     ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
     SessionThreadRecord, SummaryArtifact, SummaryKind, SummaryModelContextPolicy,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
@@ -82,6 +83,7 @@ pub use ironclaw_common::{AttachmentKind, AttachmentRef};
 // in the door's own vocabulary rather than reaching past it into `ironclaw_llm`.
 pub use ironclaw_llm::agent_message;
 pub use service::SessionThreadService;
+pub use subagent_result::FramedSubagentText;
 pub use tool_result_reference::{
     ProviderToolCallReferenceEnvelope, ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope,
     ToolResultSafeSummary,

@@ -360,19 +360,21 @@ transport = "message"
 
 [channel.connection]
 provider = "telegram"
-strategy = "device_link"
-instructions = "Link your Telegram account from this extension's configuration. Once linked, message the workspace bot from the same Telegram account to start chatting."
+strategy = "web_generated_code"
+instructions = "Open the workspace bot and send the generated code. This pairs your Telegram identity with the bot only; it does not link your personal account or enable personal-account tools."
 input_placeholder = ""
-submit_label = "Link Telegram"
-error_message = "Telegram linking failed. Open the extension configuration and try again."
-connection_success_message = "Telegram is installed as an inbound entrypoint and a personal messaging integration. Each user links their own Telegram account from the Telegram extension card in the Web UI — linking cannot be done from chat. That single verified device link lets the same account talk to the workspace bot and enables the personal Telegram tools; bot replies still come from the workspace bot, while personal messaging actions use the linked account."
+submit_label = "Connect workspace bot"
+error_message = "Telegram workspace-bot pairing failed. Generate a new code and try again."
+connection_success_message = "The workspace bot is connected. You can chat with IronClaw through the bot without linking your personal Telegram account. Personal-account tools remain unavailable until you separately link your account as a device."
+deep_link_template = "https://t.me/{bot_username}?start={code}"
+inbound_code_prefixes = ["/start"]
 
 [channel.connection.notices]
-connect_required = "👋 Link this Telegram account from the Telegram extension in IronClaw, then message me here again."
-paired = "✅ Telegram is linked. You can talk to IronClaw right here."
-already_paired_same_user = "✅ This Telegram account is already linked to you. You can talk to IronClaw right here."
-already_bound_to_other_user = "This Telegram account is already linked to another IronClaw user."
-expired_or_unknown = "This Telegram account is not linked. Open the Telegram extension in IronClaw and link it, then try again."
+connect_required = "👋 Connect this Telegram account to the workspace bot from the Telegram extension in IronClaw, then message me again."
+paired = "✅ Workspace bot connected. You can talk to IronClaw right here."
+already_paired_same_user = "✅ This Telegram account is already connected to your IronClaw user through the workspace bot."
+already_bound_to_other_user = "This Telegram account is already connected to another IronClaw user."
+expired_or_unknown = "This pairing code is expired or unknown. Generate a new code from the Telegram extension in IronClaw."
 
 [channel.ingress]
 route_suffix = "updates"

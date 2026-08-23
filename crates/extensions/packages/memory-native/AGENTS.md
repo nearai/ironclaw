@@ -26,12 +26,14 @@ rule 1).
     `InMemoryMemoryDocumentRepository`, `MemoryBackend` /
     `RepositoryMemoryBackend` / `MemoryBackendCapabilities` (`repo`, `backend`).
   - `/memory` virtual path grammar and scope: `MemoryDocumentPath`,
-    `MemoryDocumentScope` (`path`); document metadata/options
-    (`DocumentMetadata`, `HygieneMetadata`, `MemoryWriteOptions`,
-    `CONFIG_FILE_NAME` — `metadata`) and internal schema validation (`schema`).
+    `MemoryDocumentScope` (`path`); document metadata/options this crate
+    consumes from `ironclaw_memory` (`DocumentMetadata`, `HygieneMetadata`,
+    `CONFIG_FILE_NAME`) plus this crate's own `MemoryWriteOptions`
+    (`metadata`) and internal schema validation (`schema`).
   - Chunking + content hashing (`ChunkConfig`, `chunk_document`,
-    `content_sha256`), the embedding provider seam (`EmbeddingProvider`), and
-    the indexer hooks (`chunking`, `embedding`, `indexer`).
+    `content_sha256`) and the indexer hooks (`chunking`, `indexer`) — no
+    embedding-provider port exists; vector search only activates against
+    pre-supplied embeddings (see `backend.rs`'s fail-closed messages).
   - Hybrid search (FTS + vector via RRF fusion): `MemorySearchRequest`,
     `MemorySearchResult`, `FusionStrategy` (`search`).
   - The memory-document filesystem adapter (`filesystem`), the

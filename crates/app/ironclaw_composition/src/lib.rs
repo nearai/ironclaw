@@ -41,6 +41,7 @@ mod llm_admin;
 mod memory_binding;
 mod memory_provider_factory;
 mod model_gateway_assembly;
+mod notification_store_assembly;
 mod observability;
 mod operator_secret_store;
 mod operator_tool_catalog;
@@ -433,6 +434,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/secrets",
     "/authorization",
     "/outbound",
+    "/notifications",
     // The web-app channel's enrollment store. The alias keeps its pre-rename
     // `web-push` spelling on purpose: it resolves to a PHYSICAL per-user
     // subpath (`/tenants/<t>/users/<u>/web-push`), so renaming it would
@@ -504,8 +506,9 @@ fn invocation_mount_view_for_segments(
     let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 4);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
-        let permissions = if *alias == "/suggestions" {
-            // Suggestions are retained model output. Their store performs no
+        let permissions = if matches!(*alias, "/notifications" | "/suggestions") {
+            // Suggestions are retained model output, and notifications expose
+            // only typed lifecycle transitions. Neither store performs raw
             // deletion, so do not grant filesystem deletion authority.
             MountPermissions::read_write()
         } else {
@@ -724,6 +727,9 @@ where
 }
 
 #[cfg(test)]
+mod mount_permission_tests;
+
+#[cfg(test)]
 mod mount_view_tests {
     use super::*;
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
@@ -768,44 +774,6 @@ mod mount_view_tests {
                 )
             );
         }
-    }
-
-    #[test]
-    fn invocation_mount_view_denies_suggestion_deletion() {
-        let view = invocation_mount_view(&sample_scope()).unwrap();
-        let (_, grant) = view
-            .resolve_with_grant(&ScopedPath::new("/suggestions/doc.json").unwrap())
-            .unwrap();
-        assert!(grant.permissions.read);
-        assert!(grant.permissions.write);
-        assert!(grant.permissions.list);
-        assert!(!grant.permissions.delete);
-    }
-
-    #[tokio::test]
-    async fn process_journal_migration_mount_is_system_only_and_read_only() {
-        let root = Arc::new(InMemoryBackend::new());
-        let scoped = wrap_process_journal_scoped(root);
-        let legacy = ScopedPath::new("/legacy-tenants/tenant-a/users/user-a/run-state")
-            .expect("legacy path");
-        assert!(
-            scoped.resolve(&sample_scope(), &legacy).is_err(),
-            "ordinary user scopes must not enumerate other tenant roots"
-        );
-        assert_eq!(
-            scoped
-                .resolve(&ResourceScope::system(), &legacy)
-                .expect("system migration mount")
-                .as_str(),
-            "/tenants/tenant-a/users/user-a/run-state"
-        );
-        assert!(matches!(
-            scoped
-                .write_bytes(&ResourceScope::system(), &legacy, b"forbidden".to_vec())
-                .await
-                .expect_err("migration mount must not mutate legacy authorities"),
-            FilesystemError::PermissionDenied { .. }
-        ));
     }
 
     #[test]

@@ -71,7 +71,7 @@ completed-run duration derived from the run-scoped user/final transcript timesta
    bridge job status into the projection for the inline job chip.
 5. **Multi-channel handoff** — new UI + action (no event today).
 
-Each of the above follows `.claude/rules/gateway-events.md` (durable event → projection → stream
+Each of the above follows `.claude/rules/events.md` (durable event → projection → stream
 → frontend reconcile) with the required tests.
 
 ## Rollout

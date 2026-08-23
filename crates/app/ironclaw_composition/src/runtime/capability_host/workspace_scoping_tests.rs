@@ -109,6 +109,7 @@ async fn invoke_workspace_tool_as(
             crate::wrap_scoped(Arc::new(ironclaw_filesystem::InMemoryBackend::new())),
         )),
         external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+        unavailable_capability_ids: std::collections::HashSet::new(),
     };
 
     let port = factory

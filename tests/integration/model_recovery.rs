@@ -493,6 +493,13 @@ async fn output_truncation_recovers_without_shrinking_input_context() {
 
 #[tokio::test]
 async fn transcript_write_failure_stops_without_another_model_or_tool_side_effect() {
+    // This debug integration future exceeds libtest's default 2 MiB thread
+    // stack; box it on the heap. CI sets no `RUST_MIN_STACK`, and assertions
+    // remain unchanged in the helper below.
+    Box::pin(transcript_write_failure_stops_without_another_model_or_tool_side_effect_body()).await;
+}
+
+async fn transcript_write_failure_stops_without_another_model_or_tool_side_effect_body() {
     let harness = RebornIntegrationHarness::test_default()
         .with_keyed_http_responses([ScriptedHttpResponse::for_url(
             TRANSCRIPT_FAILURE_TOOL_URL,

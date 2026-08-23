@@ -433,6 +433,7 @@ fn turn_lifecycle_submit_request(
     let pad_len = payload_len.min(96);
     let pad = "x".repeat(pad_len);
     Ok(SubmitTurnRequest {
+subagent_activation_provenance: None,
         scope,
         actor,
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{lane}-{key}-{pad}"))?,

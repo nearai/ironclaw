@@ -25,4 +25,7 @@ pub use host::{
     WasmStagedRuntimeCredentialScope, WasmStagedRuntimeCredentials, WitToolHost,
 };
 pub use runtime::WitToolRuntime;
-pub use types::{PreparedWitTool, WasmLogLevel, WasmLogRecord, WitToolExecution, WitToolRequest};
+pub use types::{
+    PreparedWitTool, WasmLogLevel, WasmLogRecord, WitErrorKind, WitGuestFailure, WitToolExecution,
+    WitToolOutcome, WitToolRequest,
+};

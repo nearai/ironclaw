@@ -3,9 +3,9 @@ use ironclaw_host_api::output::OutputContract;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateKind, GateResumeDisposition, IdempotencyKey, ProductTurnContext,
-    RunProfileRequest, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId, TurnScope,
-    TurnStatus,
+    AcceptedMessageRef, ActivationProvenance, GateKind, GateResumeDisposition, IdempotencyKey,
+    ProductTurnContext, RunProfileRequest, SanitizedCancelReason, TurnActor, TurnGateRef,
+    TurnRunId, TurnScope, TurnStatus,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
@@ -78,6 +78,31 @@ pub struct SubmitTurnRequest {
     pub spawn_tree_root_run_id: Option<TurnRunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_context: Option<ProductTurnContext>,
+    /// Why this submission is activating the thread. `None` — the default for
+    /// every ordinary caller — is an untagged, human-initiated submission.
+    /// Only the coordinator's `activate()` entry point sets this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_activation_provenance: Option<ActivationProvenance>,
+}
+
+/// Re-activate an existing thread with an explicit provenance tag — the single
+/// re-activation primitive.
+///
+/// Deliberately *not* a second admission path: `activate` builds an ordinary
+/// [`SubmitTurnRequest`], so one-active-run exclusivity, idempotency replay,
+/// and busy rejection behave exactly as they do for any other submission. The
+/// only thing activation adds is the provenance stamp the derived streak caps
+/// read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivateThreadRequest {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub accepted_message_ref: AcceptedMessageRef,
+    pub provenance: ActivationProvenance,
+    pub idempotency_key: IdempotencyKey,
+    pub received_at: TurnTimestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_run_profile: Option<RunProfileRequest>,
 }
 
 /// Request shape for callers that are creating a child run from an existing

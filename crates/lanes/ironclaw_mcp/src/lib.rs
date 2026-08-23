@@ -58,7 +58,8 @@ mod runtime;
 pub use client::McpHostHttpClient;
 pub use contract::{
     McpClient, McpClientError, McpClientOutput, McpClientRequest, McpError, McpExecutionRequest,
-    McpExecutionResult, McpExecutor, McpInvocation, McpRuntimeConfig, McpToolDiscoveryOutput,
+    McpExecutionResult, McpExecutor, McpInvocation, McpProviderRejection, McpRuntimeConfig,
+    McpToolDiscoveryOutput,
 };
 pub use egress::{
     McpHostHttp, McpHostHttpEgressPlan, McpHostHttpEgressPlanRequest, McpHostHttpEgressPlanner,

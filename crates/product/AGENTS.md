@@ -41,7 +41,7 @@ an at-most-once reservation it does not own (`ironclaw_outbound`).
   stores.** Transports consume `ironclaw_product_contracts` — the trait, DTOs,
   and descriptor *types* — never `ironclaw_assistant`'s behavioral mass. (The
   surviving `webui`/`openai_compat` → `ironclaw_assistant` manifest edges are
-  the frozen descriptor-*constant* inventory §6.1.3 keeps in product — 100 and
+  the frozen descriptor-*constant* inventory §6.1.3 keeps in product — 104 and
   3 symbols, exact-match and shrink-only — not a license to import behavior;
   §12.11 D-B rules webui's edge charter-sanctioned and permanent.)
 - **Kernel stage or lane mechanics** — no `ironclaw_host_runtime`, no
@@ -63,7 +63,7 @@ an at-most-once reservation it does not own (`ironclaw_outbound`).
   adds a capability or view descriptor, never a product-local service method:
   `cargo test -p ironclaw_architecture_tests --test reborn_service_method_freeze_ratchet host_product_surface_method_set_is_frozen`
 - **Transports consume contracts.** Each transport's `ironclaw_assistant`
-  residue is pinned exact-match and shrink-only (webui 100 symbols,
+  residue is pinned exact-match and shrink-only (webui 104 symbols,
   openai_compat 3 command constants):
   `cargo test -p ironclaw_architecture_tests --test reborn_transport_product_boundary`
 - **Ports invert, never re-declare.** Product-facing ports live in

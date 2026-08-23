@@ -14,6 +14,9 @@ session, OIDC, and the query-token exception). Sibling files
   middleware in `crates/app/ironclaw_composition/src/webui/webui_serve.rs`.
   v2 shares **zero** code with v1 by contract (#3886).
 
+**Status:** v1 (`src/`) has since been fully removed from the codebase; this
+is a historical migration-parity record, not a live comparison.
+
 Decision legend: **Keep** = behavior preserved (possibly different
 implementation); **Change** = intentionally different but not a feature
 loss; **Beta-break** = a v1 capability the beta deliberately drops or

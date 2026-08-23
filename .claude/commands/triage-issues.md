@@ -22,7 +22,7 @@ If `$ARGUMENTS` contains `--label=<X>`, append `--label '<X>'` to the command. I
 Also fetch recently closed issues (last 14 days) to detect duplicates and already-resolved work:
 
 ```
-gh issue list --state closed --search "closed:>=$(date -v-14d +%Y-%m-%d)" --limit 100 --json number,title,body,labels,closedAt
+gh issue list --state closed --search "closed:>=$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d"))')" --limit 100 --json number,title,body,labels,closedAt
 ```
 
 **Exclude pull requests** — `gh issue list` may include PRs. Fetch open PR numbers to filter them out:

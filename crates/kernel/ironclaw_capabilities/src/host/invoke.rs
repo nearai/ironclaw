@@ -2,11 +2,14 @@
 //!
 //! Owns the caller-facing entry point only: it hands the decision to
 //! [`super::authorize`], then dispatches, completes obligations, and maps the
-//! fold back to a [`CapabilityInvocationResult`]. It never decides policy.
+//! fold back to a [`CapabilityDispatchResult`]. It never decides policy.
 
 use ironclaw_host_api::{
-    authorized::AuthorizeResult, dispatch::CapabilityDispatcher, ids::CapabilityId,
-    resource::ResourceEstimate, scope::ExecutionContext,
+    authorized::AuthorizeResult,
+    dispatch::{CapabilityDispatchResult, CapabilityDispatcher},
+    ids::CapabilityId,
+    resource::ResourceEstimate,
+    scope::ExecutionContext,
 };
 use tracing::debug;
 
@@ -20,10 +23,7 @@ use crate::helpers::{
     apply_invocation_state_transition_if_configured, complete_invocation_after_side_effect,
     fail_invocation_if_configured,
 };
-use crate::{
-    CapabilityInvocationError, CapabilityInvocationResult, CapabilityObligationOutcome,
-    CapabilityObligationPhase,
-};
+use crate::{CapabilityInvocationError, CapabilityObligationOutcome, CapabilityObligationPhase};
 
 impl<'a, D> CapabilityHost<'a, D>
 where
@@ -44,7 +44,7 @@ where
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: serde_json::Value,
-    ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+    ) -> Result<CapabilityDispatchResult, CapabilityInvocationError> {
         let request = InvocationInput {
             context,
             capability_id,
@@ -209,6 +209,6 @@ where
         }
 
         debug!("capability invocation completed");
-        Ok(CapabilityInvocationResult { dispatch })
+        Ok(dispatch)
     }
 }

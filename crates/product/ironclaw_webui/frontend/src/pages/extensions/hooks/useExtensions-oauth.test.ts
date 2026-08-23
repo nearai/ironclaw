@@ -64,6 +64,31 @@ test("useExtensionSetup derives hosted MCP auth recovery from the typed setup bl
   assert.equal(setup.hostedMcpAuthSelectionRequired, true);
 });
 
+test("useExtensionSetup preserves the authoritative setup phase, blockers, fields, and onboarding", () => {
+  const response = {
+    phase: "setup_needed",
+    blockers: [
+      { kind: "runtime", ref_id: "internal-runtime-diagnostic" },
+      { kind: "credential", ref_id: "internal-credential-handle" },
+    ],
+    secrets: [],
+    fields: [{ name: "public_url", prompt: "Public webhook URL" }],
+    onboarding: { setup_url: "https://example.test/setup" },
+  };
+  const context = {
+    globalThis: {},
+    useQuery: () => ({ data: response, isLoading: false, error: null }),
+  };
+  vm.runInNewContext(useExtensionsOauthSourceForTest(), context);
+
+  const setup = context.globalThis.__testExports.useExtensionSetup({ id: "example" });
+
+  assert.equal(setup.phase, "setup_needed");
+  assert.deepEqual(JSON.parse(JSON.stringify(setup.blockers)), response.blockers);
+  assert.deepEqual(JSON.parse(JSON.stringify(setup.fields)), response.fields);
+  assert.deepEqual(JSON.parse(JSON.stringify(setup.onboarding)), response.onboarding);
+});
+
 function loadLocalizedMutationHooks({ startExtensionOauth, submitExtensionSetup }) {
   const mutationConfigs = [];
   const context = {

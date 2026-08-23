@@ -1019,7 +1019,7 @@ async fn sync_parent_dir_for_operation(
         // flushed before the atomic rename; Windows does not expose a
         // portable parent-directory fsync equivalent through std/tokio.
         let _ = (virtual_path, parent, operation);
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(windows))]
