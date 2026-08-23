@@ -51,7 +51,7 @@ export const LabelledField: Story = {
   render: () => (
     <div className="max-w-sm">
       <FormField label="Workspace name" htmlFor="workspace" required hint="Shown to your team.">
-        <Input id="workspace" placeholder="Acme research" />
+        <Input id="workspace" placeholder="Research workspace" />
       </FormField>
     </div>
   ),

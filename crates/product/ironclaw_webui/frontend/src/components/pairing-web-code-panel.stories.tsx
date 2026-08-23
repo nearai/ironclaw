@@ -9,7 +9,7 @@ import { PairingWebCodePanel } from "./pairing-web-code-panel";
 // `withQueryClient` cache seed cannot intercept — so the stories stub `fetch`
 // with `withStubbedFetch`. Without a stub a shared/deployed Storybook would
 // perform a real network round-trip (and could mint a live pairing code).
-const PAIRING = "extensions/telegram/pairing";
+const PAIRING = "extensions/example-chat/pairing";
 
 // A live pending code keeps the panel in its happy path (renders the code + QR
 // + countdown) without ever calling mint — the status effect adopts it. The
@@ -19,7 +19,7 @@ const livePending = () => ({
   connected: false,
   pending: {
     code: "IRON-4F2K-9QZ",
-    deep_link: "https://t.me/ironclaw_bot?start=IRON-4F2K-9QZ",
+    deep_link: "https://example.test/connect?start=IRON-4F2K-9QZ",
     expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
   },
 });
@@ -36,9 +36,9 @@ const meta = {
     withQueryClient(),
   ],
   args: {
-    extensionId: "telegram",
-    displayName: "Telegram",
-    instructions: "Open Telegram and send this code to @ironclaw_bot to connect.",
+    extensionId: "example-chat",
+    displayName: "Example Chat",
+    instructions: "Open Example Chat and send this code to the assistant bot to connect.",
     compact: false,
   },
   parameters: {

@@ -9,7 +9,7 @@ const meta = {
     items: [
       {
         title: "Connect a channel",
-        description: "Link Slack, Telegram, or email so the agent can reach you.",
+        description: "Link a chat app or email so the agent can reach you.",
       },
       {
         title: "Install extensions",
