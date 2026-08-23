@@ -31,6 +31,7 @@ const IRONHUB_STATE_ROOT: &str = "/system/settings/ironhub";
 const MAX_LINK_ID_BYTES: usize = 256;
 const MAX_NONCE_BYTES: usize = 512;
 const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300;
+const MAX_PRIVATE_MANIFEST_URL_BYTES: usize = 2048;
 const INSTALL_CAPABILITY_ID: &str = "builtin.ironhub_install";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -492,6 +493,35 @@ fn authenticate_install(
     shared_key: &IronhubSharedKey,
     request: &IronhubInstallDeliveryRequest,
 ) -> Result<(), IronhubLinkError> {
+    // Unlike register, colons stay legal: `artifact_digest` carries `sha256:`.
+    for (field, value, max) in [
+        ("slug", request.slug.as_str(), MAX_LINK_ID_BYTES),
+        ("version", request.version.as_str(), MAX_LINK_ID_BYTES),
+        ("uid", request.uid.as_str(), MAX_LINK_ID_BYTES),
+        ("aid", request.aid.as_str(), MAX_LINK_ID_BYTES),
+        ("nonce", request.nonce.as_str(), MAX_NONCE_BYTES),
+        (
+            "artifact_digest",
+            request.artifact_digest.as_str(),
+            MAX_LINK_ID_BYTES,
+        ),
+        ("sig", request.sig.as_str(), MAX_NONCE_BYTES),
+    ] {
+        if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
+            return Err(IronhubLinkError::InvalidInput {
+                reason: format!("invalid install {field}"),
+            });
+        }
+    }
+    if let Some(url) = request.private_manifest_url.as_deref()
+        && (url.is_empty()
+            || url.len() > MAX_PRIVATE_MANIFEST_URL_BYTES
+            || url.chars().any(char::is_control))
+    {
+        return Err(IronhubLinkError::InvalidInput {
+            reason: "invalid install private_manifest_url".to_string(),
+        });
+    }
     if !timestamp_fresh(request.ts) {
         return Err(IronhubLinkError::StaleTimestamp);
     }
@@ -733,6 +763,42 @@ mod tests {
 
         let valid = install_request(now);
         assert!(authenticate_install(&shared_key(), &valid).is_ok());
+
+        for (field, value) in [
+            ("slug", "".to_string()),
+            ("slug", "x".repeat(MAX_LINK_ID_BYTES + 1)),
+            ("version", "x".repeat(MAX_LINK_ID_BYTES + 1)),
+            ("uid", "x".repeat(MAX_LINK_ID_BYTES + 1)),
+            ("aid", "line\nbreak".to_string()),
+            ("nonce", "x".repeat(MAX_NONCE_BYTES + 1)),
+            ("artifact_digest", "x".repeat(MAX_LINK_ID_BYTES + 1)),
+            ("sig", "x".repeat(MAX_NONCE_BYTES + 1)),
+            (
+                "private_manifest_url",
+                format!("https://hub.ironclaw.com/{}", "x".repeat(2048)),
+            ),
+        ] {
+            let mut request = valid.clone();
+            match field {
+                "slug" => request.slug = value,
+                "version" => request.version = value,
+                "uid" => request.uid = value,
+                "aid" => request.aid = value,
+                "nonce" => request.nonce = value,
+                "artifact_digest" => request.artifact_digest = value,
+                "sig" => request.sig = value,
+                "private_manifest_url" => request.private_manifest_url = Some(value),
+                _ => unreachable!("fixed test field"),
+            }
+            assert!(
+                matches!(
+                    authenticate_install(&shared_key(), &request),
+                    Err(IronhubLinkError::InvalidInput { .. })
+                ),
+                "{field} must be bounded before the signature is checked"
+            );
+        }
+
         let mut bad_signature = valid.clone();
         bad_signature.sig = "00".to_string();
         assert!(matches!(

@@ -28,10 +28,7 @@ pub(super) fn map_ironhub_link_error(error: IronhubLinkError) -> ProductSurfaceE
             403,
             false,
         ),
-        IronhubLinkError::Install { reason } => {
-            tracing::error!(%reason, "ironhub link install failed");
-            ProductSurfaceError::internal_invariant()
-        }
+        IronhubLinkError::Install { reason } => ProductSurfaceError::internal_from(reason),
         IronhubLinkError::InvalidInput { reason } => {
             tracing::debug!(%reason, "ironhub link request rejected");
             ProductSurfaceError::validation("input", ProductSurfaceValidationCode::InvalidValue)

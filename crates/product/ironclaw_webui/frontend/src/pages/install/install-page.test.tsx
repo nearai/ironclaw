@@ -9,10 +9,22 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 let currentSearch = "";
 
+const deliveries = [];
+
 vi.mock("react-router", () => ({
   useLocation: () => ({ search: currentSearch }),
 }));
 vi.mock("../../lib/i18n", () => ({ useT: () => (key) => key, registerPack: () => {} }));
+vi.mock("../../lib/ironhub-install-api", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    deliverIronhubInstall: (request) => {
+      deliveries.push(request);
+      return new Promise(() => {});
+    },
+  };
+});
 
 const { InstallPage } = await import("./install-page");
 
@@ -22,6 +34,7 @@ const SIGNED =
 
 function render(search) {
   currentSearch = search;
+  deliveries.length = 0;
   const container = document.createElement("div");
   document.body.append(container);
   act(() => createRoot(container).render(<InstallPage />));
@@ -39,6 +52,7 @@ test("the artifact digest is shown before anything can be installed", () => {
 
 test("nothing installs without a click", () => {
   const container = render(SIGNED);
+  assert.deepEqual(deliveries, [], "rendering the card must not deliver an install");
   assert.ok(
     container.textContent.includes("ironhub.install.confirm"),
     "the install must wait on an explicit confirmation",

@@ -1687,7 +1687,7 @@ registerPack("zh-CN", {
   "ironhub.install.notInstalled": "中心报告未安装任何内容。",
   "ironhub.install.linkInvalid": "此安装链接不完整或格式有误。",
   "ironhub.install.rejected": "此安装链接不是为该代理签名的。",
-  "ironhub.install.expired": "此安装链接已过期。请从中心重新开始安装。",
-  "ironhub.install.alreadyUsed": "此安装链接已被使用。请从中心重新开始安装。",
+  "ironhub.install.expired": "此安装链接已过期。请从 IronHub 重新开始安装。",
+  "ironhub.install.alreadyUsed": "此安装链接已被使用。请从 IronHub 重新开始安装。",
   "ironhub.install.failed": "安装未能完成。"
 });

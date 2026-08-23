@@ -97,3 +97,46 @@ test("a non-403 failure is not described as a link problem", () => {
   const error = { status: 500, payload: { kind: "internal" } };
   assert.equal(installErrorKey(error), "ironhub.install.failed");
 });
+
+test("an oversized field is rejected instead of reaching the consent card", () => {
+  const search = COMPLETE.replace("slug=attio", `slug=${"a".repeat(129)}`);
+  const { request, missing } = readIronhubInstallRequest(search);
+
+  assert.equal(request, null);
+  assert.deepEqual(missing, ["slug"]);
+});
+
+test("a slug outside the host charset is rejected", () => {
+  const search = COMPLETE.replace("slug=attio", "slug=Attio%20Tool");
+  const { request, missing } = readIronhubInstallRequest(search);
+
+  assert.equal(request, null);
+  assert.deepEqual(missing, ["slug"]);
+});
+
+test("a non-numeric timestamp is rejected rather than coerced", () => {
+  for (const raw of ["1e3", "-1", "1.5", " 12 ", "abc"]) {
+    const search = COMPLETE.replace(/ts=\d+/, `ts=${encodeURIComponent(raw)}`);
+    const { request, missing } = readIronhubInstallRequest(search);
+
+    assert.equal(request, null, `ts=${raw} must not parse`);
+    assert.ok(missing.includes("ts"), `ts=${raw} must be named`);
+  }
+});
+
+test("a non-http private manifest source is rejected", () => {
+  for (const raw of ["javascript:alert(1)", "file:///etc/passwd", "not-a-url"]) {
+    const search = `${COMPLETE}&private_manifest_url=${encodeURIComponent(raw)}`;
+    const { request, missing } = readIronhubInstallRequest(search);
+
+    assert.equal(request, null, `${raw} must not parse`);
+    assert.ok(missing.includes("private_manifest_url"));
+  }
+});
+
+test("every malformed field is named, not just the first", () => {
+  const search = COMPLETE.replace("slug=attio", "slug=BAD").replace(/ts=\d+/, "ts=nope");
+  const { missing } = readIronhubInstallRequest(search);
+
+  assert.deepEqual(missing, ["slug", "ts"]);
+});

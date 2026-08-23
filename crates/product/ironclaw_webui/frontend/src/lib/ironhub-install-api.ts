@@ -2,40 +2,57 @@
 import { apiFetch } from "./api";
 
 const IRONHUB_INSTALL_PARAMS = [
-  "slug",
-  "version",
-  "uid",
-  "aid",
-  "ts",
-  "nonce",
-  "artifact_digest",
-  "sig",
+  { name: "slug", max: 128, pattern: /^[a-z0-9_-]+$/ },
+  { name: "version", max: 64, pattern: /^[A-Za-z0-9.+_-]+$/ },
+  { name: "uid", max: 128, pattern: /^[A-Za-z0-9._-]+$/ },
+  { name: "aid", max: 128, pattern: /^[A-Za-z0-9._-]+$/ },
+  { name: "nonce", max: 128, pattern: /^[A-Za-z0-9._-]+$/ },
+  { name: "artifact_digest", max: 160, pattern: /^[A-Za-z0-9:_-]+$/ },
+  { name: "sig", max: 512, pattern: /^[A-Za-z0-9+/=_-]+$/ },
 ];
+
+const MAX_PRIVATE_MANIFEST_URL = 2048;
+
+function isHttpUrl(value) {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "https:" || protocol === "http:";
+  } catch {
+    return false;
+  }
+}
 
 export function readIronhubInstallRequest(search) {
   const params = new URLSearchParams(search);
-  const missing = IRONHUB_INSTALL_PARAMS.filter((name) => !params.get(name));
-  if (missing.length > 0) return { request: null, missing };
+  const request = {};
+  const missing = [];
 
-  const ts = Number(params.get("ts"));
-  if (!Number.isSafeInteger(ts) || ts < 0) {
-    return { request: null, missing: ["ts"] };
+  for (const { name, max, pattern } of IRONHUB_INSTALL_PARAMS) {
+    const value = params.get(name);
+    if (!value || value.length > max || !pattern.test(value)) {
+      missing.push(name);
+      continue;
+    }
+    request[name] = value;
   }
 
-  const request = {
-    slug: params.get("slug"),
-    version: params.get("version"),
-    uid: params.get("uid"),
-    aid: params.get("aid"),
-    ts,
-    nonce: params.get("nonce"),
-    artifact_digest: params.get("artifact_digest"),
-    sig: params.get("sig"),
-  };
+  const rawTs = params.get("ts");
+  if (!rawTs || !/^[0-9]{1,15}$/.test(rawTs)) {
+    missing.push("ts");
+  } else {
+    request.ts = Number(rawTs);
+  }
 
   const privateManifestUrl = params.get("private_manifest_url");
-  if (privateManifestUrl) request.private_manifest_url = privateManifestUrl;
+  if (privateManifestUrl) {
+    if (privateManifestUrl.length > MAX_PRIVATE_MANIFEST_URL || !isHttpUrl(privateManifestUrl)) {
+      missing.push("private_manifest_url");
+    } else {
+      request.private_manifest_url = privateManifestUrl;
+    }
+  }
 
+  if (missing.length > 0) return { request: null, missing };
   return { request, missing: [] };
 }
 
