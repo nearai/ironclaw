@@ -339,8 +339,11 @@ async fn submit_suggestion_generation(
         }],
         // No declared tool list: the run takes the profile's surface,
         // narrowed by `require_no_approval` to what the user's own permissions
-        // already auto-run and to read-only effects. Declaring ids here would
-        // mean re-deriving the approval decision in product code.
+        // already auto-run. That narrowing does not restrict effects — the
+        // surface can include write-effect capabilities the user has
+        // auto-approved; read/list-only behaviour is carried by
+        // SUGGESTION_SYSTEM_PROMPT alone, not enforced here. Declaring ids
+        // here would mean re-deriving the approval decision in product code.
         tools: Vec::new(),
         require_no_approval: true,
         output: output.clone(),

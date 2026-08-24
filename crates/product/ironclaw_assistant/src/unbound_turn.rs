@@ -83,9 +83,12 @@ pub struct UnboundTurnSubmission {
     /// Optional visible-surface selection journaled with the declarations.
     /// Empty means no caller-selected tools.
     pub tools: Vec<ironclaw_host_api::ids::CapabilityId>,
-    /// No human is present for this run: narrow the surface to capabilities
-    /// needing no approval and declaring no write effect. Narrowing-only;
-    /// `false` keeps the caller's normal surface.
+    /// No human is present for this run: drop capabilities whose
+    /// authorization resolves to `RequireApproval`, so the run does not park
+    /// on a gate nobody can answer. This does NOT restrict effects — the
+    /// surface can still include write-effect capabilities the caller has
+    /// auto-approved. Narrowing-only; `false` keeps the caller's normal
+    /// surface.
     pub require_no_approval: bool,
     pub output: OutputContract,
     pub requested_model: Option<String>,

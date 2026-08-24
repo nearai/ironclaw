@@ -3905,6 +3905,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             lease_recovery_interval: default_runtime_config.lease_recovery_interval,
             worker_count: runner.worker_count,
             disabled_capability_ids: default_runtime_config.disabled_capability_ids,
+            unattended_denied_capability_ids: unattended_denied_capability_ids()?,
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
@@ -5113,6 +5114,41 @@ fn validate_runtime_identity(
         source_binding_ref,
         reply_target_binding_ref,
     })
+}
+
+/// Capabilities denied to a run that declared `require_no_approval`.
+///
+/// These are SYNTHETIC capabilities that mutate state. `SyntheticCapabilityPort`
+/// appends synthetics to the surface after the host catalog has applied effect
+/// and approval filtering, so no surface-policy narrowing can gate them — an id
+/// deny-list is the only lever, and it is enforced at dispatch rather than only
+/// at listing.
+///
+/// The append itself is correct for loop infrastructure (`result_read`,
+/// `structured_result`, `capability_info`): those must always be present. It is
+/// accidental for product capabilities that merely happen to be implemented
+/// synthetically, which is what this list corrects. Composition owns the list
+/// because it is the only layer that can name all of these ids — the loop layer
+/// cannot depend on product or domain crates.
+///
+/// The set is derived by measurement, not by inspection: with the global
+/// auto-approve toggle off, these are the capabilities that survive because they
+/// bypass the filter. `tests/integration/suggestions.rs` pins it.
+fn unattended_denied_capability_ids() -> Result<Vec<CapabilityId>, RebornRuntimeError> {
+    [
+        ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID,
+        ironclaw_assistant::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
+        ironclaw_loop_host::SKILL_ACTIVATE_CAPABILITY_ID,
+        ironclaw_memory::PROFILE_SET_CAPABILITY_ID,
+        ironclaw_host_runtime::TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    ]
+    .into_iter()
+    .map(|id| {
+        CapabilityId::new(id).map_err(|reason| RebornRuntimeError::InvalidArgument {
+            reason: format!("unattended-denied capability id: {reason}"),
+        })
+    })
+    .collect()
 }
 
 struct AllowAllCapabilitySurfaceResolver;

@@ -22,7 +22,9 @@ use ironclaw_composition::{
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
 use ironclaw_llm::testing::provider_chain_over;
-use ironclaw_llm::{CompletionResponseFormat, LlmProvider, SessionConfig, create_session_manager};
+use ironclaw_llm::{
+    CompletionResponseFormat, LlmProvider, Role, SessionConfig, create_session_manager,
+};
 use ironclaw_loop_host::{HostManagedModelGateway, LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_product_contracts::inbound_requests::{
     ProductListThreadsRequest, RebornSuggestionDismissRequest, RebornSuggestionStartRequest,
@@ -1448,17 +1450,164 @@ async fn disabling_global_auto_approve_shrinks_the_autonomous_surface() -> Harne
     // unconditionally. The outer `apply_capability_surface_policy` re-filters
     // by capability ID only. So `require_no_approval` cannot gate a synthetic
     // capability at all; only an ID deny-list can.
-    assert!(
-        !with_auto_approve_off.is_empty(),
-        "auto-approve off must not empty the surface entirely"
+    //
+    // Pin the WHOLE survivor set, in the same deliberately-brittle style as
+    // `expected_autonomous_surface` above (and for the same reason): a NEW
+    // state-changing synthetic capability, or any other unexpected
+    // survivor, must fail this test loudly instead of silently widening
+    // what an unattended run with nothing auto-approved can still reach.
+    // Supersedes the separate is-empty / strictly-fewer checks this used to
+    // carry — both facts are already implied by an exact match against a
+    // named 3-element set, so asserting them separately added no coverage.
+    let expected_survivors = BTreeSet::from(
+        [
+            "builtin__outbound_delivery_targets_list",
+            "builtin__result_read",
+            "capability_info",
+        ]
+        .map(str::to_string),
     );
-    assert!(
-        with_auto_approve_off.len() < with_default_on.len(),
-        "auto-approve off must leave strictly fewer capabilities reachable \
-         ({} vs {})",
-        with_auto_approve_off.len(),
-        with_default_on.len()
+    assert_eq!(
+        with_auto_approve_off, expected_survivors,
+        "the auto-approve-off survivor set changed; review whether the new \
+         or removed synthetic capability is safe for a run nobody is \
+         watching"
     );
+    Ok(())
+}
+
+/// (#7812 review) The tests above prove `builtin__shell` is not OFFERED to
+/// the model once auto-approve is off. That is not proof dispatch would
+/// refuse the call if the model asked for it directly instead of picking it
+/// off the (correctly narrowed) list -- a staging-validation or dispatch
+/// regression could still let an excluded capability through. Drive the
+/// attempt for real: auto-approve off, script the model calling
+/// `builtin.shell` anyway, and prove it is refused before it ever executes.
+///
+/// Traced empirically, not assumed (captured a debug dump of every model
+/// call first): the excluded call never reaches dispatch.
+/// `ironclaw_loop_host::model_gateway::tool_response_to_host` classifies it
+/// `InvalidOutputReason::OutsideCapabilitySurface` (the id is neither
+/// advertised nor resolvable through `CapabilitySurfacePolicyFilter`'s
+/// scope-checked `provider_tool_call_capability_ids`); because that reason is
+/// repairable, `provider_tool_repair_messages` appends a synthetic `Tool`
+/// result instead of dispatching -- content literally "None of this
+/// response's tool calls were executed" -- and the model gets one more turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn excluded_capability_call_is_refused_not_dispatched() -> HarnessResult<()> {
+    let root = tempdir()?;
+    let session_root = tempdir()?;
+    let tenant_id = TenantId::new("suggestions-itest-excluded-tenant")?;
+    let agent_id = AgentId::new("suggestions-itest-excluded-agent")?;
+    let user_id = UserId::new("suggestions-itest-excluded-user")?;
+
+    let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm([
+        // The model calls a capability the auto-approve-off surface does not
+        // offer (see `disabling_global_auto_approve_shrinks_the_autonomous_surface`).
+        RebornScriptedReply::tool_call(
+            "builtin.shell",
+            json!({"command": "echo excluded-capability-should-not-execute"}),
+        ),
+        RebornScriptedReply::text("I recommend triaging the inbox."),
+        RebornScriptedReply::text(serde_json::to_string(&json!({
+            "suggestions": [{
+                "title": "Triage inbox",
+                "description": "Review and prioritize unread email.",
+                "suggested_prompt": "Triage my unread inbox.",
+                "icon": "web",
+                "sources": ["Web Search"],
+            }]
+        }))?),
+    ]));
+    let raw: Arc<dyn LlmProvider> = scripted_llm.clone();
+    let gateway = build_suggestions_gateway(session_root.path(), raw).await?;
+    let runtime = build_suggestions_runtime(root.path(), &tenant_id, &agent_id, gateway).await?;
+    let surface = bound_surface(&runtime, &tenant_id, &user_id, &agent_id)?;
+
+    let store = runtime
+        .standalone_auto_approve_settings_for_test()
+        .ok_or("runtime exposes no auto-approve settings store")?;
+    store
+        .set(ironclaw_approvals::AutoApproveSettingInput {
+            updated_by: ironclaw_host_api::scope::Principal::User(user_id.clone()),
+            scope: ironclaw_host_api::resource::ResourceScope {
+                tenant_id: tenant_id.clone(),
+                user_id: user_id.clone(),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+            },
+            enabled: false,
+        })
+        .await
+        .map_err(|error| format!("auto-approve write failed: {error}"))?;
+
+    SUGGESTIONS_GENERATE_COMMAND
+        .invoke_on(
+            &surface,
+            RebornSuggestionsGenerateRequest {
+                client_action_id: "suggestions-excluded-action".to_string(),
+            },
+            ironclaw_host_api::ids::ActivityId::new(),
+        )
+        .await?;
+    let generated = wait_for_ready_suggestions(&surface).await?;
+    assert_eq!(
+        generated.suggestions.len(),
+        1,
+        "the run must recover from the refused call and still finish, proving \
+         this is a policy denial the model can recover from, not a wedge"
+    );
+
+    let calls = scripted_llm.captured_requests();
+    assert_eq!(
+        calls.len(),
+        3,
+        "expected exactly 3 model calls: the excluded attempt, its \
+         host-repaired retry, and finalization; got {calls:?}"
+    );
+
+    // The excluded call must be refused BEFORE dispatch, not attempted and
+    // then reported as failing: the host's own repair message says so in
+    // words ("None of this response's tool calls were executed"), text that
+    // only exists on the `OutsideCapabilitySurface` rejection path -- a real
+    // dispatch (successful or failed) never produces it.
+    let refusal = calls[1]
+        .iter()
+        .find(|message| {
+            message.role == Role::Tool && message.name.as_deref() == Some("builtin__shell")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no tool result for the excluded builtin__shell call; got {:?}",
+                calls[1]
+            )
+        });
+    assert!(
+        refusal
+            .content
+            .contains("None of this response's tool calls were executed"),
+        "the excluded call must be refused before dispatch, not executed; \
+         got: {}",
+        refusal.content
+    );
+
+    // A dispatched (i.e. actually executed) `builtin.shell` call would echo
+    // its command's output back as the tool result. Its total absence from
+    // every captured message is the direct proof the shell command never ran.
+    assert!(
+        calls.iter().flatten().all(|message| {
+            !message
+                .content
+                .contains("excluded-capability-should-not-execute")
+        }),
+        "the scripted shell command's output must never reach the model; it \
+         would only appear if the excluded call had actually executed"
+    );
+
+    runtime.shutdown().await?;
     Ok(())
 }
 
