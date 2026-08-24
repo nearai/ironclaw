@@ -2221,7 +2221,6 @@ fn is_capability_request_noun(word: &str) -> bool {
     matches!(word.to_ascii_lowercase().as_str(), "tool" | "capability")
 }
 
-
 fn provider_tool_call_from_llm(
     tool_call: ToolCall,
     response_reasoning: Option<String>,

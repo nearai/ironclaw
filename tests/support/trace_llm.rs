@@ -5,8 +5,8 @@
 //! request-hint validation.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -16,8 +16,8 @@ use ironclaw_llm::LlmError;
 use ironclaw_llm::trace_binding::{ObservedToolResult, resolve_trace_result_bindings};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionResponseFormat,
-    CompletionStreamSink, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    CompletionStreamSink, FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolDefinition,
 };
 
 // Re-export shared types from `recording` so downstream test files can
@@ -951,7 +951,11 @@ impl LlmProvider for TraceLlm {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let step = self.next_step(&request.messages, Some(&request.tools), request.response_format.clone())?;
+        let step = self.next_step(
+            &request.messages,
+            Some(&request.tools),
+            request.response_format.clone(),
+        )?;
         match step.response {
             TraceResponse::Text {
                 content,
