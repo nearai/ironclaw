@@ -42,7 +42,7 @@ async def test_create_automation_retries_a_throttled_list(monkeypatch):
     async def no_op(*_args, **_kwargs):
         return None
 
-    async def capture_sleep(delay):
+    async def capture_sleep(delay) -> None:
         sleeps.append(delay)
 
     monkeypatch.setattr(helpers, "create_thread", no_op)
@@ -81,7 +81,7 @@ async def test_run_automation_retries_a_throttled_projection(monkeypatch):
     )
     sleeps = []
 
-    async def capture_sleep(delay):
+    async def capture_sleep(delay) -> None:
         sleeps.append(delay)
 
     monkeypatch.setattr(asyncio, "sleep", capture_sleep)
@@ -98,7 +98,7 @@ async def test_run_automation_retries_a_throttled_projection(monkeypatch):
 async def test_rate_limit_retry_uses_safe_default_for_invalid_header(monkeypatch):
     sleeps = []
 
-    async def capture_sleep(delay):
+    async def capture_sleep(delay) -> None:
         sleeps.append(delay)
 
     monkeypatch.setattr(asyncio, "sleep", capture_sleep)
@@ -113,7 +113,7 @@ async def test_rate_limit_retry_uses_safe_default_for_invalid_header(monkeypatch
 async def test_rate_limit_retry_never_sleeps_past_polling_deadline(monkeypatch):
     sleeps = []
 
-    async def capture_sleep(delay):
+    async def capture_sleep(delay) -> None:
         sleeps.append(delay)
 
     monkeypatch.setattr(asyncio, "sleep", capture_sleep)
@@ -129,7 +129,7 @@ async def test_rate_limit_retry_never_sleeps_past_polling_deadline(monkeypatch):
 async def test_rate_limit_retry_rejects_non_finite_header(monkeypatch):
     sleeps = []
 
-    async def capture_sleep(delay):
+    async def capture_sleep(delay) -> None:
         sleeps.append(delay)
 
     monkeypatch.setattr(asyncio, "sleep", capture_sleep)
