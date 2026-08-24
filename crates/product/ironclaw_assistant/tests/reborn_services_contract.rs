@@ -173,7 +173,8 @@ use ironclaw_product_contracts::lifecycle_service::{
 };
 use ironclaw_product_contracts::notification_inbox::{
     NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID, NOTIFICATIONS_MARK_READ_COMMAND_ID, NOTIFICATIONS_VIEW,
-    ProductNotificationMutationRequest, ProductNotificationMutationResponse,
+    ProductListNotificationsResponse, ProductNotificationKind, ProductNotificationMutationRequest,
+    ProductNotificationMutationResponse,
 };
 use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
@@ -981,6 +982,38 @@ struct ActorFallbackApprovalInteractionService {
     project_id: Option<ProjectId>,
 }
 
+struct FixedLegacyApprovalInteractionService {
+    pending: PendingApprovalInteractionView,
+}
+
+#[async_trait]
+impl ApprovalInteractionService for FixedLegacyApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
+        if request.scope.thread_id != self.pending.scope.thread_id
+            || request.scope.tenant_id != self.pending.scope.tenant_id
+            || request.scope.agent_id != self.pending.scope.agent_id
+            || request.scope.project_id != self.pending.scope.project_id
+            || request.scope.has_explicit_thread_owner()
+            || request.actor.user_id != self.pending.scope.user_id
+        {
+            return Ok(ListPendingApprovalsResponse { approvals: vec![] });
+        }
+        Ok(ListPendingApprovalsResponse {
+            approvals: vec![self.pending.clone()],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
+        panic!("resolve is not used by legacy notification migration tests")
+    }
+}
+
 #[async_trait]
 impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
     async fn list_pending(
@@ -1605,6 +1638,10 @@ impl StaticAutomationService {
 
 #[async_trait]
 impl AutomationProductService for StaticAutomationService {
+    fn supports_legacy_approval_notification_backfill(&self) -> bool {
+        true
+    }
+
     fn scheduler_enabled(&self) -> bool {
         self.scheduler_enabled
     }
@@ -14917,6 +14954,103 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
         vec![automation_pending_thread_id],
         "notification approval lookup must include legacy ownerless automation run threads",
     );
+}
+
+#[tokio::test]
+async fn notifications_backfill_open_legacy_automation_approval_once() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_notifications::NotificationInboxStore;
+
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let thread_id =
+        setup_ownerless_trigger_thread(&thread_service, &caller, "thread-legacy-gate-backfill")
+            .await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let run_id = automation_run_id();
+    let approval_request_id = ApprovalRequestId::new();
+    let gate_ref = approval_gate_ref(approval_request_id).expect("approval gate ref");
+    let approval_turn_scope = TurnScope::new(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        thread_id.clone(),
+    );
+    let approval_service = Arc::new(FixedLegacyApprovalInteractionService {
+        pending: PendingApprovalInteractionView {
+            scope: ApprovalInteractionScope::from_turn(
+                &approval_turn_scope,
+                &TurnActor::new(trigger_scope.creator_user_id.clone()),
+            ),
+            run_id,
+            gate_ref: gate_ref.clone(),
+            approval_request_id,
+            summary: "Approval required".to_string(),
+            action: ApprovalInteractionActionView::Dispatch {
+                capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+            },
+        },
+    });
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/notifications").expect("alias"),
+        VirtualPath::new("/engine/test/legacy-gate-backfill").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let inbox = Arc::new(NotificationInboxStore::new(
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        )),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    ));
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_service(automation_service_with_trigger_thread(
+            thread_id.clone(),
+            &caller,
+        ))
+        .with_approval_interactions(approval_service)
+        .with_notification_inbox(inbox);
+
+    async fn query_notifications(
+        services: &RebornServices,
+        caller: ProductSurfaceCaller,
+    ) -> ProductListNotificationsResponse {
+        let page = ProductSurface::query(
+            services,
+            caller,
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
+                view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                input: json!({}),
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect("list notifications");
+        let payload = page.items.into_iter().next().expect("notification payload");
+        serde_json::from_value(payload).expect("notification response")
+    }
+
+    let first = query_notifications(&services, caller.clone()).await;
+    let second = query_notifications(&services, caller).await;
+    assert_eq!(first.notifications.len(), 1);
+    assert_eq!(second.notifications.len(), 1, "backfill is idempotent");
+    let notification = &second.notifications[0];
+    let lifecycle_key =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, gate_ref.as_str().as_bytes());
+    assert_eq!(
+        notification.id,
+        format!("run:{run_id}:approval:{lifecycle_key}"),
+        "the migration must use the producer's stable id so normal gate resolution settles it",
+    );
+    assert_eq!(notification.kind, ProductNotificationKind::ApprovalRequired);
+    assert_eq!(notification.thread_id, thread_id.to_string());
+    assert_eq!(notification.turn_run_id, Some(run_id.to_string()));
+    assert!(notification.read_at.is_none());
+    assert!(notification.resolved_at.is_none());
 }
 
 #[tokio::test]
