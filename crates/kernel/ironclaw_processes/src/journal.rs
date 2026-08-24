@@ -860,7 +860,11 @@ pub struct TransitionProcessDependencyRequest {
 /// existing caller relies on. `after` is a keyset cursor over that same
 /// `(dependent_process_id, dependency_process_id)` sort key — the pair of
 /// the last row a prior page returned; the next page resumes strictly after
-/// it. `limit` caps the number of rows a bounded query returns.
+/// it. `limit` caps the number of rows a bounded query returns. When present,
+/// `allowed_states` is evaluated before the cursor and limit; bounded
+/// multi-state reads use one exact ordered-index prefix per state and merge
+/// those streams in canonical pair order. `None` preserves the historical
+/// state-agnostic behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessDependencyQuery {
     pub scope: ResourceScope,
@@ -868,6 +872,12 @@ pub struct ProcessDependencyQuery {
     pub dependent_process_id: Option<ProcessId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_ref: Option<String>,
+    /// Restrict the query to these dependency delivery states. `None` keeps
+    /// the historical state-agnostic query behavior; an empty list matches no
+    /// rows. Bounded actionable sweeps use this field so open edges cannot
+    /// consume the batch before a deliverable edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_states: Option<Vec<ProcessDependencyState>>,
     #[serde(default)]
     pub include_closed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

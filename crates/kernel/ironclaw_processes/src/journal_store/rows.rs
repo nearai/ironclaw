@@ -263,6 +263,23 @@ where
             "process_dependency_canonical_v1",
             &["lineage_scope_key", "dependent_id", "dependency_id"],
         )?,
+        // Actionable dependency reads use exact prefixes for scope, group, and
+        // delivery state, then merge the per-state ordered streams by the
+        // canonical dependent/dependency pair. This index is declared before
+        // row-native writers are exposed. The current deployment is the first
+        // writer of `bg:{thread_id}` rows, so actionable rows do not require a
+        // retained-row backfill; missing projections must fail rather than
+        // widening the read to a collection scan.
+        ordered_index(
+            "process_dependency_state_v1",
+            &[
+                "lineage_scope_key",
+                "group_ref",
+                "dependency_state",
+                "dependent_id",
+                "dependency_id",
+            ],
+        )?,
     ] {
         filesystem
             .ensure_index(&ResourceScope::system(), &dependency_prefix, &spec)
@@ -998,6 +1015,120 @@ where
     Ok(collected)
 }
 
+/// Bounded actionable dependency read. Each allowed state is read through an
+/// exact `(lineage_scope_key, group_ref, dependency_state)` prefix of
+/// `process_dependency_state_v1`. The state streams are then merged in the
+/// same `(dependent_id, dependency_id)` order as the legacy query, so one
+/// pair cursor is valid across the union.
+pub(super) struct AllowedDependencyQuery<'a> {
+    pub(super) scope: &'a ResourceScope,
+    pub(super) dependent_process_id: Option<ProcessId>,
+    pub(super) group_ref: &'a str,
+    pub(super) include_closed: bool,
+    pub(super) allowed_states: &'a [crate::ProcessDependencyState],
+    pub(super) after: Option<(ProcessId, ProcessId)>,
+}
+
+pub(super) async fn dependencies_for_scope_allowed_states<F>(
+    filesystem: &ScopedFilesystem<F>,
+    query: AllowedDependencyQuery<'_>,
+    limit: u32,
+) -> Result<Vec<ProcessDependencyRecord>, ProcessJournalStoreError>
+where
+    F: RootFilesystem,
+{
+    if limit == 0 || query.allowed_states.is_empty() {
+        return Ok(Vec::new());
+    }
+    let prefix = scoped_path(&format!("{MATERIALIZED_PREFIX}/dependency"))?;
+    let index = index_name("process_dependency_state_v1")?;
+    let sort_key = index_key("dependent_id")?;
+    let tie_breaker = index_key("dependency_id")?;
+    let scope_filter = eq_value(
+        "lineage_scope_key",
+        IndexValue::Text(lineage_scope_key(query.scope)?),
+    )?;
+    let group_filter = eq_value(
+        "group_ref",
+        IndexValue::Text(dependency_group_key(Some(query.group_ref))?),
+    )?;
+    let page_limit = limit.saturating_mul(4).clamp(1, Page::MAX_LIMIT);
+    let mut records = Vec::new();
+
+    for state in query.allowed_states.iter().copied() {
+        let state_filter = eq_value(
+            "dependency_state",
+            IndexValue::Text(dependency_state_key(state)?),
+        )?;
+        let filter = Filter::And(vec![
+            scope_filter.clone(),
+            group_filter.clone(),
+            state_filter,
+        ]);
+        let mut cursor =
+            query.after.map(
+                |(dependent, dependency)| ironclaw_filesystem::OrderedQueryCursor {
+                    value: IndexValue::Text(dependent.as_uuid().to_string()),
+                    tie_breaker: IndexValue::Text(dependency.as_uuid().to_string()),
+                },
+            );
+        loop {
+            let mut page = ironclaw_filesystem::OrderedPage::new(
+                index.clone(),
+                sort_key.clone(),
+                tie_breaker.clone(),
+                SortDirection::Ascending,
+                page_limit,
+            );
+            if let Some(current) = cursor.clone() {
+                page = page.after(current);
+            }
+            let batch = filesystem
+                .query_ordered(&ResourceScope::system(), &prefix, &filter, &page)
+                .await?;
+            let exhausted = (batch.len() as u32) < page_limit;
+            cursor = batch.last().and_then(|row| {
+                Some(ironclaw_filesystem::OrderedQueryCursor {
+                    value: row.entry.indexed.get(&sort_key)?.clone(),
+                    tie_breaker: row.entry.indexed.get(&tie_breaker)?.clone(),
+                })
+            });
+            for record in decode_dependency_rows(&batch)? {
+                if let Some(dependent_process_id) = query.dependent_process_id
+                    && record.dependent_process_id != dependent_process_id
+                {
+                    continue;
+                }
+                if !query.include_closed && record.state.is_closed() {
+                    continue;
+                }
+                records.push(record);
+            }
+            if exhausted {
+                break;
+            }
+            if cursor.is_none() {
+                return Err(ProcessJournalStoreError::Deserialization(
+                    "process dependency state row omitted pagination keys".to_string(),
+                ));
+            }
+            // The outer merge only needs enough rows to produce `limit`; a
+            // state stream can stop once it has supplied that many candidates.
+            if records.len() >= limit as usize {
+                break;
+            }
+        }
+    }
+    records.sort_by_key(|record| {
+        (
+            record.dependent_process_id.as_uuid(),
+            record.dependency_process_id.as_uuid(),
+        )
+    });
+    records.truncate(limit as usize);
+    Ok(records)
+}
+
 pub(super) async fn unresolved_dependencies<F>(
     filesystem: &ScopedFilesystem<F>,
 ) -> Result<Vec<ProcessDependencyRecord>, ProcessJournalStoreError>
@@ -1345,6 +1476,27 @@ fn eq_value(key: &str, value: IndexValue) -> Result<Filter, ProcessJournalStoreE
     })
 }
 
+pub(super) fn dependency_group_key(
+    group_ref: Option<&str>,
+) -> Result<String, ProcessJournalStoreError> {
+    serde_json::to_string(&group_ref)
+        .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))
+}
+
+pub(super) fn dependency_state_key(
+    state: crate::ProcessDependencyState,
+) -> Result<String, ProcessJournalStoreError> {
+    serde_json::to_value(state)
+        .map_err(|error| ProcessJournalStoreError::Serialization(error.to_string()))?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ProcessJournalStoreError::Serialization(
+                "process dependency state did not serialize to an indexable value".to_string(),
+            )
+        })
+}
+
 pub(super) trait ProcessFilesystemResolver {
     fn resolve_process_path(
         &self,
@@ -1676,6 +1828,14 @@ pub(super) fn encode(
             .with_indexed(
                 index_key("dependency_id")?,
                 IndexValue::Text(record.dependency_process_id.as_uuid().to_string()),
+            )
+            .with_indexed(
+                index_key("group_ref")?,
+                IndexValue::Text(dependency_group_key(record.group_ref.as_deref())?),
+            )
+            .with_indexed(
+                index_key("dependency_state")?,
+                IndexValue::Text(dependency_state_key(record.state)?),
             )
             .with_indexed(
                 index_key("created_at")?,

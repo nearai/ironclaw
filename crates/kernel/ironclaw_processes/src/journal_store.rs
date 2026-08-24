@@ -1180,6 +1180,24 @@ where
                 "dependency query with an after cursor requires a finite limit".to_string(),
             ));
         }
+        // The actionable projection is keyed by group_ref. Keep the new
+        // allowed-state query explicit rather than silently widening it to a
+        // scan when callers omit that key. Existing queries with no state
+        // filter retain their historical group-less compatibility.
+        let deduplicated_allowed_states = request.allowed_states.as_ref().map(|states| {
+            let mut deduplicated = Vec::with_capacity(states.len());
+            for state in states {
+                if !deduplicated.contains(state) {
+                    deduplicated.push(*state);
+                }
+            }
+            deduplicated
+        });
+        if deduplicated_allowed_states.is_some() && request.group_ref.is_none() {
+            return Err(ProcessJournalStoreError::InvalidRequest(
+                "dependency queries with allowed_states require group_ref".to_string(),
+            ));
+        }
         // `after`/`limit` both `None` is the pre-existing unbounded query,
         // preserved byte-for-byte: full scope drain, in-memory filter, sort.
         if request.after.is_none() && request.limit.is_none() {
@@ -1196,6 +1214,11 @@ where
                     .as_ref()
                     .is_none_or(|group_ref| record.group_ref.as_ref() == Some(group_ref))
             })
+            .filter(|record| {
+                deduplicated_allowed_states
+                    .as_ref()
+                    .is_none_or(|states| states.contains(&record.state))
+            })
             .filter(|record| request.include_closed || !record.state.is_closed())
             .collect::<Vec<_>>();
             records.sort_by_key(|record| {
@@ -1205,6 +1228,26 @@ where
                 )
             });
             return Ok(records);
+        }
+        if let Some(allowed_states) = deduplicated_allowed_states.as_deref() {
+            let group_ref = request.group_ref.as_deref().ok_or_else(|| {
+                ProcessJournalStoreError::InvalidRequest(
+                    "dependency queries with allowed_states require group_ref".to_string(),
+                )
+            })?;
+            return rows::dependencies_for_scope_allowed_states(
+                self.filesystem.as_ref(),
+                rows::AllowedDependencyQuery {
+                    scope: &request.scope,
+                    dependent_process_id: request.dependent_process_id,
+                    group_ref,
+                    include_closed: request.include_closed,
+                    allowed_states,
+                    after: request.after,
+                },
+                request.limit.unwrap_or(u32::MAX),
+            )
+            .await;
         }
         // Bounded mode: page the canonical-order index directly, applying
         // filters before the cursor/limit bound (`ProcessDependencyQuery`'s

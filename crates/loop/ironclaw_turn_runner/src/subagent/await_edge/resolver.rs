@@ -1153,7 +1153,7 @@ where
             u32::try_from(ironclaw_loop_host::MAX_QUEUED_INPUTS_PER_RUN).unwrap_or(u32::MAX);
         let edges = self
             .store
-            .list_background_for_thread(scope, batch_limit)
+            .list_background_for_thread(scope, batch_limit, human_initiated)
             .await
             .map_err(store_error)?;
         for (parent_run_id, child_run_id, edge) in edges {

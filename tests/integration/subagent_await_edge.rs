@@ -212,6 +212,7 @@ async fn process_dependency_journal_stress_closes_each_record_and_releases_capac
             scope: parent_scope.clone(),
             dependent_process_id: Some(parent_id),
             group_ref: Some("stress-group".to_string()),
+            allowed_states: None,
             include_closed: true,
             after: None,
             limit: None,

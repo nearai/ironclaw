@@ -48,6 +48,7 @@ use std::{
     },
     time::Duration,
 };
+use uuid::Uuid;
 
 #[derive(Default)]
 struct RecordingProcessObserver {
@@ -2938,6 +2939,7 @@ async fn explicit_dependency_open_is_idempotent_scope_bound_and_abandonable() {
                 scope: root_scope,
                 dependent_process_id: Some(root_id),
                 group_ref: Some("gate:explicit-open".to_string()),
+                allowed_states: None,
                 include_closed: false,
                 after: None,
                 limit: None,
@@ -3015,6 +3017,7 @@ async fn assert_bounded_dependency_query_pages_the_filtered_canonical_order<F>(
         scope: root_scope.clone(),
         dependent_process_id: None,
         group_ref: Some("paging-test".to_string()),
+        allowed_states: None,
         include_closed: false,
         after: None,
         limit: None,
@@ -3061,6 +3064,204 @@ async fn query_process_dependencies_bounded_mode_pages_the_filtered_canonical_or
     .await;
 }
 
+async fn assert_actionable_dependency_query_does_not_starve_behind_open_rows<F>(
+    store: ProcessJournalStore<F>,
+) where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    let root_scope = scope();
+    let dependent = ProcessId::from_uuid(Uuid::from_u128(0x100));
+    submit_internal_process(&store, &root_scope, dependent).await;
+
+    for value in 1..=33_u128 {
+        store
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: ProcessId::from_uuid(Uuid::from_u128(value)),
+                root_process_id: dependent,
+                scope: root_scope.clone(),
+                group_ref: Some("bg:starvation".to_string()),
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("open dependency");
+    }
+    let actionable_dependency = ProcessId::from_uuid(Uuid::from_u128(34));
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: actionable_dependency,
+            root_process_id: dependent,
+            scope: root_scope.clone(),
+            group_ref: Some("bg:starvation".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open actionable dependency");
+    store
+        .settle_process_dependency(SettleProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: actionable_dependency,
+            scope: root_scope.clone(),
+            terminal: ProcessTerminalEvidence {
+                status: ProcessLifecycleStatus::Completed,
+                output_bytes: None,
+                sanitized_reason: None,
+            },
+            settled_at: Utc::now(),
+        })
+        .await
+        .expect("settle actionable dependency")
+        .expect("actionable dependency exists");
+
+    let rows = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: root_scope,
+            dependent_process_id: None,
+            group_ref: Some("bg:starvation".to_string()),
+            allowed_states: Some(vec![ProcessDependencyState::Settled]),
+            include_closed: false,
+            after: None,
+            limit: Some(1),
+        })
+        .await
+        .expect("actionable dependency query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dependency_process_id, actionable_dependency);
+    assert_eq!(rows[0].state, ProcessDependencyState::Settled);
+}
+
+#[tokio::test]
+async fn actionable_dependency_query_does_not_starve_behind_open_rows() {
+    assert_actionable_dependency_query_does_not_starve_behind_open_rows(ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn actionable_dependency_query_merges_states_with_one_pair_cursor() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let root_scope = scope();
+    let dependent = ProcessId::from_uuid(Uuid::from_u128(0x200));
+    submit_internal_process(&store, &root_scope, dependent).await;
+
+    let mut open = Vec::new();
+    for value in 1..=3_u128 {
+        let dependency = ProcessId::from_uuid(Uuid::from_u128(value));
+        store
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                root_process_id: dependent,
+                scope: root_scope.clone(),
+                group_ref: Some("bg:cursor".to_string()),
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("open dependency");
+        open.push(dependency);
+    }
+    for dependency in &open {
+        store
+            .settle_process_dependency(SettleProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: *dependency,
+                scope: root_scope.clone(),
+                terminal: ProcessTerminalEvidence {
+                    status: ProcessLifecycleStatus::Completed,
+                    output_bytes: None,
+                    sanitized_reason: None,
+                },
+                settled_at: Utc::now(),
+            })
+            .await
+            .expect("settle dependency")
+            .expect("dependency exists");
+    }
+    store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: open[1],
+            scope: root_scope.clone(),
+            next: ProcessDependencyState::ResultAppended,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect("append result")
+        .expect("dependency exists");
+
+    let allowed_states = Some(vec![
+        ProcessDependencyState::Settled,
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::Settled,
+    ]);
+    let first = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: root_scope.clone(),
+            dependent_process_id: None,
+            group_ref: Some("bg:cursor".to_string()),
+            allowed_states: allowed_states.clone(),
+            include_closed: false,
+            after: None,
+            limit: Some(2),
+        })
+        .await
+        .expect("first multi-state page");
+    assert_eq!(
+        first
+            .iter()
+            .map(|record| record.dependency_process_id)
+            .collect::<Vec<_>>(),
+        vec![open[0], open[1]]
+    );
+    let cursor = (
+        first[1].dependent_process_id,
+        first[1].dependency_process_id,
+    );
+    let second = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: root_scope,
+            dependent_process_id: None,
+            group_ref: Some("bg:cursor".to_string()),
+            allowed_states,
+            include_closed: false,
+            after: Some(cursor),
+            limit: Some(2),
+        })
+        .await
+        .expect("second multi-state page");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].dependency_process_id, open[2]);
+    assert_eq!(second[0].state, ProcessDependencyState::Settled);
+}
+
+#[tokio::test]
+async fn actionable_dependency_query_requires_group_ref() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let error = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: scope(),
+            dependent_process_id: None,
+            group_ref: None,
+            allowed_states: Some(vec![ProcessDependencyState::Settled]),
+            include_closed: false,
+            after: None,
+            limit: Some(1),
+        })
+        .await
+        .expect_err("state projection requires an exact group prefix");
+    assert!(matches!(
+        error,
+        ProcessJournalStoreError::InvalidRequest(message)
+            if message.contains("allowed_states require group_ref")
+    ));
+}
+
 #[tokio::test]
 async fn query_process_dependencies_rejects_cursor_without_finite_limit() {
     let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
@@ -3069,6 +3270,7 @@ async fn query_process_dependencies_rejects_cursor_without_finite_limit() {
             scope: scope(),
             dependent_process_id: None,
             group_ref: None,
+            allowed_states: None,
             include_closed: false,
             after: Some((ProcessId::new(), ProcessId::new())),
             limit: None,
@@ -3106,6 +3308,10 @@ async fn query_process_dependencies_bounded_mode_holds_on_libsql() {
         .expect("mount view"),
     ));
     assert_bounded_dependency_query_pages_the_filtered_canonical_order(ProcessJournalStore::new(
+        Arc::clone(&filesystem),
+    ))
+    .await;
+    assert_actionable_dependency_query_does_not_starve_behind_open_rows(ProcessJournalStore::new(
         filesystem,
     ))
     .await;
@@ -3126,6 +3332,10 @@ async fn query_process_dependencies_bounded_mode_holds_on_postgres() {
         .expect("mount view"),
     ));
     assert_bounded_dependency_query_pages_the_filtered_canonical_order(ProcessJournalStore::new(
+        Arc::clone(&filesystem),
+    ))
+    .await;
+    assert_actionable_dependency_query_does_not_starve_behind_open_rows(ProcessJournalStore::new(
         filesystem,
     ))
     .await;
@@ -3206,6 +3416,7 @@ async fn query_process_dependencies_bounded_mode_covers_zero_limit_dependent_fil
         scope: root_scope.clone(),
         dependent_process_id: Some(dependent_a),
         group_ref: Some("branch-coverage".to_string()),
+        allowed_states: None,
         include_closed: false,
         after: None,
         limit: Some(10),
@@ -3497,6 +3708,7 @@ async fn bounded_dependency_query_fails_loud_when_a_full_page_yields_no_cursor()
             scope: root_scope,
             dependent_process_id: None,
             group_ref: Some("matching".to_string()),
+            allowed_states: None,
             include_closed: false,
             after: None,
             limit: Some(2),
@@ -3583,6 +3795,7 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
                 scope: rejected_scope,
                 dependent_process_id: Some(root_id),
                 group_ref: Some("gate:rejected".to_string()),
+                allowed_states: None,
                 include_closed: true,
                 after: None,
                 limit: None,
@@ -3632,6 +3845,7 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
             scope: child_scope.clone(),
             dependent_process_id: Some(root_id),
             group_ref: Some("gate:batch".to_string()),
+            allowed_states: None,
             include_closed: true,
             after: None,
             limit: None,
@@ -3730,6 +3944,7 @@ where
             scope: scope(),
             dependent_process_id: Some(dependent),
             group_ref: None,
+            allowed_states: None,
             include_closed: true,
             after: None,
             limit: None,
@@ -4106,6 +4321,7 @@ async fn consume_closes_a_delivered_edge_only_once_attention_is_scheduled() {
                 scope: scope(),
                 dependent_process_id: Some(dependent),
                 group_ref: None,
+                allowed_states: None,
                 include_closed: false,
                 after: None,
                 limit: None,
@@ -4211,6 +4427,7 @@ async fn new_substates_are_not_treated_as_closed() {
                 scope: scope(),
                 dependent_process_id: Some(dependent),
                 group_ref: None,
+                allowed_states: None,
                 include_closed: false,
                 after: None,
                 limit: None,

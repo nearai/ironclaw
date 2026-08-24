@@ -46,6 +46,7 @@ impl AwaitEdgeStore {
             scope: scope.to_resource_scope(),
             dependent_process_id: parent_run_id.map(Self::process_id),
             group_ref,
+            allowed_states: None,
             include_closed,
             after: None,
             limit: None,
@@ -339,12 +340,22 @@ impl AwaitEdgeStore {
         &self,
         scope: &TurnScope,
         limit: u32,
+        human_initiated: bool,
     ) -> Result<Vec<(TurnRunId, TurnRunId, AwaitEdge)>, AwaitEdgeStoreError> {
+        let mut allowed_states = vec![
+            ProcessDependencyState::Settled,
+            ProcessDependencyState::ResultAppended,
+            ProcessDependencyState::AttentionScheduled,
+        ];
+        if human_initiated {
+            allowed_states.push(ProcessDependencyState::AttentionDeferred);
+        }
         self.dependencies
             .query_process_dependencies(ProcessDependencyQuery {
                 scope: scope.to_resource_scope(),
                 dependent_process_id: None,
                 group_ref: Some(format!("bg:{}", scope.thread_id)),
+                allowed_states: Some(allowed_states),
                 include_closed: false,
                 after: None,
                 limit: Some(limit),

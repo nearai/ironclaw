@@ -10,6 +10,7 @@ use ironclaw_processes::{
     ProcessJournalStore, ProcessKind, ProcessSubmissionPort, SubmitProcessRequest,
     in_memory_backed_process_store,
 };
+use uuid::Uuid;
 
 use super::*;
 
@@ -326,7 +327,7 @@ async fn settled_background_edge(
             dependency_process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
             root_process_id: parent_process_id,
             scope: scope.to_resource_scope(),
-            group_ref: Some(edge.gate_ref.as_str().to_string()),
+            group_ref: Some(format!("bg:{}", scope.thread_id)),
             created_at: edge.created_at,
             metadata: serde_json::to_value(awaited_child_set_record(child_run_id, &edge))
                 .expect("serialize submitted record"),
@@ -347,6 +348,80 @@ async fn settled_background_edge(
         .expect("edge exists");
     assert_eq!(settled.state, AwaitEdgeState::Settled);
     (scope, parent_run_id, child_run_id)
+}
+
+#[tokio::test]
+async fn background_sweep_query_skips_open_rows_and_honors_human_deferred_state() {
+    let (store, journal) = new_store();
+    let (scope, parent, settled_child) = settled_background_edge(&store, &journal).await;
+    let (_, _, mut edge) = edge_fixture();
+    edge.mode = SpawnSubagentMode::Background;
+    let parent_process_id = ProcessId::from_uuid(parent.as_uuid());
+
+    // More open rows than the sweep batch limit would otherwise return. The
+    // state-prefix query must reach the settled row without consuming these
+    // historical opens first.
+    for value in 1..=33_u128 {
+        let child = ProcessId::from_uuid(Uuid::from_u128(value));
+        journal
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: parent_process_id,
+                dependency_process_id: child,
+                root_process_id: parent_process_id,
+                scope: scope.to_resource_scope(),
+                group_ref: Some(format!("bg:{}", scope.thread_id)),
+                created_at: Utc::now(),
+                metadata: serde_json::to_value(awaited_child_set_record(
+                    TurnRunId::from_uuid(child.as_uuid()),
+                    &edge,
+                ))
+                .expect("serialize open background edge"),
+            })
+            .await
+            .expect("open background edge");
+    }
+    let actionable = store
+        .list_background_for_thread(&scope, 1, false)
+        .await
+        .expect("list actionable background edges");
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(
+        actionable[0].1,
+        TurnRunId::from_uuid(settled_child.as_uuid())
+    );
+
+    store
+        .record_result_appended(
+            &scope,
+            parent,
+            settled_child,
+            LoopMessageRef::new("msg:deferred").expect("message ref"),
+        )
+        .await
+        .expect("append result")
+        .expect("settled edge exists");
+    store
+        .defer_streak_capped(&scope, parent, settled_child)
+        .await
+        .expect("defer result")
+        .expect("appended edge exists");
+    assert!(
+        store
+            .list_background_for_thread(&scope, 1, false)
+            .await
+            .expect("autonomous sweep list")
+            .is_empty(),
+        "autonomous starts must leave deferred attention parked"
+    );
+    assert_eq!(
+        store
+            .list_background_for_thread(&scope, 1, true)
+            .await
+            .expect("human sweep list")
+            .len(),
+        1,
+        "human starts may retry deferred attention"
+    );
 }
 
 #[tokio::test]
