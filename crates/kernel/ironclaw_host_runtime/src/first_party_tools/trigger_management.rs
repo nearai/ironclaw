@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -11,14 +15,17 @@ use ironclaw_host_api::{
     ids::CapabilityId,
     invocation::InvocationOrigin,
     resource::{ResourceScope, ResourceUsage},
+    turn::TurnRunId,
 };
 use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
-    MissingTriggerActiveRunLookup, MissingTriggerManualFireRunner, TriggerActiveRunLookup,
-    TriggerError, TriggerExecutionSpec, TriggerId, TriggerManualFireOutcome,
-    TriggerManualFireRunner, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
-    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
-    TriggerState, active_holds_for_records,
+    MAX_TRIGGER_RUN_HISTORY_LIMIT, MissingTriggerActiveRunLookup,
+    MissingTriggerCapabilityCallFactsSource, MissingTriggerManualFireRunner,
+    TriggerActiveRunLookup, TriggerCapabilityCallFact, TriggerCapabilityCallFactsScope,
+    TriggerCapabilityCallFactsSource, TriggerError, TriggerExecutionSpec, TriggerId,
+    TriggerManualFireOutcome, TriggerManualFireRunner, TriggerRecord, TriggerRecordValidationKind,
+    TriggerRepository, TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind,
+    TriggerSourceKind, TriggerState, active_holds_for_records,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,6 +44,7 @@ use super::{
 const TRIGGER_LIST_MAX_LIMIT: usize = 100;
 const TRIGGER_RUN_HISTORY_DEFAULT_LIMIT: usize = 25;
 const TRIGGER_RUN_HISTORY_MAX_LIMIT: usize = 100;
+const TRIGGER_STATUS_FACTS_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
@@ -44,6 +52,7 @@ pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 pub const TRIGGER_RUN_CAPABILITY_ID: &str = "builtin.trigger_run";
+pub const TRIGGER_STATUS_CAPABILITY_ID: &str = "builtin.trigger_status";
 
 /// Grounding description for the read path (issue #7246): the model was
 /// observed fabricating automation status ("your digest routine is running")
@@ -53,6 +62,8 @@ pub const TRIGGER_RUN_CAPABILITY_ID: &str = "builtin.trigger_run";
 /// fabricate, and bridges the user vocabulary ("automation", "routine") to
 /// this trigger capability.
 const TRIGGER_LIST_DESCRIPTION: &str = "List the caller's scheduled routines \u{2014} the automations shown on the Automations page \u{2014} with each routine's state (scheduled, paused, or completed), schedule, next and last fire times, recent run history, and any active hold. This listing is the authoritative current state. Call this before answering any question about which routines or automations exist, and before saying one is running, paused, already set up, delivering results, or missing \u{2014} never report routine or automation status from conversation history or memory. An empty list means the caller has no routines: say exactly that instead of guessing.";
+
+const TRIGGER_STATUS_DESCRIPTION: &str = "Read one caller-scoped scheduled routine and one exact run (or its latest run), including the run's authoritative status and observed capability-call metadata. Capability calls are runtime facts only: they do not grade semantic quality, prove an external side effect, retry the run, or change routine state. Use trigger_list first to discover a trigger id.";
 
 const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine from a structured execution contract. Keep the contract concise and outcome-focused: describe the full task each fire performs in execution_contract.goal, written for a future run with no memory of this conversation, and make completion observable with explicit success criteria, output instructions, and no-result text. Do not inspect or enumerate future-work data while authoring the routine, and do not prescribe a speculative tool-call sequence; each fire discovers the capabilities and task data available then. Call trigger_create once when the user-requested schedule, task, and any explicitly named delivery destination are known. A successful response means the routine is durably persisted: stop authoring, report the returned state, and do not call trigger_create again or pause, remove, or replace the routine unless the user explicitly asks. Derive execution_contract.policy.result_delivery from the user's wording: use suppress_when_nothing_to_report when the user says to notify only on a match, change, or actionable result; otherwise use deliver. A scheduled fire runs as the routine's owning user and may use the linked integration capabilities available to the owning user, subject to the user's current connection and permission settings. Write requested integration reads or user-authorized actions into execution_contract.goal explicitly. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write delivery as an explicit goal step naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so make output_instructions describe that reply and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
 
@@ -68,6 +79,13 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         first_party_capability_manifest(
             TRIGGER_LIST_CAPABILITY_ID,
             TRIGGER_LIST_DESCRIPTION,
+            vec![EffectKind::DispatchCapability],
+            PermissionMode::Allow,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            TRIGGER_STATUS_CAPABILITY_ID,
+            TRIGGER_STATUS_DESCRIPTION,
             vec![EffectKind::DispatchCapability],
             PermissionMode::Allow,
             resource_profile(),
@@ -141,6 +159,24 @@ pub(super) fn insert_handlers_with_services(
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
 ) -> Result<(), HostApiError> {
+    insert_handlers_with_services_and_facts(
+        registry,
+        repository,
+        create_hook,
+        active_run_lookup,
+        Arc::new(MissingTriggerCapabilityCallFactsSource),
+        manual_fire_runner,
+    )
+}
+
+pub(super) fn insert_handlers_with_services_and_facts(
+    registry: &mut FirstPartyCapabilityRegistry,
+    repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    capability_call_facts: Arc<dyn TriggerCapabilityCallFactsSource>,
+    manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
+) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
         Arc::new(TriggerManagementToolHandler {
@@ -148,6 +184,7 @@ pub(super) fn insert_handlers_with_services(
             create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
             active_run_lookup,
+            capability_call_facts,
             manual_fire_runner,
         }),
     )
@@ -166,6 +203,7 @@ pub(super) fn insert_handlers_with_clock(
             create_hook: Arc::new(NoopTriggerCreateHook),
             clock,
             active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+            capability_call_facts: Arc::new(MissingTriggerCapabilityCallFactsSource),
             manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
         }),
     )
@@ -181,6 +219,10 @@ fn insert_trigger_handlers(
     );
     registry.insert_handler(
         CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(TRIGGER_STATUS_CAPABILITY_ID)?,
         handler.clone(),
     );
     registry.insert_handler(
@@ -268,6 +310,7 @@ struct TriggerManagementToolHandler {
     create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    capability_call_facts: Arc<dyn TriggerCapabilityCallFactsSource>,
     manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
 }
 
@@ -329,6 +372,15 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                     &request.scope,
                     request.input,
                     self.clock.now(),
+                )
+                .await?
+            }
+            TRIGGER_STATUS_CAPABILITY_ID => {
+                trigger_status(
+                    &*self.repository,
+                    &*self.capability_call_facts,
+                    &request.scope,
+                    request.input,
                 )
                 .await?
             }
@@ -465,6 +517,13 @@ struct TriggerRunInput {
 struct TriggerListInput {
     limit: Option<usize>,
     run_limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TriggerStatusInput {
+    trigger_id: String,
+    run_id: Option<String>,
 }
 
 async fn create_trigger(
@@ -653,6 +712,110 @@ async fn list_triggers(
         })
         .collect::<Vec<_>>();
     Ok(json!({ "triggers": output }))
+}
+
+async fn trigger_status(
+    repository: &dyn TriggerRepository,
+    capability_call_facts: &dyn TriggerCapabilityCallFactsSource,
+    scope: &ResourceScope,
+    input: Value,
+) -> Result<Value, FirstPartyCapabilityError> {
+    let input: TriggerStatusInput = serde_json::from_value(input).map_err(|_| input_error())?;
+    let trigger_id = TriggerId::parse(&input.trigger_id).map_err(trigger_input_error)?;
+    let requested_run_id = input
+        .run_id
+        .as_deref()
+        .map(TurnRunId::parse)
+        .transpose()
+        .map_err(|_| input_error())?;
+    let record = repository
+        .get_trigger(scope.tenant_id.clone(), trigger_id)
+        .await
+        .map_err(|error| trigger_repository_error("get_trigger", error))?
+        .filter(|record| {
+            record.creator_user_id == scope.user_id
+                && record.agent_id == scope.agent_id
+                && record.project_id == scope.project_id
+        })
+        .ok_or_else(input_error)?;
+
+    let history_limit = if requested_run_id.is_some() {
+        MAX_TRIGGER_RUN_HISTORY_LIMIT
+    } else {
+        1
+    };
+    let runs = repository
+        .list_trigger_run_history(scope.tenant_id.clone(), trigger_id, history_limit)
+        .await
+        .map_err(|error| trigger_repository_error("list_trigger_run_history", error))?;
+    let run = match requested_run_id {
+        Some(run_id) => Some(
+            runs.into_iter()
+                .find(|run| run.run_id == Some(run_id))
+                .ok_or_else(input_error)?,
+        ),
+        None => runs.into_iter().next(),
+    };
+
+    let run = match run {
+        Some(run) => {
+            let mut output = trigger_run_output(&run);
+            output["capability_calls"] =
+                capability_calls_output(capability_call_facts, scope, run.run_id).await;
+            Some(output)
+        }
+        None => None,
+    };
+    Ok(json!({
+        "trigger": trigger_output(&record, &[], None),
+        "run": run,
+    }))
+}
+
+async fn capability_calls_output(
+    source: &dyn TriggerCapabilityCallFactsSource,
+    scope: &ResourceScope,
+    run_id: Option<TurnRunId>,
+) -> Value {
+    let Some(run_id) = run_id else {
+        return json!({ "availability": "not_applicable", "items": [] });
+    };
+    let facts_scope = TriggerCapabilityCallFactsScope::from_resource_scope(scope);
+    match tokio::time::timeout(
+        TRIGGER_STATUS_FACTS_TIMEOUT,
+        source.capability_calls_for_run(&facts_scope, run_id),
+    )
+    .await
+    {
+        Ok(Ok(facts)) => json!({
+            "availability": "available",
+            "items": facts
+                .into_iter()
+                .filter(|fact| fact.run_id == run_id)
+                .map(capability_call_output)
+                .collect::<Vec<_>>(),
+        }),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, %run_id, "trigger capability-call facts unavailable");
+            json!({ "availability": "unavailable" })
+        }
+        Err(_) => {
+            tracing::warn!(%run_id, "trigger capability-call facts lookup timed out");
+            json!({ "availability": "unavailable" })
+        }
+    }
+}
+
+fn capability_call_output(fact: TriggerCapabilityCallFact) -> Value {
+    let mut output = json!({
+        "invocation_id": fact.invocation_id.to_string(),
+        "capability_id": fact.capability_id.as_str(),
+        "status": fact.status,
+    });
+    if let Some(error_kind) = fact.error_kind {
+        output["error_kind"] = Value::String(error_kind);
+    }
+    output
 }
 
 /// Maps the crate-neutral hold projection (`ironclaw_triggers`) to this

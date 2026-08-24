@@ -611,6 +611,9 @@ pub(super) async fn build_backend_production(
         Arc::clone(&trigger_repository),
         Arc::clone(&trigger_create_hook) as Arc<dyn TriggerCreateHook>,
         trigger_active_run_lookup,
+        Arc::new(ProjectedTriggerCapabilityCallFactsSource::new(Arc::clone(
+            &event_log,
+        ))),
         trigger_manual_fire_runner.clone(),
         process_backend,
     )?;

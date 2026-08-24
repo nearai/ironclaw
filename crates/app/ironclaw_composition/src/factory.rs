@@ -160,7 +160,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_package,
 };
 use ironclaw_host_runtime::{
-    builtin_first_party_handlers_with_trigger_services_for_process_backend,
+    builtin_first_party_handlers_with_trigger_services_and_facts_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
 use ironclaw_identity::projects::ProjectRepository;
@@ -189,7 +189,9 @@ use ironclaw_threads::FilesystemSessionThreadService;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerError, TriggerRecord,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerCapabilityCallFact,
+    TriggerCapabilityCallFactsError, TriggerCapabilityCallFactsScope,
+    TriggerCapabilityCallFactsSource, TriggerCapabilityCallStatus, TriggerError, TriggerRecord,
     TriggerRepository,
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
@@ -1220,19 +1222,99 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    capability_call_facts: Arc<dyn TriggerCapabilityCallFactsSource>,
     manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_services_for_process_backend(
+    builtin_first_party_handlers_with_trigger_services_and_facts_for_process_backend(
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
+        capability_call_facts,
         manual_fire_runner,
         process_backend,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
     })
+}
+
+struct ProjectedTriggerCapabilityCallFactsSource {
+    projection: ironclaw_event_projections::ReplayEventProjectionService,
+}
+
+impl ProjectedTriggerCapabilityCallFactsSource {
+    fn new(event_log: Arc<dyn ironclaw_event_log::DurableEventLog>) -> Self {
+        Self {
+            projection: ironclaw_event_projections::ReplayEventProjectionService::from_runtime_log(
+                event_log,
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TriggerCapabilityCallFactsSource for ProjectedTriggerCapabilityCallFactsSource {
+    async fn capability_calls_for_run(
+        &self,
+        scope: &TriggerCapabilityCallFactsScope,
+        run_id: ironclaw_host_api::turn::TurnRunId,
+    ) -> Result<Vec<TriggerCapabilityCallFact>, TriggerCapabilityCallFactsError> {
+        let projection_scope =
+            ironclaw_event_projections::ProjectionScope::from_resource_scope(&ResourceScope {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: scope.user_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                mission_id: None,
+                thread_id: None,
+                invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+            });
+        let parent_run_id = ironclaw_host_api::ids::InvocationId::from_uuid(run_id.as_uuid());
+        let window = self
+            .projection
+            .capability_activities_for_run(
+                projection_scope,
+                parent_run_id,
+                ironclaw_event_projections::MAX_PROJECTION_PAGE_LIMIT,
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, %run_id, "trigger capability-call projection failed");
+                TriggerCapabilityCallFactsError::Unavailable
+            })?;
+        if window.truncated {
+            tracing::warn!(%run_id, "trigger capability-call projection was truncated");
+            return Err(TriggerCapabilityCallFactsError::Unavailable);
+        }
+        Ok(window
+            .activities
+            .into_iter()
+            .map(|activity| TriggerCapabilityCallFact {
+                invocation_id: activity.invocation_id,
+                run_id,
+                capability_id: activity.capability_id,
+                status: match activity.status {
+                    ironclaw_event_projections::CapabilityActivityStatus::Started => {
+                        TriggerCapabilityCallStatus::Started
+                    }
+                    ironclaw_event_projections::CapabilityActivityStatus::Running => {
+                        TriggerCapabilityCallStatus::Running
+                    }
+                    ironclaw_event_projections::CapabilityActivityStatus::Completed => {
+                        TriggerCapabilityCallStatus::Completed
+                    }
+                    ironclaw_event_projections::CapabilityActivityStatus::Failed => {
+                        TriggerCapabilityCallStatus::Failed
+                    }
+                    ironclaw_event_projections::CapabilityActivityStatus::Killed => {
+                        TriggerCapabilityCallStatus::Killed
+                    }
+                },
+                error_kind: activity.error_kind,
+            })
+            .collect())
+    }
 }
 
 fn manifest_channel_account_setup_descriptors(

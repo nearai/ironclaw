@@ -1063,6 +1063,16 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["trigger_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/trigger_status.input.v1.json" => json!({
+            "type": "object",
+            "description": "Read one caller-scoped routine and one exact run, or the latest run when run_id is omitted.",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" },
+                "run_id": { "type": "string", "description": "Optional exact run id returned in trigger run history" }
+            },
+            "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
         _ => return None,
     })
 }
@@ -1281,6 +1291,18 @@ mod tests {
         assert_eq!(schema["required"], serde_json::json!(["trigger_id"]));
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["trigger_id"]["type"], "string");
+    }
+
+    #[test]
+    fn trigger_status_requires_a_trigger_and_accepts_an_exact_run() {
+        let schema =
+            resolve_builtin_input_schema_ref("schemas/builtin/trigger_status.input.v1.json")
+                .expect("trigger_status schema is registered");
+
+        assert_eq!(schema["required"], serde_json::json!(["trigger_id"]));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["trigger_id"]["type"], "string");
+        assert_eq!(schema["properties"]["run_id"]["type"], "string");
     }
 
     #[test]

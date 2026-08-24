@@ -3,6 +3,7 @@ use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
 use ironclaw_turns::TurnRunId;
 
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Accept-all preflight for tests that pin persistence/round-trip behavior of
 /// restrictive policies, which `NoopTriggerCreateHook` now fails closed on.
@@ -630,6 +631,11 @@ use ironclaw_host_api::{
     invocation::InvocationOrigin,
 };
 use ironclaw_triggers::InMemoryTriggerRepository;
+use ironclaw_triggers::{
+    ClaimDueFireOutcome, ClaimManualFireRequest, ClearActiveFireRequest, FireAcceptedRequest,
+    TriggerCapabilityCallFact, TriggerCapabilityCallFactsError, TriggerCapabilityCallFactsScope,
+    TriggerCapabilityCallFactsSource, TriggerCapabilityCallStatus, TriggerRunHistoryStatus,
+};
 
 const MUTATION_CAPABILITIES: &[&str] = &[
     TRIGGER_CREATE_CAPABILITY_ID,
@@ -653,8 +659,217 @@ fn origin_test_handler(create_hook: Arc<dyn TriggerCreateHook>) -> TriggerManage
         create_hook,
         clock: Arc::new(SystemTriggerManagementClock),
         active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        capability_call_facts: Arc::new(MissingTriggerCapabilityCallFactsSource),
         manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
     }
+}
+
+struct StaticCapabilityCallFactsSource {
+    facts: Vec<TriggerCapabilityCallFact>,
+}
+
+struct CountingCapabilityCallFactsSource {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TriggerCapabilityCallFactsSource for CountingCapabilityCallFactsSource {
+    async fn capability_calls_for_run(
+        &self,
+        _scope: &TriggerCapabilityCallFactsScope,
+        _run_id: TurnRunId,
+    ) -> Result<Vec<TriggerCapabilityCallFact>, TriggerCapabilityCallFactsError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+}
+
+#[async_trait]
+impl TriggerCapabilityCallFactsSource for StaticCapabilityCallFactsSource {
+    async fn capability_calls_for_run(
+        &self,
+        _scope: &TriggerCapabilityCallFactsScope,
+        _run_id: TurnRunId,
+    ) -> Result<Vec<TriggerCapabilityCallFact>, TriggerCapabilityCallFactsError> {
+        Ok(self.facts.clone())
+    }
+}
+
+#[tokio::test]
+async fn trigger_status_reports_exact_call_facts_without_grading_the_run() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let run_id = TurnRunId::new();
+    let first_call_id = InvocationId::new();
+    let second_call_id = InvocationId::new();
+    let handler = TriggerManagementToolHandler {
+        repository: repository.clone(),
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        capability_call_facts: Arc::new(StaticCapabilityCallFactsSource {
+            facts: vec![
+                TriggerCapabilityCallFact {
+                    invocation_id: first_call_id,
+                    run_id,
+                    capability_id: CapabilityId::new("gmail.search").expect("capability id"),
+                    status: TriggerCapabilityCallStatus::Completed,
+                    error_kind: None,
+                },
+                TriggerCapabilityCallFact {
+                    invocation_id: second_call_id,
+                    run_id,
+                    capability_id: CapabilityId::new("slack.send").expect("capability id"),
+                    status: TriggerCapabilityCallStatus::Failed,
+                    error_kind: Some("provider_error".to_string()),
+                },
+            ],
+        }),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
+    };
+    let created = dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(RunId::new())),
+        TRIGGER_CREATE_CAPABILITY_ID,
+        once_create_input("fact-reporting-routine"),
+    )
+    .await
+    .expect("seed routine");
+    let trigger_id = TriggerId::parse(
+        created.output["trigger"]["trigger_id"]
+            .as_str()
+            .expect("trigger id"),
+    )
+    .expect("valid trigger id");
+    let now = Utc::now();
+    let fire_slot = match repository
+        .claim_manual_fire(ClaimManualFireRequest {
+            tenant_id: created_scope().tenant_id,
+            trigger_id,
+            now,
+        })
+        .await
+        .expect("claim manual fire")
+    {
+        ClaimDueFireOutcome::Claimed(claimed) => claimed.fire_slot,
+        other => panic!("expected claimed fire, got {other:?}"),
+    };
+    repository
+        .mark_fire_accepted(FireAcceptedRequest {
+            tenant_id: created_scope().tenant_id,
+            trigger_id,
+            fire_slot,
+            run_id,
+            thread_id: ironclaw_host_api::ids::ThreadId::new(uuid::Uuid::new_v4().to_string())
+                .expect("thread id"),
+            submitted_at: now,
+        })
+        .await
+        .expect("accept fire");
+    repository
+        .clear_active_fire(ClearActiveFireRequest {
+            tenant_id: created_scope().tenant_id,
+            trigger_id,
+            fire_slot,
+            run_id,
+            status: TriggerRunHistoryStatus::Ok,
+        })
+        .await
+        .expect("complete fire");
+
+    let result = dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(RunId::new())),
+        TRIGGER_STATUS_CAPABILITY_ID,
+        json!({"trigger_id": trigger_id.to_string(), "run_id": run_id.to_string()}),
+    )
+    .await
+    .expect("read exact run status");
+
+    assert_eq!(result.output["run"]["status"], "ok");
+    assert_eq!(
+        result.output["run"]["capability_calls"]["availability"],
+        "available"
+    );
+    assert_eq!(
+        result.output["run"]["capability_calls"]["items"],
+        json!([
+            {
+                "invocation_id": first_call_id.to_string(),
+                "capability_id": "gmail.search",
+                "status": "completed"
+            },
+            {
+                "invocation_id": second_call_id.to_string(),
+                "capability_id": "slack.send",
+                "status": "failed",
+                "error_kind": "provider_error"
+            }
+        ])
+    );
+    assert!(result.output.get("assessment").is_none());
+    assert!(result.output["run"].get("assessment").is_none());
+}
+
+fn created_scope() -> ResourceScope {
+    ResourceScope::local_default(
+        UserId::new("trigger-origin-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope")
+}
+
+#[tokio::test]
+async fn trigger_list_does_not_query_capability_call_facts() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler = TriggerManagementToolHandler {
+        repository: Arc::new(InMemoryTriggerRepository::default()),
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        capability_call_facts: Arc::new(CountingCapabilityCallFactsSource {
+            calls: Arc::clone(&calls),
+        }),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
+    };
+    dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(RunId::new())),
+        TRIGGER_CREATE_CAPABILITY_ID,
+        once_create_input("list-without-facts"),
+    )
+    .await
+    .expect("seed routine");
+
+    dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(RunId::new())),
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+    )
+    .await
+    .expect("list routines");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the broad list path must not replay exact-run facts"
+    );
+}
+
+#[tokio::test]
+async fn unavailable_capability_call_facts_are_not_reported_as_an_empty_observation() {
+    let output = capability_calls_output(
+        &MissingTriggerCapabilityCallFactsSource,
+        &created_scope(),
+        Some(TurnRunId::new()),
+    )
+    .await;
+
+    assert_eq!(output, json!({"availability": "unavailable"}));
+    assert!(
+        output.get("items").is_none(),
+        "unavailable projection data must not look like an observed empty call list"
+    );
 }
 
 async fn dispatch_with_origin(
