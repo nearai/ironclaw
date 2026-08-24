@@ -89,7 +89,6 @@ registerPack("ko", {
   "status.checking": "확인 중",
 
   // Login page
-  "login.tagline": "Gateway v2",
   "login.hero": "운영 추적을 유지하며 로컬 에이전트를 제어합니다.",
   "login.heroSub": "토큰 접근은 브라우저 콘솔을 동일한 게이트웨이 런타임, 승인, 도구 및 스레드 상태에 연결합니다.",
   "login.bearerAuth": "Bearer 인증",

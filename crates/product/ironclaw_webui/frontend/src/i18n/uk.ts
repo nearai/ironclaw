@@ -89,7 +89,6 @@ registerPack("uk", {
   "status.checking": "перевірка",
 
   // Login page
-  "login.tagline": "Gateway v2",
   "login.hero": "Керування локальним агентом без втрати операторського сліду.",
   "login.heroSub": "Доступ за токеном прив’язує консоль браузера до того ж runtime шлюзу, затверджень, інструментів і стану тредів.",
   "login.bearerAuth": "Bearer-автентифікація",

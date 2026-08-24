@@ -89,7 +89,6 @@ registerPack("de", {
   "status.checking": "prüfen",
 
   // Login page
-  "login.tagline": "Gateway v2",
   "login.hero": "Lokale Agentensteuerung ohne den Operator‑Trail zu verlieren.",
   "login.heroSub": "Tokenzugriff bindet die Browser‑Konsole an dieselbe Gateway‑Runtime, Freigaben, Tools und Thread‑Zustand.",
   "login.bearerAuth": "Bearer‑Auth",

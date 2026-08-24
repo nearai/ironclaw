@@ -89,7 +89,6 @@ registerPack("en", {
   "status.checking": "checking",
 
   // Login page
-  "login.tagline": "Gateway v2",
   "login.hero": "Local agent control without losing the operator trail.",
   "login.heroSub":
     "Token access keeps the browser console tied to the same gateway runtime, approvals, tools, and thread state.",
