@@ -1048,15 +1048,34 @@ impl LoopCapabilityPortFactory for RuntimeProfiledCapabilityPortFactory {
                     "unbound declarations read failed",
                 )
             })?;
-            if let Some(declarations) = declarations
-                && !declarations.tools.is_empty()
-            {
-                let allowed = policy.capability_ids.clone().intersect(
-                    ironclaw_host_api::capability_surface::CapabilityIdScope::only(
-                        declarations.tools,
-                    ),
-                );
-                policy = policy.with_capability_ids(allowed);
+            if let Some(declarations) = declarations {
+                if !declarations.tools.is_empty() {
+                    let allowed = policy.capability_ids.clone().intersect(
+                        ironclaw_host_api::capability_surface::CapabilityIdScope::only(
+                            declarations.tools,
+                        ),
+                    );
+                    policy = policy.with_capability_ids(allowed);
+                }
+                // No human is present, so an approval-gated capability is a
+                // run that PARKS, not one that asks: drop those from the
+                // surface. The decision itself stays with the kernel
+                // authorizer — this only sets the input it already consumes,
+                // so "auto-approved" means exactly what the user's own
+                // settings say, uniformly across built-ins, extensions, and
+                // MCP servers.
+                //
+                // This deliberately does NOT restrict effects. Product
+                // decision (#7812): the run may reach every capability the
+                // user has auto-approved, and read/list-only behaviour is
+                // carried by the prompt. Note the consequence — the approval
+                // hard floor is only Financial/ModifyApproval/ModifyBudget and
+                // global auto-approve defaults on, so this surface includes
+                // write-effect capabilities such as shell and outbound
+                // delivery.
+                if declarations.require_no_approval {
+                    policy = policy.without_approval_gated();
+                }
             }
         }
         policy = policy.deny_capability_ids(denied);
