@@ -912,25 +912,18 @@ where
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut filters = vec![eq_value(
+    // `dependent_id` is the canonical index's *sort key*, not part of its
+    // equality prefix — `ordered_query_prefix_values` requires the filter's
+    // equality-key set to equal exactly the index keys preceding the sort
+    // key (here, just `lineage_scope_key`), so an equality filter on
+    // `dependent_id` itself makes the ordered query `Unsupported` rather than
+    // narrowing it. `dependent_process_id`, like `group_ref`/`include_closed`
+    // below, is therefore an in-memory filter applied to each page's rows,
+    // not an index-level one.
+    let filter = eq_value(
         "lineage_scope_key",
         IndexValue::Text(lineage_scope_key(scope)?),
-    )?];
-    if let Some(dependent_process_id) = dependent_process_id {
-        filters.push(eq_text(
-            "dependent_id",
-            &dependent_process_id.as_uuid().to_string(),
-        )?);
-    }
-    let filter = if filters.len() == 1 {
-        filters.into_iter().next().ok_or_else(|| {
-            ProcessJournalStoreError::InvalidRequest(
-                "canonical dependency query lost its required filter".to_string(),
-            )
-        })?
-    } else {
-        Filter::And(filters)
-    };
+    )?;
     let index = index_name("process_dependency_canonical_v1")?;
     let sort_key = index_key("dependent_id")?;
     let tie_breaker = index_key("dependency_id")?;
@@ -943,9 +936,10 @@ where
         },
     );
     // Over-fetch per page like `recent_agent_turn_processes_for_scope`: the
-    // group_ref/closed filters below aren't index-level, so one page can be
-    // filtered away entirely — fetching more than `limit` rows per round trip
-    // keeps that case from degenerating into one round trip per matching row.
+    // dependent_process_id/group_ref/closed filters below aren't index-level,
+    // so one page can be filtered away entirely — fetching more than `limit`
+    // rows per round trip keeps that case from degenerating into one round
+    // trip per matching row.
     let page_limit = limit.saturating_mul(4).clamp(1, Page::MAX_LIMIT);
     let mut collected: Vec<ProcessDependencyRecord> = Vec::new();
     loop {
@@ -970,6 +964,11 @@ where
             })
         });
         for record in decode_dependency_rows(&batch)? {
+            if let Some(dependent_process_id) = dependent_process_id
+                && record.dependent_process_id != dependent_process_id
+            {
+                continue;
+            }
             if let Some(group_ref) = group_ref
                 && record.group_ref.as_deref() != Some(group_ref)
             {
@@ -983,8 +982,17 @@ where
                 return Ok(collected);
             }
         }
-        if exhausted || cursor.is_none() {
+        if exhausted {
             break;
+        }
+        if cursor.is_none() {
+            // A full page (not exhausted) whose last row has no derivable
+            // cursor cannot safely continue paging: matches the unbounded
+            // sibling `query_indexed_collection`'s fail-loud contract for the
+            // same shape instead of silently truncating the result.
+            return Err(ProcessJournalStoreError::Deserialization(
+                "process dependency canonical order row omitted pagination keys".to_string(),
+            ));
         }
     }
     Ok(collected)
