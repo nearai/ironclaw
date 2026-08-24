@@ -5,11 +5,12 @@ family rules in `crates/app/AGENTS.md`.
 
 ## Start Here
 
-- Read `README.md`, then `Cargo.toml` (zero production dependencies — one
-  dev-only vocabulary import).
+- Read `README.md`, then `Cargo.toml` (zero production dependencies — two
+  dev-only vocabulary imports, `ironclaw_host_api` and
+  `ironclaw_product_contracts`, each with its own comment explaining why).
 - Use these Reborn contracts as the source of truth before changing behavior:
-  - `docs/reborn/contracts/_contract-freeze-index.md`
-  - `docs/reborn/contracts/kernel-boundary.md`
+  - `docs/internal/reborn/contracts/_contract-freeze-index.md`
+  - `docs/internal/reborn/contracts/kernel-boundary.md`
 
 ## What This Crate Owns
 
@@ -38,7 +39,7 @@ family rules in `crates/app/AGENTS.md`.
   never a bare `root.join("crates/…")` literal — that is what lets gates
   survive family moves (`reborn_crate_inventory.rs` pins the resolver).
 - Keep rules conservative and explicit; when an intentional architecture edge
-  changes, update the design record (`docs/reborn/target-architecture/`) with
+  changes, update the design record (`docs/internal/reborn/target-architecture/`) with
   a dated amendment in the same PR.
 - If the contract and code disagree, stop and treat the task as a
   contract-change request instead of silently changing ownership.

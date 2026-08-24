@@ -436,7 +436,7 @@ cargo run -q -p ironclaw --bin ironclaw -- onboard --force
 
 `--dry-run` reports what would be initialized without writing files.
 `--import-history` reserves the history-import step in the summary (not wired
-yet). See `docs/reborn/onboarding.md` for the full slice description and the
+yet). See `docs/internal/reborn/onboarding.md` for the full slice description and the
 completion-marker schema.
 
 ### `models list` / `models status` / `models set-provider`
@@ -565,7 +565,7 @@ url_env = "IRONCLAW_REBORN_POSTGRES_URL"
 secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
 # Optional; defaults to 2. Keep below the PostgreSQL server or managed
 # session-pool cap after reserving capacity for restarts and operator sessions.
-pool_max_size = 2
+pool_max_size = 8
 
 [policy]
 deployment_mode = "hosted_multi_tenant"

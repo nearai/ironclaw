@@ -33,8 +33,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityProgress,
-    CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
-    LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+    CapabilitySurfaceVersion, LoopCapabilityPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
     ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution,
 };
@@ -90,7 +90,6 @@ impl ToolSpec {
             description_trust: Default::default(),
             // External tools are client-side; the host never runs them in
             // parallel, and they always park, so mark them exclusive.
-            concurrency_hint: ConcurrencyHint::Exclusive,
             parameters_schema: self.parameters_schema.clone(),
         }
     }
@@ -128,17 +127,29 @@ fn external_tool_capability_id(
     })
 }
 
+/// Derives the provider tool name for a client-declared external tool by
+/// routing through the SAME capability id this decorator itself mints
+/// (`external_tool_capability_id`) and the ONE capability-id ->
+/// provider-tool-name mapping (`ProviderToolName::for_capability` in
+/// `ironclaw_host_api::ids`). That mapping carves the `external_tool.`
+/// namespace out of its usual `.` -> `__` encoding and hands the suffix back
+/// verbatim, so this necessarily agrees with prepared-context history
+/// seeding (`ironclaw_threads::prepared_context`), which derives a seeded
+/// external tool call's provider name through the identical mapping.
 fn provider_tool_name_for_external_tool(
     tool_name: &str,
 ) -> Result<ProviderToolName, AgentLoopHostError> {
-    let provider_tool_name = tool_name.to_ascii_lowercase();
-    ProviderToolDefinition::validate_name(&provider_tool_name).map_err(|error| {
+    let lowered = tool_name.to_ascii_lowercase();
+    let capability_id = CapabilityId::new(format!("external_tool.{lowered}")).map_err(|_| {
         AgentLoopHostError::new(
-            error.kind,
-            format!(
-                "external tool name cannot be represented as a provider tool name: {}",
-                error.safe_summary
-            ),
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "external tool name cannot be represented as a capability id",
+        )
+    })?;
+    ProviderToolName::for_capability(&capability_id).map_err(|error| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("external tool name cannot be represented as a provider tool name: {error}"),
         )
     })
 }
@@ -244,6 +255,13 @@ impl ExternalToolCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for ExternalToolCapabilityPort {
+    fn requires_ordered_batch_invocation(&self, invocations: &[LoopRequest]) -> bool {
+        invocations
+            .iter()
+            .any(|invocation| self.owns_capability(&invocation.capability_id))
+            || self.inner.requires_ordered_batch_invocation(invocations)
+    }
+
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner_tool_definitions()?;
         let surface = self.surface.lock().map_err(|_| surface_lock_error())?;
@@ -359,7 +377,10 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        let mut surface = self.inner.visible_capabilities(request).await?;
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        let mut surface = Box::pin(self.inner.visible_capabilities(request)).await?;
         let specs = self
             .catalog
             .specs(self.run_id)
@@ -419,10 +440,16 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if !self.owns_capability(&request.capability_id) {
-            return self.inner.invoke_capability(request).await;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            return Box::pin(self.inner.invoke_capability(request)).await;
         }
         // `complete_or_park` emits the host `Resolution` directly (§5.3 Stage 2b).
-        self.complete_or_park(request).await
+        // Chain-boxing: each port delegation is boxed so the stacked
+        // decorator chain never compiles into a single oversized poll
+        // frame (see reborn_integration_model_recovery stack-overflow).
+        Box::pin(self.complete_or_park(request)).await
     }
 
     async fn invoke_capability_batch(
@@ -432,7 +459,10 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
         let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let resolution = self.invoke_capability(invocation).await?;
+            // Chain-boxing: each port delegation is boxed so the stacked
+            // decorator chain never compiles into a single oversized poll
+            // frame (see reborn_integration_model_recovery stack-overflow).
+            let resolution = Box::pin(self.invoke_capability(invocation)).await?;
             // `parks()` is the batch-stop predicate (gates + suspensions), the
             // Resolution-side successor to `CapabilityOutcome::is_suspension`. An
             // external-tool park still forces a stop even when the caller did not
@@ -521,6 +551,10 @@ mod tests {
 
     #[async_trait]
     impl LoopCapabilityPort for EmptyInnerPort {
+        fn requires_ordered_batch_invocation(&self, _invocations: &[LoopRequest]) -> bool {
+            false
+        }
+
         async fn visible_capabilities(
             &self,
             _request: VisibleCapabilityRequest,
@@ -915,6 +949,30 @@ mod tests {
             ids.provider_capability_id.as_str(),
             "external_tool.client_tool"
         );
+    }
+
+    #[tokio::test]
+    async fn external_tool_batch_requires_ordered_entry() {
+        let (port, _run_context) =
+            wrapped_port_with_specs(vec![external_tool_spec("client_tool")]).await;
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let request = |capability_id: &str| LoopRequest {
+            activity_id: Default::default(),
+            surface_version: surface.version.clone(),
+            capability_id: CapabilityId::new(capability_id).expect("capability id"),
+            input_ref: CapabilityInputRef::new(format!("input:{capability_id}"))
+                .expect("input ref"),
+            approval_resume: None,
+            auth_resume: None,
+        };
+
+        assert!(port.requires_ordered_batch_invocation(&[
+            request("regular.sibling"),
+            request("external_tool.client_tool"),
+        ]));
     }
 
     #[tokio::test]

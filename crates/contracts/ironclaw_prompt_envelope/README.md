@@ -75,4 +75,4 @@ cargo test -p ironclaw_architecture_tests
 - Family boundary: [`../AGENTS.md`](../AGENTS.md) (this crate has no separate
   `AGENTS.md`; the invariants above are the working rules).
 - Design record: PROPOSAL §6.1.6;
-  `docs/reborn/target-architecture/families/contracts.md`.
+  `docs/internal/reborn/target-architecture/families/contracts.md`.

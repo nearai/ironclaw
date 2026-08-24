@@ -58,9 +58,9 @@ on:
       # crate layout silently stops matching when crates move into family
       # directories (`crates/<family>/ironclaw_*`, PROPOSAL §5) — every E2E job
       # skipped, roll-up green, nothing run. Depth-independent by construction.
-      # See docs/reborn/target-architecture/CHECKLIST.md WS10.
+      # See docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
       - "crates/**"
-      - "docs/reborn/**"
+      - "docs/internal/reborn/**"
       - "scripts/reborn-e2e-rust.sh"
       - "scripts/ci/*hermetic*"
       - "tests/e2e/**"
@@ -88,6 +88,7 @@ jobs:
   changes:
     name: Detect Reborn E2E scope
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       has_e2e_scope: ${{ steps.non_diff.outputs.has_e2e_scope || steps.diff.outputs.has_e2e_scope }}
     steps:
@@ -114,7 +115,7 @@ jobs:
           # for the same reason (CHECKLIST WS10); both forms are pinned by
           # scripts/ci/ws12_workflow_contracts.py, which replays a nested
           # crate path through this exact regex.
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|docs/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/[^/]*hermetic[^/]*$|tests/e2e/|build\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|docs/internal/reborn/|scripts/reborn-e2e-rust\.sh$|scripts/ci/[^/]*hermetic[^/]*$|tests/e2e/|build\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/reborn-e2e\.yml$)'; then
             echo "has_e2e_scope=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_e2e_scope=false" >> "$GITHUB_OUTPUT"
@@ -475,7 +476,11 @@ jobs:
 
       - name: Install Playwright browser
         if: matrix.kind == 'browser'
-        run: playwright install --with-deps chromium
+        # `playwright install --with-deps` shells out to apt as root, so it
+        # inherits the same stall-forever failure as the mold/clang step. The
+        # cache above covers only the browser tarball -- a cache hit still runs
+        # the apt transaction -- so bound the whole thing.
+        run: timeout --signal=INT --kill-after=30s 8m playwright install --with-deps chromium
 
       - name: Checkout pinned Emulate fork
         if: matrix.kind == 'provider'
@@ -510,6 +515,7 @@ jobs:
           LANE: ${{ matrix.lane }}
           PROVIDER_SHARD: ${{ matrix.shard }}
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
+          IRONCLAW_E2E_ARTIFACT_DIR: ${{ runner.temp }}/e2e-artifacts
         run: |
           set -euo pipefail
           case "${LANE}" in
@@ -623,9 +629,18 @@ jobs:
           path: tests/e2e/screenshots/
           if-no-files-found: ignore
 
+      - name: Upload E2E diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reborn-e2e-${{ matrix.lane }}-diagnostics
+          path: ${{ runner.temp }}/e2e-artifacts/
+          if-no-files-found: ignore
+
   reborn-e2e:
     name: Reborn E2E
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     needs:
       - changes

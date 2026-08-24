@@ -289,6 +289,7 @@ SEL_V2 = {
     "admin_secret_delete_dialog": "[data-testid='admin-secret-delete-dialog']",
     "admin_secret_delete_confirm": "[data-testid='admin-secret-delete-confirm']",
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
+    "sidebar_nav_for": "nav-{id}",
     "sidebar_button": "#gateway-sidebar button",
     "nav_workspace": "[data-testid='nav-workspace']",
     "workspace_heading": "[data-testid='workspace-heading']",
@@ -312,6 +313,13 @@ SEL_V2 = {
     "nav_settings_inference": "a[href='/settings/inference']",
     "nav_settings_appearance": "a[href='/settings/appearance']",
     "settings_search_input": "input[type='search'][placeholder='Search settings...']",
+    "settings_model_selector": "[data-testid='settings-model-selector']",
+    "settings_model_selector_status": "[data-testid='settings-model-selector-status']",
+    "settings_model_policy_editor": "[data-testid='settings-model-policy-editor']",
+    "settings_model_policy_model_input": "[data-testid='settings-model-policy-model-input']",
+    "settings_model_policy_add_model": "[data-testid='settings-model-policy-add-model']",
+    "settings_model_policy_save": "[data-testid='settings-model-policy-save']",
+    "settings_model_policy_status": "[data-testid='settings-model-policy-status']",
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
@@ -349,6 +357,10 @@ SEL_V2 = {
     "notification_panel": "[data-testid='notification-panel']",
     "notification_row": "[data-testid='notification-row']",
     "notification_unread_dot": "[data-testid='notification-unread-dot']",
+    "notification_mark_all_read": "[data-testid='notification-mark-all-read']",
+    "notification_load_more": "[data-testid='notification-load-more']",
+    "notification_error_banner": "[data-testid='notification-error-banner']",
+    "notification_page_limit": "[data-testid='notification-page-limit']",
     "toast": "[data-testid='toast']",
     "toast_dismiss": "[data-testid='toast-dismiss']",
     "toast_viewport": "[data-rht-toaster]",
@@ -473,6 +485,9 @@ SEL_V2 = {
     ),
     "automation_action_for": (
         "[data-testid='automation-action-button'][data-automation-id='{id}']"
+    ),
+    "automation_run_now_for": (
+        "[data-testid='automation-run-now-button'][data-automation-id='{id}']"
     ),
     "automation_delete_for": (
         "[data-testid='automation-delete-button'][data-automation-id='{id}']"

@@ -81,9 +81,10 @@ pub trait RootFilesystem: Send + Sync {
 
     /// Lists direct children of a canonical virtual directory.
     ///
-    /// Lightweight: returns path + type, no payload, no pagination. Use
-    /// [`query`](Self::query) when you need pagination, filtering, or the
-    /// materialized entry bodies.
+    /// Lightweight: returns path + type and no payload. Use
+    /// [`list_dir_page`](Self::list_dir_page) for bounded keyset pagination,
+    /// or [`query`](Self::query) for indexed filtering and materialized entry
+    /// bodies.
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
 
     /// Lists at most `max_entries` direct children of a canonical virtual
@@ -98,6 +99,30 @@ pub trait RootFilesystem: Send + Sync {
         max_entries: usize,
     ) -> Result<Vec<DirEntry>, FilesystemError> {
         let mut entries = self.list_dir(path).await?;
+        entries.truncate(max_entries);
+        Ok(entries)
+    }
+
+    /// Lists a stable name-ordered keyset page of direct children.
+    ///
+    /// `after` is the final child name returned by the previous page. Backends
+    /// with native path ordering should override this method so memory remains
+    /// bounded by `max_entries`. The default preserves compatibility for
+    /// decorators and test doubles by filtering a materialized listing.
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        if max_entries == 0 {
+            return Ok(Vec::new());
+        }
+        let mut entries = self.list_dir(path).await?;
+        if let Some(after) = after {
+            entries.retain(|entry| entry.name.as_str() > after);
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
         entries.truncate(max_entries);
         Ok(entries)
     }

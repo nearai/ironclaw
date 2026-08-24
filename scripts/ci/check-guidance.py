@@ -8,7 +8,7 @@ routed readers to `crates/<crate>/…` paths that stopped existing when crates
 moved into family directories. A misled agent does not complain the way a
 misled human does — it silently produces a bad change — so guidance drift is a
 correctness bug, and the detectable classes belong in CI
-(`docs/reborn/guidance-conventions.md` closes with "the guidance half is this
+(`docs/internal/reborn/guidance-conventions.md` closes with "the guidance half is this
 convention's job"; this gate is that job's mechanical part).
 
 Five claims are checked, all against **git-tracked** state so local build
@@ -17,9 +17,15 @@ artifacts can never satisfy a reference and CI and a laptop agree:
   1. **References resolve.** Every repo path a guidance document names —
      backticked inline paths and relative markdown links in the root
      `AGENTS.md`/`CLAUDE.md`, every `AGENTS.md`/`CLAUDE.md`/`CONTRACT.md`/
-     `README.md` under `crates/`, `.claude/rules/*.md`, and
+     `README.md` under `crates/`, every `AGENTS.md`/`CLAUDE.md` under
+     `tests/`, `.claude/rules/*.md`, and
      `.claude/skills/*/SKILL.md` — must resolve to a tracked file or
-     directory.
+     directory. Published `docs/` pages (everything outside `docs/internal/`,
+     `zh/` mirror included) are scanned for backticked paths only — their
+     markdown links are Mintlify site routes, not repo paths. The
+     `docs/internal/` archive is excluded as a class, except the living spec
+     pages in `INTERNAL_GUIDANCE_PREFIXES`, which are scanned as full
+     guidance files (never published, so their links are repo-path claims).
   2. **Rule triggers are live.** Every `paths:` glob in a rule's (or skill's)
      frontmatter must match at least one tracked file. A rule whose glob
      matches nothing is a rule that never loads — the exact
@@ -34,8 +40,8 @@ artifacts can never satisfy a reference and CI and a laptop agree:
      and `crates/AGENTS.md` states "Every crate has one"; measured 2026-08-06
      the tree is at 62/62, so this gates rather than warns.
   5. **The `CLAUDE.md` alias rule holds.** Beside the root `AGENTS.md` and
-     every `AGENTS.md` under `crates/`, a `CLAUDE.md` must be tracked — and,
-     outside the two named real-file exceptions in
+     every `AGENTS.md` under `crates/` or `tests/`, a `CLAUDE.md` must be
+     tracked — and, outside the two named real-file exceptions in
      `ALIAS_REAL_FILE_EXCEPTIONS` below, tracked *as a symlink* (index mode
      `120000`) whose target is exactly `AGENTS.md`. Checked against the git
      **index**, not the working tree: a committed symlink deletion, or a link
@@ -73,9 +79,12 @@ gate gets disabled, which is worse than no gate):
   * the one reference immediately preceding a `check-guidance: path-ok`
     marker — put the marker in an HTML comment right after the deliberate
     example: `` `crates/…/myprovider.rs` <!-- check-guidance: path-ok -->``.
-    Unlike the glyph, the marker is per-reference, not per-line: other
-    references on the same line are still checked, so a fresh dangling path
-    cannot ride into the tree beside a vouched-for one.
+    In `.mdx` files (where raw HTML comments are not MDX syntax) use the MDX
+    comment form: `` {/* check-guidance: path-ok */}`` — both comment
+    syntaxes are recognized everywhere. Unlike the glyph, the marker is
+    per-reference, not per-line: other references on the same line are still
+    checked, so a fresh dangling path cannot ride into the tree beside a
+    vouched-for one.
 
 **How a reference resolves** — the ways this repository's guidance actually
 cites paths, each verified against the live tree before being modeled:
@@ -104,8 +113,9 @@ content owner adds the `✎` / `path-ok` marker those lines should carry.
 
 The gate fails closed on its own errors — unreadable file, unterminated or
 unparseable frontmatter, broken crate discovery, an extraction pass that finds
-almost nothing (floor constants below) — because "the checker crashed" must
-never be reported as "the guidance is fine".
+almost nothing (floor constants below), a docs.json navigation page missing
+from the docs scan — because "the checker crashed" must never be reported as
+"the guidance is fine".
 
     python3 scripts/ci/check-guidance.py           # verify
     python3 scripts/ci/check-guidance.py --json    # machine-readable report
@@ -126,15 +136,41 @@ import re
 import subprocess
 import sys
 
-_LIB = pathlib.Path(__file__).resolve().parent / "lib"
-sys.path.insert(0, str(_LIB))
+_CI = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(_CI / "lib"))
+sys.path.insert(0, str(_CI))
 
 import crate_tree  # noqa: E402  (scripts/ci/lib — the one discovery rule)
 
+# Owns the Mintlify navigation model; the docs-coverage check reuses it.
+import docs_publication_boundary  # noqa: E402  (scripts/ci)
+
 ROOT_GUIDANCE = ("AGENTS.md", "CLAUDE.md")
 CRATE_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md", "CONTRACT.md", "README.md")
+# `tests/` carries the same AGENTS.md-canonical/CLAUDE.md-alias shape as
+# crates/**, but none of the CONTRACT.md/README.md-per-crate convention —
+# only the two alias basenames are guidance here.
+TESTS_PREFIX = "tests/"
+TESTS_GUIDANCE_BASENAMES = ("AGENTS.md", "CLAUDE.md")
 RULES_PREFIX = ".claude/rules/"
 SKILLS_PREFIX = ".claude/skills/"
+# The docs scan reads the git tree, not the publication set (`.mintignore`
+# plays no part). docs/internal/ is excluded as a class: its dated plans and
+# ADRs describe the tree as it stood when written (measured 2026-08-07: 705
+# of 709 dangling docs references sat there).
+DOCS_PREFIX = "docs/"
+DOCS_EXCLUDED_PREFIX = "docs/internal/"
+# Living spec pages inside the archive, still cited as authoritative, so
+# they get the full guidance treatment — links included, since they are
+# never published. The extension-runtime siblings checklist.md and
+# implementation.md stay archival. Each prefix must match a tracked page or
+# discovery refuses (a zero-match means the corpus moved).
+INTERNAL_GUIDANCE_PREFIXES = (
+    "docs/internal/reborn/contracts/",
+    "docs/internal/reborn/extension-runtime/overview.md",
+    "docs/internal/reborn/extension-runtime/standard-operations.md",
+    "docs/internal/reborn/guidance-conventions.md",
+)
 
 CORRECTION_GLYPH = "✎"
 SUPPRESS_MARKER = "check-guidance: path-ok"
@@ -153,12 +189,12 @@ NON_PATH_IDENTIFIERS = frozenset(
     }
 )
 
-# The `CLAUDE.md` alias rule (docs/reborn/guidance-conventions.md, "How the
+# The `CLAUDE.md` alias rule (docs/internal/reborn/guidance-conventions.md, "How the
 # files actually load"): beside the root `AGENTS.md` and every `AGENTS.md`
-# under `crates/`, a `CLAUDE.md` symlink — index mode `120000`, target exactly
-# this string — keeps Claude Code auto-injection and AGENTS.md-reading tools
-# on the same bytes. A regular-file copy would drift; a deleted or retargeted
-# link silently splits the two audiences again.
+# under `crates/` or `tests/`, a `CLAUDE.md` symlink — index mode `120000`,
+# target exactly this string — keeps Claude Code auto-injection and
+# AGENTS.md-reading tools on the same bytes. A regular-file copy would drift;
+# a deleted or retargeted link silently splits the two audiences again.
 ALIAS_TARGET = "AGENTS.md"
 
 # Named real-file exceptions to the alias rule — the only two, each carrying
@@ -184,15 +220,19 @@ ALIAS_REAL_FILE_EXCEPTIONS: dict[str, str] = {
 # extraction pass that finds almost no path references, means the discovery
 # globs or the extractor broke — not that the repository stopped documenting
 # itself. Refuse rather than report an empty scan as clean. (Measured
-# 2026-08-06 on the shipped tree: 237 guidance files, ~2070 path references,
-# 38 rule globs, 65 AGENTS.md/CLAUDE.md alias pairs. Re-measure with `--json`
-# and re-date this comment when the numbers move materially.) Each floor sits
-# roughly half of its measured value: low enough that legitimate
-# consolidation never trips it, high enough that a parser or discovery pass
-# silently degrading to a handful of hits refuses instead of passing — a
-# floor of 1 catches only total loss, not the degraded-but-nonzero shape.
-MIN_GUIDANCE_FILES = 40
-MIN_PATH_REFERENCES = 80
+# 2026-08-07 on the shipped tree, after the docs/ surface joined the scan:
+# 364 guidance files, ~2276 path references, 57 rule globs, 65
+# AGENTS.md/CLAUDE.md alias pairs. Re-measure with `--json` and re-date this
+# comment when the numbers move materially.) Each floor sits roughly half of
+# its measured value: low enough that legitimate consolidation never trips
+# it, high enough that a parser or discovery pass silently degrading to a
+# handful of hits refuses instead of passing — a floor of 1 catches only
+# total loss, not the degraded-but-nonzero shape. The docs surface has no
+# count floor: `check_docs_nav_coverage` validates it against docs.json
+# navigation instead, and the internal spec prefixes have their own
+# zero-match refusal.
+MIN_GUIDANCE_FILES = 180
+MIN_PATH_REFERENCES = 1100
 MIN_RULE_GLOBS = 20
 MIN_ALIAS_PAIRS = 40
 
@@ -403,11 +443,82 @@ def discover_guidance(tree: Tree) -> list[str]:
     for path in sorted(tree.files):
         if path.startswith("crates/") and path.rsplit("/", 1)[-1] in CRATE_GUIDANCE_BASENAMES:
             docs.append(path)
+        elif path.startswith(TESTS_PREFIX) and path.rsplit("/", 1)[-1] in TESTS_GUIDANCE_BASENAMES:
+            docs.append(path)
         elif path.startswith(RULES_PREFIX) and path.endswith(".md") and "/" not in path[len(RULES_PREFIX):]:
             docs.append(path)
         elif path.startswith(SKILLS_PREFIX) and path.endswith("/SKILL.md"):
             docs.append(path)
+        elif (
+            path.startswith(DOCS_PREFIX)
+            and path.endswith((".md", ".mdx"))
+            and (
+                not path.startswith(DOCS_EXCLUDED_PREFIX)
+                or path.startswith(INTERNAL_GUIDANCE_PREFIXES)
+            )
+        ):
+            docs.append(path)
+    for prefix in INTERNAL_GUIDANCE_PREFIXES:
+        if not any(path.startswith(prefix) for path in docs):
+            raise GuidanceError(
+                f"living internal spec prefix {prefix!r} matched no tracked "
+                "pages — the corpus moved or was renamed, and leaving the "
+                "prefix stale would silently drop it from the scan. Update "
+                "INTERNAL_GUIDANCE_PREFIXES to the new location."
+            )
     return docs
+
+
+def check_docs_nav_coverage(repo_root: pathlib.Path, docs: list[str]) -> int:
+    """Every page docs.json navigation publishes must be in the scan.
+
+    Validates docs discovery against the published surface itself instead of
+    a count floor: a broken filter refuses on the first missing nav page.
+    OpenAPI pseudo-pages ("GET /users") have no source file and are skipped,
+    matching docs_publication_boundary.py. Zero covered pages also refuses —
+    an empty navigation would validate nothing.
+    """
+    docs_json = repo_root / "docs" / "docs.json"
+    try:
+        manifest = json.loads(docs_json.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise GuidanceError(
+            f"cannot read docs/docs.json ({error}) — the published-page set "
+            "cannot be derived, so docs discovery cannot be validated."
+        ) from error
+    scanned = frozenset(docs)
+    covered = 0
+    uncovered: list[str] = []
+    for page in sorted(
+        docs_publication_boundary.collect_nav_pages(manifest.get("navigation", {}))
+    ):
+        if docs_publication_boundary.OPENAPI_PAGE_RE.match(page):
+            continue
+        if any(
+            f"docs/{page}{suffix}" in scanned
+            for suffix in docs_publication_boundary.PAGE_SUFFIXES
+        ):
+            covered += 1
+        else:
+            uncovered.append(page)
+    if uncovered:
+        shown = ", ".join(uncovered[:10])
+        more = f" (and {len(uncovered) - 10} more)" if len(uncovered) > 10 else ""
+        raise GuidanceError(
+            f"docs.json navigation publishes pages the reference scan does "
+            f"not cover: {shown}{more}. Either the docs branch of discovery "
+            "broke (fix DOCS_PREFIX/DOCS_EXCLUDED_PREFIX) or a navigation "
+            "entry has no tracked source file (docs_publication_boundary.py "
+            "fails on that too); refusing rather than leaving published "
+            "prose unchecked."
+        )
+    if covered == 0:
+        raise GuidanceError(
+            "docs.json navigation names no source-backed pages — the "
+            "coverage check has nothing to validate docs discovery against; "
+            "refusing rather than passing vacuously."
+        )
+    return covered
 
 
 def _read_guidance(path: pathlib.Path) -> str:
@@ -415,6 +526,14 @@ def _read_guidance(path: pathlib.Path) -> str:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
         raise GuidanceError(f"cannot read guidance file {path}: {error}") from error
+
+
+# Comment syntaxes stripped from prose before extraction. HTML comments are
+# markdown's native form; MDX (the `.mdx` pages under `docs/`) rejects raw
+# HTML comments and uses JSX comment braces instead. Both are recognized in
+# every file — a marker's meaning must not change when a page is renamed
+# between `.md` and `.mdx`.
+_COMMENT_SYNTAXES: tuple[tuple[str, str], ...] = (("<!--", "-->"), ("{/*", "*/}"))
 
 
 def _reference_lines(text: str, doc: str) -> list[tuple[int, str, tuple[int, ...]]]:
@@ -428,10 +547,12 @@ def _reference_lines(text: str, doc: str) -> list[tuple[int, str, tuple[int, ...
     """
     lines: list[tuple[int, str, tuple[int, ...]]] = []
     in_fence = False
-    in_comment = False
+    # The closing delimiter of a comment that opened on an earlier line, or
+    # None outside comments. Which syntax opened decides which closer ends it.
+    pending_close: str | None = None
     for number, raw in enumerate(text.splitlines(), start=1):
         stripped = raw.strip()
-        if not in_comment and stripped.startswith("```"):
+        if pending_close is None and stripped.startswith("```"):
             in_fence = not in_fence
             continue
         if in_fence:
@@ -440,38 +561,50 @@ def _reference_lines(text: str, doc: str) -> list[tuple[int, str, tuple[int, ...
             continue
         line = raw
         markers: list[int] = []
-        if in_comment:
-            end = line.find("-->")
+        if pending_close is not None:
+            end = line.find(pending_close)
             if end == -1:
                 continue
             # A marker inside a comment that opened on an earlier line has no
             # same-line reference before it; position 0 suppresses nothing.
-            if SUPPRESS_MARKER in line[: end + 3]:
+            if SUPPRESS_MARKER in line[: end + len(pending_close)]:
                 markers.append(0)
-            line = line[end + 3 :]
-            in_comment = False
+            line = line[end + len(pending_close) :]
+            pending_close = None
         # Comments are collapsed left to right, so a recorded position stays
         # valid in the final string: everything before it is comment-free.
         while True:
-            start = line.find("<!--")
-            if start == -1:
+            openings = [
+                (position, opener, closer)
+                for opener, closer in _COMMENT_SYNTAXES
+                if (position := line.find(opener)) != -1
+            ]
+            if not openings:
                 break
-            end = line.find("-->", start)
+            start, opener, closer = min(openings)
+            end = line.find(closer, start + len(opener))
             if end == -1:
                 if SUPPRESS_MARKER in line[start:]:
                     markers.append(start)
                 line = line[:start]
-                in_comment = True
+                pending_close = closer
                 break
-            if SUPPRESS_MARKER in line[start : end + 3]:
+            if SUPPRESS_MARKER in line[start : end + len(closer)]:
                 markers.append(start)
-            line = line[:start] + line[end + 3 :]
+            line = line[:start] + line[end + len(closer) :]
         if line.strip():
             lines.append((number, line, tuple(markers)))
     if in_fence:
         raise GuidanceError(
             f"{doc}: unterminated ``` fence — the extractor cannot tell prose "
             "from code, so it refuses rather than scanning the wrong half."
+        )
+    if pending_close is not None:
+        opener = next(o for o, c in _COMMENT_SYNTAXES if c == pending_close)
+        raise GuidanceError(
+            f"{doc}: unterminated {opener} comment — every line after it "
+            "would be silently un-scanned, the same fail-open shape the "
+            "fence refusal above exists to prevent."
         )
     return lines
 
@@ -536,6 +669,18 @@ def extract_references(
 ) -> list[Reference]:
     references: list[Reference] = []
     base = str(pathlib.PurePosixPath(doc).parent)
+    # Under docs/, markdown link targets are Mintlify site routes
+    # (extensionless page paths, `/using/cli` site-absolute forms) — a
+    # different namespace than the tracked tree, so the link extractor is off
+    # there by design. Backticked repo paths remain checked. The living
+    # internal spec pages are the exception: they are fenced out of
+    # publication (never a site route), and their relative links
+    # (`](kernel-boundary.md)`) are genuine repo-path claims — renaming one
+    # contract file would leave every cross-reference dangling with the gate
+    # green.
+    include_links = not doc.startswith(DOCS_PREFIX) or doc.startswith(
+        INTERNAL_GUIDANCE_PREFIXES
+    )
     previous_spans: list[str] = []
     for number, line, markers in _reference_lines(text, doc):
         inline_matches = list(_INLINE_CODE.finditer(line))
@@ -557,11 +702,14 @@ def extract_references(
                 candidates.append(
                     (match.end(), Reference(doc, number, token, context))
                 )
-        for match in _MARKDOWN_LINK.finditer(line):
-            token = _resolve_link(doc, match.group(1))
-            if token is None or _NOT_A_PATH.search(token):
-                continue
-            candidates.append((match.end(), Reference(doc, number, token, context)))
+        if include_links:
+            for match in _MARKDOWN_LINK.finditer(line):
+                token = _resolve_link(doc, match.group(1))
+                if token is None or _NOT_A_PATH.search(token):
+                    continue
+                candidates.append(
+                    (match.end(), Reference(doc, number, token, context))
+                )
         candidates.sort(key=lambda item: item[0])
         # A `path-ok` marker vouches for the one reference immediately before
         # it — never the whole line, so a fresh dangling path beside a
@@ -877,7 +1025,7 @@ def check_family_tables(
                 problems.append(
                     f"  crates/{family}/ has crates but no tracked {family_agents} — "
                     "every family carries its boundary document "
-                    "(docs/reborn/guidance-conventions.md)"
+                    "(docs/internal/reborn/guidance-conventions.md)"
                 )
                 rows_by_family[family] = []
             else:
@@ -906,7 +1054,7 @@ def check_family_tables(
         if f"{crate.directory}/README.md" not in tree.files:
             problems.append(
                 f"  {crate.directory} has no tracked README.md — the convention "
-                "requires one per crate (docs/reborn/guidance-conventions.md), "
+                "requires one per crate (docs/internal/reborn/guidance-conventions.md), "
                 "and crates/AGENTS.md states every crate has one"
             )
     return problems, tabled
@@ -924,7 +1072,8 @@ def check_claude_aliases(
     agents_docs = ["AGENTS.md"] + sorted(
         path
         for path in tree.files
-        if path.startswith("crates/") and path.endswith("/AGENTS.md")
+        if path.endswith("/AGENTS.md")
+        and (path.startswith("crates/") or path.startswith(TESTS_PREFIX))
     )
     if len(agents_docs) < MIN_ALIAS_PAIRS:
         raise GuidanceError(
@@ -959,10 +1108,10 @@ def check_claude_aliases(
         if alias not in tree.files:
             problems.append(
                 f"  {agents} has no tracked CLAUDE.md beside it — every "
-                "AGENTS.md at the root and under crates/ carries a "
+                "AGENTS.md at the root and under crates/ or tests/ carries a "
                 "`CLAUDE.md -> AGENTS.md` symlink alias so Claude Code "
                 "auto-injection and AGENTS.md readers see the same bytes "
-                "(docs/reborn/guidance-conventions.md). Restore it: "
+                "(docs/internal/reborn/guidance-conventions.md). Restore it: "
                 f"`ln -s AGENTS.md {alias} && git add {alias}`"
             )
         elif alias not in symlinks:
@@ -1025,6 +1174,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"{MIN_GUIDANCE_FILES}). The discovery globs or the checkout broke; "
                 "refusing rather than scanning almost nothing."
             )
+        # All scanned docs/ files; published-surface health is nav_pages_covered.
+        docs_files = sum(1 for doc in docs if doc.startswith(DOCS_PREFIX))
+        nav_covered = check_docs_nav_coverage(repo_root, docs)
         crates = load_crates(repo_root)
         reference_problems, warnings, references = check_references(
             repo_root, docs, tree, crates
@@ -1039,6 +1191,8 @@ def main(argv: list[str] | None = None) -> int:
     problems = reference_problems + glob_problems + table_problems + alias_problems
     report = {
         "guidance_files": len(docs),
+        "docs_files": docs_files,
+        "nav_pages_covered": nav_covered,
         "path_references": references,
         "rule_globs": globs_checked,
         "crates_tabled": crates_tabled,
@@ -1071,6 +1225,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "guidance: OK "
         f"({len(docs)} guidance files, {references} path references verified, "
+        f"{nav_covered} published docs pages nav-covered, "
         f"{globs_checked} frontmatter globs live, {crates_tabled} crates tabled "
         f"in their family AGENTS.md with README.md present, "
         f"{aliases_verified} CLAUDE.md aliases verified, "

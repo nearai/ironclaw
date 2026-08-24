@@ -363,7 +363,7 @@ The scattered sites shrink to pointers, same change:
 
 ## 10. Law and docs
 
-- **`docs/reborn/extension-runtime/overview.md` §5.4 rewrite:** the outbound
+- **`docs/internal/reborn/extension-runtime/overview.md` §5.4 rewrite:** the outbound
   section gains model-initiated delivery as a first-class policy-class intent
   through the same coordinator. The sole-writer rule, attempt persistence, and
   crash semantics are restated to cover it; the boundary note becomes: the

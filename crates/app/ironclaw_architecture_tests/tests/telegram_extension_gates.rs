@@ -4,10 +4,10 @@
 //!    must never grow a `telegram_bot` / `telegram_personal` /
 //!    `telegram_channel` companion identity (the pattern #6116's
 //!    `reborn_retired_taxonomy` gate pins for Slack).
-//! 2. The Reborn context stays free of the v1 pairing surface: no
-//!    `/api/pairing/` route literals in `crates/` or the webui v2 frontend —
-//!    Telegram pairing is the WebGeneratedCode flow under
-//!    `/api/webchat/v2/channels/telegram/pairing`.
+//! 2. The workspace-bot channel and personal linked-account tools use separate
+//!    ceremonies on the same extension: generated-code pairing binds the bot
+//!    actor, while device link grants the caller's MTProto account.
+//! 3. The Reborn context stays free of the retired v1 `/api/pairing/` routes.
 
 #[allow(dead_code)]
 mod ratchet_support;
@@ -167,6 +167,37 @@ fn generic_extension_lifecycle_has_no_telegram_knowledge() {
     assert!(
         offenders.is_empty(),
         "generic extension lifecycle contains Telegram-only policy symbols: {offenders:?}"
+    );
+}
+
+#[test]
+fn telegram_bot_pairing_and_personal_device_link_remain_independent() {
+    let manifest = crate_path(
+        &workspace_root(),
+        "crates/extensions/packages/telegram/manifest.toml",
+    );
+    let source = std::fs::read_to_string(&manifest).expect("Telegram manifest readable");
+    let channel_connection = source
+        .split("\n[channel.connection]\n")
+        .nth(1)
+        .and_then(|tail| tail.split("\n[channel.connection.notices]\n").next())
+        .expect("Telegram channel connection section");
+    let auth = source
+        .split("\n[auth.telegram]\n")
+        .nth(1)
+        .and_then(|tail| tail.split("\n[[tools]]\n").next())
+        .expect("Telegram auth section");
+
+    assert!(
+        channel_connection.contains("strategy = \"web_generated_code\"")
+            && channel_connection
+                .contains("deep_link_template = \"https://t.me/{bot_username}?start={code}\"")
+            && channel_connection.contains("inbound_code_prefixes = [\"/start\"]"),
+        "Telegram bot identity must use the generic generated-code pairing ceremony"
+    );
+    assert!(
+        auth.contains("method = \"device_link\""),
+        "Telegram personal-account tools must keep the independent device-link ceremony"
     );
 }
 
@@ -358,11 +389,6 @@ fn no_retired_taxonomy_telegram_identifiers() {
         if display.contains("telegram_extension_gates.rs") {
             continue;
         }
-        // `crates/ironclaw_gateway/static` is the v1 monolith's embedded UI,
-        // retained until the monolith retires — not reborn context.
-        if display.contains("ironclaw_gateway/static") {
-            continue;
-        }
         let Ok(contents) = std::fs::read_to_string(&file) else {
             continue;
         };
@@ -392,9 +418,7 @@ fn reborn_context_free_of_v1_pairing_routes() {
     let mut offenders = Vec::new();
     for file in rust_and_frontend_files(&root.join("crates")) {
         let display = file.display().to_string();
-        if display.contains("telegram_extension_gates.rs")
-            || display.contains("ironclaw_gateway/static")
-        {
+        if display.contains("telegram_extension_gates.rs") {
             continue;
         }
         let Ok(contents) = std::fs::read_to_string(&file) else {
@@ -415,8 +439,8 @@ fn reborn_context_free_of_v1_pairing_routes() {
     }
     assert!(
         offenders.is_empty(),
-        "v1 pairing route literals found in the reborn context (telegram pairing is \
-         /api/webchat/v2/channels/telegram/pairing):\n{}",
+        "v1 pairing route literals found in the reborn context (pairing is generic: \
+         /api/webchat/v2/extensions/{{extension_id}}/pairing/{{action}}):\n{}",
         offenders.join("\n")
     );
 }

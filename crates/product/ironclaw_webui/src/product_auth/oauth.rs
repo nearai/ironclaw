@@ -103,8 +103,17 @@ pub(super) async fn oauth_flow_status_handler(
         invocation_id: query.invocation_id,
     };
     let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
-    let status = run_with_backend_timeout(state.product_auth.flow_status(&scope, flow_id)).await?;
-    Ok(Json(OAuthFlowStatusResponse { status }))
+    // The whole record, not just its status: §8.12's additive device-link
+    // frame rides this response so a re-rendered card hydrates from the
+    // durable flow instead of starting a second link. Reading is all this
+    // does — a device link *advances* through its own poll operation, which
+    // makes a vendor call and is a route of its own.
+    let record = run_with_backend_timeout(state.product_auth.flow_record(&scope, flow_id)).await?;
+    Ok(Json(OAuthFlowStatusResponse {
+        status: record.status,
+        flow_id: record.id,
+        device_link: ironclaw_auth::product_prompt::device_link_view_for_flow(&record),
+    }))
 }
 
 pub(super) async fn oauth_flow_reconcile_handler(
@@ -124,7 +133,13 @@ pub(super) async fn oauth_flow_reconcile_handler(
     let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
     let status =
         run_with_backend_timeout(state.product_auth.reconcile_oauth_flow(&scope, flow_id)).await?;
-    Ok(Json(OAuthFlowStatusResponse { status }))
+    // Reconcile is an OAuth-only command; it echoes the id it was called with
+    // and never carries a device-link frame.
+    Ok(Json(OAuthFlowStatusResponse {
+        status,
+        flow_id,
+        device_link: None,
+    }))
 }
 
 /// Recipe-driven extension OAuth start: the requested vendor resolves to its

@@ -8,7 +8,6 @@ from typing import Any
 
 from journey_types import ProviderJourneyReplayFacts, SlackChannelFixture
 
-TRACE_BOOTSTRAP_TOOLS = frozenset({"builtin__extension_search"})
 MISSING_SLACK_CHANNEL_ID = "C_REBORN_QA_10E_MISSING"
 
 
@@ -74,7 +73,6 @@ def _provider_leg(
                 call
                 for call in response["tool_calls"]
                 if call["name"] in provider_tools
-                or call["name"] in TRACE_BOOTSTRAP_TOOLS
             ]
             if calls:
                 provider_steps.append(

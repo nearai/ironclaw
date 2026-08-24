@@ -99,10 +99,11 @@ own recipient field names, their own error strings. Consequences:
 - **Wire naming:** dotted capability id → `__` wire name
   (`capability_port.rs:3099-3115`); Slack's 8 ids are already exactly
   `slack.<op_name>` for 8 of the 16 core op names, so re-badging changes zero ids.
-- **Structured guest errors exist:** WASM guests may return `{code, kind}`
-  (`crates/kernel/ironclaw_host_runtime/src/services/wasm_execution.rs:333-349`), code
-  sanitized to `[A-Za-z0-9_.-]{,64}` and surfaced on the model-visible cause channel
-  — the transport for the standard error taxonomy.
+- **Structured guest errors exist:** WASM guests return the WIT
+  `guest-failure` record with a closed, vendor-neutral `kind` and optional
+  `code` and `message` (`crates/lanes/ironclaw_wasm/wit/tool.wit`). The host
+  scrubs both text carriers at sandbox egress before surfacing them on the
+  model-visible cause channel — the transport for the standard error taxonomy.
 - **Slack WASM dispatches on capability id already:** single `execute(params,
   context)` entry; `context.capability_id` maps to an internal action
   (`assets/slack/wasm-src/src/lib.rs:171-188`) — the ABI needs no change.
@@ -291,9 +292,9 @@ pinned at plan time with a regression test asserting model-visibility.
 ## 8. Error taxonomy
 
 Closed code vocabulary, host-owned. Codes ride the existing channels — structured
-WASM guest errors (`{code, kind}`) and `ToolError::Failed` safe summaries for
-first-party — so no new plumbing. The standard defines the codes, their meaning, and
-their failure class:
+WASM `guest-failure` records (`kind` plus optional `code` and `message`) and
+`ToolError::Rejected` host summaries for first-party adapters — so no new
+plumbing. The standard defines the codes, their meaning, and their failure class:
 
 **Amended 2026-07-29 post-audit** (pre-merge amendment wave W6): added
 `messaging.outside_messaging_window` (row marked †, 11 → 12 codes). Also
@@ -408,7 +409,7 @@ No WebUI changes → no frontend/e2e gate triggered.
 
 ## 12. Documentation
 
-- New normative page `docs/reborn/extension-runtime/standard-operations.md`
+- New normative page `docs/internal/reborn/extension-runtime/standard-operations.md`
   (vocabulary, binding rules, contract principles, error taxonomy) + a short §3.4
   pointer in `overview.md`. `openwiki/` untouched (auto-generated).
 - `.claude/skills/reborn-extension-surfaces`: new subsection on binding standard
@@ -417,7 +418,7 @@ No WebUI changes → no frontend/e2e gate triggered.
   `crates/contracts/ironclaw_host_api/src/product_adapter/channel_adapter.rs`). The sibling
   project flagged the same lines; whoever lands second takes a trivial doc rebase.
 - This spec's Appendix A/B pin the canonical contracts; the durable normative copy
-  lands in `docs/reborn/extension-runtime/` with the implementation.
+  lands in `docs/internal/reborn/extension-runtime/` with the implementation.
 
 ## 13. Deliberately not built
 

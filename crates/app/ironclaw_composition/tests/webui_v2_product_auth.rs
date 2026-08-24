@@ -2179,3 +2179,257 @@ async fn product_auth_callback_malformed_flow_id_uses_sanitized_error() {
     assert!(!body.contains("malformed-flow-pkce"));
     assert!(dispatcher.events().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Device-link routes.
+//
+// The four operations are driven end to end over the real mounted router,
+// against a scripted vendor driver: start -> poll -> poll -> submit(password)
+// -> completed. What these prove is the transport half — that a card can
+// actually run a link through HTTP, that the frame it renders from carries
+// §8.12's fields, and that a stale revision is refused rather than replayed.
+// The vendor conversation itself is `ironclaw_auth`'s and is tested there.
+// ---------------------------------------------------------------------------
+
+const DEVICE_LINK_VENDOR: &str = "acmevendor";
+const DEVICE_LINK_EXTENSION: &str = "acme-personal";
+
+fn device_link_recipe() -> ironclaw_auth::ResolvedVendorAuthRecipe {
+    let recipe: ironclaw_extension_contracts::recipe::VendorAuthRecipe = toml::from_str(
+        "method = \"device_link\"\n\
+         display_name = \"Acme personal account\"\n\
+         alternate_mode_label = \"Use my number\"\n",
+    )
+    .expect("device-link recipe parses");
+    ironclaw_auth::ResolvedVendorAuthRecipe {
+        vendor: DEVICE_LINK_VENDOR.to_string(),
+        recipe,
+        token_exchange_resource: None,
+        protected_resource_metadata_url: None,
+    }
+}
+
+fn build_app_with_device_link() -> (axum::Router, Arc<ironclaw_auth::RecordingDeviceLinkDriver>) {
+    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        Arc::new(InMemoryAuthProductServices::new()),
+        dispatcher,
+    ));
+    let vendor = Arc::new(ironclaw_auth::RecordingDeviceLinkDriver::new());
+    product_auth.attach_device_link(
+        Arc::new(ironclaw_auth::DeviceLinkFlowDriver::new(
+            vendor.clone(),
+            product_auth.flow_manager(),
+            Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
+                device_link_recipe(),
+            ])),
+        )),
+        // The revoker half is exercised by the extension host's own suite; a
+        // route test needs only the flow driver, so this stays the fail-closed
+        // slot rather than a second scripted double pretending to be a vendor.
+        Arc::new(ironclaw_auth::DeferredLinkedDeviceRevoker::default()),
+    );
+    (
+        build_app_with_product_auth_service_and_config(product_auth),
+        vendor,
+    )
+}
+
+async fn post_device_link(
+    app: &axum::Router,
+    operation: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/reborn/product-auth/device-link/{operation}"))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+async fn device_link_json(response: axum::response::Response) -> serde_json::Value {
+    let body = read_body_string(response).await;
+    serde_json::from_str(&body).expect("device-link responses are JSON objects")
+}
+
+#[tokio::test]
+async fn device_link_routes_drive_a_link_from_start_to_completion() {
+    let (app, vendor) = build_app_with_device_link();
+    let invocation = InvocationId::new().to_string();
+
+    let started = post_device_link(
+        &app,
+        "start",
+        json!({
+            "provider": DEVICE_LINK_VENDOR,
+            "extension_name": DEVICE_LINK_EXTENSION,
+            "mode": "default",
+            "invocation_id": invocation,
+        }),
+    )
+    .await;
+    assert_eq!(started.status(), StatusCode::OK);
+    let started = device_link_json(started).await;
+    let flow_id = started["flow_id"]
+        .as_str()
+        .expect("start returns a flow id")
+        .to_string();
+    let frame = started["device_link"].clone();
+    assert_eq!(
+        frame["step"], "display",
+        "the first frame shows the payload"
+    );
+    // §8.12's additive fields: without `flow_id` a card cannot poll or submit,
+    // and without `mode` it cannot offer the other path.
+    assert_eq!(frame["flow_id"], flow_id);
+    assert_eq!(frame["mode"], "default");
+    assert!(frame["qr_payload"].is_string());
+
+    // Poll until the vendor asks for the account password. The scripted driver
+    // answers `AwaitingVendor` once before it does.
+    let mut frame = frame;
+    for _ in 0..3 {
+        if frame["step"] == "input_required" {
+            break;
+        }
+        let polled = post_device_link(
+            &app,
+            "poll",
+            json!({ "flow_id": flow_id, "invocation_id": invocation }),
+        )
+        .await;
+        assert_eq!(polled.status(), StatusCode::OK);
+        frame = device_link_json(polled).await["device_link"].clone();
+    }
+    assert_eq!(frame["step"], "input_required");
+    assert_eq!(
+        frame["input_kind"], "password",
+        "the card needs the real input kind, or it renders a password in the clear"
+    );
+    let revision = frame["revision"].as_u64().expect("frames carry a revision");
+
+    // A submission typed against a superseded frame is refused, not replayed:
+    // the value is a credential and the transition is not idempotent.
+    let stale = post_device_link(
+        &app,
+        "input",
+        json!({
+            "flow_id": flow_id,
+            "revision": revision.saturating_sub(1),
+            "kind": "password",
+            "value": "hunter2",
+            "invocation_id": invocation,
+        }),
+    )
+    .await;
+    assert_eq!(
+        stale.status(),
+        StatusCode::CONFLICT,
+        "a stale-revision submit must not reach the vendor"
+    );
+
+    let submitted = post_device_link(
+        &app,
+        "input",
+        json!({
+            "flow_id": flow_id,
+            "revision": revision,
+            "kind": "password",
+            "value": "hunter2",
+            "invocation_id": invocation,
+        }),
+    )
+    .await;
+    assert_eq!(submitted.status(), StatusCode::OK);
+    let submitted = device_link_json(submitted).await;
+    assert_eq!(submitted["status"], "completed");
+    assert_eq!(submitted["device_link"]["step"], "completed");
+
+    // The vendor saw exactly one submission — the refused one never reached it.
+    let submits = vendor
+        .calls()
+        .into_iter()
+        .filter(|call| matches!(call, ironclaw_auth::DeviceLinkDriverCall::Submit(..)))
+        .count();
+    assert_eq!(submits, 1, "the stale submit must not have been replayed");
+
+    // The shared flow-status route serves the same record as a pure read, so a
+    // re-rendered card hydrates without advancing anything.
+    let status =
+        get_oauth_flow_status(&app, &flow_id, &format!("?invocation_id={invocation}")).await;
+    assert_eq!(status.status(), StatusCode::OK);
+    let status = device_link_json(status).await;
+    assert_eq!(status["status"], "completed");
+    assert_eq!(status["flow_id"], flow_id);
+    assert_eq!(status["device_link"]["step"], "completed");
+}
+
+#[tokio::test]
+async fn device_link_cancel_terminalizes_the_flow_and_asks_the_vendor_to_tear_down() {
+    let (app, vendor) = build_app_with_device_link();
+    let invocation = InvocationId::new().to_string();
+
+    let started = device_link_json(
+        post_device_link(
+            &app,
+            "start",
+            json!({
+                "provider": DEVICE_LINK_VENDOR,
+                "extension_name": DEVICE_LINK_EXTENSION,
+                "invocation_id": invocation,
+            }),
+        )
+        .await,
+    )
+    .await;
+    let flow_id = started["flow_id"].as_str().expect("flow id").to_string();
+
+    let canceled = post_device_link(
+        &app,
+        "cancel",
+        json!({ "flow_id": flow_id, "invocation_id": invocation }),
+    )
+    .await;
+    assert_eq!(canceled.status(), StatusCode::OK);
+    assert_eq!(device_link_json(canceled).await["status"], "canceled");
+
+    // The vendor teardown is the whole reason cancel is a route: an
+    // accepted-but-abandoned link otherwise leaves a live authorization.
+    assert!(
+        vendor
+            .calls()
+            .iter()
+            .any(|call| matches!(call, ironclaw_auth::DeviceLinkDriverCall::Cancel(..))),
+        "cancel must reach the vendor, not merely close the record"
+    );
+}
+
+#[tokio::test]
+async fn device_link_routes_report_unavailable_when_no_driver_is_composed() {
+    // A deployment that composed no device-link driver says so, rather than
+    // 404-ing as though the caller's flow were unknown.
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        Arc::new(InMemoryAuthProductServices::new()),
+        Arc::new(RecordingAuthDispatcher::default()),
+    ));
+    let app = build_app_with_product_auth_service_and_config(product_auth);
+
+    let response = post_device_link(
+        &app,
+        "start",
+        json!({
+            "provider": DEVICE_LINK_VENDOR,
+            "extension_name": DEVICE_LINK_EXTENSION,
+            "invocation_id": InvocationId::new().to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}

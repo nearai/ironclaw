@@ -64,7 +64,7 @@ REBORN_BASELINE_PATH = REPO_ROOT / "scripts" / "no_panics_reborn_baseline.txt"
 # since the WS7 family move, which keeps the
 # package name and only renames the directory — PROPOSAL §5.1). Keying on the
 # path meant a move turned the whole gate into a crash or, worse, a shrunken
-# scan. See docs/reborn/target-architecture/CHECKLIST.md WS10.
+# scan. See docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 SHIPPING_PACKAGE_NAME = "ironclaw"
 
 
@@ -444,6 +444,11 @@ def has_cfg_test_module_declaration(
     source_parent = repository_root / parent
     if source_parent.is_dir():
         candidates.extend(source_parent.glob("*.rs"))
+        repository_root_resolved = repository_root.resolve()
+        for ancestor in source_parent.resolve().parents:
+            if ancestor == repository_root_resolved.parent:
+                break
+            candidates.extend(ancestor.glob("*.rs"))
     if posix_path.parent.name == "src":
         candidates.extend(
             [
@@ -457,16 +462,22 @@ def has_cfg_test_module_declaration(
     )
     path_declaration = re.compile(
         rf"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
-        rf"#\s*\[\s*path\s*=\s*[\"']{re.escape(posix_path.name)}[\"']\s*\]\s*"
+        r"#\s*\[\s*path\s*=\s*[\"']([^\"']+)[\"']\s*\]\s*"
+        r"(?:#\s*\[[^\]]+\]\s*)*"
         r"(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
     )
+    target = (repository_root / pathlib.Path(*posix_path.parts)).resolve()
     for candidate in candidates:
         try:
             source = candidate.read_text(encoding="utf-8")
         except (FileNotFoundError, OSError, UnicodeError):
             continue
-        if declaration.search(source) or path_declaration.search(source):
+        if declaration.search(source):
             return True
+        for path_match in path_declaration.finditer(source):
+            declared = (candidate.parent / pathlib.Path(path_match.group(1))).resolve()
+            if declared == target:
+                return True
     return False
 
 
@@ -634,7 +645,7 @@ def shipping_reborn_source_roots(metadata: dict) -> list[pathlib.Path]:
     (``crates/<family>/ironclaw_*``): fewer files scanned, panics in the moved
     crates unreviewed, and the gate still green for any crate that happened to
     carry no baseline entries. See
-    docs/reborn/target-architecture/CHECKLIST.md WS10.
+    docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 
     Fail-closed: every reachable workspace member must resolve to a crate
     directory *and* contribute at least one production target root. A member
@@ -1223,6 +1234,14 @@ class CheckNoPanicsTests(unittest.TestCase):
                 "crates/kernel/ironclaw_processes/src/journal_store/state_tests.rs"
             )
         )
+        # Nested path attributes are also test-only when the source module
+        # spells the path relative to the crate's `src/` directory. This is
+        # the layout used by `system_inference.rs`.
+        self.assertTrue(
+            is_test_only_path(
+                "crates/loop/ironclaw_loop_host/src/system_inference/tests.rs"
+            )
+        )
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/test_helpers.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/lib.rs"))
@@ -1250,6 +1269,41 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertFalse(
             is_test_only_path("crates/extensions/packages/memory-native/src/contract_tests.rs")
         )
+
+    def test_cfg_path_declaration_walks_ancestor_modules(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
+            root = pathlib.Path(directory)
+            (root / "src/outer/inner").mkdir(parents=True)
+            source = root / "src/lib.rs"
+            source.write_text(
+                "#[cfg(test)]\n"
+                '#[path = "outer/inner/fixture_tests.rs"]\n'
+                "mod fixture_tests;\n",
+                encoding="utf-8",
+            )
+
+            target = root / "src/outer/inner/fixture_tests.rs"
+            self.assertTrue(
+                has_cfg_test_module_declaration(target.as_posix(), root)
+            )
+
+    def test_cfg_path_declaration_allows_intervening_attributes(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as directory:
+            root = pathlib.Path(directory)
+            (root / "src/with_attrs").mkdir(parents=True)
+            source = root / "src/with_attrs.rs"
+            source.write_text(
+                "#[cfg(test)]\n"
+                '#[path = "with_attrs/tests.rs"]\n'
+                "#[allow(dead_code)]\n"
+                "mod tests;\n",
+                encoding="utf-8",
+            )
+
+            target = root / "src/with_attrs/tests.rs"
+            self.assertTrue(
+                has_cfg_test_module_declaration(target.as_posix(), root)
+            )
 
     def test_lifetime_annotations_do_not_desync_braces(self) -> None:
         """Lifetime annotations ('a, 'static) must not be parsed as char literals.

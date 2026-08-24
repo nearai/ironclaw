@@ -9,6 +9,9 @@ use super::{host::LoopSafeSummary, system_inference::SystemInferenceTaskId};
 #[serde(rename_all = "snake_case")]
 pub enum CompactionInitiator {
     Auto,
+    /// Compaction triggered because the bounded recent-message window omitted
+    /// durable model-visible transcript entries.
+    WindowEviction,
     /// Proactive compaction triggered when a single capability result exceeds
     /// the byte-cap policy threshold. Fires from the PostCapabilityStage
     /// before the oversized result is appended to the context window.
@@ -23,6 +26,10 @@ pub enum CompactionInitiator {
 pub enum LoopCompactionMode {
     /// Build a fresh summary for the selected transcript range.
     Fresh,
+    /// Build a fresh summary after the bounded recent-message window reports
+    /// an omitted stable boundary. This mode additionally permits a finalized
+    /// tool-result terminal boundary.
+    WindowEviction,
     /// Update an existing summary with a later transcript range.
     Update,
 }
@@ -40,7 +47,7 @@ pub struct LoopCompactionRequest {
     pub drop_through_seq: u64,
     /// Estimated tail budget the strategy wanted preserved outside the range.
     pub preserve_tail_tokens: u64,
-    /// Fresh versus incremental summary mode.
+    /// Requested summary and cut-point validation mode.
     pub mode: LoopCompactionMode,
     /// Deadline for any inference work needed by compaction.
     pub deadline_ms: u64,

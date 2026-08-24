@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_assistant::{
-    LifecyclePackageKind, LifecyclePackageRef, RebornOutboundDeliveryTargetId,
+    AUTOMATION_RUN_COMMAND, LifecyclePackageKind, LifecyclePackageRef,
+    RebornAutomationMutationResponse, RebornAutomationRequest, RebornOutboundDeliveryTargetId,
 };
 use ironclaw_composition::{
     ChannelExtensionBinding, RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity,
@@ -25,13 +26,15 @@ use ironclaw_composition::{
 };
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind};
 use ironclaw_extension_contracts::external::ExternalActorRef;
+use ironclaw_host_api::execution_policy::{ResultDeliveryPolicy, TurnExecutionPolicy};
+use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_PROVIDER_TOOL_NAME;
 use ironclaw_host_api::product_adapter::AdapterInstallationId as ProductAdapterInstallationId;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, CapabilitySet, EffectKind, GrantConstraints},
     ids::{
-        AgentId, CapabilityGrantId, CapabilityId, ExtensionId, ProviderToolName, RunId, TenantId,
-        UserId,
+        ActivityId, AgentId, CapabilityGrantId, CapabilityId, ExtensionId, ProviderToolName, RunId,
+        TenantId, UserId,
     },
     mount::MountView,
     resource::ResourceEstimate,
@@ -39,16 +42,17 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    TRIGGER_RUN_CAPABILITY_ID,
 };
 use ironclaw_loop_contracts::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -57,13 +61,19 @@ use ironclaw_outbound::{
     CommunicationPreferenceRecord, DeliveryDefaultScope, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryStore,
 };
+use ironclaw_product_contracts::{
+    notification_inbox::{
+        NOTIFICATIONS_VIEW, ProductListNotificationsResponse, ProductNotificationKind,
+    },
+    surface::{ProductSurfaceCaller, ProductSurfaceInvokeRequest, ProductSurfaceQueryRequest},
+};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
-    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerId,
-    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerExecutionSpec,
+    TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
+use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnScope};
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -71,10 +81,22 @@ const TENANT: &str = "trigger-e2e-tenant";
 const USER: &str = "trigger-e2e-owner";
 const AGENT: &str = "trigger-e2e-agent";
 const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
+
+fn trigger_execution_contract(goal: impl Into<String>) -> Value {
+    json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
+    })
+}
 const QA_9B_PROMPT: &str = "QA_9B scheduled health digest";
 const QA_9B_RESULT: &str = "QA_9B scheduled health digest complete";
 const QA_9D_PROMPT: &str = "QA_9D scheduled release digest";
 const QA_9D_RESULT: &str = "QA_9D scheduled release digest complete";
+const QA_SILENT_PROMPT: &str = "QA_SILENT scheduled no-change check";
 const SLACK_TEAM: &str = "T-TRIGGER-E2E";
 const SLACK_USER: &str = "U-TRIGGER-E2E";
 const SLACK_DEFAULT_DM: &str = "D-TRIGGER-DEFAULT";
@@ -193,6 +215,70 @@ impl HostManagedModelGateway for DeliveryJourneyGateway {
         self.requests.lock().await.push(request);
         Ok(HostManagedModelResponse::assistant_reply(reply.to_string()))
     }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        if !request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(QA_SILENT_PROMPT))
+        {
+            return self.stream_model(request).await;
+        }
+        let request_number = {
+            let mut requests = self.requests.lock().await;
+            requests.push(request);
+            requests
+                .iter()
+                .filter(|request| {
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains(QA_SILENT_PROMPT))
+                })
+                .count()
+        };
+        let (call_id, tool_name, arguments) = if request_number == 1 {
+            (
+                "scheduled-suppression-prior-tool",
+                "builtin__trigger_list",
+                json!({}),
+            )
+        } else {
+            (
+                "scheduled-suppression-result",
+                STRUCTURED_RESULT_PROVIDER_TOOL_NAME,
+                json!({"outcome": "nothing_to_report"}),
+            )
+        };
+        let call = ProviderToolCall {
+            provider_id: "scheduled-suppression-e2e-provider".to_string(),
+            provider_model_id: "scheduled-suppression-e2e-model".to_string(),
+            turn_id: Some("scheduled-suppression-e2e-turn".to_string()),
+            id: call_id.to_string(),
+            name: ProviderToolName::new(tool_name).expect("provider tool name"),
+            arguments,
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    error.safe_summary,
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -275,7 +361,7 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// Model gateway for T0-5505-E2E: on its FIRST turn of the fired run,
 /// attempts to register EVERY scheduled-trigger mutator capability
 /// (`builtin.trigger_create`, `builtin.trigger_remove`, `builtin.trigger_pause`,
-/// `builtin.trigger_resume`) as real provider tool calls — as a real native
+/// `builtin.trigger_resume`, `builtin.trigger_run`) as real provider tool calls — as a real native
 /// provider tool call would — directly against the fired run's actual
 /// (composed) capability port via `stream_model_with_capabilities`. This is
 /// the same seam a production LLM-provider-backed gateway uses to turn a raw
@@ -287,9 +373,9 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// Generalized from a single `trigger_create`-only attempt (PR #5515 review:
 /// "production mutator deny set only has create covered end-to-end — the
 /// full-path poller test only attempts `builtin.trigger_create`") to cover
-/// all four mutators from the SAME first turn:
+/// all five mutators from the SAME first turn:
 /// `HostManagedModelResponse::capability_calls` already takes a `Vec`, so all
-/// four registration attempts are made, and any that resolve are forwarded,
+/// five registration attempts are made, and any that resolve are forwarded,
 /// before the turn's single response is returned. This closes the drift risk
 /// where the production `SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS` deny set
 /// could accidentally drop `trigger_remove`/`trigger_pause`/`trigger_resume`
@@ -301,7 +387,7 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// `provider_tool_call_capability_ids` override (delegating to `inner` so
 /// deferred/disclosed tools still resolve — see #5149's progressive tool
 /// disclosure), then scope-checks the resolved id against its deny set
-/// before ever building a candidate. All four mutator ids are on the fix's
+/// before ever building a candidate. All five mutator ids are on the fix's
 /// scheduled_trigger deny set, so every scope check fails closed with
 /// `AgentLoopHostErrorKind::InvalidInvocation` /
 /// "provider tool call targets a disabled capability" — registration never
@@ -313,7 +399,7 @@ impl NetworkHttpEgress for FakeSlackProvider {
 /// forwarded together as one `capability_calls` response, which the loop
 /// will actually dispatch — including staging the real JSON input through
 /// the run's real `StagedCapabilityIo`, so a genuinely unpatched surface
-/// would really create a second trigger and/or remove/pause/resume the
+/// would really create a second trigger and/or remove/pause/resume/run the
 /// target trigger. If every registration is denied (the fixed, expected
 /// behavior), there is nothing to dispatch and a plain reply is returned
 /// instead so the run still terminates cleanly.
@@ -326,7 +412,7 @@ struct TriggerMutatorAttemptGateway {
     call_count: TokioMutex<usize>,
     /// Set by the test body, before the fire is triggered, to the id of the
     /// already-created legitimate trigger. `trigger_remove`/`trigger_pause`/
-    /// `trigger_resume`'s attempts target this record — a real `trigger_id`
+    /// `trigger_resume`/`trigger_run` attempts target this record — a real `trigger_id`
     /// is required to shape a realistic input for those capabilities' input
     /// schema, even though the scope-check denial happens before the payload
     /// is ever read.
@@ -369,7 +455,8 @@ impl TriggerMutatorAttemptGateway {
             ),
             (TRIGGER_REMOVE_CAPABILITY_ID, mutator_payload.clone()),
             (TRIGGER_PAUSE_CAPABILITY_ID, mutator_payload.clone()),
-            (TRIGGER_RESUME_CAPABILITY_ID, mutator_payload),
+            (TRIGGER_RESUME_CAPABILITY_ID, mutator_payload.clone()),
+            (TRIGGER_RUN_CAPABILITY_ID, mutator_payload),
         ]
         .into_iter()
         .map(|(capability_id, arguments)| {
@@ -474,6 +561,76 @@ impl HostManagedModelGateway for TriggerMutatorAttemptGateway {
     }
 }
 
+#[derive(Default)]
+struct CapabilityProbeGateway {
+    outcome: TokioMutex<Option<Result<(), String>>>,
+}
+
+impl CapabilityProbeGateway {
+    async fn outcome(&self) -> Option<Result<(), String>> {
+        self.outcome.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for CapabilityProbeGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(HostManagedModelResponse::assistant_reply(
+            "structured trigger probe had no capability port".to_string(),
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        _request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let call = ProviderToolCall {
+            provider_id: "structured-trigger-e2e-provider".to_string(),
+            provider_model_id: "structured-trigger-e2e-model".to_string(),
+            turn_id: Some("structured-trigger-e2e-turn".to_string()),
+            id: "structured-trigger-list-probe".to_string(),
+            name: ProviderToolName::new(provider_tool_name_for_capability_id(
+                TRIGGER_LIST_CAPABILITY_ID,
+            ))
+            .expect("trigger-list provider tool name"),
+            arguments: json!({}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let outcome = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.safe_summary);
+        *self.outcome.lock().await = Some(outcome);
+        Ok(HostManagedModelResponse::assistant_reply(
+            "structured trigger capability probe complete".to_string(),
+        ))
+    }
+}
+
+async fn wait_for_capability_probe(
+    gateway: &CapabilityProbeGateway,
+    deadline: Duration,
+) -> Result<(), String> {
+    let stop = Instant::now() + deadline;
+    loop {
+        if let Some(outcome) = gateway.outcome().await {
+            return outcome;
+        }
+        assert!(
+            Instant::now() < stop,
+            "capability probe did not reach the model"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// Poll `repo` until `predicate` returns `true` or `deadline` elapses.
 ///
 /// Returns the last record seen. If the predicate is satisfied before the
@@ -520,7 +677,7 @@ async fn wait_for_mutator_registration_outcomes(
     loop {
         let captured_contents = gateway.captured_message_contents().await;
         let outcomes = gateway.registration_outcomes().await;
-        if outcomes.len() == 4 || Instant::now() >= stop {
+        if outcomes.len() == 5 || Instant::now() >= stop {
             return (captured_contents, outcomes);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -598,11 +755,19 @@ async fn build_runtime_with_slack_delivery(
     .with_network_http_egress_for_test(slack_provider)
     .with_channel_extension_bindings(vec![ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
         outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
     }]);
     let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
@@ -781,6 +946,7 @@ async fn seed_due_delivery_trigger(
     repository: &Arc<dyn TriggerRepository>,
     prompt: &str,
     delivery_target: Option<&str>,
+    execution_spec: Option<TriggerExecutionSpec>,
 ) -> TriggerId {
     let trigger_id = TriggerId::new();
     let fire_at = Utc::now() - chrono::Duration::seconds(120);
@@ -791,10 +957,11 @@ async fn seed_due_delivery_trigger(
             creator_user_id: UserId::new(USER).expect("valid user id"),
             agent_id: Some(AgentId::new(AGENT).expect("valid agent id")),
             project_id: None,
-            name: format!("{prompt} trigger"),
+            name: format!("delivery test {trigger_id}"),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
             prompt: prompt.to_string(),
+            execution_spec,
             delivery_target: delivery_target.map(|target| {
                 TriggerDeliveryTargetId::new(target).expect("valid trigger delivery target")
             }),
@@ -848,6 +1015,65 @@ async fn wait_for_recorded_outcome(
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+async fn wait_for_trigger_run_status(
+    repository: &Arc<dyn TriggerRepository>,
+    trigger_id: TriggerId,
+    run_id: TurnRunId,
+    expected: TriggerRunHistoryStatus,
+) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let history = repository
+            .list_trigger_run_history(
+                TenantId::new(TENANT).expect("valid tenant id"),
+                trigger_id,
+                10,
+            )
+            .await
+            .expect("read trigger run history");
+        if history
+            .iter()
+            .any(|run| run.run_id == Some(run_id) && run.status == expected)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "trigger {trigger_id} run {run_id} did not reach {expected:?} within 15s: {history:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn invoke_run_automation(
+    runtime: &RebornRuntime,
+    trigger_id: TriggerId,
+) -> RebornAutomationMutationResponse {
+    let surface = runtime.product_surface(None).expect("product surface");
+    let response = surface
+        .invoke(
+            ProductSurfaceCaller::new(
+                TenantId::new(TENANT).expect("valid tenant id"),
+                UserId::new(USER).expect("valid user id"),
+                Some(AgentId::new(AGENT).expect("valid agent id")),
+                None,
+            ),
+            ProductSurfaceInvokeRequest {
+                operation_id: AUTOMATION_RUN_COMMAND
+                    .capability_id()
+                    .expect("automation run capability id"),
+                input: serde_json::to_value(RebornAutomationRequest {
+                    automation_id: trigger_id.to_string(),
+                })
+                .expect("automation run request"),
+                activity_id: ActivityId::new(),
+            },
+        )
+        .await
+        .expect("run automation through product surface");
+    serde_json::from_value(response.output).expect("automation run response")
 }
 
 /// Same as [`build_runtime_with`], but with an explicit
@@ -904,6 +1130,17 @@ fn seed_test_secret_master_key(root: &Path) {
 }
 
 async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
+    let outcome = invoke_trigger_create_outcome(runtime, input).await;
+    let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected trigger create to complete, got {outcome:?}");
+    };
+    completed.output
+}
+
+async fn invoke_trigger_create_outcome(
+    runtime: &RebornRuntime,
+    input: Value,
+) -> RuntimeCapabilityOutcome {
     // The Tools-settings global auto-approve switch is authoritative for
     // first-party tool dispatch; turn it on for the trigger management
     // scope so the create call (and the poller-submitted turn that shares the
@@ -921,11 +1158,10 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
         })
         .await
         .expect("enable global auto-approve for trigger management dispatch");
-
     let host_runtime = runtime
         .host_runtime_for_test()
         .expect("runtime exposes host runtime");
-    let outcome = host_runtime
+    host_runtime
         .invoke_capability((
             trigger_management_execution_context(),
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
@@ -933,11 +1169,7 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
             input,
         ))
         .await
-        .expect("trigger create invocation completes");
-    let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
-        panic!("expected trigger create to complete, got {outcome:?}");
-    };
-    completed.output
+        .expect("trigger create invocation completes")
 }
 
 fn trigger_management_execution_context() -> ExecutionContext {
@@ -1044,6 +1276,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         schedule: TriggerSchedule::once(Utc::now() - chrono::Duration::seconds(120), "UTC")
             .expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
@@ -1173,8 +1406,15 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
 /// while keeping the id costs nothing — so the step is written anyway,
 /// carrying the id. An earlier draft treated non-resolution as "destination is
 /// gone" and wiped the route; this test failed on exactly that.
-#[tokio::test]
-async fn stored_delivery_target_trigger_is_migrated_to_prompt() {
+#[test]
+fn stored_delivery_target_trigger_is_migrated_to_prompt() {
+    run_async_test_with_stack(
+        "stored_delivery_target_trigger_is_migrated_to_prompt",
+        stored_delivery_target_trigger_is_migrated_to_prompt_async,
+    );
+}
+
+async fn stored_delivery_target_trigger_is_migrated_to_prompt_async() {
     const LEGACY_PROMPT: &str = "stored-target-era digest prompt";
     let root = tempfile::tempdir().expect("tempdir");
     let model_gateway = Arc::new(DeliveryJourneyGateway::default());
@@ -1207,6 +1447,7 @@ async fn stored_delivery_target_trigger_is_migrated_to_prompt() {
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
             prompt: LEGACY_PROMPT.to_string(),
+            execution_spec: None,
             delivery_target: Some(
                 TriggerDeliveryTargetId::new(QA_9B_TARGET_ID).expect("valid delivery target"),
             ),
@@ -1287,12 +1528,33 @@ async fn stored_delivery_target_trigger_is_migrated_to_prompt() {
     third.shutdown().await.expect("third runtime shutdown");
 }
 
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// QA-9B + QA-9D whole-path regression, retargeted to the explicit-delivery
 /// model (spec §8): a scheduled fire's RESULT is never pushed to a channel.
 ///
 /// due trigger -> trusted ingress -> real Reborn run -> persisted final reply
-/// in the fire's own run thread -> background-run notifier -> **nothing on any
-/// channel**.
+/// in the fire's own run thread -> durable Inbox outcome, while the background
+/// delivery notifier still sends **nothing on any channel**.
 ///
 /// The two arms are the two ways the retired routing used to pick a
 /// destination: QA-9B had none (it inherited the creator's default), QA-9D
@@ -1320,24 +1582,82 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
     let delivery_store = runtime
         .triggered_run_delivery_store_for_test()
         .expect("local runtime exposes the production triggered-delivery store");
-    let default_target_trigger = seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None).await;
+    let default_target_trigger =
+        seed_due_delivery_trigger(&repository, QA_9B_PROMPT, None, None).await;
     let explicit_target_trigger =
-        seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID)).await;
+        seed_due_delivery_trigger(&repository, QA_9D_PROMPT, Some(QA_9D_TARGET_ID), None).await;
+    let suppressed_spec = TriggerExecutionSpec {
+        version: 1,
+        goal: QA_SILENT_PROMPT.to_string(),
+        success_criteria: vec!["Report only when changes exist".to_string()],
+        output_instructions: "Return a concise change summary".to_string(),
+        no_result_text: "No changes".to_string(),
+        policy: TurnExecutionPolicy {
+            result_delivery: ResultDeliveryPolicy::SuppressWhenNothingToReport,
+            ..TurnExecutionPolicy::default()
+        },
+    };
+    let suppressed_prompt = suppressed_spec.render_prompt();
+    let suppressed_trigger = seed_due_delivery_trigger(
+        &repository,
+        &suppressed_prompt,
+        Some(QA_9B_TARGET_ID),
+        Some(suppressed_spec),
+    )
+    .await;
 
-    wait_for_recorded_outcome(
+    let default_run_id = wait_for_recorded_outcome(
         &repository,
         &delivery_store,
         default_target_trigger,
         TriggeredRunDeliveryOutcomeKind::Skipped,
     )
     .await;
-    wait_for_recorded_outcome(
+    let suppressed_run_id = wait_for_recorded_outcome(
+        &repository,
+        &delivery_store,
+        suppressed_trigger,
+        TriggeredRunDeliveryOutcomeKind::Suppressed,
+    )
+    .await;
+    let explicit_run_id = wait_for_recorded_outcome(
         &repository,
         &delivery_store,
         explicit_target_trigger,
         TriggeredRunDeliveryOutcomeKind::Skipped,
     )
     .await;
+
+    let suppressed_thread_id = repository
+        .list_trigger_run_history(
+            TenantId::new(TENANT).expect("valid tenant id"),
+            suppressed_trigger,
+            1,
+        )
+        .await
+        .expect("read suppressed trigger run history")
+        .into_iter()
+        .find(|run| run.run_id == Some(suppressed_run_id))
+        .and_then(|run| run.thread_id)
+        .expect("suppressed run has a canonical thread id");
+    let outbound_state = runtime
+        .outbound_delivery_stores_for_test()
+        .expect("local runtime exposes the production outbound state store")
+        .0;
+    let suppressed_attempts = outbound_state
+        .list_delivery_attempts(TurnScope::new_with_owner(
+            TenantId::new(TENANT).expect("valid tenant id"),
+            Some(AgentId::new(AGENT).expect("valid agent id")),
+            None,
+            suppressed_thread_id,
+            Some(UserId::new(USER).expect("valid user id")),
+        ))
+        .await
+        .expect("read suppressed run delivery attempts");
+    assert!(
+        suppressed_attempts.is_empty(),
+        "suppression must happen before delivery reservation: {suppressed_attempts:?}"
+    );
 
     assert!(
         slack_provider.provider_messages().is_empty(),
@@ -1359,6 +1679,78 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         1,
         "QA-9D must execute exactly one model run"
     );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(QA_SILENT_PROMPT)
+            .await,
+        2,
+        "the suppressible routine must perform prior tool work before its typed result"
+    );
+
+    let caller = ProductSurfaceCaller::new(
+        TenantId::new(TENANT).expect("tenant"),
+        UserId::new(USER).expect("user"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        None,
+    );
+    let surface = runtime.product_surface(None).expect("product surface");
+    let inbox = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = surface
+                .query(
+                    caller.clone(),
+                    ProductSurfaceQueryRequest {
+                        view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                        input: json!({ "limit": 10 }),
+                        cursor: None,
+                        limit: None,
+                    },
+                )
+                .await
+                .expect("query notification Inbox");
+            let response: ProductListNotificationsResponse = serde_json::from_value(
+                page.items
+                    .into_iter()
+                    .next()
+                    .expect("notification response payload"),
+            )
+            .expect("decode notification response");
+            if response.notifications.len() == 2 {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background completion notifications arrive");
+    assert!(
+        inbox
+            .notifications
+            .iter()
+            .all(|notification| notification.kind == ProductNotificationKind::RunCompleted),
+        "only selected completed results are materialized: {:?}",
+        inbox.notifications
+    );
+    let notified_runs = inbox
+        .notifications
+        .iter()
+        .filter_map(|notification| notification.turn_run_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        notified_runs,
+        std::collections::BTreeSet::from(
+            [default_run_id.to_string(), explicit_run_id.to_string(),]
+        ),
+        "ordinary scheduled completions notify, while NothingToReport stays suppressed"
+    );
+
+    // The identities themselves are what dedupe on replay.
+    let record_count_before_restart = inbox.notifications.len();
+    let identities_before_restart = inbox
+        .notifications
+        .iter()
+        .map(|notification| notification.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
 
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(
@@ -1374,7 +1766,79 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
     )
     .await;
     register_delivery_targets(&restarted);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let restarted_surface = restarted.product_surface(None).expect("restarted surface");
+    let replayed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let replayed_page = restarted_surface
+                .query(
+                    caller.clone(),
+                    ProductSurfaceQueryRequest {
+                        view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                        input: json!({ "limit": 10 }),
+                        cursor: None,
+                        limit: None,
+                    },
+                )
+                .await
+                .expect("query Inbox while observer replay settles");
+            let replayed: ProductListNotificationsResponse = serde_json::from_value(
+                replayed_page
+                    .items
+                    .into_iter()
+                    .next()
+                    .expect("replayed notification payload"),
+            )
+            .expect("decode replayed Inbox");
+            if replayed.notifications.len() >= record_count_before_restart {
+                break replayed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("observer replay reaches the pre-restart notification count");
+    assert_eq!(
+        replayed.notifications.len(),
+        record_count_before_restart,
+        "restart/replay must not add a second record under an already-existing id"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let settled_page = restarted_surface
+        .query(
+            caller,
+            ProductSurfaceQueryRequest {
+                view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                input: json!({ "limit": 10 }),
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect("query Inbox after observer replay settles");
+    let settled: ProductListNotificationsResponse = serde_json::from_value(
+        settled_page
+            .items
+            .into_iter()
+            .next()
+            .expect("settled notification payload"),
+    )
+    .expect("decode settled Inbox");
+    assert_eq!(
+        settled.notifications.len(),
+        record_count_before_restart,
+        "restart/replay must remain at the pre-restart count after a settle window"
+    );
+    assert_eq!(
+        settled
+            .notifications
+            .iter()
+            .map(|notification| notification.id.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        identities_before_restart,
+        "restart/replay resolves to the same notification identities, so a replayed \
+         commit is absorbed by its stable id instead of arriving twice"
+    );
     restarted
         .shutdown()
         .await
@@ -1394,6 +1858,101 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         1,
         "restart must not rerun QA-9D"
     );
+    assert_eq!(
+        model_gateway
+            .request_count_containing(QA_SILENT_PROMPT)
+            .await,
+        2,
+        "restart must not rerun or dispatch the suppressed result"
+    );
+}
+
+#[tokio::test]
+async fn product_run_now_uses_manual_fire_path_and_reaches_delivery_settlement() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let model_gateway = Arc::new(DeliveryJourneyGateway::default());
+    let slack_provider = Arc::new(FakeSlackProvider::default());
+    let runtime = build_runtime_with_slack_delivery(
+        &root,
+        Arc::clone(&model_gateway),
+        Arc::clone(&slack_provider),
+    )
+    .await;
+    pair_trigger_creator(&runtime).await;
+
+    let repository = runtime.trigger_repository();
+    let tenant_id = TenantId::new(TENANT).expect("valid tenant id");
+    let trigger_id = TriggerId::new();
+    let scheduled_slot = Utc::now() + chrono::Duration::hours(1);
+    repository
+        .upsert_trigger(TriggerRecord {
+            trigger_id,
+            tenant_id: tenant_id.clone(),
+            creator_user_id: UserId::new(USER).expect("valid user id"),
+            agent_id: Some(AgentId::new(AGENT).expect("valid agent id")),
+            project_id: None,
+            name: "manual run delivery journey".to_string(),
+            source: TriggerSourceKind::Schedule,
+            schedule: TriggerSchedule::cron("0 * * * *").expect("valid hourly schedule"),
+            prompt: QA_9B_PROMPT.to_string(),
+            execution_spec: None,
+            delivery_target: None,
+            state: TriggerState::Scheduled,
+            next_run_at: scheduled_slot,
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("seed future automation");
+
+    let response = invoke_run_automation(&runtime, trigger_id).await;
+    assert!(
+        response.updated,
+        "run-now must report the caller-scoped mutation"
+    );
+
+    let delivery_store = runtime
+        .triggered_run_delivery_store_for_test()
+        .expect("local runtime exposes the production triggered-delivery store");
+    let run_id = wait_for_recorded_outcome(
+        &repository,
+        &delivery_store,
+        trigger_id,
+        TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured,
+    )
+    .await;
+    wait_for_trigger_run_status(&repository, trigger_id, run_id, TriggerRunHistoryStatus::Ok).await;
+
+    let settled = repository
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("read manually fired automation")
+        .expect("automation remains present");
+    assert_eq!(
+        settled.next_run_at, scheduled_slot,
+        "manual fire must not advance the recurring schedule"
+    );
+    let history = repository
+        .list_trigger_run_history(tenant_id, trigger_id, 1)
+        .await
+        .expect("read manual run history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].source, TriggerSourceKind::Manual);
+    assert_eq!(
+        model_gateway.request_count_containing(QA_9B_PROMPT).await,
+        1,
+        "run-now must execute through the canonical trigger runner"
+    );
+    assert!(
+        slack_provider.provider_messages().is_empty(),
+        "manual and scheduled runs share the explicit-delivery policy"
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]
@@ -1416,7 +1975,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         &runtime,
         json!({
             "name": "trigger-e2e-created-by-tool",
-            "prompt": TRIGGER_PROMPT,
+            "execution_contract": trigger_execution_contract(TRIGGER_PROMPT),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )
@@ -1446,7 +2005,14 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         .await
         .expect("get created trigger")
         .expect("created trigger persisted");
-    assert_eq!(record.prompt, TRIGGER_PROMPT);
+    assert!(
+        record.prompt.contains(TRIGGER_PROMPT),
+        "rendered trigger prompt must preserve the frozen goal"
+    );
+    assert!(
+        record.execution_spec.is_some(),
+        "builtin trigger creation must persist the structured execution contract"
+    );
     assert_eq!(record.creator_user_id, user_id);
     assert_eq!(record.name, "trigger-e2e-created-by-tool");
 
@@ -1534,7 +2100,7 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
         &runtime,
         json!({
             "name": "trigger-e2e-created-by-tool-fires-twice",
-            "prompt": TRIGGER_PROMPT,
+            "execution_contract": trigger_execution_contract(TRIGGER_PROMPT),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )
@@ -1686,6 +2252,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() + chrono::Duration::seconds(3600),
@@ -1792,6 +2359,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: fire_at,
@@ -1916,6 +2484,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         // Every minute — recurring cron stays Scheduled after each fire.
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: original_next_run_at,
@@ -2017,28 +2586,151 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
     );
 }
 
+#[tokio::test]
+async fn structured_trigger_empty_allowlist_reaches_the_fired_run_and_exposes_no_tools() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(CapabilityProbeGateway::default());
+    let runtime = build_runtime_with_tool_disclosure(
+        &root,
+        Arc::clone(&gateway),
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
+        ),
+        ToolDisclosureMode::Off,
+    )
+    .await;
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let repo = runtime.trigger_repository();
+
+    let invalid = invoke_trigger_create_outcome(
+        &runtime,
+        json!({
+            "name": "structured-missing-capability",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Use a missing capability",
+                "success_criteria": ["Return a result"],
+                "output_instructions": "Return concise Markdown",
+                "no_result_text": "No result is available",
+                "policy": {
+                    "allowed_capability_ids": ["missing.capability"],
+                    "result_delivery": "deliver"
+                }
+            },
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(invalid, RuntimeCapabilityOutcome::Failed(_)),
+        "creation preflight must reject an unavailable capability before persistence: {invalid:?}"
+    );
+    assert!(
+        repo.list_triggers(tenant_id.clone())
+            .await
+            .expect("list triggers after rejected preflight")
+            .is_empty(),
+        "a failed creation preflight must not persist a trigger"
+    );
+    let missing_skill = invoke_trigger_create_outcome(
+        &runtime,
+        json!({
+            "name": "structured-missing-skill",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Use a missing skill",
+                "success_criteria": ["Return a result"],
+                "output_instructions": "Return concise Markdown",
+                "no_result_text": "No result is available",
+                "policy": {
+                    "required_skills": ["missing-trigger-skill"],
+                    "result_delivery": "deliver"
+                }
+            },
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(missing_skill, RuntimeCapabilityOutcome::Failed(_)),
+        "creation preflight must reject an unavailable skill before persistence: {missing_skill:?}"
+    );
+    assert!(
+        repo.list_triggers(tenant_id.clone())
+            .await
+            .expect("list triggers after rejected skill preflight")
+            .is_empty(),
+        "a failed skill preflight must not persist a trigger"
+    );
+
+    let created = invoke_trigger_create(
+        &runtime,
+        json!({
+            "name": "structured-empty-tool-surface",
+            "execution_contract": {
+                "version": 1,
+                "goal": "Report trigger status",
+                "success_criteria": ["Return a definitive status"],
+                "output_instructions": "Return concise Markdown",
+                "no_result_text": "No trigger status is available",
+                "policy": {
+                    "allowed_capability_ids": [],
+                    "result_delivery": "deliver"
+                }
+            },
+            "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
+        }),
+    )
+    .await;
+    let trigger_id = TriggerId::parse(
+        created["trigger"]["trigger_id"]
+            .as_str()
+            .expect("created trigger id"),
+    )
+    .expect("valid trigger id");
+    let mut record = repo
+        .get_trigger(tenant_id.clone(), trigger_id)
+        .await
+        .expect("get structured trigger")
+        .expect("structured trigger persisted");
+    assert!(record.execution_spec.is_some(), "contract must persist");
+    record.next_run_at = Utc::now() - chrono::Duration::seconds(120);
+    repo.upsert_trigger(record)
+        .await
+        .expect("make structured trigger due");
+
+    let outcome = wait_for_capability_probe(gateway.as_ref(), Duration::from_secs(15)).await;
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    assert_eq!(
+        outcome,
+        Err("provider tool call is outside the visible capability surface".to_string()),
+        "Some([]) must reach the scheduled run as an empty tool surface"
+    );
+}
+
 /// T0-5505-E2E: end-to-end proof that issue #5505's fix composes through the
 /// real Reborn runtime — a scheduled-trigger fire resolves the dedicated
 /// `scheduled_trigger` capability surface, and a fired run that tries to
-/// create a *second* trigger, or remove/pause/resume the existing one,
-/// cannot, because all four mutator capabilities are stripped from that
+/// create a *second* trigger, or remove/pause/resume/run the existing one,
+/// cannot, because all five mutator capabilities are stripped from that
 /// surface (`builtin.trigger_list` and firing itself stay intact).
 ///
 /// Unlike the other tests in this file, the fired run's model gateway
 /// (`TriggerMutatorAttemptGateway`) does not just record requests — on the fired
 /// run's first turn it registers real `builtin.trigger_create`,
-/// `builtin.trigger_remove`, `builtin.trigger_pause`, and
-/// `builtin.trigger_resume` provider tool calls against the run's actual
+/// `builtin.trigger_remove`, `builtin.trigger_pause`, `builtin.trigger_resume`,
+/// and `builtin.trigger_run` provider tool calls against the run's actual
 /// composed `LoopCapabilityPort` (the exact seam a native provider tool-call
 /// response goes through in production) — one attempting to create a second
-/// trigger named `SELF_CREATE_MARKER_TRIGGER_NAME`, the other three
+/// trigger named `SELF_CREATE_MARKER_TRIGGER_NAME`, the other four
 /// targeting the already-created legitimate trigger. See
 /// `TriggerMutatorAttemptGateway`'s doc comment for why this exercises the real
 /// `CapabilitySurfacePolicyFilter` and disclosure chain instead of a stand-in,
-/// and for why all four mutators — not just
+/// and for why all five mutators — not just
 /// `trigger_create` — are covered here (PR #5515 review comment: a
 /// full-path test that only exercised `trigger_create` would not catch the
-/// production deny constant accidentally dropping one of the other three).
+/// production deny constant accidentally dropping one of the other four).
 #[tokio::test]
 async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
     scheduled_trigger_denies_mutators_with_tool_disclosure(ToolDisclosureMode::Off).await;
@@ -2055,7 +2747,7 @@ async fn scheduled_trigger_fire_cannot_invoke_trigger_mutators() {
 /// exactly one usage anywhere in the repo (an unrelated system-prompt test),
 /// so nothing exercised that decorator-ordering composition end-to-end; a
 /// decorator-order or bridged-disclosure regression could have re-exposed
-/// `trigger_create`/`remove`/`pause`/`resume` without any whole-path test
+/// `trigger_create`/`remove`/`pause`/`resume`/`run` without any whole-path test
 /// failing. Keep this alongside the `Off` variant rather than folding it in
 /// — it pins the composition order, not just the deny outcome.
 #[tokio::test]
@@ -2085,7 +2777,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         &runtime,
         json!({
             "name": "trigger-e2e-self-create-guard",
-            "prompt": TRIGGER_PROMPT,
+            "execution_contract": trigger_execution_contract(TRIGGER_PROMPT),
             "schedule": { "kind": "cron", "expression": "* * * * *", "timezone": "UTC" }
         }),
     )
@@ -2143,9 +2835,9 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
 
     assert_eq!(
         registration_outcomes.len(),
-        4,
-        "the fired run must have attempted all 4 scheduled-trigger mutator \
-         registrations (create/remove/pause/resume) — captured_messages: \
+        5,
+        "the fired run must have attempted all 5 scheduled-trigger mutator \
+         registrations (create/remove/pause/resume/run) — captured_messages: \
          {captured_contents:?}, outcomes: {registration_outcomes:?}, \
          settled_record: {settled:?}"
     );
@@ -2182,6 +2874,12 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         registration_outcomes.get(TRIGGER_REMOVE_CAPABILITY_ID),
         Some(&Err(DENIED_SUMMARY.to_string())),
         "expected the scheduled_trigger surface to deny the trigger_remove \
+         registration attempt made from inside the fired run: {registration_outcomes:?}"
+    );
+    assert_eq!(
+        registration_outcomes.get(TRIGGER_RUN_CAPABILITY_ID),
+        Some(&Err(DENIED_SUMMARY.to_string())),
+        "expected the scheduled_trigger surface to deny the trigger_run \
          registration attempt made from inside the fired run: {registration_outcomes:?}"
     );
     assert_eq!(

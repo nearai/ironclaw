@@ -11,7 +11,7 @@
 # makes every crate-scoped arm stop matching: the paths still look like code, so
 # they fall through to `is_code_path` and get bucketed legacy-only, and the whole
 # Reborn suite is silently skipped on a green PR. See
-# docs/reborn/target-architecture/CHECKLIST.md WS10.
+# docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 #
 # Test/override env vars (unset in prod):
 #   IRONCLAW_REPO_ROOT  repository root whose crate tree defines the inventory
@@ -340,7 +340,7 @@ is_shared_test_path() {
 is_reborn_test_path() {
   local path="$1"
   case "$path" in
-    docs/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|scripts/ci/run-reborn-group-tests.sh|scripts/ci/check-reborn-responses-e2e-manifest.py|tests/reborn_*|tests/integration/*|tests/support/reborn_parity_qa/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/reborn_coverage_tests.txt|tests/e2e/reborn_responses_e2e_tests.txt|tests/e2e/scenarios/test_reborn_*)
+    docs/internal/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|scripts/ci/run-reborn-group-tests.sh|scripts/ci/check-reborn-responses-e2e-manifest.py|tests/reborn_*|tests/integration/*|tests/support/reborn_parity_qa/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/reborn_coverage_tests.txt|tests/e2e/reborn_responses_e2e_tests.txt|tests/e2e/scenarios/test_reborn_*)
       return 0
       ;;
     crates/ironclaw_architecture_tests/*)

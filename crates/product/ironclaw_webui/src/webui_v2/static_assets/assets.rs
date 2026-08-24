@@ -236,6 +236,14 @@ mod tests {
         assert!(!renderer.contains("codeEl.style.whiteSpace"));
 
         let styles = source_text("styles/app.css");
+        let markdown_styles = styles
+            .split_once("/* ── Markdown body ")
+            .and_then(|(_, markdown_and_rest)| {
+                markdown_and_rest
+                    .split_once("/* ── Mobile responsive overrides ")
+                    .map(|(markdown, _)| markdown)
+            })
+            .expect("app.css keeps bounded Markdown styles");
         assert!(styles.contains(".markdown-body {\n  max-width: 100%;\n  min-width: 0;"));
         assert!(styles.contains("overflow-wrap: anywhere;"));
         assert!(styles.contains(".markdown-code-frame {\n  position: relative;"));
@@ -246,10 +254,10 @@ mod tests {
         assert!(styles.contains("overflow-wrap: normal;\n  word-break: normal;"));
         assert!(styles.contains("display: inline; background: transparent; padding: 0;"));
         assert!(styles.contains("font-size: 0.9em; line-height: 1.65; white-space: inherit;"));
-        assert!(!styles.contains("word-break: break-word"));
-        assert!(!styles.contains("white-space: pre-wrap"));
-        assert!(!styles.contains("word-break: break-all"));
-        assert!(!styles.contains("width: max-content"));
+        assert!(!markdown_styles.contains("word-break: break-word"));
+        assert!(!markdown_styles.contains("white-space: pre-wrap"));
+        assert!(!markdown_styles.contains("word-break: break-all"));
+        assert!(!markdown_styles.contains("width: max-content"));
         assert!(styles.contains("--v2-chat-readable-max-width:"));
         assert!(styles.contains(".v2-chat-readable-width {\n  max-width: 100%;\n}"));
         assert!(styles.contains("@media (min-width: 640px) {"));
@@ -440,8 +448,10 @@ mod tests {
         assert!(api.contains("listAutomations"));
         assert!(api.contains("pauseAutomation"));
         assert!(api.contains("resumeAutomation"));
+        assert!(api.contains("runAutomation"));
         assert!(api.contains("deleteAutomation"));
         assert!(api.contains("/automations"));
+        assert!(api.contains("/run"));
         assert!(api.contains("/pause"));
         assert!(api.contains("/resume"));
         assert!(api.contains(r#"method: "DELETE""#));
@@ -491,6 +501,10 @@ mod tests {
         assert!(
             app_bundle_contains_encoded_automation_route("resume"),
             "served WebUI bundle must include the automation resume endpoint; run the frontend build after editing frontend/src/**"
+        );
+        assert!(
+            app_bundle_contains_encoded_automation_route("run"),
+            "served WebUI bundle must include the automation run endpoint; run the frontend build after editing frontend/src/**"
         );
         let app_bundle_contains_encoded_automation_delete = app_bundle
             .split("/automations/${encodeURIComponent(")
@@ -564,7 +578,11 @@ mod tests {
         assert!(sidebar_threads.contains("t(\"common.deleteChat\")"));
         assert!(sidebar_threads.contains("t(\"thread.deleteConfirm\")"));
         assert!(sidebar_threads.contains("deleteThreadErrorMessage"));
-        assert!(sidebar_threads.contains("window.alert"));
+        assert!(
+            sidebar_threads
+                .contains(r#"toast(deleteThreadErrorMessage(error, t), { tone: "error" });"#)
+        );
+        assert!(!sidebar_threads.contains("window.alert"));
 
         let api = source_text("lib/api.ts");
         assert!(api.contains("export function deleteThread"));
@@ -686,6 +704,54 @@ mod tests {
     }
 
     #[test]
+    fn settings_and_extensions_navigation_has_one_source_of_truth() {
+        // Settings and Extensions sub-navigation is declared once, in
+        // `app/routes.ts`; the sidebar and the page header read it from there.
+        // The per-page tab components kept a second copy of the same lists with
+        // no production consumer, and the Settings copy had already drifted —
+        // it still advertised agent/channels/networking/users entries that are
+        // not routed.
+        for deleted in [
+            "pages/settings/components/settings-tabs.tsx",
+            "pages/settings/components/settings-tabs.test.ts",
+            "pages/extensions/components/extensions-tabs.tsx",
+        ] {
+            let full = format!("{}/frontend/src/{deleted}", env!("CARGO_MANIFEST_DIR"));
+            assert!(
+                !std::path::Path::new(&full).exists(),
+                "{deleted} duplicated app/routes.ts navigation and must not return"
+            );
+        }
+
+        let settings_schema = source_text("pages/settings/lib/settings-schema.ts");
+        let extensions_schema = source_text("pages/extensions/lib/extensions-schema.ts");
+        assert!(
+            !settings_schema.contains("SETTINGS_TABS"),
+            "Settings navigation belongs to app/routes.ts, not the field schema"
+        );
+        assert!(
+            !extensions_schema.contains("EXTENSIONS_TABS"),
+            "Extensions navigation belongs to app/routes.ts, not the surface schema"
+        );
+
+        // Unrelated field schemas and extension presentation metadata stay put.
+        assert!(settings_schema.contains("export const AGENT_FIELDS"));
+        assert!(settings_schema.contains("export const NETWORKING_FIELDS"));
+        assert!(settings_schema.contains("export const RESTART_REQUIRED_KEYS"));
+        assert!(extensions_schema.contains("export const RUNTIME_LABELS"));
+        assert!(extensions_schema.contains("export function hasChannelSurface"));
+
+        // The remaining source of truth still feeds both live consumers.
+        let routes = source_text("app/routes.ts");
+        assert!(routes.contains("export const SETTINGS_SUB_ROUTES"));
+        assert!(routes.contains("export const EXTENSIONS_SUB_ROUTES"));
+        assert!(routes.contains("settings: SETTINGS_SUB_ROUTES"));
+        assert!(routes.contains("extensions: EXTENSIONS_SUB_ROUTES"));
+        assert!(source_text("components/sidebar-nav.tsx").contains("EXPANDABLE_SUB_ROUTES"));
+        assert!(source_text("components/page-header.tsx").contains("EXPANDABLE_SUB_ROUTES"));
+    }
+
+    #[test]
     fn auth_session_assets_use_server_capabilities_for_admin_status() {
         let api = source_text("lib/api.ts");
         assert!(api.contains("fetchSession"));
@@ -708,18 +774,25 @@ mod tests {
 
         let sidebar_nav = source_text("components/sidebar-nav.tsx");
         assert!(sidebar_nav.contains("isAdmin = false"));
-        assert!(sidebar_nav.contains("[\"users\", \"inference\"].includes(subRoute.id)"));
+        assert!(sidebar_nav.contains("export function visibleSidebarSubRoutes"));
+        assert!(sidebar_nav.contains("!(routeId === \"settings\" && subRoute.id === \"users\")"));
+        assert!(sidebar_nav.contains("visibleSidebarSubRoutes(route.id, isAdmin)"));
+        assert!(!sidebar_nav.contains("[\"users\", \"inference\"].includes(subRoute.id)"));
+
+        let routes = source_text("app/routes.ts");
+        assert!(
+            routes
+                .contains(r#"{ id: "inference", labelKey: "settings.inference", icon: "spark" }"#)
+        );
 
         let settings_page = source_text("pages/settings/settings-page.tsx");
         assert!(settings_page.contains("isAdmin = false"));
+        assert!(
+            settings_page.contains("const defaultTab = isAdmin ? \"inference\" : \"language\"")
+        );
         assert!(settings_page.contains("const defaultTabIsVisible = tabContentHas(defaultTab)"));
         assert!(settings_page.contains("const redirectTab = defaultTabIsVisible"));
-        assert!(settings_page.contains("isOperatorTab(tab)"));
-
-        let settings_tabs = source_text("pages/settings/components/settings-tabs.tsx");
-        assert!(settings_tabs.contains("isAdmin = false"));
-        assert!(!settings_tabs.contains("isAdmin = true"));
-        assert!(settings_tabs.contains("tab.id !== \"inference\""));
+        assert!(!settings_page.contains("isOperatorTab(tab)"));
 
         let layout = source_text("layout/gateway-layout.tsx");
         assert!(layout.contains("enabled: isAdmin"));
@@ -778,10 +851,18 @@ mod tests {
 
         let events = source_text("pages/chat/lib/useChatEvents.ts");
         assert!(events.contains("isFinalReply: true"));
+        // The in-flight marker is evidence-driven now: projection text is
+        // final only when the durable projection says so, so the pin asserts
+        // the derivation instead of a hardcoded `false`.
         assert!(
-            events.contains("isFinalReply: false"),
+            events.contains("const finalizedText = item.text.finalized === true;"),
+            "projection-text finality must be driven by the durable finalized bit"
+        );
+        assert!(
+            events.contains("isFinalReply: finalizedText"),
             "live projection text must remain in-flight until final reply/timeline finalizes it"
         );
+        assert!(events.contains("isStreaming: !finalizedText"));
         assert!(events.contains("const textRunId = item.text.run_id || null;"));
     }
 
@@ -877,9 +958,15 @@ mod tests {
     fn extension_oauth_setup_refreshes_while_popup_is_open() {
         let use_extensions = source_text("pages/extensions/hooks/useExtensions.ts");
 
+        let oauth_events = source_text("lib/product-auth-oauth-events.ts");
+
         assert!(
-            use_extensions.contains("OAUTH_SETUP_REFRESH_MS = 2000"),
+            oauth_events.contains("OAUTH_FLOW_POLL_MS = 2000"),
             "OAuth setup should poll often enough for setup-complete state to appear promptly"
+        );
+        assert!(
+            use_extensions.contains("OAUTH_FLOW_POLL_MS"),
+            "OAuth setup should poll on the shared product-auth OAuth flow cadence"
         );
         assert!(
             use_extensions.contains("const watchOauthProgress = React.useCallback"),

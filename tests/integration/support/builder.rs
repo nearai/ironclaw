@@ -31,8 +31,7 @@ use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::turn::{
-    IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+    IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     capability_surface::CapabilitySurfacePolicy,
@@ -142,9 +141,10 @@ pub struct RebornIntegrationHarnessBuilder {
     capability: RebornCapabilityBackend,
     keyed_http_responses: Vec<ScriptedHttpResponse>,
     web_access_response_bodies: Vec<Vec<u8>>,
-    /// W4-AUTHGATE-WIRE: FIFO scripted statuses for the `GithubIssueTools`
-    /// backend's **network**-egress lane (see `with_github_network_status`).
-    github_network_statuses: Vec<u16>,
+    /// W4-AUTHGATE-WIRE: FIFO scripted responses for the `GithubIssueTools`
+    /// backend's **network**-egress lane. `None` preserves the existing
+    /// status-only default body; `Some` scripts the exact provider body.
+    github_network_responses: Vec<(u16, Option<Vec<u8>>)>,
     /// S1 seam: FIFO scripted response bodies for the real-egress-pipeline
     /// backend's wire-level transport recorder (see
     /// `with_real_egress_response_bodies`).
@@ -159,6 +159,8 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Mutually exclusive raw-provider behavior for this one-thread harness.
     /// Each model-selecting builder method replaces the previous mode.
     model_mode: ThreadModelMode,
+    /// Wire production's RootFilesystem-backed durable loop milestone sink.
+    durable_milestone_event_store: bool,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
     /// Tool disclosure mode for the underlying group's ONE planned runtime.
@@ -195,6 +197,8 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Threaded into
     /// `RebornIntegrationGroupBuilder::with_lease_recovery_interval_for_test`.
     lease_recovery_interval: Option<Duration>,
+    /// Test-only scheduler heartbeat interval override for measured workloads.
+    runner_heartbeat_interval: Option<Duration>,
     /// Test-only canonical-loop iteration limit override.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Test-only runtime seam that rejects final assistant transcript writes.
@@ -279,6 +283,13 @@ impl RebornIntegrationHarnessBuilder {
     /// [`RebornThreadBuilder::park_model`].
     pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
         self.model_mode = ThreadModelMode::Parked(gate);
+        self
+    }
+
+    /// Add deterministic latency at the raw provider seam before every scripted
+    /// model response. The real decorator chain still wraps this provider.
+    pub fn with_model_call_delay_for_test(mut self, delay: Duration) -> Self {
+        self.model_mode = ThreadModelMode::Delayed(delay);
         self
     }
 
@@ -368,6 +379,20 @@ impl RebornIntegrationHarnessBuilder {
     /// call happens after a non-model persistence boundary fails.
     pub fn record_model_calls_for_test(mut self) -> Self {
         self.record_model_calls = true;
+        self
+    }
+
+    /// Wire the production durable loop-milestone adapter and event store over
+    /// the same `RootFilesystem` selected by [`Self::storage`].
+    pub fn with_durable_milestone_event_store_for_test(mut self) -> Self {
+        self.durable_milestone_event_store = true;
+        self
+    }
+
+    /// Override the production scheduler heartbeat interval for a deterministic
+    /// measured workload.
+    pub fn with_runner_heartbeat_interval_for_test(mut self, interval: Duration) -> Self {
+        self.runner_heartbeat_interval = Some(interval);
         self
     }
 
@@ -622,7 +647,18 @@ impl RebornIntegrationHarnessBuilder {
     /// path) must be scripted here. Implies [`with_github_issue_tools`](Self::with_github_issue_tools).
     pub fn with_github_network_status(mut self, status: u16) -> Self {
         self.capability = RebornCapabilityBackend::GithubIssueTools;
-        self.github_network_statuses.push(status);
+        self.github_network_responses.push((status, None));
+        self
+    }
+
+    /// Script one exact GitHub WASM provider response on the network lane.
+    /// Use this instead of [`with_github_network_status`](Self::with_github_network_status)
+    /// when the regression depends on the provider's response body as well as
+    /// its status.
+    pub fn with_github_network_response(mut self, status: u16, body: impl Into<Vec<u8>>) -> Self {
+        self.capability = RebornCapabilityBackend::GithubIssueTools;
+        self.github_network_responses
+            .push((status, Some(body.into())));
         self
     }
 
@@ -712,7 +748,7 @@ impl RebornIntegrationHarnessBuilder {
                 CapabilityScriptingInputs {
                     keyed_http_responses: self.keyed_http_responses,
                     web_access_response_bodies: self.web_access_response_bodies,
-                    github_network_statuses: self.github_network_statuses,
+                    github_network_responses: self.github_network_responses,
                     real_egress_response_bodies: self.real_egress_response_bodies,
                 },
                 self.park_tool_gate,
@@ -729,6 +765,9 @@ impl RebornIntegrationHarnessBuilder {
         }
         if self.turn_event_sink {
             group_builder = group_builder.with_turn_event_sink();
+        }
+        if self.durable_milestone_event_store {
+            group_builder = group_builder.with_durable_milestone_event_store_for_test();
         }
         group_builder = group_builder.with_tool_disclosure_mode(self.tool_disclosure);
         if let Some(policy) = self.bridged_policy_override {
@@ -751,6 +790,9 @@ impl RebornIntegrationHarnessBuilder {
         }
         if let Some(interval) = self.lease_recovery_interval {
             group_builder = group_builder.with_lease_recovery_interval_for_test(interval);
+        }
+        if let Some(interval) = self.runner_heartbeat_interval {
+            group_builder = group_builder.with_runner_heartbeat_interval_for_test(interval);
         }
         if let Some(limit) = self.planned_default_iteration_limit {
             group_builder = group_builder.with_iteration_limit_for_test(limit);
@@ -864,13 +906,14 @@ impl RebornIntegrationHarness {
             capability: RebornCapabilityBackend::Echo,
             keyed_http_responses: Vec::new(),
             web_access_response_bodies: Vec::new(),
-            github_network_statuses: Vec::new(),
+            github_network_responses: Vec::new(),
             real_egress_response_bodies: Vec::new(),
             storage: StorageMode::default(),
             safety_context: None,
             shell_mode: ShellMode::default(),
             model_mode: ThreadModelMode::Normal,
             turn_event_sink: false,
+            durable_milestone_event_store: false,
             // General integration tests stay hermetic across production default
             // changes. Disclosure-specific tests opt into Bridged explicitly.
             tool_disclosure: ToolDisclosureMode::Off,
@@ -882,6 +925,7 @@ impl RebornIntegrationHarness {
             park_tool_gate: None,
             runner_lease_ttl: None,
             lease_recovery_interval: None,
+            runner_heartbeat_interval: None,
             planned_default_iteration_limit: None,
             fail_append_finalized_assistant_message: false,
             fail_append_tool_result_reference: false,
@@ -967,13 +1011,23 @@ impl RebornIntegrationHarness {
                     .into(),
             );
         }
-        let (event_id, envelope) = self.build_user_envelope(text)?;
+        let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let attachment = ironclaw_host_api::attachment::InboundAttachment {
             id: format!("{event_id}-att-0"),
             mime_type: mime_type.to_string(),
             filename: Some(filename.to_string()),
             bytes,
         };
+        let envelope = self
+            .ingress
+            .verified_text_envelope_with_trigger_and_attachments(
+                &event_id,
+                &self.actor_id,
+                &self.conversation_id,
+                text,
+                ProductTriggerReason::DirectChat,
+                std::slice::from_ref(&attachment),
+            )?;
         let ack = self
             .workflow
             .submit_inbound_with_attachments(envelope, vec![attachment])
@@ -1001,7 +1055,7 @@ impl RebornIntegrationHarness {
                     .into(),
             );
         }
-        let (event_id, envelope) = self.build_user_envelope(text)?;
+        let event_id = format!("evt-{}", self.event_seq.fetch_add(1, Ordering::Relaxed));
         let inbound = attachments
             .into_iter()
             .enumerate()
@@ -1013,7 +1067,17 @@ impl RebornIntegrationHarness {
                     bytes,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let envelope = self
+            .ingress
+            .verified_text_envelope_with_trigger_and_attachments(
+                &event_id,
+                &self.actor_id,
+                &self.conversation_id,
+                text,
+                ProductTriggerReason::DirectChat,
+                &inbound,
+            )?;
         let ack = self
             .workflow
             .submit_inbound_with_attachments(envelope, inbound)
@@ -1077,6 +1141,16 @@ impl RebornIntegrationHarness {
     /// inbound sink submits through this exact instance.
     pub(crate) fn product_surface_for_test(&self) -> std::sync::Arc<DefaultProductSurface> {
         std::sync::Arc::clone(&self.workflow)
+    }
+
+    /// The SAME `InMemoryDiagnosticStore` the loop's diagnostic sinks write
+    /// into. Hand this to `RebornServices::with_diagnostic_store` so a test
+    /// reads what the run actually recorded, exactly as production connects
+    /// the two in `product_surface.rs:98`.
+    pub(crate) fn diagnostic_store(
+        &self,
+    ) -> std::sync::Arc<ironclaw_assistant::inspector_store::InMemoryDiagnosticStore> {
+        std::sync::Arc::clone(&self._shared.diagnostic_store)
     }
 
     /// A fresh binding-service instance over the GROUP-shared product
@@ -2021,6 +2095,37 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Provider-generic twin of [`Self::resolve_auth_gate`]: resolve a blocked
+    /// AUTH gate by minting a real credential account for `provider` under THIS
+    /// run's dispatch scope (through the production manual-token flow), then
+    /// resuming with no deny disposition so the parked capability
+    /// re-dispatches.
+    ///
+    /// `resolve_auth_gate` is hardwired to GitHub's seeder; this is the form a
+    /// linked-account (device-link) journey needs, where "the user answered the
+    /// gate" means "the user linked their account" and the provider is the
+    /// package's own credential-authority namespace.
+    pub async fn resolve_auth_gate_for_provider(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+        provider: &str,
+        label: &str,
+    ) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
+        self.seed_capability_credential_account(provider, label, &[])
+            .await?;
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            None,
+            ResumeTurnPrecondition::BlockedAuthGate,
+        )
+        .await
+    }
+
     /// Seed a Configured credential account WITH real secret material for
     /// `provider` through the production manual-token flow, scoped so this
     /// thread's CAPABILITY dispatch finds it: account selection matches all of
@@ -2125,6 +2230,147 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
+    /// Drive one device link end to end through the **production** step
+    /// machine — the same `DeviceLinkFlowDriver` the WebUI routes dispatch to,
+    /// resolved off the composed product-auth bundle — and return the
+    /// credential account it minted.
+    ///
+    /// What is real here is everything except the vendor: composition's
+    /// driver, the auth-side revision compare-and-swap and TTLs, the extension
+    /// host's snapshot resolution and rate limits, provisional custody, the
+    /// completion mint with its ownership pin, and the durable blob write. The
+    /// vendor half is the harness's scripted adapter, because the real one
+    /// speaks MTProto over a socket with no injectable seam.
+    pub async fn link_device_through_product_auth(
+        &self,
+        provider: &str,
+        extension_id: &str,
+        password: &str,
+    ) -> HarnessResult<ironclaw_auth::CredentialAccount> {
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            _ => return Err("no host-runtime capability backend to drive a device link".into()),
+        };
+        let product_auth = harness.product_auth_for_test()?;
+        let driver = product_auth
+            .device_link_driver()
+            .ok_or("composition wired no device-link driver")?;
+        // Mirror production execution-user resolution (explicit owner → actor)
+        // exactly as `seed_capability_credential_account` does: the account
+        // must land under the same four scope fields dispatch-time credential
+        // selection matches on, or the linked tool parks on the auth gate
+        // forever against an account that plainly exists.
+        let dispatch_user = self
+            .turn_scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| self.binding.actor_user_id.clone());
+        let resource = self.run_resource_scope_for_user(dispatch_user);
+        let scope = ironclaw_auth::AuthProductScope::credential_owner(
+            &resource,
+            ironclaw_auth::AuthSurface::Api,
+        );
+
+        let record = driver
+            .start(ironclaw_auth::DeviceLinkStartRequest {
+                scope: scope.clone(),
+                provider: ironclaw_auth::AuthProviderId::new(provider)?,
+                extension_id: ironclaw_host_api::ids::ExtensionId::new(extension_id)?,
+                continuation: ironclaw_auth::AuthContinuationRef::SetupOnly,
+                mode: ironclaw_extension_contracts::device_link::DeviceLinkMode::Default,
+                resume: None,
+            })
+            .await
+            .map_err(|error| format!("device-link start failed: {error:?}"))?;
+        let flow_id = record.id;
+
+        // Poll until the vendor asks for a value, waiting out the back-off the
+        // frame itself asks for. That wait is not test politeness: the host
+        // enforces a poll floor and answers an early poll with
+        // `AwaitingVendor` *without calling the adapter at all*, so a tight
+        // loop here would spin forever against the rate limiter rather than
+        // advancing the link — exactly what a hot-looping card would do.
+        // Bounded: a link that never reaches an input step is a failure to
+        // report, not a loop to spin.
+        let mut record = record;
+        for _ in 0..8 {
+            if matches!(
+                record.device_link_step(),
+                Some(
+                    ironclaw_extension_contracts::device_link::DeviceLinkStep::InputRequired { .. }
+                )
+            ) {
+                break;
+            }
+            if let Some(
+                ironclaw_extension_contracts::device_link::DeviceLinkStep::AwaitingVendor {
+                    retry_in,
+                },
+            ) = record.device_link_step()
+            {
+                tokio::time::sleep(*retry_in).await;
+            }
+            record = driver
+                .poll(&scope, flow_id)
+                .await
+                .map_err(|error| format!("device-link poll failed: {error:?}"))?;
+        }
+        let Some(ironclaw_extension_contracts::device_link::DeviceLinkStep::InputRequired {
+            kind,
+            ..
+        }) = record.device_link_step().cloned()
+        else {
+            return Err(format!(
+                "device link never asked for input (last step: {:?})",
+                record.device_link_step()
+            )
+            .into());
+        };
+
+        let input = match kind {
+            ironclaw_extension_contracts::device_link::DeviceLinkInputKind::Password => {
+                ironclaw_extension_contracts::device_link::DeviceLinkInput::Password(
+                    secrecy::SecretString::from(password.to_string()),
+                )
+            }
+            ironclaw_extension_contracts::device_link::DeviceLinkInputKind::Code => {
+                ironclaw_extension_contracts::device_link::DeviceLinkInput::Code(
+                    secrecy::SecretString::from(password.to_string()),
+                )
+            }
+            ironclaw_extension_contracts::device_link::DeviceLinkInputKind::Identifier => {
+                ironclaw_extension_contracts::device_link::DeviceLinkInput::Identifier(
+                    password.to_string(),
+                )
+            }
+        };
+        let completed = driver
+            .submit_input(&scope, flow_id, record.step_revision(), input)
+            .await
+            .map_err(|error| format!("device-link submit failed: {error:?}"))?;
+        if completed.status != ironclaw_auth::AuthFlowStatus::Completed {
+            return Err(format!(
+                "device link did not complete: {:?} / {:?}",
+                completed.status,
+                completed.device_link_step()
+            )
+            .into());
+        }
+        let account_id = completed
+            .credential_account_id
+            .ok_or("a completed device link must carry the account it minted")?;
+        product_auth
+            .credential_account_service()
+            .get_account(ironclaw_auth::CredentialAccountLookupRequest {
+                scope,
+                account_id,
+                requester_extension: Some(ironclaw_host_api::ids::ExtensionId::new(extension_id)?),
+            })
+            .await
+            .map_err(|error| format!("minted account read-back failed: {error:?}"))?
+            .ok_or_else(|| "the minted credential account is missing on read-back".into())
+    }
+
     /// This thread's run `(tenant, agent, project)` scope with `user_id` as
     /// the owner — the exact four fields dispatch-time credential-account
     /// selection matches. Pass the run's resolved execution user (thread
@@ -2225,8 +2471,6 @@ impl RebornIntegrationHarness {
                 run_id,
                 gate_resolution_ref: gate_ref,
                 precondition,
-                source_binding_ref: SourceBindingRef::new("src:resume")?,
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key,
                 resume_disposition,
             })
@@ -2364,7 +2608,14 @@ pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
         .with_db_name("ironclaw_test")
         .with_user("postgres")
         .with_password("postgres")
-        .with_tag("16-alpine");
+        .with_init_sql(b"CREATE EXTENSION IF NOT EXISTS pg_stat_statements;".to_vec())
+        .with_tag("16-alpine")
+        .with_cmd([
+            "-c",
+            "fsync=off",
+            "-c",
+            "shared_preload_libraries=pg_stat_statements",
+        ]);
     let unavailable = |error: String| -> String {
         if std::env::var("CI").is_ok() {
             panic!("StorageMode::Postgres requires Docker in CI and provisioning failed: {error}");
@@ -2475,9 +2726,7 @@ pub(crate) fn apply_hermetic_env() {
             std::env::remove_var("LLM_RESPONSE_CACHE_ENABLED");
             std::env::remove_var("RESPONSE_CACHE_ENABLED");
             std::env::remove_var("NEARAI_SESSION_TOKEN");
-            // No integration test should inherit the ambient tool-disclosure
-            // knob. Builders pin Off and disclosure tests opt into Bridged;
-            // scrubbing is defense in depth for the retained env fallback.
+            // No integration test should inherit ambient rollout knobs.
             std::env::remove_var(ironclaw_loop_host::REBORN_TOOL_DISCLOSURE_ENV);
         }
     });
@@ -2495,7 +2744,10 @@ pub(crate) fn binding_request(
         external_conversation_ref: envelope.external_conversation_ref().clone(),
         external_event_id: envelope.external_event_id().clone(),
         route_kind: ProductConversationRouteKind::Direct,
-        auth_claim: envelope.auth_claim().clone(),
+        auth_claim: envelope
+            .require_verified_auth_claim()
+            .expect("harness envelopes carry verified webhook evidence")
+            .clone(),
     }
 }
 

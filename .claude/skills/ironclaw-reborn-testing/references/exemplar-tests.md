@@ -16,7 +16,7 @@ Living companions to the tier tree in `../SKILL.md`. Each exemplar is a real in-
 
 ## 2. The scripted-model harness seam
 
-The in-process harness (code in `tests/integration/support/`, spec in `tests/integration/CLAUDE.md`) fakes exactly one thing: the vendor SDK at the bottom (`TraceLlm`). Everything else — product orchestration, coordinator, scheduler, agent loop, the real `ironclaw_llm` retry/failover/circuit-breaker chain — executes for real, and assertions read *persisted state* (filesystem, thread history), never internals.
+The in-process harness (code in `tests/integration/support/`, spec in `tests/integration/AGENTS.md`) fakes exactly one thing: the vendor SDK at the bottom (`TraceLlm`). Everything else — product orchestration, coordinator, scheduler, agent loop, the real `ironclaw_llm` retry/failover/circuit-breaker chain — executes for real, and assertions read *persisted state* (filesystem, thread history), never internals.
 
 - **Right**: mock at the vendor-SDK seam; assert from durable state; `cargo test --test reborn_integration_<name>` runs offline with zero setup.
 - **Wrong**: mocking at the gateway seam (skips the whole `ironclaw_llm` chain — that's the separate binary-replay tier's job); hand-building `TraceStep`s; asserting on internal structs.
@@ -38,8 +38,8 @@ When a predicate selects what goes out the wire, the test must construct the rea
 
 **BAD for PR-gated coverage**: `if docker_unavailable { return }` — the container security suite silently vanishes from CI and no gate notices. Existing Docker sandbox canaries still use soft skips; don't copy that pattern into new gate coverage.
 
-**GOOD**: make absence loud — feature-gate the test (`#![cfg(all(feature = "postgres", feature = "integration"))]`, which `scripts/check-boundaries.sh` enforces for root `tests/`), or require an explicit opt-out env var and *fail* when the dependency is missing without it. A skipped security test that doesn't announce itself is indistinguishable from coverage.
+**GOOD**: make absence loud — feature-gate the test (`#![cfg(all(feature = "postgres", feature = "integration"))]`), or require an explicit opt-out env var and *fail* when the dependency is missing without it. A skipped security test that doesn't announce itself is indistinguishable from coverage.
 
 ## 6. Naming your contract's tests
 
-`docs/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/domains/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map. If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing.
+`docs/internal/reborn/contracts/conversation-binding.md` is the model contract doc: it names its proving test file (`crates/domains/ironclaw_conversations/tests/inbound_contract.rs`) *and* the run command. `scripts/reborn-e2e-rust.sh` is the machine-readable contract→test map. If you implement contract behavior: extend the named test, and add the doc's "which tests prove this" line if it's missing.

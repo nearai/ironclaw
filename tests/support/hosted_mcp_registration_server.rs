@@ -113,6 +113,7 @@ impl HostedMcpRegistrationProbeGate {
 /// explicitly allowlisted origins to the loopback fixture.
 pub struct HostedMcpRegistrationNetworkEgress {
     loopback_base: String,
+    mcp_host: String,
     client: reqwest::Client,
     /// When set, any request whose path contains this substring fails at the
     /// transport layer instead of reaching the fixture server, scripting the
@@ -123,8 +124,18 @@ pub struct HostedMcpRegistrationNetworkEgress {
 
 impl HostedMcpRegistrationNetworkEgress {
     pub fn for_server(server: &HostedMcpRegistrationServer) -> Self {
+        Self::for_server_with_mcp_host(server, "mcp.example.test")
+    }
+
+    /// Map a specific production-shaped MCP host to the loopback fixture while
+    /// retaining the fixture authorization-server origin.
+    pub fn for_server_with_mcp_host(
+        server: &HostedMcpRegistrationServer,
+        mcp_host: impl Into<String>,
+    ) -> Self {
         Self {
             loopback_base: server.base_url.clone(),
+            mcp_host: mcp_host.into(),
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -165,9 +176,16 @@ impl NetworkHttpEgress for HostedMcpRegistrationNetworkEgress {
             || source.port().is_some()
             || !source.username().is_empty()
             || source.password().is_some()
-            || !matches!(host, "mcp.example.test" | "auth.example.test")
+            || (host != self.mcp_host && host != "auth.example.test")
         {
-            return Err(NetworkHttpError::PolicyDenied { reason: "hosted MCP fixture accepts only mcp.example.test and auth.example.test HTTPS origins".to_string(), request_bytes, response_bytes: 0 });
+            return Err(NetworkHttpError::PolicyDenied {
+                reason: format!(
+                    "hosted MCP fixture accepts only {} and auth.example.test HTTPS origins",
+                    self.mcp_host
+                ),
+                request_bytes,
+                response_bytes: 0,
+            });
         }
         if let Some(path_substr) = &self.fail_transport_for_path
             && source.path().contains(path_substr.as_str())

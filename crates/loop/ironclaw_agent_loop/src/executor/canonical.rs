@@ -7,11 +7,11 @@ use crate::{family::LoopFamily, state::LoopExecutionState, strategies::TurnEndKi
 
 use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, COMPLETION_NUDGE_LIMIT,
-    CancelCheck, CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage,
-    DefaultExecutorPipeline, DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput,
-    ModelStep, PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext,
-    StopInput, StopKind, StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
-    UserFacingInputDrainMode, latency,
+    CancelCheck, CapabilityInput, CheckpointStage, DefaultExecutorPipeline, DrainInput,
+    ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PromptInput, PromptStep,
+    ReplyAdmissionInput, ReplyAdmissionStep, StageContext, StopInput, StopKind,
+    StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, latency, scheduled_trigger_run,
 };
 
 impl DefaultExecutorPipeline {
@@ -97,15 +97,8 @@ impl DefaultExecutorPipeline {
                         "checkpoint_before_model",
                         host.run_context(),
                         state.iteration,
-                        CheckpointStage.process(
-                            ctx,
-                            CheckpointInput {
-                                state,
-                                kind: CheckpointKind::BeforeModel,
-                            },
-                        ),
-                    )?
-                    .state;
+                        CheckpointStage.write_before_model_batched(ctx, state),
+                    )?;
                     if prompt.rendered_repeated_call_warning {
                         state.stop_state.mark_repeated_call_warning_rendered();
                         let note_started_at = latency::started_at();
@@ -154,13 +147,8 @@ impl DefaultExecutorPipeline {
                         ModelStep::Exit(exit) => return Ok(exit),
                     };
 
-                    // Capture provider-reported usage before the `match` consumes
-                    // `model_response`. Only assistant-reply turns feed the
-                    // diminishing-returns window (#3841 follow-up F1): a
-                    // capability-batch turn produces tool calls, not output
-                    // tokens, and would otherwise look like four "no progress"
-                    // turns in a row. `None` is "unknown" and must NOT count as
-                    // a zero-output turn against the detector.
+                    // Capture provider-reported usage before the `match`
+                    // consumes `model_response`.
                     let response_usage = model_response.usage;
                     // Accumulate the run's cumulative usage for EVERY model
                     // response, before branching on its output. A capability
@@ -187,7 +175,6 @@ impl DefaultExecutorPipeline {
                                         AssistantReplyInput {
                                             state: *state,
                                             reply,
-                                            usage: response_usage,
                                         },
                                     ),
                                 )?,
@@ -305,6 +292,8 @@ impl DefaultExecutorPipeline {
                                 stop_state.completion_nudges_used += 1;
                                 stop_state.completion_nudge_pending = true;
                                 stop_state.last_reply_trailed_off = false;
+                                stop_state.last_reply_empty = false;
+                                stop_state.last_reply_ended_with_question = false;
                                 debug!(
                                     iteration = stop_state.iteration,
                                     ?kind,
@@ -530,7 +519,10 @@ fn completion_nudge_should_fire(
     }
     match kind {
         StopKind::NoProgressDetected => false,
-        StopKind::GracefulStop => state.last_reply_trailed_off,
+        StopKind::GracefulStop => {
+            state.last_reply_trailed_off
+                || (scheduled_trigger_run(host) && state.last_reply_ended_with_question)
+        }
         StopKind::Aborted(_) => false,
     }
 }

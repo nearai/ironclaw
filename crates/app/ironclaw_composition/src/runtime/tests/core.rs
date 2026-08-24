@@ -14,9 +14,37 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use crate::test_support::{TEST_SESSION_EXTENSION_ID, with_test_authenticated_session_channel};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+use ironclaw_event_log::{
+    EventError, EventSink, NonBlockingEventSink, RuntimeEvent, RuntimeEventKind,
+};
+
+#[derive(Default)]
+struct OverloadedEventSink {
+    attempted_events: StdMutex<Vec<RuntimeEvent>>,
+}
+
+#[async_trait]
+impl EventSink for OverloadedEventSink {
+    async fn emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        NonBlockingEventSink::try_emit(self, event)
+    }
+}
+
+impl NonBlockingEventSink for OverloadedEventSink {
+    fn try_emit(&self, event: RuntimeEvent) -> Result<(), EventError> {
+        self.attempted_events
+            .lock()
+            .expect("attempted event recording mutex is not poisoned")
+            .push(event);
+        Err(EventError::Sink {
+            reason: "injected saturated observability queue".to_string(),
+        })
+    }
+}
 
 #[derive(Default)]
 struct SlackDmOpenNetworkEgress {
@@ -140,9 +168,17 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_network_http_egress_for_test(network_egress.clone())
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        surfaces: {
+            let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
+            ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
+                .with_ingress(adapter.clone())
+                .with_reply(adapter.clone())
+                .with_delivery(adapter)
+        },
         preference_target_codec: None,
         outbound_target_provider: None,
+        first_party_initializer: None,
+        registration_document_path: None,
     }]);
     let input =
         RebornRuntimeInput::from_build_input(build_input).with_identity(RebornRuntimeIdentity {
@@ -213,7 +249,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         Some("A-RUNTIME".to_string()),
     )
     .expect("proven Slack identity");
-    let rollback =
+    let transaction =
         ironclaw_extension_host::channel_identity_binding::bind_channel_identities_for_callback(
             &binding_config,
             "slack",
@@ -223,7 +259,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .await
         .expect("bind Slack identity before activation")
         .expect("Slack callback maps to the installed channel extension");
-    drop(rollback);
+    transaction.commit().await;
 
     let dm_targets = &runtime.channel_dm_target_store;
 
@@ -711,8 +747,8 @@ use ironclaw_assistant::{
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, IdempotencyKey, LoopResultRef, ReplyTargetBindingRef,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, IdempotencyKey, LoopResultRef, SanitizedCancelReason, TurnActor, TurnId,
+    TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     ids::{
@@ -742,6 +778,13 @@ use ironclaw_loop_host::{
 use ironclaw_product_contracts::inbound_requests::{
     ProductCreateThreadRequest, ProductListAutomationsRequest, ProductResolveGateRequest,
     ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+};
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_ARCHIVE_COMMAND, NOTIFICATIONS_MARK_READ_COMMAND, NOTIFICATIONS_VIEW,
+    ProductListNotificationsResponse, ProductNotificationMutationRequest,
+};
+use ironclaw_product_contracts::operator_llm::{
+    LlmConfigService, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
 };
 use ironclaw_product_contracts::outbound::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_contracts::surface::{
@@ -920,6 +963,109 @@ impl HostManagedModelGateway for RecordingGateway {
             self.reply.clone(),
         ))
     }
+}
+
+#[tokio::test]
+async fn standalone_cli_send_uses_saved_user_model_preference() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let standalone_root = root.path().join("standalone");
+    std::fs::create_dir_all(&standalone_root).expect("standalone root");
+    std::fs::write(
+        standalone_root.join(crate::factory::STANDALONE_SECRETS_MASTER_KEY_PATH),
+        format!(
+            "{}\n",
+            ironclaw_secrets::keychain::generate_master_key_hex()
+        ),
+    )
+    .expect("seed standalone secrets master key");
+    let config_home_dir = root.path().join("config-home");
+    std::fs::create_dir_all(&config_home_dir).expect("config home dir");
+    let home = RebornHome::resolve_from_env_parts(
+        Some(config_home_dir.as_os_str().to_os_string()),
+        None,
+        None,
+    )
+    .expect("valid reborn home");
+    std::fs::write(
+        home.config_file_path(),
+        "[llm.default]\nprovider_id = \"ollama\"\nmodel = \"workspace-default\"\n",
+    )
+    .expect("write config.toml");
+
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let gateway = Arc::new(RecordingGateway {
+        reply: "preferred model reply".to_string(),
+        requests: Arc::clone(&requests),
+    });
+    let input = RebornRuntimeInput::from_build_input(
+        crate::deployment::local_filesystem_build_input("runtime-cli-model-owner", standalone_root)
+            .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_boot_config(RebornBootConfig::new(home, RebornProfile::Standalone))
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-cli-model-tenant".to_string(),
+        agent_id: "runtime-cli-model-agent".to_string(),
+        source_binding_id: "runtime-cli-model-source".to_string(),
+        reply_target_binding_id: "runtime-cli-model-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: RUNTIME_SEND_TIMEOUT,
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let caller = ProductSurfaceCaller::new(
+        TenantId::new("runtime-cli-model-tenant").expect("tenant"),
+        UserId::new("runtime-cli-model-owner").expect("user"),
+        Some(AgentId::new("runtime-cli-model-agent").expect("agent")),
+        None,
+    );
+    let llm_config = runtime
+        .llm_config_service
+        .as_ref()
+        .expect("boot config wires model selection");
+    llm_config
+        .set_user_model_policy(
+            caller.clone().with_operator_config(true),
+            SetUserModelPolicyRequest {
+                workspace_default: "workspace-default".to_string(),
+                allowed_models: vec![
+                    "workspace-default".to_string(),
+                    "preferred-model".to_string(),
+                ],
+            },
+        )
+        .await
+        .expect("model policy is stored");
+    llm_config
+        .set_user_model_preference(
+            caller,
+            SetUserModelPreferenceRequest {
+                model: Some("preferred-model".to_string()),
+            },
+        )
+        .await
+        .expect("model preference is stored");
+
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    runtime
+        .send_user_message(&conversation, "use my saved model")
+        .await
+        .expect("CLI message sends");
+
+    {
+        let requests = requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 1, "one model call should be made");
+        let request = &requests[0];
+        let route = request
+            .resolved_model_route
+            .as_ref()
+            .expect("saved preference should reach the model gateway");
+        assert!(route.is_advisory());
+        assert_eq!(route.model_id(), "preferred-model");
+    }
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[async_trait]
@@ -1875,6 +2021,8 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         fallback_index: 0,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        tool_choice: None,
+        response_format: None,
     }
 }
 
@@ -4081,7 +4229,7 @@ async fn hosted_mcp_activation_stays_pending_until_preparation_completes() {
 }
 
 #[tokio::test]
-async fn cancel_run_propagates_to_subagent_children() {
+async fn cancel_run_propagates_to_children_when_event_sink_is_unavailable() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "unused".to_string(),
@@ -4102,7 +4250,10 @@ async fn cancel_run_propagates_to_subagent_children() {
     })
     .with_model_gateway_override(gateway);
 
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let overloaded_event_sink = Arc::new(OverloadedEventSink::default());
+    let event_sink: Arc<dyn NonBlockingEventSink> = overloaded_event_sink.clone();
+    runtime.runtime_event_sink = event_sink;
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
     let conversation = runtime.new_conversation().await.expect("conversation");
     let parent_scope = runtime.turn_scope_for(&conversation.0);
@@ -4110,12 +4261,12 @@ async fn cancel_run_propagates_to_subagent_children() {
     let parent = runtime
         .turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
+            output_contract: None,
             scope: parent_scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:cancel-parent").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:cancel-parent").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-parent").unwrap(),
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("cancel-parent").unwrap(),
             received_at: Utc::now(),
@@ -4147,9 +4298,8 @@ async fn cancel_run_propagates_to_subagent_children() {
                 child_scope: child_scope.clone(),
                 actor,
                 accepted_message_ref: AcceptedMessageRef::new("msg:cancel-child").unwrap(),
-                source_binding_ref: SourceBindingRef::new("source:cancel-child").unwrap(),
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:cancel-child").unwrap(),
                 requested_run_profile: None,
+                output_contract: None,
                 idempotency_key: IdempotencyKey::new("cancel-child").unwrap(),
                 received_at: Utc::now(),
                 requested_run_id: None,
@@ -4191,6 +4341,7 @@ async fn cancel_run_propagates_to_subagent_children() {
     runtime
         .thread_service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
+            intrinsic_outcome: None,
             scope: runtime.thread_scope.clone(),
             thread_id: parent_scope.thread_id.clone(),
             turn_run_id: parent_run_id.to_string(),
@@ -4248,6 +4399,24 @@ async fn cancel_run_propagates_to_subagent_children() {
         .await
         .expect("child state");
     assert_eq!(child_state.status, TurnStatus::Cancelled);
+
+    {
+        let cancellation_events = overloaded_event_sink
+            .attempted_events
+            .lock()
+            .expect("attempted event recording mutex is not poisoned");
+        assert_eq!(
+            cancellation_events.len(),
+            2,
+            "parent and child cancellation events must both be attempted"
+        );
+        assert!(
+            cancellation_events
+                .iter()
+                .all(|event| event.kind == RuntimeEventKind::LoopCancelled),
+            "the best-effort cancellation path must emit only the expected cancellation records"
+        );
+    }
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -5309,6 +5478,11 @@ async fn standalone_runtime_rejects_workspace_overlapping_default_skill_roots() 
 
 #[tokio::test]
 async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
+    // This exercises a complete filesystem-backed runtime bootstrap. Under the
+    // crate's parallel test load that can exceed the short poll budget used by
+    // smaller scenarios, even though the model path itself completes promptly.
+    const INVALID_SKILL_TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
     seed_user_skill(
@@ -5340,7 +5514,7 @@ async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
+        max_total: INVALID_SKILL_TEST_TIMEOUT,
     })
     .with_model_gateway_override(gateway);
 
@@ -5438,13 +5612,13 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
         reply: "webui projection ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         crate::deployment::local_filesystem_build_input(
             "runtime-webui-owner",
             root.path().join("standalone"),
         )
         .with_runtime_policy(standalone_runtime_policy()),
-    )
+    ))
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-tenant".to_string(),
         agent_id: "runtime-webui-agent".to_string(),
@@ -5483,6 +5657,7 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-webui-stream-message".to_string()),
             thread_id: Some(created.thread.thread_id.to_string()),
             content: Some("hello webui stream".to_string()),
@@ -5833,6 +6008,269 @@ async fn query_product_surface_page(
         payload,
         next_cursor: page.next_cursor,
     })
+}
+
+#[tokio::test]
+async fn production_product_surface_uses_the_durable_notification_inbox() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("standalone");
+    let gateway: Arc<dyn HostManagedModelGateway> = Arc::new(RecordingGateway {
+        reply: "notification composition".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let runtime_input = || {
+        RebornRuntimeInput::from_build_input(
+            crate::deployment::local_filesystem_build_input(
+                "runtime-notification-owner",
+                storage_root.clone(),
+            )
+            .with_runtime_policy(standalone_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-notification-tenant".to_string(),
+            agent_id: "runtime-notification-agent".to_string(),
+            source_binding_id: "runtime-notification-source".to_string(),
+            reply_target_binding_id: "runtime-notification-reply".to_string(),
+        })
+        .with_model_gateway_override(Arc::clone(&gateway))
+    };
+    let runtime = tokio::time::timeout(
+        PRODUCTION_SHAPED_BUILD_TIMEOUT,
+        build_reborn_runtime(runtime_input()),
+    )
+    .await
+    .expect("runtime build does not time out")
+    .expect("runtime builds");
+    let caller = ProductSurfaceCaller::new(
+        TenantId::new("runtime-notification-tenant").expect("tenant"),
+        UserId::new("runtime-notification-owner").expect("user"),
+        Some(AgentId::new("runtime-notification-agent").expect("agent")),
+        None,
+    );
+    let thread_id = ThreadId::new("runtime-notification-thread").expect("thread");
+    let turn_run_id = TurnRunId::new();
+    tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        runtime
+            .notification_inbox
+            .publish(ironclaw_notifications::PublishNotificationRequest {
+                id: ironclaw_notifications::NotificationId::new("runtime-notification-1")
+                    .expect("notification id"),
+                recipient: ironclaw_notifications::NotificationRecipient {
+                    tenant_id: caller.tenant_id.clone(),
+                    user_id: caller.user_id.clone(),
+                },
+                kind: ironclaw_notifications::NotificationKind::ApprovalRequired,
+                severity: ironclaw_notifications::NotificationSeverity::Warning,
+                source: ironclaw_notifications::NotificationSource {
+                    thread_id: thread_id.clone(),
+                    turn_run_id: Some(turn_run_id),
+                    lifecycle_ref: Some(
+                        ironclaw_notifications::LifecycleRef::new("runtime-notification-gate")
+                            .expect("lifecycle ref"),
+                    ),
+                },
+                action: ironclaw_notifications::NotificationAction::OpenThread { thread_id },
+                occurred_at: Utc::now(),
+            }),
+    )
+    .await
+    .expect("notification publish does not time out")
+    .expect("persist notification through production store");
+
+    let bundle = runtime.product_surface(None).expect("product surface");
+    let initial_page = tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        query_product_surface_page(
+            bundle.as_ref(),
+            caller.clone(),
+            RebornViewQuery {
+                view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                params: serde_json::json!({ "limit": 10 }),
+                cursor: None,
+            },
+        ),
+    )
+    .await
+    .expect("notification list does not time out")
+    .expect("list notification through production product surface");
+    let initial: ProductListNotificationsResponse =
+        serde_json::from_value(initial_page.payload).expect("notification response");
+    assert_eq!(initial.notifications.len(), 1);
+    assert_eq!(initial.notifications[0].id, "runtime-notification-1");
+    assert_eq!(
+        initial.notifications[0].turn_run_id,
+        Some(turn_run_id.to_string())
+    );
+    assert_eq!(initial.unread_count, 1);
+
+    let malformed_limit = query_product_surface_page(
+        bundle.as_ref(),
+        caller.clone(),
+        RebornViewQuery {
+            view_id: NOTIFICATIONS_VIEW.id.to_string(),
+            params: serde_json::json!({ "limit": "ten" }),
+            cursor: None,
+        },
+    )
+    .await
+    .expect_err("a malformed notification limit is rejected at the product boundary");
+    assert_eq!(
+        malformed_limit.code,
+        ProductSurfaceErrorCode::InvalidRequest
+    );
+    assert_eq!(malformed_limit.kind, ProductSurfaceErrorKind::Validation);
+
+    let invalid_limit = query_product_surface_page(
+        bundle.as_ref(),
+        caller.clone(),
+        RebornViewQuery {
+            view_id: NOTIFICATIONS_VIEW.id.to_string(),
+            params: serde_json::json!({ "limit": 0 }),
+            cursor: None,
+        },
+    )
+    .await
+    .expect_err("an invalid notification limit is rejected at the product boundary");
+    assert_eq!(invalid_limit.code, ProductSurfaceErrorCode::InvalidRequest);
+
+    let missing = invoke_product_command(
+        bundle.as_ref(),
+        caller.clone(),
+        NOTIFICATIONS_MARK_READ_COMMAND,
+        ProductNotificationMutationRequest {
+            notification_id: "runtime-notification-missing".to_string(),
+        },
+    )
+    .await
+    .expect_err("a missing notification is a typed product miss");
+    assert_eq!(missing.code, ProductSurfaceErrorCode::NotFound);
+    assert_eq!(missing.kind, ProductSurfaceErrorKind::NotFound);
+
+    let foreign_caller = ProductSurfaceCaller::new(
+        caller.tenant_id.clone(),
+        UserId::new("runtime-notification-foreign").expect("foreign user"),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+    );
+    let foreign_mutation = invoke_product_command(
+        bundle.as_ref(),
+        foreign_caller,
+        NOTIFICATIONS_MARK_READ_COMMAND,
+        ProductNotificationMutationRequest {
+            notification_id: "runtime-notification-1".to_string(),
+        },
+    )
+    .await
+    .expect_err("a foreign caller cannot mutate the owner's notification");
+    assert_eq!(foreign_mutation.code, ProductSurfaceErrorCode::NotFound);
+
+    let owner_after_foreign_attempt = runtime
+        .notification_inbox
+        .list(ironclaw_notifications::ListNotificationsRequest {
+            recipient: ironclaw_notifications::NotificationRecipient {
+                tenant_id: caller.tenant_id.clone(),
+                user_id: caller.user_id.clone(),
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("owner notification survives foreign mutation attempt");
+    assert_eq!(owner_after_foreign_attempt.notifications.len(), 1);
+    assert!(
+        owner_after_foreign_attempt.notifications[0]
+            .read_at
+            .is_none()
+    );
+
+    tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        invoke_product_command(
+            bundle.as_ref(),
+            caller.clone(),
+            NOTIFICATIONS_MARK_READ_COMMAND,
+            ProductNotificationMutationRequest {
+                notification_id: "runtime-notification-1".to_string(),
+            },
+        ),
+    )
+    .await
+    .expect("mark-read command does not time out")
+    .expect("mark durable notification read");
+    tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        invoke_product_command(
+            bundle.as_ref(),
+            caller.clone(),
+            NOTIFICATIONS_ARCHIVE_COMMAND,
+            ProductNotificationMutationRequest {
+                notification_id: "runtime-notification-1".to_string(),
+            },
+        ),
+    )
+    .await
+    .expect("archive command does not time out")
+    .expect("archive durable notification");
+
+    let visible_page = tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        query_product_surface_page(
+            bundle.as_ref(),
+            caller.clone(),
+            RebornViewQuery {
+                view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                params: serde_json::json!({ "limit": 10 }),
+                cursor: None,
+            },
+        ),
+    )
+    .await
+    .expect("post-archive notification list does not time out")
+    .expect("list notifications after archive");
+    let visible: ProductListNotificationsResponse =
+        serde_json::from_value(visible_page.payload).expect("notification response");
+    assert!(visible.notifications.is_empty());
+    assert_eq!(visible.unread_count, 0);
+
+    drop(bundle);
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, runtime.shutdown())
+        .await
+        .expect("runtime shutdown does not time out")
+        .expect("runtime shuts down");
+
+    let reopened = tokio::time::timeout(
+        PRODUCTION_SHAPED_BUILD_TIMEOUT,
+        build_reborn_runtime(runtime_input()),
+    )
+    .await
+    .expect("reopened runtime build does not time out")
+    .expect("reopened runtime builds");
+    let persisted = tokio::time::timeout(
+        RUNTIME_POLL_TIMEOUT,
+        reopened
+            .notification_inbox
+            .list(ironclaw_notifications::ListNotificationsRequest {
+                recipient: ironclaw_notifications::NotificationRecipient {
+                    tenant_id: caller.tenant_id,
+                    user_id: caller.user_id,
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            }),
+    )
+    .await
+    .expect("reopened notification list does not time out")
+    .expect("read persisted archive state after restart");
+    assert_eq!(persisted.notifications.len(), 1);
+    assert!(persisted.notifications[0].read_at.is_some());
+    assert!(persisted.notifications[0].archived_at.is_some());
+    tokio::time::timeout(RUNTIME_SEND_TIMEOUT, reopened.shutdown())
+        .await
+        .expect("reopened runtime shutdown does not time out")
+        .expect("reopened runtime shuts down");
 }
 
 async fn stream_product_events(
@@ -6618,10 +7056,10 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
         reply: "webui skill context ok".to_string(),
         requests: Arc::clone(&requests),
     });
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         crate::deployment::local_filesystem_build_input("runtime-webui-skill-owner", storage_root)
             .with_runtime_policy(standalone_runtime_policy()),
-    )
+    ))
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-webui-skill-tenant".to_string(),
         agent_id: "runtime-webui-skill-agent".to_string(),
@@ -6660,6 +7098,7 @@ async fn standalone_webui_bundle_records_selectable_filesystem_skill_context() {
         caller,
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-webui-skill-message".to_string()),
             thread_id: Some(created.thread.thread_id.to_string()),
             content: Some("$webui-helper please help".to_string()),
@@ -6742,6 +7181,13 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
     };
     use std::sync::OnceLock;
+
+    // This scenario performs a complete libSQL-backed runtime bootstrap and an
+    // extension lifecycle transition while the crate's other runtime tests run
+    // in parallel. Keep the timeout large enough to measure the behavior under
+    // test rather than host scheduling contention; the generic 10-second poll
+    // budget is intentionally tighter for smaller runtime scenarios.
+    const SURFACE_CHANGE_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
     // Gateway state seeded after runtime build.
     struct LifecycleServiceHandle {
@@ -6904,7 +7350,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     })
     .with_poll_settings(PollSettings {
         interval: Duration::from_millis(10),
-        max_total: RUNTIME_POLL_TIMEOUT,
+        max_total: SURFACE_CHANGE_TEST_TIMEOUT,
     })
     .with_model_gateway_override(gateway_for_runtime);
 
@@ -6926,7 +7372,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         .enable_global_auto_approve_for_test(&conversation)
         .await;
     let reply = tokio::time::timeout(
-        RUNTIME_SEND_TIMEOUT,
+        SURFACE_CHANGE_TEST_TIMEOUT,
         runtime.send_user_message(&conversation, "use echo tool twice"),
     )
     .await
@@ -6968,13 +7414,13 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         reply: "busy-drain ok".to_string(),
         requests: Arc::new(StdMutex::new(Vec::new())),
     });
-    let input = RebornRuntimeInput::from_build_input(
+    let input = RebornRuntimeInput::from_build_input(with_test_authenticated_session_channel(
         crate::deployment::local_filesystem_build_input(
             "runtime-rejected-busy-owner",
             root.path().join("standalone"),
         )
         .with_runtime_policy(standalone_runtime_policy()),
-    )
+    ))
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-rejected-busy-tenant".to_string(),
         agent_id: "runtime-rejected-busy-agent".to_string(),
@@ -7017,12 +7463,12 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
     let submitted_a = runtime
         .turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
+            output_contract: None,
             scope: scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("msg:rejected-busy-a").unwrap(),
-            source_binding_ref: SourceBindingRef::new("source:rejected-busy-a").unwrap(),
-            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:rejected-busy-a").unwrap(),
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("rejected-busy-a").unwrap(),
             received_at: Utc::now(),
@@ -7044,6 +7490,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-rejected-busy-b".to_string()),
             thread_id: Some(thread_id.to_string()),
             content: Some("message B while thread is busy".to_string()),
@@ -7165,6 +7612,7 @@ async fn deferred_busy_message_not_auto_submitted_after_run_cancellation() {
         caller.clone(),
         SUBMIT_TURN_COMMAND,
         ProductSubmitTurnRequest {
+            extension_id: Some(TEST_SESSION_EXTENSION_ID.to_string()),
             client_action_id: Some("send-rejected-busy-c".to_string()),
             thread_id: Some(thread_id.to_string()),
             content: Some("message C after thread is free".to_string()),
@@ -7223,6 +7671,7 @@ impl ironclaw_auth::RuntimeCredentialAccountSelectionService for MultiToolConfig
             refresh_secret: None,
             scopes: Vec::new(),
             provider_identity: None,
+            link_revision: 0,
             created_at: now,
             updated_at: now,
         })

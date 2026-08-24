@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 mod automation;
+mod execution_spec;
 mod fire_access;
 mod in_memory;
 mod libsql;
@@ -39,6 +40,7 @@ mod worker;
 /// `ironclaw_common`, which must hold no domain vocabulary); `MAX_TRIGGER_NAME_BYTES`
 /// below is the same bound under this crate's own noun.
 pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+pub use execution_spec::TriggerExecutionSpec;
 /// Fire-time access: the check contract plus the checkers that are pure
 /// trigger-scope policy. The deployment *grant* value and the identity-directory
 /// checker stay in the composition root — see `fire_access`'s module doc
@@ -65,6 +67,8 @@ pub const MAX_TRIGGER_PROMPT_BYTES: usize = 32 * 1024;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
 const EXTERNAL_EVENT_DOMAIN: &str = "external-event";
+const MANUAL_ROUTE_THREAD_DOMAIN: &str = "manual-route-thread";
+const MANUAL_EXTERNAL_EVENT_DOMAIN: &str = "manual-external-event";
 
 #[derive(Debug, Error)]
 pub enum TriggerError {
@@ -100,6 +104,7 @@ pub enum TriggerRecordValidationKind {
     NameTooLong,
     PromptEmpty,
     PromptTooLong,
+    ExecutionSpecInvalid,
     Other,
 }
 
@@ -352,6 +357,10 @@ pub struct TriggerRecord {
     pub source: TriggerSourceKind,
     pub schedule: TriggerSchedule,
     pub prompt: String,
+    /// Versioned authoring contract for structured routines. The rendered
+    /// `prompt` is frozen alongside it so scheduling remains prompt-based.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_spec: Option<TriggerExecutionSpec>,
     /// Retired per-trigger delivery route, read-tolerated only.
     ///
     /// Fires used to push their final reply here; they no longer do — a
@@ -386,6 +395,13 @@ impl TriggerRecord {
                 kind: TriggerRecordValidationKind::PromptTooLong,
                 reason: format!("trigger prompt must be at most {MAX_TRIGGER_PROMPT_BYTES} bytes"),
             });
+        }
+        if let Some(spec) = &self.execution_spec {
+            // The persisted prompt (rendered at creation) is authoritative and
+            // deliberately NOT compared against a re-render: `validate()` runs
+            // on stored records before every fire, so requiring equality with
+            // the current template would brick them on any template edit.
+            spec.validate()?;
         }
         if self.active_run_ref.is_some() && self.active_fire_slot.is_none() {
             return Err(TriggerError::InvalidRecord {
@@ -662,10 +678,11 @@ pub struct ElapsedOccurrenceCount {
     pub capped: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerSourceKind {
     Schedule,
+    Manual,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -755,11 +772,13 @@ pub(crate) fn parse_state_codec(value: &str) -> Result<TriggerState, TriggerErro
 pub(crate) fn source_kind_text_codec(value: TriggerSourceKind) -> &'static str {
     match value {
         TriggerSourceKind::Schedule => "schedule",
+        TriggerSourceKind::Manual => "manual",
     }
 }
 pub(crate) fn parse_source_kind_codec(value: &str) -> Result<TriggerSourceKind, TriggerError> {
     match value {
         "schedule" => Ok(TriggerSourceKind::Schedule),
+        "manual" => Ok(TriggerSourceKind::Manual),
         other => Err(TriggerError::InvalidRecord {
             kind: TriggerRecordValidationKind::Other,
             reason: format!("source: unsupported trigger source `{other}`"),
@@ -801,6 +820,7 @@ pub struct TriggerRunRecord {
     pub tenant_id: TenantId,
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
+    pub source: TriggerSourceKind,
     pub run_id: Option<TurnRunId>,
     /// Canonical thread id for this run, or `None` if no canonical conversation
     /// thread has been established yet.
@@ -828,6 +848,7 @@ impl TriggerRunRecord {
         tenant_id: TenantId,
         trigger_id: TriggerId,
         fire_slot: Timestamp,
+        source: TriggerSourceKind,
         run_id: Option<TurnRunId>,
         submitted_at: Timestamp,
     ) -> Self {
@@ -835,6 +856,7 @@ impl TriggerRunRecord {
             tenant_id,
             trigger_id,
             fire_slot,
+            source,
             run_id,
             thread_id: None,
             status: TriggerRunHistoryStatus::Running,
@@ -855,14 +877,32 @@ pub struct TriggerFireIdentity {
 
 impl TriggerFireIdentity {
     pub fn new(tenant_id: TenantId, trigger_id: TriggerId, fire_slot: Timestamp) -> Self {
+        Self::for_source(
+            TriggerSourceKind::Schedule,
+            tenant_id,
+            trigger_id,
+            fire_slot,
+        )
+    }
+
+    pub fn for_source(
+        source: TriggerSourceKind,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+    ) -> Self {
+        let (route_domain, external_event_domain) = match source {
+            TriggerSourceKind::Schedule => (ROUTE_THREAD_DOMAIN, EXTERNAL_EVENT_DOMAIN),
+            TriggerSourceKind::Manual => (MANUAL_ROUTE_THREAD_DOMAIN, MANUAL_EXTERNAL_EVENT_DOMAIN),
+        };
         let route_thread_id = TriggerRouteThreadId::new_unchecked(derive_fire_digest(
-            ROUTE_THREAD_DOMAIN,
+            route_domain,
             &tenant_id,
             trigger_id,
             fire_slot,
         ));
         let external_event_id = TriggerExternalEventId::new_unchecked(derive_fire_digest(
-            EXTERNAL_EVENT_DOMAIN,
+            external_event_domain,
             &tenant_id,
             trigger_id,
             fire_slot,
@@ -904,6 +944,8 @@ pub struct TriggerFire {
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
 }
 
 #[async_trait]
@@ -923,6 +965,13 @@ pub struct ClaimDueFireRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimManualFireRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub now: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedTriggerFire {
     pub record: TriggerRecord,
     pub fire_slot: Timestamp,
@@ -933,6 +982,9 @@ pub enum ClaimDueFireOutcome {
     Claimed(ClaimedTriggerFire),
     NotFound,
     NotDue {
+        record: TriggerRecord,
+    },
+    Paused {
         record: TriggerRecord,
     },
     AlreadyActive {
@@ -1036,6 +1088,8 @@ pub trait TriggerSourceProvider: Send + Sync {
     async fn evaluate(
         &self,
         record: &TriggerRecord,
+        fire_slot: Timestamp,
+        source: TriggerSourceKind,
         now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError>;
 }
@@ -1048,16 +1102,22 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
     async fn evaluate(
         &self,
         record: &TriggerRecord,
+        fire_slot: Timestamp,
+        source: TriggerSourceKind,
         now: Timestamp,
     ) -> Result<Option<TriggerFire>, TriggerError> {
         record.validate()?;
-        if record.source != TriggerSourceKind::Schedule || !record.is_due_at(now) {
+        if record.source != TriggerSourceKind::Schedule
+            || record.state != TriggerState::Scheduled
+            || fire_slot > now
+        {
             return Ok(None);
         }
-        let identity = TriggerFireIdentity::new(
+        let identity = TriggerFireIdentity::for_source(
+            source,
             record.tenant_id.clone(),
             record.trigger_id,
-            record.next_run_at,
+            fire_slot,
         );
         Ok(Some(TriggerFire {
             identity,
@@ -1065,6 +1125,10 @@ impl TriggerSourceProvider for ScheduleTriggerSourceProvider {
             agent_id: record.agent_id.clone(),
             project_id: record.project_id.clone(),
             prompt: record.prompt.clone(),
+            execution_policy: record
+                .execution_spec
+                .as_ref()
+                .map(|spec| spec.policy.clone()),
         }))
     }
 }
@@ -1220,6 +1284,21 @@ pub trait TriggerRepository: Send + Sync {
         request: ClaimDueFireRequest,
     ) -> Result<ClaimDueFireOutcome, TriggerError>;
 
+    /// Atomically claims an on-demand fire without applying the schedule's due
+    /// gate or advancing `next_run_at`.
+    ///
+    /// The active-fire columns remain the concurrency boundary. In particular,
+    /// two manual calls in the same timestamp resolution cannot both reach
+    /// identity minting, so no nonce is needed in the deterministic identity.
+    async fn claim_manual_fire(
+        &self,
+        _request: ClaimManualFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "claim_manual_fire not implemented by this repository".to_string(),
+        })
+    }
+
     async fn mark_fire_accepted(
         &self,
         request: FireAcceptedRequest,
@@ -1340,13 +1419,14 @@ pub use postgres::PostgresTriggerRepository;
 pub use worker::{
     ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP, ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection,
     ActiveHoldReason, BlockedActiveRunKind, MissingTriggerActiveRunLookup,
-    NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
-    TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFailedFireSettlement,
-    TriggerFireSettlementObserver, TriggerPollerFailureReason, TriggerPollerFireOutcome,
-    TriggerPollerFireReport, TriggerPollerTickReport, TriggerPollerWorker,
-    TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRunFailureSettlement,
-    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
-    active_hold_projection, active_holds_for_records,
+    MissingTriggerManualFireRunner, NoopTriggerFireSettlementObserver,
+    TriggerAcceptedFireSettlement, TriggerActiveRunLookup, TriggerActiveRunState,
+    TriggerActiveRunStateRequest, TriggerFailedFireSettlement, TriggerFireSettlementObserver,
+    TriggerManualFireOutcome, TriggerManualFireRunner, TriggerPollerFailureReason,
+    TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
+    TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps,
+    TriggerRunFailureSettlement, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
+    TrustedTriggerSubmitRequest, active_hold_projection, active_holds_for_records,
 };
 
 #[derive(Clone, Default)]

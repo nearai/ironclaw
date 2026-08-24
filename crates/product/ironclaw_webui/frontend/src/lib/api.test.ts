@@ -17,11 +17,12 @@ import {
   queryOperatorLogs,
   renameAutomation,
   resumeAutomation,
-  getWebPushStatus,
+  runAutomation,
+  getNotificationSetupStatus,
   setNotificationChannels,
   setupExtension,
-  subscribeWebPush,
-  unsubscribeWebPush,
+  enableNotificationSetup,
+  disableNotificationSetup,
 } from "./api";
 
 const originalFetch = globalThis.fetch;
@@ -228,6 +229,7 @@ test("automation mutations use encoded v2 automation routes", async () => {
     });
   };
 
+  await runAutomation({ automationId: "automation/needs encoding" });
   await pauseAutomation({ automationId: "automation/needs encoding" });
   await resumeAutomation({ automationId: "automation/needs encoding" });
   await renameAutomation({
@@ -236,28 +238,33 @@ test("automation mutations use encoded v2 automation routes", async () => {
   });
   await deleteAutomation({ automationId: "automation/needs encoding" });
 
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 5);
   assert.equal(
     calls[0].path,
-    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/pause",
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/run",
   );
   assert.equal(calls[0].options.method, "POST");
   assert.equal(
     calls[1].path,
-    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/resume",
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/pause",
   );
   assert.equal(calls[1].options.method, "POST");
   assert.equal(
     calls[2].path,
-    "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding/resume",
   );
   assert.equal(calls[2].options.method, "POST");
-  assert.equal(calls[2].options.body, JSON.stringify({ name: "Renamed status" }));
   assert.equal(
     calls[3].path,
     "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
   );
-  assert.equal(calls[3].options.method, "DELETE");
+  assert.equal(calls[3].options.method, "POST");
+  assert.equal(calls[3].options.body, JSON.stringify({ name: "Renamed status" }));
+  assert.equal(
+    calls[4].path,
+    "/api/webchat/v2/automations/automation%2Fneeds%20encoding",
+  );
+  assert.equal(calls[4].options.method, "DELETE");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });
 
@@ -426,6 +433,7 @@ test("automation state mutations reject before fetch when automation id is missi
   };
 
   await assert.rejects(pauseAutomation(), /automationId is required/);
+  await assert.rejects(runAutomation(), /automationId is required/);
   await assert.rejects(resumeAutomation({}), /automationId is required/);
   await assert.rejects(renameAutomation({ name: "Renamed" }), /automationId is required/);
   await assert.rejects(
@@ -606,7 +614,7 @@ test("clientActionId falls back when global crypto is null", () => {
   });
 });
 
-test("getWebPushStatus reads the web-push status route", async () => {
+test("getNotificationSetupStatus reads the channel's generic status route", async () => {
   const calls = [];
   globalThis.sessionStorage = {
     getItem: () => "",
@@ -616,19 +624,31 @@ test("getWebPushStatus reads the web-push status route", async () => {
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(
-      JSON.stringify({ vapid_public_key: "k", subscription_count: 0, subscriptions: [] }),
+      JSON.stringify({
+        extension_id: "some-channel",
+        requires_setup: true,
+        enabled: false,
+        detail: {
+          registration_count: 0,
+          registrations: [],
+          bootstrap: { vapid_public_key: "k" },
+        },
+      }),
       { status: 200, headers: { "content-type": "application/json" } },
     );
   };
 
-  const status = await getWebPushStatus();
+  const status = await getNotificationSetupStatus({ extensionId: "some-channel" });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, "/api/webchat/v2/web-push/status");
-  assert.equal(status.vapid_public_key, "k");
+  assert.equal(calls[0].path, "/api/webchat/v2/channels/some-channel/notifications");
+  assert.equal(status.requires_setup, true);
+  assert.equal(status.detail.bootstrap.vapid_public_key, "k");
+  await assert.rejects(getNotificationSetupStatus(), /extensionId is required/);
+  assert.equal(calls.length, 1, "a missing extension id must never reach fetch");
 });
 
-test("subscribeWebPush posts the subscription wire body and validates required keys", async () => {
+test("enableNotificationSetup posts the channel-opaque payload to the enable route", async () => {
   const calls = [];
   globalThis.sessionStorage = {
     getItem: () => "",
@@ -637,36 +657,40 @@ test("subscribeWebPush posts the subscription wire body and validates required k
   };
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ outcome: "enrolled" }), {
+    return new Response(JSON.stringify({ enabled: true }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   };
 
-  await subscribeWebPush({
-    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
-    keys: { p256dh: "pk", auth: "as" },
-    userAgent: "TestBrowser/1.0",
+  await enableNotificationSetup({
+    extensionId: "some-channel",
+    payload: {
+      endpoint: "https://push.example/send/abc",
+      keys: { p256dh: "pk", auth: "as" },
+      user_agent: "TestBrowser/1.0",
+    },
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, "/api/webchat/v2/web-push/subscriptions");
+  assert.equal(
+    calls[0].path,
+    "/api/webchat/v2/channels/some-channel/notifications/enable",
+  );
   assert.equal(calls[0].options.method, "POST");
   assert.deepEqual(JSON.parse(calls[0].options.body), {
-    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
-    keys: { p256dh: "pk", auth: "as" },
-    user_agent: "TestBrowser/1.0",
+    payload: {
+      endpoint: "https://push.example/send/abc",
+      keys: { p256dh: "pk", auth: "as" },
+      user_agent: "TestBrowser/1.0",
+    },
   });
 
-  await assert.rejects(subscribeWebPush(), /endpoint is required/);
-  await assert.rejects(
-    subscribeWebPush({ endpoint: "https://fcm.googleapis.com/fcm/send/abc" }),
-    /keys\.p256dh and keys\.auth are required/,
-  );
+  await assert.rejects(enableNotificationSetup(), /extensionId is required/);
   assert.equal(calls.length, 1, "invalid input must never reach fetch");
 });
 
-test("unsubscribeWebPush posts the endpoint removal body", async () => {
+test("disableNotificationSetup posts the channel-opaque payload to the disable route", async () => {
   const calls = [];
   globalThis.sessionStorage = {
     getItem: () => "",
@@ -675,18 +699,24 @@ test("unsubscribeWebPush posts the endpoint removal body", async () => {
   };
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ removed: true }), {
+    return new Response(JSON.stringify({ enabled: false }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   };
 
-  await unsubscribeWebPush({ endpoint: "https://fcm.googleapis.com/fcm/send/abc" });
+  await disableNotificationSetup({
+    extensionId: "some-channel",
+    payload: { endpoint: "https://push.example/send/abc" },
+  });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].path, "/api/webchat/v2/web-push/subscriptions/remove");
+  assert.equal(
+    calls[0].path,
+    "/api/webchat/v2/channels/some-channel/notifications/disable",
+  );
   assert.deepEqual(JSON.parse(calls[0].options.body), {
-    endpoint: "https://fcm.googleapis.com/fcm/send/abc",
+    payload: { endpoint: "https://push.example/send/abc" },
   });
-  await assert.rejects(unsubscribeWebPush({}), /endpoint is required/);
+  await assert.rejects(disableNotificationSetup({}), /extensionId is required/);
 });

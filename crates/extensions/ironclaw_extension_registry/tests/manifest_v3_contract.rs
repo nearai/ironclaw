@@ -64,7 +64,7 @@ fn acme_record() -> ExtensionManifestRecord {
     parse_v3(ACME_MANIFEST).expect("acme fixture manifest must parse")
 }
 
-// ---------------------------------------------------------------------------
+// arch-exempt: large_file, manifest-v3 cases remain one conformance suite pending fixture split, plan #7477
 // Parsing the documented v3 shape
 // ---------------------------------------------------------------------------
 
@@ -146,7 +146,14 @@ fn acme_fixture_resolves_channel_and_auth_recipe() {
     assert_eq!(channel.id, "messages");
     assert_eq!(channel.conversation_model, ConversationModel::Continuous);
     let ingress = channel.ingress.as_ref().expect("ingress declared");
-    assert_eq!(ingress.route_suffix.as_str(), "events");
+    assert_eq!(
+        ingress
+            .route_suffix
+            .as_ref()
+            .expect("webhook ingress declares a route_suffix")
+            .as_str(),
+        "events"
+    );
 
     assert_eq!(resolved.auth.len(), 1);
     let auth = &resolved.auth[0];
@@ -187,15 +194,29 @@ fn admin_configuration_is_manifest_declared_and_resolved_without_installation_st
     assert_eq!(descriptor.fields.len(), 2);
     assert!(descriptor.fields[0].secret);
     assert!(descriptor.fields[1].secret);
+    assert_eq!(
+        descriptor.fields[0].description,
+        "Issued by the Acme developer console under Bot Settings.",
+        "a manifest-declared field description must survive resolution"
+    );
+    assert!(
+        descriptor.fields[1].description.is_empty(),
+        "a field without a declared description resolves to empty, not an error"
+    );
 }
 
 #[test]
 fn duplicate_admin_configuration_handles_fail_closed() {
-    let toml = ACME_MANIFEST.replace(
-        r#"fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+    let original_fields = r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by the Acme developer console under Bot Settings." },
   { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
-]"#,
+]"#;
+    assert!(
+        ACME_MANIFEST.contains(original_fields),
+        "fixture fields block drifted; update this replacement source"
+    );
+    let toml = ACME_MANIFEST.replace(
+        original_fields,
         r#"fields = [
   { handle = "acme_client_id", label = "Client ID", secret = false, required = true },
   { handle = "acme_client_id", label = "Duplicate", secret = true, required = true },
@@ -230,11 +251,16 @@ fn channel_runtime_configuration_comes_from_admin_configuration_alone() {
 
 #[test]
 fn channel_runtime_secret_references_must_be_declared_by_admin_configuration() {
-    let toml = ACME_MANIFEST.replace(
-        r#"fields = [
-  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+    let original_fields = r#"fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true, description = "Issued by the Acme developer console under Bot Settings." },
   { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
-]"#,
+]"#;
+    assert!(
+        ACME_MANIFEST.contains(original_fields),
+        "fixture fields block drifted; update this replacement source"
+    );
+    let toml = ACME_MANIFEST.replace(
+        original_fields,
         r#"fields = [
   { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
 ]"#,
@@ -348,12 +374,10 @@ fn undeclared_channel_connection_placeholder_fails_closed() {
     let toml = ACME_MANIFEST.replace(
         "[channel.presentation]\n\
          supports_markdown = true\n\
-         supports_threads = false\n\
-         max_message_chars = 4000\n",
+         supports_threads = false\n",
         "[channel.presentation]\n\
          supports_markdown = true\n\
-         supports_threads = false\n\
-         max_message_chars = 4000\n\n\
+         supports_threads = false\n\n\
          [channel.connection]\n\
          provider = \"acme\"\n\
          strategy = \"web_generated_code\"\n\
@@ -491,6 +515,83 @@ fn referenced_vendors_require_an_auth_recipe() {
     let toml = ACME_MANIFEST.replace("vendor = \"acme\"", "vendor = \"zeta\"");
     let error = parse_v3(&toml).unwrap_err();
     assert!(error.contains("zeta"), "{error}");
+}
+
+/// A `device_link` recipe must project onto
+/// `RuntimeCredentialAccountSetup::DeviceLink` on **both** sides of the
+/// manifest — the per-tool credential requirement and the resolved auth
+/// surface — because the two are read by different consumers (the auth-gate
+/// challenge and the extension-card connect affordance). A vendor whose
+/// surface disagreed with its credentials would offer a connect affordance
+/// that services a challenge the engine cannot mint. The setup carries no
+/// scopes: a linked device holds the account's own authority, which is why
+/// `VendorAuthRecipe::scope_ceiling` is empty for this method.
+#[test]
+fn device_link_recipe_projects_onto_the_device_link_account_setup() {
+    let toml = ACME_MANIFEST
+        .replace(
+            r#"method = "oauth2_code"
+display_name = "Acme account"
+authorization_endpoint = "https://auth.acme.example/oauth/authorize"
+token_endpoint = "https://auth.acme.example/oauth/token"
+pkce = "s256"
+scopes = ["notes:write"]
+client_credentials = { client_id_handle = "acme_oauth_client_id", client_secret_handle = "acme_oauth_client_secret" }
+
+[auth.acme.token_response]
+access_token = "/access_token"
+scope = { path = "/scope", missing = "fallback_to_requested" }
+
+[auth.acme.identity]
+account_id = "/account/id""#,
+            r#"method = "device_link"
+display_name = "Acme account"
+default_mode_label = "Scan a code"
+alternate_mode_label = "Use your phone number""#,
+        )
+        // The tool credential's own `scopes` are a per-tool request, not the
+        // recipe ceiling; a device-link vendor grants no scopes at all.
+        .replace(r#"scopes = ["notes:write"]"#, "scopes = []");
+    assert!(
+        !toml.contains("oauth2_code"),
+        "the oauth recipe block must actually have been replaced"
+    );
+
+    let record = parse_v3(&toml).expect("a device_link recipe is a valid v3 auth section");
+    let resolved = record.resolved();
+
+    let auth = resolved
+        .auth
+        .iter()
+        .find(|surface| surface.vendor.as_str() == "acme")
+        .expect("acme auth surface");
+    assert!(
+        matches!(
+            auth.recipe.as_ref().expect("recipe"),
+            VendorAuthRecipe::DeviceLink(_)
+        ),
+        "the recipe must round-trip as device_link"
+    );
+    assert_eq!(auth.setup, RuntimeCredentialAccountSetup::DeviceLink);
+
+    let credential = record
+        .manifest()
+        .capabilities
+        .iter()
+        .flat_map(|capability| capability.runtime_credentials.iter())
+        .find(|credential| credential.handle.as_str() == "acme_user_token")
+        .expect("acme fixture declares the user-token credential");
+    match &credential.source {
+        RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } => {
+            assert_eq!(provider.as_str(), "acme");
+            assert_eq!(
+                setup,
+                &RuntimeCredentialAccountSetup::DeviceLink,
+                "the credential requirement must agree with the auth surface"
+            );
+        }
+        other => panic!("expected product auth account source, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1259,9 +1360,14 @@ fn standard_op_binding_threads_and_synthesizes_canonical_refs() {
         cap.input_schema_ref.as_str(),
         "standard:messaging/send_message.input.v1"
     );
+    // The synthesized ref carries the op's CURRENT schema version, which is
+    // not necessarily `.v1`: `send_message` graduated to `.output.v2` (the
+    // `sent_unverified` evidence branch). Already-installed bindings keep
+    // their `.v1` ref — nothing rewrites a resolved record — but a manifest
+    // parsed today pins the current version.
     assert_eq!(
         cap.output_schema_ref.as_ref().map(|r| r.as_str()),
-        Some("standard:messaging/send_message.output.v1")
+        Some("standard:messaging/send_message.output.v2")
     );
 }
 

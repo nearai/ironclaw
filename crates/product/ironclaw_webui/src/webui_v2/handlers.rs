@@ -39,13 +39,14 @@ use ironclaw_assistant::{
     ADMIN_USER_PUT_SECRET_CAPABILITY, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY,
     ADMIN_USER_SET_STATUS_CAPABILITY, ADMIN_USER_UPDATE_CAPABILITY, ADMIN_USER_VIEW,
     ADMIN_USERS_VIEW, ATTACHMENT_READ_COMMAND, AUTOMATION_DELETE_COMMAND, AUTOMATION_PAUSE_COMMAND,
-    AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_COMMAND, AUTOMATIONS_VIEW, CANCEL_RUN_COMMAND,
-    CREATE_THREAD_COMMAND, EXTENSION_IMPORT_CAPABILITY, EXTENSION_INSTALL_CAPABILITY,
-    EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
-    FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, GLOBAL_AUTO_APPROVE_VIEW,
-    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND,
-    LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
+    AUTOMATION_RENAME_COMMAND, AUTOMATION_RESUME_COMMAND, AUTOMATION_RUN_COMMAND, AUTOMATIONS_VIEW,
+    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, EXTENSION_IMPORT_CAPABILITY,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY,
+    EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_COMMAND,
+    FS_STAT_VIEW, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND,
+    LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND, LLM_NEARAI_LOGIN_COMMAND,
+    LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
     LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW,
     NOTIFICATION_CHANNELS_SET_COMMAND, NOTIFICATION_CHANNELS_VIEW, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
@@ -83,13 +84,29 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
+    RebornSuggestionDismissRequest, RebornSuggestionStartRequest, RebornSuggestionsGenerateRequest,
 };
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND, IronhubInstallDeliveryRequest, IronhubInstallDeliveryResult,
 };
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_ARCHIVE_COMMAND, NOTIFICATIONS_MARK_ALL_READ_COMMAND,
+    NOTIFICATIONS_MARK_READ_COMMAND, NOTIFICATIONS_VIEW, ProductListNotificationsRequest,
+    ProductListNotificationsResponse, ProductMarkAllNotificationsReadRequest,
+    ProductNotificationMutationRequest, ProductNotificationMutationResponse,
+};
+use ironclaw_product_contracts::notification_setup::{
+    NOTIFICATION_SETUP_DISABLE_COMMAND, NOTIFICATION_SETUP_ENABLE_COMMAND,
+    NOTIFICATION_SETUP_STATUS_VIEW,
+};
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
-    NearAiWalletLoginResult, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPolicyRequest,
+    SetUserModelPreferenceRequest, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
+};
+use ironclaw_product_contracts::operator_llm::{
+    LLM_USER_MODEL_POLICY_SET_CAPABILITY, LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY,
+    USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
 };
 use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_product_contracts::package_lifecycle::{
@@ -110,18 +127,15 @@ use ironclaw_product_contracts::product_wire::{
     RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornRetryRunResponse,
     RebornSetNotificationChannelsRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeProductRequest, RebornTraceHoldAuthorizeResponse,
-    SettingsToolPermissionState,
+    RebornSubmitTurnResponse, RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
+    RebornSuggestionStartResponse, RebornSuggestionsResponse, RebornTimelineRequest,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, SettingsToolPermissionState,
 };
 use ironclaw_product_contracts::product_wire::{
-    RebornWebPushStatusResponse, RebornWebPushSubscribeRequest, RebornWebPushSubscribeResponse,
-    RebornWebPushUnsubscribeRequest, RebornWebPushUnsubscribeResponse,
+    RebornNotificationSetupMutationRequest, RebornNotificationSetupStatusResponse,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
-use ironclaw_product_contracts::web_push::{
-    WEB_PUSH_STATUS_VIEW, WEB_PUSH_SUBSCRIBE_COMMAND, WEB_PUSH_UNSUBSCRIBE_COMMAND,
-};
 use ironclaw_product_contracts::workspace_views::{
     FsMount, ProjectFsFile, RebornAddMemberRequest, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
@@ -147,6 +161,10 @@ use ironclaw_host_api::{
     resolution::{Blocked, Resolution},
     result_meta::FailureKind,
 };
+use ironclaw_product_contracts::suggestions::{
+    SUGGESTION_DISMISS_COMMAND, SUGGESTION_START_COMMAND, SUGGESTIONS_GENERATE_COMMAND,
+    SUGGESTIONS_LIST_VIEW,
+};
 use ironclaw_product_contracts::surface::{
     ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
     ProductSurfaceErrorKind, ProductSurfaceValidationCode,
@@ -169,6 +187,7 @@ const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
 const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
+const SUGGESTIONS_MAX_RETRY_AFTER_SECONDS: u32 = 60;
 const ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
@@ -185,6 +204,11 @@ pub struct WebUiV2SessionResponse {
     /// format registry so the picker can never drift from the server's
     /// allowed set; the send-message decode remains authoritative.
     pub attachments: AttachmentCapabilities,
+    /// The deployment's authenticated-session channel — the extension id the
+    /// browser plugs into the generic session-inbound route. Absent when the
+    /// deployment has no session channel (sends fail closed client-side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_channel_extension_id: Option<String>,
 }
 
 /// Effective WebUI feature gates surfaced to the browser on `GET /session`.
@@ -199,6 +223,10 @@ pub struct WebUiV2Features {
     /// `IRONCLAW_REBORN_PROJECTS`, while the surface is still being
     /// finished.
     pub reborn_projects: bool,
+    /// OOBE first-run suggestion surface (the first-run suggestion cards).
+    /// Hidden unless the deployment sets `IRONCLAW_OOBE_SUGGESTIONS`; gated so
+    /// real users never see fabricated suggestions until it ships.
+    pub oobe_suggestions: bool,
     /// Whether the browser must hide raw workspace fallback and only show the
     /// caller-scoped workspace projection. Hosted deployments enable this to
     /// avoid showing artifacts from a shared `/workspace` root; local
@@ -244,12 +272,14 @@ pub async fn get_session(
         capabilities,
         features: WebUiV2Features {
             reborn_projects: state.reborn_projects_enabled(),
+            oobe_suggestions: state.oobe_suggestions_enabled(),
             workspace_requires_scoped_projection,
             regression_artifact_export: state.regression_artifact_export_enabled(),
             admin_thread_scrape: state.admin_thread_scrape_enabled(),
             global_auto_approve,
         },
         attachments: attachment_capabilities(),
+        session_channel_extension_id: state.session_channel_extension_id().map(str::to_string),
     })
 }
 
@@ -601,17 +631,21 @@ pub async fn admin_delete_user_secret(
     Ok(Json(response))
 }
 
-/// `POST /api/webchat/v2/threads/{thread_id}/messages`
+/// `POST /api/webchat/v2/channels/{extension_id}/messages`
 ///
-/// Body shape: [`ProductSubmitTurnRequest`] (the path `thread_id` overrides
-/// any value in the body).
-pub async fn send_message(
+/// The generic session-inbound door: one route for every
+/// authenticated-session channel, keyed by `extension_id` — no channel is
+/// named in the path table. Body shape: [`ProductSubmitTurnRequest`] with
+/// `thread_id` required in the body (the caller owns the thread); the path
+/// `extension_id` overrides any value in the body, and the product surface
+/// validates it against the deployment's session-channel directory.
+pub async fn session_channel_message(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-    Path(thread_id): Path<String>,
+    Path(extension_id): Path<String>,
     Json(mut body): Json<ProductSubmitTurnRequest>,
 ) -> Result<Json<RebornSubmitTurnResponse>, WebUiV2HttpError> {
-    body.thread_id = Some(thread_id);
+    body.extension_id = Some(extension_id);
     let response =
         invoke_product_command(state.services(), caller, SUBMIT_TURN_COMMAND, body).await?;
     Ok(Json(response))
@@ -1426,7 +1460,10 @@ pub async fn stream_events(
 /// and `sse_capacity::REJECTION_REFUND_LIMIT` for why refunding stops once
 /// a caller hammers a saturated cap.
 fn sse_capacity_rejected(refundable: bool) -> Response {
-    let response = sse_concurrency_exhausted().into_response();
+    let mut response = sse_concurrency_exhausted().into_response();
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     if refundable {
         mark_rate_limit_refundable(response)
     } else {
@@ -1832,6 +1869,83 @@ pub struct ListThreadsQuery {
     pub needs_approval: bool,
 }
 
+/// `GET /api/webchat/v2/notifications`
+pub async fn list_notifications(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Query(query): Query<ListNotificationsQuery>,
+) -> Result<Json<ProductListNotificationsResponse>, WebUiV2HttpError> {
+    let surface = state.bind_services(caller);
+    let response = NOTIFICATIONS_VIEW
+        .query_on(
+            &surface,
+            ProductListNotificationsRequest { limit: query.limit },
+            query.cursor,
+        )
+        .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListNotificationsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NotificationPath {
+    pub notification_id: String,
+}
+
+/// `POST /api/webchat/v2/notifications/{notification_id}/read`
+pub async fn mark_notification_read(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(NotificationPath { notification_id }): Path<NotificationPath>,
+) -> Result<Json<ProductNotificationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATIONS_MARK_READ_COMMAND,
+        ProductNotificationMutationRequest { notification_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/notifications/read-all`
+pub async fn mark_all_notifications_read(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<ProductNotificationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATIONS_MARK_ALL_READ_COMMAND,
+        ProductMarkAllNotificationsReadRequest {},
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/notifications/{notification_id}/archive`
+pub async fn archive_notification(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(NotificationPath { notification_id }): Path<NotificationPath>,
+) -> Result<Json<ProductNotificationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATIONS_ARCHIVE_COMMAND,
+        ProductNotificationMutationRequest { notification_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
 /// `GET /api/webchat/v2/commands`
 pub async fn list_commands(
     State(state): State<WebUiV2State>,
@@ -1912,6 +2026,22 @@ pub async fn pause_automation(
     Ok(Json(response))
 }
 
+/// `POST /api/webchat/v2/automations/:automation_id/run`
+pub async fn run_automation(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(automation_id): Path<String>,
+) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        AUTOMATION_RUN_COMMAND,
+        RebornAutomationRequest { automation_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
 /// `POST /api/webchat/v2/automations/:automation_id/resume`
 pub async fn resume_automation(
     State(state): State<WebUiV2State>,
@@ -1959,6 +2089,100 @@ pub async fn delete_automation(
         caller,
         AUTOMATION_DELETE_COMMAND,
         RebornAutomationRequest { automation_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/suggestions`
+///
+/// Returns the current persisted snapshot without starting generation.
+pub async fn list_suggestions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<RebornSuggestionsResponse>, WebUiV2HttpError> {
+    let response = query_product_view(
+        state.services(),
+        caller,
+        SUGGESTIONS_LIST_VIEW.descriptor(),
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/suggestions/generate`
+///
+/// Begins or observes one durable, idempotent generation. The request action
+/// id is an idempotency key only; generation identity and authorization remain
+/// owned by the product service and its durable store.
+pub async fn generate_suggestions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(request): Json<RebornSuggestionsGenerateRequest>,
+) -> Result<Response, WebUiV2HttpError> {
+    let client_action_id = parse_client_action_id(Some(request.client_action_id))?;
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTIONS_GENERATE_COMMAND,
+        RebornSuggestionsGenerateRequest {
+            client_action_id: client_action_id.as_str().to_string(),
+        },
+    )
+    .await?;
+    let accepted = response.status == RebornSuggestionGenerationStatus::Generating;
+    let retry_after = response
+        .retry_after_seconds
+        .unwrap_or(1)
+        .clamp(1, SUGGESTIONS_MAX_RETRY_AFTER_SECONDS);
+    let mut http_response = (
+        if accepted {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(response),
+    )
+        .into_response();
+    if accepted {
+        let value = HeaderValue::from_str(&retry_after.to_string())
+            .map_err(ProductSurfaceError::internal_from)?;
+        http_response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, value);
+    }
+    Ok(http_response)
+}
+
+/// `POST /api/webchat/v2/suggestions/:suggestion_id/start`
+pub async fn start_suggestion(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<RebornSuggestionStartResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTION_START_COMMAND,
+        RebornSuggestionStartRequest { suggestion_id },
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+/// `DELETE /api/webchat/v2/suggestions/:suggestion_id`
+pub async fn dismiss_suggestion(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Path(suggestion_id): Path<String>,
+) -> Result<Json<RebornSuggestionDismissResponse>, WebUiV2HttpError> {
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        SUGGESTION_DISMISS_COMMAND,
+        RebornSuggestionDismissRequest { suggestion_id },
     )
     .await?;
     Ok(Json(response))
@@ -2265,53 +2489,73 @@ pub async fn set_notification_channels(
     Ok(Json(response))
 }
 
-/// `GET /api/webchat/v2/web-push/status`
+/// `GET /api/webchat/v2/channels/{extension_id}/notifications`
 ///
-/// The deployment's VAPID public key (`applicationServerKey`) plus the
-/// caller's enrolled browsers — redacted to push-service hosts; endpoint
-/// capability URLs never leave the backend.
-pub async fn web_push_status(
+/// One channel's per-user notification-setup state: whether the channel
+/// requires enrollment, whether the caller is enrolled, and a
+/// channel-opaque `detail` document only that channel's client interprets
+/// (for web push: the VAPID `applicationServerKey` plus enrolled browsers
+/// redacted to push-service hosts).
+pub async fn notification_setup_status(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-) -> Result<Json<RebornWebPushStatusResponse>, WebUiV2HttpError> {
+    Path(extension_id): Path<String>,
+) -> Result<Json<RebornNotificationSetupStatusResponse>, WebUiV2HttpError> {
     let response = query_product_view(
         state.services(),
         caller,
-        WEB_PUSH_STATUS_VIEW.descriptor(),
-        serde_json::json!({}),
+        NOTIFICATION_SETUP_STATUS_VIEW.descriptor(),
+        serde_json::json!({ "extension_id": extension_id }),
         None,
     )
     .await?;
     Ok(Json(response))
 }
 
-/// `POST /api/webchat/v2/web-push/subscriptions`
+/// `POST /api/webchat/v2/channels/{extension_id}/notifications/enable`
 ///
-/// Enroll (or refresh) the caller's current browser for web push. Body:
-/// [`RebornWebPushSubscribeRequest`]; the endpoint is validated against the
-/// supported push-service allowlist before persistence.
-pub async fn web_push_subscribe(
+/// Perform the channel's per-user notification enrollment. The body is a
+/// channel-opaque `payload` the channel's adapter validates (for web push:
+/// the browser's push subscription, checked against the push-service
+/// allowlist before persistence). The path names the channel; a body
+/// `extension_id` is overridden.
+pub async fn notification_setup_enable(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-    Json(body): Json<RebornWebPushSubscribeRequest>,
-) -> Result<Json<RebornWebPushSubscribeResponse>, WebUiV2HttpError> {
-    let response =
-        invoke_product_command(state.services(), caller, WEB_PUSH_SUBSCRIBE_COMMAND, body).await?;
+    Path(extension_id): Path<String>,
+    Json(mut body): Json<RebornNotificationSetupMutationRequest>,
+) -> Result<Json<RebornNotificationSetupStatusResponse>, WebUiV2HttpError> {
+    body.extension_id = extension_id;
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATION_SETUP_ENABLE_COMMAND,
+        body,
+    )
+    .await?;
     Ok(Json(response))
 }
 
-/// `POST /api/webchat/v2/web-push/subscriptions/remove`
+/// `POST /api/webchat/v2/channels/{extension_id}/notifications/disable`
 ///
-/// Remove one of the caller's browser enrollments by endpoint. POST (not
-/// DELETE) because the endpoint is a long capability URL carried in the body.
-pub async fn web_push_unsubscribe(
+/// Tear down the channel's per-user notification enrollment. POST (not
+/// DELETE) because the payload selecting what to tear down (for web push: a
+/// long push-endpoint capability URL) rides the body. The path names the
+/// channel; a body `extension_id` is overridden.
+pub async fn notification_setup_disable(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-    Json(body): Json<RebornWebPushUnsubscribeRequest>,
-) -> Result<Json<RebornWebPushUnsubscribeResponse>, WebUiV2HttpError> {
-    let response =
-        invoke_product_command(state.services(), caller, WEB_PUSH_UNSUBSCRIBE_COMMAND, body)
-            .await?;
+    Path(extension_id): Path<String>,
+    Json(mut body): Json<RebornNotificationSetupMutationRequest>,
+) -> Result<Json<RebornNotificationSetupStatusResponse>, WebUiV2HttpError> {
+    body.extension_id = extension_id;
+    let response = invoke_product_command(
+        state.services(),
+        caller,
+        NOTIFICATION_SETUP_DISABLE_COMMAND,
+        body,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -3943,6 +4187,115 @@ pub async fn run_operator_service_lifecycle(
 #[derive(Debug, Deserialize)]
 pub struct LlmProviderPath {
     pub provider_id: String,
+}
+
+/// `GET /api/webchat/v2/llm/models`
+///
+/// User-safe catalog for the caller's tenant. Unlike the operator provider
+/// snapshot, this response contains no endpoints or credential metadata.
+pub async fn get_user_model_catalog(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<UserModelCatalog>, WebUiV2HttpError> {
+    Ok(Json(
+        query_user_model_catalog(state.services(), caller).await?,
+    ))
+}
+
+async fn query_user_model_catalog(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+) -> Result<UserModelCatalog, ProductSurfaceError> {
+    let page = query_product_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: USER_MODEL_CATALOG_VIEW.id.to_string(),
+            params: serde_json::json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
+    serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
+}
+
+/// `GET /api/webchat/v2/llm/model-preference`
+pub async fn get_user_model_preference(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+) -> Result<Json<UserModelPreference>, WebUiV2HttpError> {
+    Ok(Json(
+        query_user_model_preference(state.services(), caller).await?,
+    ))
+}
+
+async fn query_user_model_preference(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: ProductSurfaceCaller,
+) -> Result<UserModelPreference, ProductSurfaceError> {
+    let page = query_product_page(
+        services,
+        caller,
+        RebornViewQuery {
+            view_id: USER_MODEL_PREFERENCE_VIEW.id.to_string(),
+            params: serde_json::json!({}),
+            cursor: None,
+        },
+    )
+    .await?;
+    serde_json::from_value(page.payload).map_err(ProductSurfaceError::internal_from)
+}
+
+/// `PUT /api/webchat/v2/llm/model-preference`
+pub async fn set_user_model_preference(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Json(body): Json<SetUserModelPreferenceRequest>,
+) -> Result<Json<UserModelPreference>, WebUiV2HttpError> {
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY,
+        body,
+    )
+    .await?;
+    capability_resolution_succeeded(
+        resolution,
+        "user model preference",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
+    Ok(Json(
+        query_user_model_preference(state.services(), caller).await?,
+    ))
+}
+
+/// `PUT /api/webchat/v2/llm/model-policy`
+pub async fn set_user_model_policy(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<ProductSurfaceCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Json(body): Json<SetUserModelPolicyRequest>,
+) -> Result<Json<UserModelCatalog>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_USER_MODEL_POLICY_SET_CAPABILITY,
+        body,
+    )
+    .await?;
+    capability_resolution_succeeded(
+        resolution,
+        "user model policy",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
+    Ok(Json(
+        query_user_model_catalog(state.services(), caller).await?,
+    ))
 }
 
 /// `GET /api/webchat/v2/llm/providers`

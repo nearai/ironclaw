@@ -303,8 +303,45 @@ uuid_id!(ResultRef);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ProviderToolName(String);
 
+/// Reserved capability-id prefix under which the external-tool loop lane
+/// (`external_tool_capability_id` in `ironclaw_loop_host`) mints synthetic
+/// capability ids from client-declared provider tool names, e.g.
+/// `external_tool.lookup`. Those tool names are wire names the client already
+/// declared — there is no `.`-separated capability encoding to invert for
+/// them — so [`ProviderToolName::for_capability`] and
+/// [`ProviderToolName::encode_capability_str`] carve this prefix out of the
+/// blanket `.` → `__` mapping and return the bare suffix instead. The live
+/// external-tool lane and prepared-context history seeding both depend on
+/// this carve-out to agree on the same provider tool name for the same
+/// capability id.
+const EXTERNAL_TOOL_CAPABILITY_PREFIX: &str = "external_tool.";
+
 impl ProviderToolName {
     pub const MAX_BYTES: usize = 64;
+
+    /// The ONE capability-id → provider-tool-name mapping. Every surface that
+    /// renders a capability to a model tool name goes through here so the
+    /// mapping cannot fork.
+    ///
+    /// For ordinary capability ids this is `.` → `__` (provider tool grammars
+    /// reject dots). For ids under the reserved
+    /// [`EXTERNAL_TOOL_CAPABILITY_PREFIX`] namespace, the suffix is returned
+    /// verbatim: it is already the client-declared wire name, host-minted
+    /// straight onto the capability id, not something this mapping encoded —
+    /// re-encoding it would produce a name no declared tool matches.
+    pub fn for_capability(capability: &CapabilityId) -> Result<Self, HostApiError> {
+        Self::new(Self::encode_capability_str(capability.as_str()))
+    }
+
+    /// String form of the same mapping, for MATCHERS that compare arbitrary
+    /// model-emitted identifiers against the encoding (they cannot fail on
+    /// non-capability text). Rendering sites use [`Self::for_capability`].
+    pub fn encode_capability_str(capability_id: &str) -> String {
+        match capability_id.strip_prefix(EXTERNAL_TOOL_CAPABILITY_PREFIX) {
+            Some(external_tool_name) => external_tool_name.to_string(),
+            None => capability_id.replace('.', "__"),
+        }
+    }
 
     pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
         let value = value.into();
@@ -497,6 +534,47 @@ mod tests {
         assert_eq!(
             GateRef::for_auth_gate(non_uuid),
             GateRef::for_auth_gate(non_uuid)
+        );
+    }
+
+    #[test]
+    fn for_capability_external_tool_carve_out_returns_bare_suffix() {
+        // The external-tool namespace mints capability ids from a
+        // client-declared wire name that is already provider-safe — the
+        // mapping must hand it back verbatim, not double-underscore-encode
+        // it, or seeded replay history names a tool no declared external
+        // tool matches.
+        let capability = CapabilityId::new("external_tool.lookup").expect("valid capability id");
+        let provider_tool_name =
+            ProviderToolName::for_capability(&capability).expect("valid provider tool name");
+        assert_eq!(provider_tool_name.as_str(), "lookup");
+        assert_eq!(
+            ProviderToolName::encode_capability_str("external_tool.lookup"),
+            "lookup"
+        );
+    }
+
+    #[test]
+    fn for_capability_non_external_tool_ids_keep_dot_to_double_underscore_encoding() {
+        // Every other capability namespace is unaffected by the carve-out.
+        let capability = CapabilityId::new("builtin.shell").expect("valid capability id");
+        let provider_tool_name =
+            ProviderToolName::for_capability(&capability).expect("valid provider tool name");
+        assert_eq!(provider_tool_name.as_str(), "builtin__shell");
+        assert_eq!(
+            ProviderToolName::encode_capability_str("builtin.shell"),
+            "builtin__shell"
+        );
+    }
+
+    #[test]
+    fn for_capability_external_tool_multi_segment_suffix_round_trips() {
+        // Multi-segment suffixes are not expected from the live lane (client
+        // tool names cannot contain dots), but the carve-out only strips the
+        // reserved prefix, so anything downstream of it stays untouched.
+        assert_eq!(
+            ProviderToolName::encode_capability_str("external_tool.foo"),
+            "foo"
         );
     }
 }

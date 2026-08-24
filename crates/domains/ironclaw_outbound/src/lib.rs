@@ -35,11 +35,10 @@ pub use delivered_gate_routes::{
     NoopDeliveredGateRouteStore,
 };
 pub use delivery_resolution::{
-    CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
-    CommunicationDeliveryResolution, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    DeliveryTargetCapabilities, RequestedOutboundContext, RequestedOutboundKind,
-    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
-    SystemEventReasonCode,
+    CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryResolution,
+    CommunicationDeliveryResolutionRequest, CommunicationModality, DeliveryTargetCapabilities,
+    RequestedOutboundContext, RequestedOutboundKind, RunNotificationContext,
+    RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext, SystemEventReasonCode,
 };
 pub use delivery_targets::{
     MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetChannel,
@@ -70,10 +69,10 @@ pub use triggered_run_delivery::{
     TriggeredRunDeliveryRecord, TriggeredRunDeliveryRequest, TriggeredRunDeliveryStore,
 };
 pub use types::{
-    AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryDecision,
-    OutboundDeliveryStatus, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
-    OutboundPushTargetRequest, PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
+    ClaimDeliveryAttemptForSendRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
+    OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
+    OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
+    PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
     ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, RecoverInterruptedDeliveryRequest,
     ReplyTargetBindingClaim, ReplyTargetValidationRequest, ThreadNotificationPolicy,
     ThreadNotificationTarget, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,

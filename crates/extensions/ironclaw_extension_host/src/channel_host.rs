@@ -23,6 +23,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
+use ironclaw_extension_contracts::channel::{
+    ChannelConnectionDescriptor, ChannelConnectionStrategy,
+};
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_contracts::external::{ExternalConversationRef, ExternalEventId};
 use ironclaw_extension_contracts::preference_target::PreferenceTargetCodec;
@@ -63,6 +66,68 @@ use crate::extension_ingress::{
 };
 use ironclaw_extension_host::ChannelConfigService;
 use ironclaw_product_contracts::admin_users::AdminUserService;
+
+/// Characters that must be escaped when an extension id is interpolated into
+/// the `connect` query value. Extension ids arrive as raw strings from durable
+/// installation and deployment-binding records, so the id is encoded rather
+/// than trusted to be URL-safe: a `&`, `#`, or space in an id would otherwise
+/// truncate or re-target the link the notice advertises.
+const CONNECT_QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// The channel's `connect_required` copy, with a one-click connect link
+/// appended when three things hold: the strategy is OAuth, the deployment
+/// configured a public web origin, and the channel's own reply adapter
+/// declares that it delivers an ephemeral reply privately (#7681).
+/// `/chat?connect=<extension>` is an authenticated route, so the link rides
+/// the WebUI's existing login round-trip unchanged. The other strategies
+/// carry their own `connection.deep_link_template`.
+///
+/// The privacy condition is the fail-closed half. This notice is the one a
+/// shared conversation shows an unlinked sender, and it is kept out of the
+/// room only by an `OutboundVisibility::EphemeralTo` request, which
+/// [`ChannelReply`](ironclaw_extension_contracts::channel_adapter::ChannelReply)
+/// documents as a hint: an adapter that cannot honor it posts publicly
+/// instead. Appending a setup link on strategy alone would therefore broadcast
+/// it to every member of the conversation the first time an OAuth-strategy
+/// channel without ephemeral support ships. Adapters that have not declared
+/// the capability keep the static, link-free manifest copy.
+fn connect_required_notice(
+    connection: &ChannelConnectionDescriptor,
+    extension_id: &str,
+    base_url: Option<&str>,
+    supports_private_delivery: bool,
+) -> String {
+    let text = &connection.notices.connect_required;
+    match base_url {
+        Some(base)
+            if supports_private_delivery
+                && connection.strategy == ChannelConnectionStrategy::OAuth =>
+        {
+            let base = base.trim_end_matches('/');
+            let extension_id =
+                percent_encoding::utf8_percent_encode(extension_id, CONNECT_QUERY_VALUE);
+            format!("{text} Or connect directly: {base}/chat?connect={extension_id}")
+        }
+        _ => text.clone(),
+    }
+}
+
+/// Whether a channel's bound reply adapter delivers an
+/// [`OutboundVisibility::EphemeralTo`](ironclaw_extension_contracts::channel_adapter::OutboundVisibility)
+/// reply privately. A channel with no reply half emits nothing source-routed,
+/// so it cannot deliver a notice privately either.
+fn surfaces_support_private_delivery(
+    surfaces: &ironclaw_extension_contracts::channel_adapter::ChannelSurfaces,
+) -> bool {
+    surfaces
+        .reply
+        .as_ref()
+        .is_some_and(|reply| reply.supports_private_delivery())
+}
 
 /// The default admission resolver, or `None` (= reject every shared
 /// conversation). Admission is presence-based: the channel's verified
@@ -109,7 +174,11 @@ pub fn evidence_mint_for_verification(
                 header: recipe.header.clone(),
             })
         }
-        IngressVerificationRecipe::None => None,
+        // No webhook-signature evidence is minted at this layer for either: a
+        // `none` recipe has no trusted claim (route fails closed), and an
+        // `authenticated_session` channel mounts no webhook route at all — its
+        // T1 evidence is minted by the host's authenticated transport, not here.
+        IngressVerificationRecipe::AuthenticatedSession | IngressVerificationRecipe::None => None,
     }
 }
 
@@ -264,6 +333,11 @@ pub struct GenericChannelHostDeps {
     pub channel_pairing: Option<Arc<crate::channel_pairing::ChannelPairingRegistry>>,
     /// Admin-users directory backing channel-command role gating.
     pub admin_users: Arc<dyn AdminUserService>,
+    /// The deployment's public web app origin (e.g.
+    /// `https://ironclaw.example.com`). Backs the connect link appended to an
+    /// OAuth-strategy channel's `connect_required` notice; `None` keeps that
+    /// notice at its static, link-free manifest text.
+    pub connect_link_base_url: Option<String>,
 }
 
 /// What the assembly last reconciled for one extension id.
@@ -313,6 +387,17 @@ impl HostedChannelSource {
             Self::Deployment(binding) => binding.resolved.as_ref(),
             Self::Active(active) => active.resolved.as_ref(),
         }
+    }
+
+    /// Whether this channel's bound reply adapter delivers an ephemeral reply
+    /// privately. Read from the adapter itself rather than the manifest: the
+    /// manifest declares which surfaces exist, the implementation declares
+    /// what it can actually do with them.
+    fn supports_private_delivery(&self) -> bool {
+        surfaces_support_private_delivery(match self {
+            Self::Deployment(binding) => &binding.surfaces,
+            Self::Active(active) => &active.channel,
+        })
     }
 
     fn same_source(&self, other: &Self) -> bool {
@@ -479,7 +564,7 @@ impl GenericChannelHostAssembly {
         for extension_id in snapshot.extension_ids() {
             if let Some(active) = snapshot.extension(&extension_id)
                 && let Some(channel) = active.resolved.channel.as_ref()
-                && channel.inbound
+                && channel.supports_inbound()
                 && channel.ingress.is_some()
             {
                 desired
@@ -611,14 +696,18 @@ impl GenericChannelHostAssembly {
         // per-extension provider identity the workflow's actor resolver uses
         // below, so the actor a command's role is resolved for is always the
         // same actor the conversation binding resolved.
-        let (command_role_provider, command_role_lookup) = self.provider_identity_lookup(source);
-        let command_roles = Arc::new(crate::channel_command_roles::ChannelActorRoleResolver::new(
-            command_role_provider,
-            command_role_lookup,
-            Arc::clone(&self.deps.admin_users),
-            self.deps.identity.tenant_id.clone(),
-            self.deps.identity.operator_user_id.clone(),
-        ));
+        let (command_role_provider, command_role_keyspace, command_role_lookup) =
+            self.provider_identity_lookup(source);
+        let command_roles = Arc::new(
+            crate::channel_command_roles::ChannelActorRoleResolver::new(
+                command_role_provider,
+                command_role_lookup,
+                Arc::clone(&self.deps.admin_users),
+                self.deps.identity.tenant_id.clone(),
+                self.deps.identity.operator_user_id.clone(),
+            )
+            .with_identity_keyspace(command_role_keyspace),
+        );
 
         let adapter_id = ProductAdapterId::new(source.extension_id())
             .map_err(|error| format!("invalid adapter id: {error}"))?;
@@ -626,7 +715,7 @@ impl GenericChannelHostAssembly {
         // Per-user identity iff a provider lookup exists (OAuth vendor or
         // pairing strategy); the `None` arm is the operator resolver, which
         // must never be combined with shared-conversation admission.
-        let actor_identity_is_per_user = self.provider_identity_lookup(source).1.is_some();
+        let actor_identity_is_per_user = self.provider_identity_lookup(source).2.is_some();
         let graph = self
             .deps
             .channel_workflow
@@ -710,8 +799,17 @@ impl GenericChannelHostAssembly {
         source: &HostedChannelSource,
     ) -> (
         String,
+        crate::channel_identity::ChannelIdentityKeyspace,
         Option<Arc<dyn ironclaw_host_api::user_identity::RebornUserIdentityLookup>>,
     ) {
+        let identity_keyspace = crate::channel_identity::ChannelIdentityKeyspace::for_strategy(
+            source
+                .resolved()
+                .channel
+                .as_ref()
+                .and_then(|channel| channel.connection.as_ref())
+                .map(|connection| connection.strategy),
+        );
         let pairing_extension = self
             .deps
             .channel_pairing
@@ -721,17 +819,25 @@ impl GenericChannelHostAssembly {
             self.deps.identity_lookup.as_ref(),
             source.resolved().auth.first(),
         ) {
-            (Some(lookup), Some(auth)) => {
-                (auth.vendor.as_str().to_string(), Some(Arc::clone(lookup)))
-            }
-            // Pairing-strategy channels have no OAuth vendor; verified
-            // inbound actors resolve through the bindings the pairing
-            // consume wrote, keyed by the extension id as provider. Unbound
-            // actors fail closed instead of inheriting the operator.
-            (Some(lookup), None) if pairing_extension => {
-                (source.extension_id().to_string(), Some(Arc::clone(lookup)))
-            }
-            _ => (source.extension_id().to_string(), None),
+            // A generated-code channel owns its channel identity even when the
+            // same extension also declares unrelated personal-account auth.
+            // Prioritizing auth here would make Bot API admission depend on the
+            // MTProto surface and recreate the two-mode identity collision.
+            (Some(lookup), _) if pairing_extension => (
+                source.extension_id().to_string(),
+                crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
+                Some(Arc::clone(lookup)),
+            ),
+            (Some(lookup), Some(auth)) => (
+                auth.vendor.as_str().to_string(),
+                identity_keyspace,
+                Some(Arc::clone(lookup)),
+            ),
+            _ => (
+                source.extension_id().to_string(),
+                crate::channel_identity::ChannelIdentityKeyspace::Unversioned,
+                None,
+            ),
         }
     }
 
@@ -744,14 +850,15 @@ impl GenericChannelHostAssembly {
         &self,
         source: &HostedChannelSource,
     ) -> Arc<dyn ProductActorUserResolver> {
-        let (provider, provider_lookup) = self.provider_identity_lookup(source);
+        let (provider, identity_keyspace, provider_lookup) = self.provider_identity_lookup(source);
         match provider_lookup {
             Some(lookup) => Arc::new(
                 crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
                     provider,
                     source.extension_id(),
                     lookup,
-                ),
+                )
+                .with_identity_keyspace(identity_keyspace),
             ),
             None => Arc::new(OperatorActorUserResolver {
                 operator_user_id: self.deps.identity.operator_user_id.clone(),
@@ -821,15 +928,40 @@ impl GenericChannelHostAssembly {
         })
     }
 
-    /// The connect/pair notice wording for one extension: the pairing
-    /// service's own policy when it has one, otherwise the generic wording
-    /// derived from the extension's display name.
+    /// The connect notice wording for one extension: the pairing service's
+    /// own policy when it has one, otherwise the manifest connection policy
+    /// for non-pairing strategies such as `device_link`, then generic copy.
     fn connection_notices(&self, source: &HostedChannelSource) -> ChannelConnectionNoticePolicy {
         self.deps
             .channel_pairing
             .as_ref()
             .and_then(|registry| registry.get(source.extension_id()))
             .map(|service| service.connection_notices().clone())
+            .or_else(|| {
+                source
+                    .resolved()
+                    .channel
+                    .as_ref()
+                    .and_then(|channel| channel.connection.as_ref())
+                    .map(|connection| ChannelConnectionNoticePolicy {
+                        connect_required: connect_required_notice(
+                            connection,
+                            source.extension_id(),
+                            self.deps.connect_link_base_url.as_deref(),
+                            source.supports_private_delivery(),
+                        ),
+                        paired: connection.notices.paired.clone(),
+                        already_paired_same_user: connection
+                            .notices
+                            .already_paired_same_user
+                            .clone(),
+                        already_bound_to_other_user: connection
+                            .notices
+                            .already_bound_to_other_user
+                            .clone(),
+                        expired_or_unknown: connection.notices.expired_or_unknown.clone(),
+                    })
+            })
             .unwrap_or_else(|| ChannelConnectionNoticePolicy::generic(&source.resolved().name))
     }
 
@@ -1193,6 +1325,149 @@ mod tests {
             }
             other => panic!("expected a shared-secret-header mint, got {other:?}"),
         }
+    }
+
+    fn connection_descriptor(strategy: ChannelConnectionStrategy) -> ChannelConnectionDescriptor {
+        ChannelConnectionDescriptor {
+            provider: ironclaw_host_api::ids::VendorId::new("vendorx").expect("vendor id"),
+            strategy,
+            instructions: "connect".to_string(),
+            input_placeholder: String::new(),
+            submit_label: "Connect".to_string(),
+            error_message: "failed".to_string(),
+            notices: ironclaw_extension_contracts::channel::ChannelConnectionNotices {
+                connect_required: "Connect your account.".to_string(),
+                paired: "paired".to_string(),
+                already_paired_same_user: "already".to_string(),
+                already_bound_to_other_user: "other".to_string(),
+                expired_or_unknown: "expired".to_string(),
+            },
+            connection_success_message: "connected".to_string(),
+            deep_link_template: None,
+            inbound_code_prefixes: Vec::new(),
+        }
+    }
+
+    /// #7681: the one-click link is appended only for an OAuth-strategy channel
+    /// on a deployment that configured a public web origin, and only when the
+    /// channel's reply adapter delivers ephemeral replies privately. Every
+    /// other combination must return the manifest copy verbatim — a relative,
+    /// vendor-mismatched, or room-visible link would be posted into a customer
+    /// conversation.
+    #[test]
+    fn connect_notice_appends_the_link_only_for_oauth_with_a_base_url() {
+        let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
+
+        assert_eq!(
+            connect_required_notice(&oauth, "slack", Some("https://app.example.com"), true),
+            "Connect your account. Or connect directly: https://app.example.com/chat?connect=slack"
+        );
+        // A trailing slash on the configured origin must not produce `//chat`.
+        assert_eq!(
+            connect_required_notice(&oauth, "slack", Some("https://app.example.com/"), true),
+            "Connect your account. Or connect directly: https://app.example.com/chat?connect=slack"
+        );
+        // Unset origin ships dark: the notice stays link-free rather than
+        // advertising an unreachable relative path.
+        assert_eq!(
+            connect_required_notice(&oauth, "slack", None, true),
+            oauth.notices.connect_required
+        );
+        // A non-OAuth strategy carries its own deep link, so no link leaks
+        // into its copy even when an origin IS configured.
+        for strategy in [
+            ChannelConnectionStrategy::DeviceLink,
+            ChannelConnectionStrategy::WebGeneratedCode,
+            ChannelConnectionStrategy::AdminManagedChannels,
+        ] {
+            let other = connection_descriptor(strategy);
+            assert_eq!(
+                connect_required_notice(&other, "slack", Some("https://app.example.com"), true),
+                other.notices.connect_required,
+                "{strategy:?} must return the manifest copy verbatim"
+            );
+        }
+    }
+
+    /// The fail-closed half: privacy for this notice comes from an
+    /// `EphemeralTo` request the adapter may ignore, so an OAuth-strategy
+    /// channel whose reply adapter has NOT declared private delivery must not
+    /// carry a setup link — publishing it would show every member of a shared
+    /// conversation the link meant for one unlinked sender.
+    #[test]
+    fn connect_notice_withholds_the_link_when_the_adapter_cannot_deliver_privately() {
+        let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
+        assert_eq!(
+            connect_required_notice(&oauth, "slack", Some("https://app.example.com"), false),
+            oauth.notices.connect_required
+        );
+    }
+
+    /// The gate input itself: the link decision reads what the bound reply
+    /// adapter declares, so an adapter that never opted in (the default, e.g.
+    /// Telegram's `sendMessage`-only reply) reports `false` and a channel with
+    /// no reply half at all reports `false` too.
+    #[test]
+    fn private_delivery_support_is_read_from_the_bound_reply_adapter() {
+        use ironclaw_extension_contracts::channel_adapter::{
+            ChannelError, ChannelReply, ChannelSurfaces, DeliveryReport, OutboundEnvelope,
+        };
+        use ironclaw_extension_contracts::tool_adapter::RestrictedEgress;
+
+        struct PublicOnlyReply;
+        #[async_trait::async_trait]
+        impl ChannelReply for PublicOnlyReply {
+            async fn send_reply(
+                &self,
+                _envelope: OutboundEnvelope,
+                _egress: &dyn RestrictedEgress,
+            ) -> Result<DeliveryReport, ChannelError> {
+                Ok(DeliveryReport::default())
+            }
+        }
+
+        struct EphemeralReply;
+        #[async_trait::async_trait]
+        impl ChannelReply for EphemeralReply {
+            async fn send_reply(
+                &self,
+                _envelope: OutboundEnvelope,
+                _egress: &dyn RestrictedEgress,
+            ) -> Result<DeliveryReport, ChannelError> {
+                Ok(DeliveryReport::default())
+            }
+
+            fn supports_private_delivery(&self) -> bool {
+                true
+            }
+        }
+
+        assert!(!surfaces_support_private_delivery(
+            &ChannelSurfaces::default()
+        ));
+        assert!(!surfaces_support_private_delivery(
+            &ChannelSurfaces::default().with_reply(Arc::new(PublicOnlyReply))
+        ));
+        assert!(surfaces_support_private_delivery(
+            &ChannelSurfaces::default().with_reply(Arc::new(EphemeralReply))
+        ));
+    }
+
+    /// The extension id comes from a durable record, so it is percent-encoded:
+    /// an unescaped `&` would truncate the query and re-target the link.
+    #[test]
+    fn connect_notice_percent_encodes_the_extension_id() {
+        let oauth = connection_descriptor(ChannelConnectionStrategy::OAuth);
+        assert_eq!(
+            connect_required_notice(
+                &oauth,
+                "sl ack&evil=1",
+                Some("https://app.example.com"),
+                true
+            ),
+            "Connect your account. Or connect directly: \
+             https://app.example.com/chat?connect=sl%20ack%26evil%3D1"
+        );
     }
 
     #[test]

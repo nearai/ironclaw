@@ -1,6 +1,6 @@
 # `crates/substrates/` — privileged mechanism, never authority
 
-**Layer(s):** `substrates` · **Crates:** 6 · **May depend on:** `ironclaw_host_api`
+**Layer(s):** `substrates` · **Crates:** 7 · **May depend on:** `ironclaw_host_api`
 (contracts), `ironclaw_observability`, plus exactly three charted sibling edges
 (below) · **Depended on by:** every layer above — kernel services mediate
 filesystem/secrets/network for the tiers above them, domain crates hold direct
@@ -22,6 +22,7 @@ in `crates/kernel/` before the call arrives.
 | Crate | Charter (one line) | Go here when |
 | --- | --- | --- |
 | [`ironclaw_filesystem`](./ironclaw_filesystem) | Storage fabric: `RootFilesystem` trait, `ScopedFilesystem` mount enforcement, mount catalog, CAS floor, disk/libSQL/Postgres/in-memory backends | Bytes or records need a durable home behind the one trait |
+| [`ironclaw_documents`](./ironclaw_documents) | Bounded, structure-preserving OOXML transforms and deterministic HTML-subset PDF rendering | Document bytes need addressable reads or typed, loss-averse transforms without filesystem authority |
 | [`ironclaw_libsql_runtime`](./ironclaw_libsql_runtime) | libSQL connection admission: one bounded read pool + exactly one writer lane per database | You need a libSQL connection — this is the only legal source |
 | [`ironclaw_network`](./ironclaw_network) | Egress policy and hardened outbound transport; the workspace's only `reqwest` owner | An outbound HTTP call must be policy-checked before it exists |
 | [`ironclaw_observability`](./ironclaw_observability) | Zero-cost-when-off latency-trace macros; exactly one dependency (`tracing`) | You want to time an operation without adopting a tracing stack |
@@ -33,8 +34,8 @@ every crate here answers differently (`families/substrates.md` requires it
 stated per crate):
 
 - `ironclaw_filesystem` — kernel services and domain record owners hold direct
-  trait handles; that breadth is the point (28 normal-dep consumers, measured
-  via `cargo metadata` 2026-08-05).
+  trait handles; that breadth is the point (re-derive the fan-in with
+  `grep -rl '^ironclaw_filesystem = ' --include=Cargo.toml crates tools | wc -l`).
 - `ironclaw_libsql_runtime` — exactly `ironclaw_filesystem`,
   `ironclaw_triggers`, `ironclaw_composition` (measured fan-in 3; the three sit
   in three families, which is why the crate exists).
@@ -44,7 +45,8 @@ stated per crate):
   edges (5 total) — standing narrowing targets, not charter.
 - `ironclaw_observability` — anyone (7 consumers); the only crate here with no
   security-relevant surface.
-- `ironclaw_safety` — any caller needing detection (17 consumers).
+- `ironclaw_safety` — any caller needing detection (re-derive the fan-in with
+  `grep -rl '^ironclaw_safety = ' --include=Cargo.toml crates tools | wc -l`).
 - `ironclaw_secrets` — the tightest. The auth engine (`ironclaw_auth`) is the
   chartered direct consumer (it owns token custody); everything else is meant
   to arrive through kernel staging or a `product_contracts` port. Measured
@@ -52,6 +54,9 @@ stated per crate):
   `extension_host`, `extension_manager`, `host_runtime`, `sandbox`, `stress`);
   the surplus is tracked narrowing (PROPOSAL §6.2.2, `extension_manager` in
   #7095), not permission.
+- `ironclaw_documents` — pure byte-transform callers may invoke it directly;
+  filesystem path selection, overwrite policy, and writes stay in the mediated
+  host-runtime caller.
 
 ## What never belongs here
 
@@ -131,7 +136,7 @@ All gates below run with `cargo test -p ironclaw_architecture_tests`.
 
 ## Sources
 
-[`docs/reborn/target-architecture/families/substrates.md`](../../docs/reborn/target-architecture/families/substrates.md)
+[`docs/internal/reborn/target-architecture/families/substrates.md`](../../docs/internal/reborn/target-architecture/families/substrates.md)
 (full charter, boundaries, security posture) · PROPOSAL §6.2 (per-crate
 contracts), §8 (dependency model), §11.2.6 (persistence rule) · the gates named
 above.

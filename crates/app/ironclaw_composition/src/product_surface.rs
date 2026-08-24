@@ -9,7 +9,7 @@ use ironclaw_assistant::{
     ProjectScopedAttachmentReader, ProjectScopedFilesystemReader, RebornAutomationProductService,
     RebornServices as ProductRebornServices, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductService,
+    RebornSkillTrustLevel, SkillsProductService, UnboundTurnService,
 };
 use ironclaw_attachments::ProjectScopedAttachmentLander;
 use ironclaw_auth::ChannelConnectionService;
@@ -31,6 +31,7 @@ use ironclaw_product_contracts::surface::{
 
 use ironclaw_triggers::TriggerRepository;
 
+use crate::model_gateway_assembly::RebornLlmReloadParts;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
@@ -43,9 +44,11 @@ use ironclaw_assistant::{
     RebornOutboundPreferencesService, notification_channels_set_operator_tool_info,
     outbound_delivery_synthetic_provider,
 };
+use ironclaw_config::RebornBootConfig;
 use ironclaw_extension_manager::ExtensionHostLifecycleProductService;
 use ironclaw_extension_manager::admin_configuration::AdminConfigurationViewProvider;
 use ironclaw_extension_manager::webui_extension_credentials::ProductAuthExtensionCredentialSetup;
+use ironclaw_filesystem::{CompositeRootFilesystem, ScopedFilesystem};
 use ironclaw_skills::{ScopedSkillManagementError, ScopedSkillManagementPort};
 
 /// A trigger repository paired with the turn-run snapshot source from the
@@ -92,7 +95,19 @@ pub(crate) fn build_product_surface_with_channel_connection(
     .with_input_enqueue(runtime.webui_input_enqueue())
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service())
-    .with_diagnostic_store(Arc::clone(&runtime.diagnostic_store));
+    .with_diagnostic_store(Arc::clone(&runtime.diagnostic_store))
+    .with_session_inbound_ledger(Arc::clone(&runtime.session_inbound_ledger))
+    .with_session_channel_directory(Arc::clone(&runtime.session_channel_directory));
+    let default_thread_scope = runtime.product_default_thread_scope();
+    api = api.with_suggestions(
+        runtime.suggestions_store(),
+        Arc::new(UnboundTurnService::new(
+            runtime.product_thread_service(),
+            runtime.product_turn_coordinator(),
+            default_thread_scope.agent_id.clone(),
+            default_thread_scope.project_id.clone(),
+        )),
+    );
     if let Some(ironhub_link) = runtime.ironhub_link_service() {
         api = api.with_ironhub_link_service(ironhub_link);
     }
@@ -238,6 +253,7 @@ pub(crate) fn build_product_surface_with_channel_connection(
     );
     api = api.with_automation_product_service(Arc::new(
         RebornAutomationProductService::new(backing.repository, active_run_lookup)
+            .with_manual_fire_runner(Arc::clone(&runtime.trigger_manual_fire_runner))
             .with_scheduler_enabled(runtime.readiness.workers.trigger_poller),
     ));
     // First-class projects + membership (ACL). Built once per runtime over the
@@ -251,12 +267,13 @@ pub(crate) fn build_product_surface_with_channel_connection(
             )),
         ),
     ));
-    if let Some(web_push) = runtime.web_push.as_ref() {
-        api = api.with_web_push_product_service(Arc::new(
-            ironclaw_assistant::RebornWebPushProductService::new(
-                Arc::clone(&web_push.subscriptions),
-                web_push.vapid_public_key.clone(),
-                web_push.allowed_push_hosts.clone(),
+    api = api.with_notification_inbox(Arc::clone(&runtime.notification_inbox));
+    if let Some(resolver) = runtime.channel_delivery_resolver.clone() {
+        api = api.with_notification_setup_service(Arc::new(
+            ironclaw_assistant::RegistrationChannelNotificationSetupService::new(
+                resolver,
+                Arc::clone(&runtime.delivery_registrations),
+                Arc::clone(&runtime.delivery_client_bootstrap),
             ),
         ));
     }
@@ -305,19 +322,39 @@ pub(crate) fn build_product_surface_with_channel_connection(
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn LlmConfigService>> {
-    let boot = runtime.webui_boot_config()?;
-    let keys = ironclaw_operator::LlmKeyStore::new(crate::RuntimeOperatorSecretValueStore::shared(
-        runtime.secret_store(),
+    runtime
+        .llm_config_service
+        .clone()
+        .map(|service| service as _)
+}
+
+pub(crate) fn compose_llm_config_service(
+    boot: Option<&RebornBootConfig>,
+    keys: ironclaw_operator::LlmKeyStore,
+    scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    llm_reload: Option<&RebornLlmReloadParts>,
+) -> Option<Arc<ironclaw_operator::RebornLlmConfigService>> {
+    let boot = boot?;
+    let model_policy_store = Arc::new(ironclaw_operator::FilesystemModelSelectionPolicyStore::new(
+        Arc::clone(&scoped_filesystem),
     ));
-    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys);
-    if let Some(reload) = runtime.webui_llm_reload_trigger() {
-        llm_config = llm_config.with_reload_trigger(reload);
-    }
-    if let Some(session) = runtime.webui_llm_session() {
-        llm_config = llm_config.with_nearai_session(session);
-    }
-    if let Some(states) = runtime.webui_nearai_login_states() {
-        llm_config = llm_config.with_nearai_login_states(states);
+    let user_model_preference_store = Arc::new(
+        ironclaw_operator::FilesystemUserModelPreferenceStore::new(scoped_filesystem),
+    );
+    let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys.clone())
+        .with_model_policy_store(model_policy_store)
+        .with_user_model_preference_store(user_model_preference_store);
+    if let Some(parts) = llm_reload {
+        let reload = Arc::new(ironclaw_operator::RebornLlmReloadAdapter::new(
+            boot.clone(),
+            Arc::clone(&parts.reload_handle),
+            Arc::clone(&parts.session),
+            keys.clone(),
+        ));
+        llm_config = llm_config
+            .with_reload_trigger(reload)
+            .with_nearai_session(Arc::clone(&parts.session))
+            .with_nearai_login_states(Arc::clone(&parts.nearai_login_states));
     }
     Some(Arc::new(llm_config))
 }

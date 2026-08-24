@@ -307,6 +307,92 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_surfaces_call_tool_error_content() {
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::tool_error())),
+        RecordingEgressPlanner::new(host_http_plan()),
+    );
+
+    let output = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect("CallToolResult.isError is a protocol rejection, not a transport failure");
+
+    assert_eq!(
+        output
+            .provider_rejection
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.message.as_ref())
+            .map(|message| message.as_str()),
+        Some("Bad credentials; token lacks repo scope")
+    );
+}
+
+#[tokio::test]
+async fn mcp_runtime_reconciles_call_tool_rejection_as_a_real_attempt() {
+    let package = package_from_manifest(MCP_MANIFEST);
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::tool_error())),
+        RecordingEgressPlanner::new(host_http_plan()),
+    );
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits::default().set_max_output_bytes(10_000),
+        )
+        .unwrap();
+
+    let error = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            McpExecutionRequest {
+                extension: &package.id,
+                capabilities: &package.capabilities,
+                runtime: &package.manifest.runtime,
+                capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
+                scope,
+                estimate: ResourceEstimate::default().set_output_bytes(10_000),
+                resource_reservation: None,
+                invocation: McpInvocation {
+                    input: json!({"query": "ironclaw"}),
+                },
+            },
+        )
+        .await
+        .expect_err("provider-declared tool rejection must not become success");
+
+    let McpError::ProviderRejected(rejection) = error else {
+        panic!("expected a provider rejection with accounting evidence");
+    };
+    assert_eq!(
+        rejection
+            .diagnostic
+            .message
+            .as_ref()
+            .map(|message| message.as_str()),
+        Some("Bad credentials; token lacks repo scope")
+    );
+    assert_eq!(rejection.receipt.status, ReservationStatus::Reconciled);
+    assert!(rejection.usage.network_egress_bytes > 0);
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert!(governor.usage_for(&account).network_egress_bytes > 0);
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_auth_probe_stops_after_the_initialization_handshake() {
     let egress = RecordingRuntimeEgress::json_rpc();
     let planner = RecordingEgressPlanner::new(host_http_plan());
@@ -417,10 +503,84 @@ async fn concrete_mcp_http_client_maps_upstream_auth_status_to_auth_required() {
         .await
         .expect_err("upstream MCP auth failures must become auth-required errors");
 
-    assert!(matches!(error, McpClientError::AuthRequired));
+    assert!(matches!(error, McpClientError::AuthRequired { .. }));
     let requests = egress.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(json_rpc_method(&requests[0].body), "initialize");
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_counts_initialize_before_initialized_auth_failure() {
+    let egress = RecordingRuntimeEgress::initialized_auth_required();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("initialized auth rejection must fail");
+
+    let McpClientError::AuthRequired { usage } = error else {
+        panic!("expected auth-required attempt usage");
+    };
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        usage.network_egress_bytes,
+        requests
+            .iter()
+            .map(|request| request.body.len() as u64)
+            .sum::<u64>()
+    );
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_counts_handshake_before_tool_http_rejection() {
+    let egress = RecordingRuntimeEgress::tool_http_rejected();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("tool HTTP rejection must fail");
+
+    let McpClientError::ProviderRejected { usage, .. } = error else {
+        panic!("expected provider-rejected attempt usage");
+    };
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        usage.network_egress_bytes,
+        requests
+            .iter()
+            .map(|request| request.body.len() as u64)
+            .sum::<u64>()
+    );
 }
 
 #[tokio::test]
@@ -1154,7 +1314,7 @@ async fn concrete_mcp_http_client_maps_discovery_auth_status_to_auth_required() 
         .await
         .expect_err("upstream MCP discovery auth failures must stay typed");
 
-    assert!(matches!(error, McpClientError::AuthRequired));
+    assert!(matches!(error, McpClientError::AuthRequired { .. }));
 }
 
 #[tokio::test]
@@ -1619,6 +1779,7 @@ async fn mcp_runtime_can_enforce_client_reported_output_size_without_serializing
         output: json!({"small": true}),
         usage: ResourceUsage::default(),
         output_bytes: Some(1_000),
+        provider_rejection: None,
     }));
     let runtime = McpRuntime::new(
         McpRuntimeConfig {
@@ -1664,6 +1825,7 @@ async fn mcp_runtime_rejects_output_when_adapter_under_reports_size() {
         output: json!({"large": "this output exceeds the configured limit"}),
         usage: ResourceUsage::default(),
         output_bytes: Some(1),
+        provider_rejection: None,
     }));
     let runtime = McpRuntime::new(
         McpRuntimeConfig {
@@ -1742,7 +1904,10 @@ impl McpClient for RecordingMcpClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecordedResponseMode {
     Json,
+    ToolError,
     AuthRequired,
+    InitializedAuthRequired,
+    ToolHttpRejected,
     JsonMissingProtocolVersion,
     DeepOpenApiSchema,
     InvalidToolCatalog,
@@ -1774,6 +1939,30 @@ impl RecordingRuntimeEgress {
     fn auth_required() -> Self {
         Self {
             mode: RecordedResponseMode::AuthRequired,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn initialized_auth_required() -> Self {
+        Self {
+            mode: RecordedResponseMode::InitializedAuthRequired,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn tool_http_rejected() -> Self {
+        Self {
+            mode: RecordedResponseMode::ToolHttpRejected,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn tool_error() -> Self {
+        Self {
+            mode: RecordedResponseMode::ToolError,
             protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1840,7 +2029,10 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let method = json_rpc_method(&request.body);
         self.requests.lock().unwrap().push(request.clone());
-        if self.mode == RecordedResponseMode::AuthRequired {
+        if self.mode == RecordedResponseMode::AuthRequired
+            || (self.mode == RecordedResponseMode::InitializedAuthRequired
+                && method == "notifications/initialized")
+        {
             return Ok(RuntimeHttpEgressResponse {
                 status: 401,
                 headers: vec![],
@@ -1868,6 +2060,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     json_rpc_id(&request.body),
                     result,
                     vec![("Mcp-Session-Id".to_string(), "session-123".to_string())],
+                    request.body.len() as u64,
                 ))
             }
             "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
@@ -1880,6 +2073,17 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                 redaction_applied: false,
             }),
             "tools/call" => {
+                if self.mode == RecordedResponseMode::ToolHttpRejected {
+                    return Ok(RuntimeHttpEgressResponse {
+                        status: 422,
+                        headers: vec![],
+                        body: br#"{"error":"validation failed"}"#.to_vec(),
+                        saved_body: None,
+                        request_bytes: request.body.len() as u64,
+                        response_bytes: 29,
+                        redaction_applied: false,
+                    });
+                }
                 let id = json_rpc_id(&request.body);
                 match self.mode {
                     RecordedResponseMode::Json
@@ -1887,17 +2091,35 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     | RecordedResponseMode::DeepOpenApiSchema
                     | RecordedResponseMode::InvalidToolCatalog
                     | RecordedResponseMode::MixedShapeInvalidCatalog
-                    | RecordedResponseMode::LongToolDescription => Ok(runtime_json_response(
+                    | RecordedResponseMode::LongToolDescription
+                    | RecordedResponseMode::InitializedAuthRequired => Ok(runtime_json_response(
                         id,
                         json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
                         vec![],
+                        request.body.len() as u64,
                     )),
                     RecordedResponseMode::Sse => Ok(runtime_sse_response(
                         id,
                         json!({"content":[{"type":"text","text":"ok from sse"}],"isError":false}),
+                        request.body.len() as u64,
+                    )),
+                    RecordedResponseMode::ToolError => Ok(runtime_json_response(
+                        id,
+                        json!({
+                            "content": [
+                                {"type": "text", "text": "Bad credentials"},
+                                {"type": "text", "text": "token lacks repo scope"}
+                            ],
+                            "isError": true
+                        }),
+                        vec![],
+                        request.body.len() as u64,
                     )),
                     RecordedResponseMode::AuthRequired => {
                         unreachable!("auth-required mode returns before JSON-RPC method dispatch")
+                    }
+                    RecordedResponseMode::ToolHttpRejected => {
+                        unreachable!("tool rejection returns before JSON-RPC result dispatch")
                     }
                 }
             }
@@ -1924,7 +2146,12 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                             })
                         })
                         .collect::<Vec<_>>();
-                    return Ok(runtime_json_response(id, json!({ "tools": tools }), vec![]));
+                    return Ok(runtime_json_response(
+                        id,
+                        json!({ "tools": tools }),
+                        vec![],
+                        request.body.len() as u64,
+                    ));
                 }
                 if self.mode == RecordedResponseMode::InvalidToolCatalog {
                     return Ok(runtime_json_response(
@@ -1937,6 +2164,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                             }]
                         }),
                         vec![],
+                        request.body.len() as u64,
                     ));
                 }
                 if self.mode == RecordedResponseMode::MixedShapeInvalidCatalog {
@@ -1962,6 +2190,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                             ]
                         }),
                         vec![],
+                        request.body.len() as u64,
                     ));
                 }
                 let search_description = if self.mode == RecordedResponseMode::LongToolDescription {
@@ -2006,12 +2235,22 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     | RecordedResponseMode::DeepOpenApiSchema
                     | RecordedResponseMode::InvalidToolCatalog
                     | RecordedResponseMode::MixedShapeInvalidCatalog
-                    | RecordedResponseMode::LongToolDescription => {
-                        Ok(runtime_json_response(id, result, vec![]))
+                    | RecordedResponseMode::LongToolDescription
+                    | RecordedResponseMode::ToolError => Ok(runtime_json_response(
+                        id,
+                        result,
+                        vec![],
+                        request.body.len() as u64,
+                    )),
+                    RecordedResponseMode::Sse => {
+                        Ok(runtime_sse_response(id, result, request.body.len() as u64))
                     }
-                    RecordedResponseMode::Sse => Ok(runtime_sse_response(id, result)),
                     RecordedResponseMode::AuthRequired => {
                         unreachable!("auth-required mode returns before JSON-RPC method dispatch")
+                    }
+                    RecordedResponseMode::InitializedAuthRequired
+                    | RecordedResponseMode::ToolHttpRejected => {
+                        unreachable!("call-only response mode cannot reach tools/list")
                     }
                 }
             }
@@ -2111,10 +2350,15 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .map(|(_, value)| value.as_str())
 }
 
+/// `request_bytes` is the caller's `request.body.len()` — every other
+/// response variant in this file (401/202/422/500) reports the real
+/// transferred request size, so this success-path helper must match it
+/// rather than silently reporting the request as free.
 fn runtime_json_response(
     id: Option<u64>,
     result: serde_json::Value,
     extra_headers: Vec<(String, String)>,
+    request_bytes: u64,
 ) -> RuntimeHttpEgressResponse {
     let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
     headers.extend(extra_headers);
@@ -2130,12 +2374,16 @@ fn runtime_json_response(
         response_bytes: body.len() as u64,
         body,
         saved_body: None,
-        request_bytes: 0,
+        request_bytes,
         redaction_applied: false,
     }
 }
 
-fn runtime_sse_response(id: Option<u64>, result: serde_json::Value) -> RuntimeHttpEgressResponse {
+fn runtime_sse_response(
+    id: Option<u64>,
+    result: serde_json::Value,
+    request_bytes: u64,
+) -> RuntimeHttpEgressResponse {
     let event = json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -2148,7 +2396,7 @@ fn runtime_sse_response(id: Option<u64>, result: serde_json::Value) -> RuntimeHt
         response_bytes: body.len() as u64,
         body,
         saved_body: None,
-        request_bytes: 0,
+        request_bytes,
         redaction_applied: false,
     }
 }
@@ -2190,6 +2438,7 @@ impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
                     "Mcp-Session-Id".to_string(),
                     format!("session-{}", request.scope.user_id.as_str()),
                 )],
+                request.body.len() as u64,
             )),
             "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
                 status: 202,
@@ -2204,6 +2453,7 @@ impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
                 json_rpc_id(&request.body),
                 json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
                 vec![],
+                request.body.len() as u64,
             )),
             other => panic!("unexpected MCP JSON-RPC method {other}"),
         }
@@ -2244,6 +2494,7 @@ impl RuntimeHttpEgress for RotatingSessionRuntimeEgress {
                     "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
                 }),
                 vec![("Mcp-Session-Id".to_string(), "session-initial".to_string())],
+                request.body.len() as u64,
             )),
             "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
                 status: 202,
@@ -2258,6 +2509,7 @@ impl RuntimeHttpEgress for RotatingSessionRuntimeEgress {
                 json_rpc_id(&request.body),
                 json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
                 vec![],
+                request.body.len() as u64,
             )),
             other => panic!("unexpected MCP JSON-RPC method {other}"),
         }
@@ -2285,6 +2537,7 @@ impl RuntimeHttpEgress for InvalidSessionRuntimeEgress {
                 "Mcp-Session-Id".to_string(),
                 "bad\r\nInjected: yes".to_string(),
             )],
+            request.body.len() as u64,
         ))
     }
 }
@@ -2307,6 +2560,7 @@ impl RuntimeHttpEgress for MissingIdRuntimeEgress {
                     "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
                 }),
                 vec![],
+                request.body.len() as u64,
             )),
             "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
                 status: 202,
@@ -2321,6 +2575,7 @@ impl RuntimeHttpEgress for MissingIdRuntimeEgress {
                 None,
                 json!({"content":[{"type":"text","text":"missing id"}],"isError":false}),
                 vec![],
+                request.body.len() as u64,
             )),
             other => panic!("unexpected MCP JSON-RPC method {other}"),
         }
@@ -2380,6 +2635,7 @@ impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
                         "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
                     }),
                     vec![("Mcp-Session-Id".to_string(), "session-good".to_string())],
+                    request.body.len() as u64,
                 ))
             }
             "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
@@ -2395,6 +2651,7 @@ impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
                 json_rpc_id(&request.body),
                 json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
                 vec![],
+                request.body.len() as u64,
             )),
             other => panic!("unexpected MCP JSON-RPC method {other}"),
         }

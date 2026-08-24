@@ -19,6 +19,8 @@ mod parity_qa_support;
 mod reborn_support;
 mod support;
 
+use std::time::Duration;
+
 use axum::{
     Json, Router,
     extract::State,
@@ -30,7 +32,7 @@ use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::{HTTP_CAPABILITY_ID, READ_FILE_CAPABILITY_ID};
 use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_turns::TurnStatus;
-use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
+use parity_qa_support::binary_e2e::{HarnessWaitConfig, RebornBinaryE2EHarness};
 use parity_qa_support::model_replay::{
     RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
 };
@@ -101,6 +103,13 @@ async fn reborn_qa_strategy_doc_becomes_knowledge_base_for_answers() {
     harness.shutdown().await;
 }
 
+fn live_http_wait() -> HarnessWaitConfig {
+    HarnessWaitConfig {
+        timeout: Duration::from_secs(60),
+        poll_interval: Duration::from_millis(20),
+    }
+}
+
 #[tokio::test]
 async fn reborn_qa_meeting_prep_references_company_doc_and_latest_news() {
     const REPLY: &str = "Your next meeting is with PepsiCo: the PepsiCo brief covers supply chain pilots, and the latest news is 'PepsiCo expands AI logistics program'.";
@@ -153,7 +162,7 @@ async fn reborn_qa_meeting_prep_references_company_doc_and_latest_news() {
         .await
         .expect("submit meeting prep request");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, live_http_wait())
         .await
         .expect("completed run");
     harness

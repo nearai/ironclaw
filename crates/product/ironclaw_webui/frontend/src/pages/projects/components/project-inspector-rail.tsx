@@ -6,14 +6,10 @@ import {
   formatMetricValue,
   formatProjectDate,
   healthTone,
-  missionStatusCounts,
 } from "../lib/projects-presenters";
-import { ProjectMissionInspector } from "./project-mission-inspector";
 import { ProjectThreadInspector } from "./project-thread-inspector";
 
-function ProjectSnapshot({ project, missions, threads, overview, t }) {
-  const counts = missionStatusCounts(missions);
-
+function ProjectSnapshot({ project, threads, overview, t }) {
   return (
     <div className="space-y-4">
       <Panel className="p-4 sm:p-5">
@@ -29,10 +25,7 @@ function ProjectSnapshot({ project, missions, threads, overview, t }) {
         </div>
         <p className="mt-4 text-sm leading-6 text-iron-200">{project.description || t("projects.snapshot.noDescription")}</p>
 
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          <div className="rounded-2xl border border-white/8 bg-iron-950/60 p-3 text-sm text-iron-100">
-            {t("projects.snapshot.activePausedMissions", { active: counts.active, paused: counts.paused })}
-          </div>
+        <div className="mt-5">
           <div className="rounded-2xl border border-white/8 bg-iron-950/60 p-3 text-sm text-iron-100">
             {t("projects.snapshot.threadsGates", { threads: threads.length, gates: overview?.pending_gates || 0 })}
           </div>
@@ -77,17 +70,11 @@ function ProjectSnapshot({ project, missions, threads, overview, t }) {
 export function ProjectInspectorRail({
   project,
   overview,
-  missions,
   threads,
   inspector,
   isLoading,
   error,
   onClear,
-  onOpenThread,
-  onFireMission,
-  onPauseMission,
-  onResumeMission,
-  isBusy,
 }) {
   const t = useT();
 
@@ -102,20 +89,9 @@ export function ProjectInspectorRail({
         ? (<div className="space-y-4">{[1, 2].map((index) => (<div key={index} className="v2-skeleton h-48 rounded-[20px]" />))}</div>)
         : error
           ? (<div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error.message}</div>)
-          : inspector?.type === "mission"
-            ? (
-                <ProjectMissionInspector
-                  mission={inspector.mission}
-                  onFire={onFireMission}
-                  onPause={onPauseMission}
-                  onResume={onResumeMission}
-                  onOpenThread={onOpenThread}
-                  isBusy={isBusy}
-                />
-              )
-            : inspector?.type === "thread"
-              ? (<ProjectThreadInspector thread={inspector.thread} />)
-              : (<ProjectSnapshot project={project} missions={missions} threads={threads} overview={overview} t={t} />)}
+          : inspector?.type === "thread"
+            ? (<ProjectThreadInspector thread={inspector.thread} />)
+            : (<ProjectSnapshot project={project} threads={threads} overview={overview} t={t} />)}
     </aside>
   );
 }

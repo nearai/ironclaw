@@ -40,6 +40,6 @@ keep naming the failure-string rule and the gate; edit it with
 authoritative "where does new code go" answer). [`README.md`](./README.md) —
 orientation: public surface, measured edges, tests.
 [`../AGENTS.md`](../AGENTS.md) — the `lanes/` family boundary and its gates.
-Contracts of record: `docs/reborn/contracts/mcp.md`,
-`docs/reborn/contracts/runtime-workflows.md`,
-`docs/reborn/contracts/processes.md`.
+Contracts of record: `docs/internal/reborn/contracts/mcp.md`,
+`docs/internal/reborn/contracts/runtime-workflows.md`,
+`docs/internal/reborn/contracts/processes.md`.

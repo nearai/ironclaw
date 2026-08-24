@@ -1,84 +1,54 @@
 use super::*;
 
-use ironclaw_turns::TurnError;
+use ironclaw_host_api::{execution_policy::TurnExecutionPolicy, resource::ResourceScope};
 
-/// Late-bindable [`AgentTurnRuntimePort`] view over the runtime's own turn
-/// state — the run-state source every caller-initiated "which run is this"
-/// lookup reads (today `builtin.outbound_deliver`'s same-origin check).
-/// Production installs the runtime's own turn state and never repoints it; a
-/// `test-support` harness repoints it (see
-/// `rebind_standalone_trigger_source_turn_state_for_test`) so those lookups
-/// can see runs recorded in the harness's own store.
-pub(crate) struct LateBoundAgentTurnRuntime {
-    source: Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
+#[async_trait::async_trait]
+pub(crate) trait TriggerExecutionPolicyPreflight: Send + Sync {
+    async fn validate(
+        &self,
+        scope: &ResourceScope,
+        policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError>;
 }
 
-impl LateBoundAgentTurnRuntime {
-    pub(crate) fn new(
-        source: Arc<std::sync::RwLock<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>>>,
-    ) -> Self {
-        Self { source }
-    }
+pub(crate) struct TriggerCreatorPairingHook {
+    pub(super) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    pub(super) conversations: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
+    pub(super) execution_preflight: tokio::sync::OnceCell<Arc<dyn TriggerExecutionPolicyPreflight>>,
+}
 
-    fn current(&self) -> Result<Arc<dyn ironclaw_turns::AgentTurnRuntimePort>, TurnError> {
-        self.source
-            .read()
-            .map(|source| Arc::clone(&*source))
-            .map_err(|_| TurnError::Unavailable {
-                reason: "late-bound turn-state source lock is unavailable".to_string(),
+impl TriggerCreatorPairingHook {
+    pub(crate) fn bind_execution_preflight(
+        &self,
+        preflight: Arc<dyn TriggerExecutionPolicyPreflight>,
+    ) -> Result<(), TriggerError> {
+        self.execution_preflight
+            .set(preflight)
+            .map_err(|_| TriggerError::Backend {
+                reason: "trigger execution preflight was already bound".to_string(),
             })
     }
 }
 
 #[async_trait::async_trait]
-impl ironclaw_turns::AgentTurnRuntimePort for LateBoundAgentTurnRuntime {
-    async fn submit_turn(
-        &self,
-        request: ironclaw_turns::SubmitTurnRequest,
-        admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
-        run_profile_resolver: &dyn ironclaw_loop_contracts::RunProfileResolver,
-    ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
-        self.current()?
-            .submit_turn(request, admission_policy, run_profile_resolver)
-            .await
-    }
-
-    async fn resume_turn(
-        &self,
-        request: ironclaw_turns::ResumeTurnRequest,
-    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
-        self.current()?.resume_turn(request).await
-    }
-
-    async fn retry_turn(
-        &self,
-        request: ironclaw_turns::RetryTurnRequest,
-    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
-        self.current()?.retry_turn(request).await
-    }
-
-    async fn request_cancel(
-        &self,
-        request: ironclaw_turns::CancelRunRequest,
-    ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
-        self.current()?.request_cancel(request).await
-    }
-
-    async fn get_run_state(
-        &self,
-        request: ironclaw_turns::GetRunStateRequest,
-    ) -> Result<ironclaw_turns::TurnRunState, TurnError> {
-        self.current()?.get_run_state(request).await
-    }
-}
-
-pub(super) struct TriggerCreatorPairingHook {
-    pub(super) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    pub(super) conversations: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
-}
-
-#[async_trait::async_trait]
 impl TriggerCreateHook for TriggerCreatorPairingHook {
+    async fn validate_execution_policy(
+        &self,
+        scope: &ResourceScope,
+        policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        // An unbound preflight is a composition wiring fault, not a defect in
+        // the caller's contract — `Backend` (like double binding above), never
+        // `InvalidRecord`, which would tell the caller to fix a valid contract.
+        let preflight = self
+            .execution_preflight
+            .get()
+            .ok_or_else(|| TriggerError::Backend {
+                reason: "trigger execution preflight is not bound".to_string(),
+            })?;
+        preflight.validate(scope, policy).await
+    }
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let filesystem = Arc::clone(&self.scoped_filesystem);
         let conversations = self

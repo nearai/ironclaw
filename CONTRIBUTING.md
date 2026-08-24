@@ -86,7 +86,8 @@ Before asking for review:
 - Fill out the PR template with a clear summary, validation notes, and impact assessment
 - If your change affects tracked behavior, update `FEATURE_PARITY.md` in the same branch
 - If onboarding or setup behavior changes, update the relevant setup docs in the same branch
-- If you are using a coding agent and it supports them, run `review-pr` or `pr-shepherd --fix` before opening or updating the PR
+- If you are using a coding agent and it supports them, run `pr-shepherd` before opening or updating the PR
+- For bug-issue fixes there is no dedicated repo command: follow the test-first discipline in `AGENTS.md` (pin the bug in a failing test at the right tier, then fix), and let CI's review bot plus `codex review` cover the review pass
 - `codex review --base origin/main` is also encouraged before requesting review
 
 ## Review Follow-Through
@@ -142,6 +143,7 @@ Run `cargo deny check` before adding new dependencies to verify license compatib
 ## Document your Changes
 
 - The folder `/docs` contains user-facing documentation for technical savvy users, developers and operators. It is built with Mintlify and rendered on the website.
+- The live site deploys from the `docs-live` branch, which release automation points at each stable release — docs merged to `main` appear on the site with the next stable release, not immediately. To fix a wrong page on the live site mid-week, see the docs-hotfix recipe in `docs/internal/weekly-release-strategy.md` ("Docs publication").
 - For features, update the relevant capability doc in `docs/capabilities/`
 - For channels, update the relevant channel doc in `docs/channels/`
 - For extensions / tools, update the relevant doc in `docs/extensions/`

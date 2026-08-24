@@ -102,6 +102,7 @@ async def _open_mocked_settings_page(
             await fulfill_json(
                 route,
                 {
+                    "session_channel_extension_id": "web-app",
                     "tenant_id": "reborn-v2-e2e",
                     "user_id": "reborn-v2-e2e-user",
                     "capabilities": {"operator_webui_config": True},

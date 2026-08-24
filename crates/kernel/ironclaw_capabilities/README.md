@@ -88,5 +88,5 @@ cargo test -p ironclaw_architecture_tests   # after dependency/API changes
   guardrails.
 - [`../AGENTS.md`](../AGENTS.md) — the kernel family; the witness in the
   sealed-mint table.
-- `docs/reborn/contracts/capability-access.md`,
-  `docs/reborn/contracts/capabilities.md`.
+- `docs/internal/reborn/contracts/capability-access.md`,
+  `docs/internal/reborn/contracts/capabilities.md`.

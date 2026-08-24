@@ -7,15 +7,18 @@ use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
     dispatch::{DispatchInputIssue, DispatchInputIssueCode, RuntimeDispatchErrorKind},
     error::HostApiError,
+    execution_policy::TurnExecutionPolicy,
     ids::CapabilityId,
     invocation::InvocationOrigin,
     resource::{ResourceScope, ResourceUsage},
 };
 use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
-    MissingTriggerActiveRunLookup, TriggerActiveRunLookup, TriggerError, TriggerId, TriggerRecord,
-    TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord, TriggerSchedule,
-    TriggerScheduleValidationKind, TriggerSourceKind, TriggerState, active_holds_for_records,
+    MissingTriggerActiveRunLookup, MissingTriggerManualFireRunner, TriggerActiveRunLookup,
+    TriggerError, TriggerExecutionSpec, TriggerId, TriggerManualFireOutcome,
+    TriggerManualFireRunner, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
+    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
+    TriggerState, active_holds_for_records,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -25,6 +28,7 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
+use super::trigger_creation::TriggerCreateInput;
 use super::{
     FIRST_PARTY_MAX_OUTPUT_BYTES, bounded_input_size, bounded_output_bytes,
     first_party_capability_manifest, input_error, resource_profile,
@@ -39,6 +43,7 @@ pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
+pub const TRIGGER_RUN_CAPABILITY_ID: &str = "builtin.trigger_run";
 
 /// Grounding description for the read path (issue #7246): the model was
 /// observed fabricating automation status ("your digest routine is running")
@@ -49,7 +54,7 @@ pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 /// this trigger capability.
 const TRIGGER_LIST_DESCRIPTION: &str = "List the caller's scheduled routines \u{2014} the automations shown on the Automations page \u{2014} with each routine's state (scheduled, paused, or completed), schedule, next and last fire times, recent run history, and any active hold. This listing is the authoritative current state. Call this before answering any question about which routines or automations exist, and before saying one is running, paused, already set up, delivering results, or missing \u{2014} never report routine or automation status from conversation history or memory. An empty list means the caller has no routines: say exactly that instead of guessing.";
 
-const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine. The prompt is the full task each fire performs, written for a future run with no memory of this conversation. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write that as an explicit step in the prompt naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so end the prompt with the reply itself and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
+const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine from a structured execution contract. Keep the contract concise and outcome-focused: describe the full task each fire performs in execution_contract.goal, written for a future run with no memory of this conversation, and make completion observable with explicit success criteria, output instructions, and no-result text. Do not inspect or enumerate future-work data while authoring the routine, and do not prescribe a speculative tool-call sequence; each fire discovers the capabilities and task data available then. Call trigger_create once when the user-requested schedule, task, and any explicitly named delivery destination are known. A successful response means the routine is durably persisted: stop authoring, report the returned state, and do not call trigger_create again or pause, remove, or replace the routine unless the user explicitly asks. Derive execution_contract.policy.result_delivery from the user's wording: use suppress_when_nothing_to_report when the user says to notify only on a match, change, or actionable result; otherwise use deliver. A scheduled fire runs as the routine's owning user and may use the linked integration capabilities available to the owning user, subject to the user's current connection and permission settings. Write requested integration reads or user-authorized actions into execution_contract.goal explicitly. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write delivery as an explicit goal step naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so make output_instructions describe that reply and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
     Ok(vec![
@@ -88,6 +93,13 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
             PermissionMode::Ask,
             resource_profile(),
         )?,
+        first_party_capability_manifest(
+            TRIGGER_RUN_CAPABILITY_ID,
+            "Run a caller-scoped scheduled trigger now through its normal execution and delivery path without changing its schedule",
+            vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
     ])
 }
 
@@ -98,11 +110,12 @@ pub(super) fn insert_handlers(
     // Compatibility wrapper: supplies `MissingTriggerActiveRunLookup`, so
     // callers through this path never project an `active_hold`, mirroring
     // `NoopTriggerCreateHook` below (#5886).
-    insert_handlers_with_create_hook(
+    insert_handlers_with_services(
         registry,
         repository,
         Arc::new(NoopTriggerCreateHook),
         Arc::new(MissingTriggerActiveRunLookup),
+        Arc::new(MissingTriggerManualFireRunner),
     )
 }
 
@@ -112,6 +125,22 @@ pub(super) fn insert_handlers_with_create_hook(
     create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 ) -> Result<(), HostApiError> {
+    insert_handlers_with_services(
+        registry,
+        repository,
+        create_hook,
+        active_run_lookup,
+        Arc::new(MissingTriggerManualFireRunner),
+    )
+}
+
+pub(super) fn insert_handlers_with_services(
+    registry: &mut FirstPartyCapabilityRegistry,
+    repository: Arc<dyn TriggerRepository>,
+    create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
+) -> Result<(), HostApiError> {
     insert_trigger_handlers(
         registry,
         Arc::new(TriggerManagementToolHandler {
@@ -119,6 +148,7 @@ pub(super) fn insert_handlers_with_create_hook(
             create_hook,
             clock: Arc::new(SystemTriggerManagementClock),
             active_run_lookup,
+            manual_fire_runner,
         }),
     )
 }
@@ -136,6 +166,7 @@ pub(super) fn insert_handlers_with_clock(
             create_hook: Arc::new(NoopTriggerCreateHook),
             clock,
             active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+            manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
         }),
     )
 }
@@ -160,7 +191,11 @@ fn insert_trigger_handlers(
         CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
         handler.clone(),
     );
-    registry.insert_handler(CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?, handler);
+    registry.insert_handler(
+        CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(CapabilityId::new(TRIGGER_RUN_CAPABILITY_ID)?, handler);
     Ok(())
 }
 
@@ -177,6 +212,15 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
+    /// Deliberately no default body: every hook must make an explicit
+    /// preflight decision, so a compatibility path can never silently persist
+    /// an unvalidated execution policy.
+    async fn validate_execution_policy(
+        &self,
+        scope: &ResourceScope,
+        policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError>;
+
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
 }
 
@@ -185,6 +229,26 @@ struct NoopTriggerCreateHook;
 
 #[async_trait]
 impl TriggerCreateHook for NoopTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        // This compatibility path has no preflight service. An empty policy
+        // carries nothing to validate; a restrictive one must fail closed —
+        // persisting it would arm capability/skill restrictions nothing has
+        // vouched for, and the fired run would only discover that at 3am.
+        if policy.allowed_capability_ids.is_some() || !policy.required_skills.is_empty() {
+            return Err(TriggerError::InvalidRecord {
+                kind: TriggerRecordValidationKind::ExecutionSpecInvalid,
+                reason: "execution policy restrictions are not supported on this runtime path: \
+                         no structured-trigger preflight is available to validate them"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
         Ok(())
     }
@@ -204,6 +268,7 @@ struct TriggerManagementToolHandler {
     create_hook: Arc<dyn TriggerCreateHook>,
     clock: Arc<dyn TriggerManagementClock>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn TriggerManualFireRunner>,
 }
 
 #[async_trait]
@@ -213,14 +278,14 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         // Defense-in-depth backstop (issue #5505): a scheduled/automation origin
-        // must never create, remove, pause, or resume a routine — that is
+        // must never create, remove, pause, resume, or run a routine — that is
         // self-referential automation that could silence or reschedule itself.
         //
         // The PRIMARY structural guarantees live one layer up, in the runner's
         // capability surface (`ironclaw_turn_runner::runtime`):
         //   * a scheduled-trigger fire runs on the `scheduled_trigger` surface
         //     profile, whose `resolved CapabilitySurfacePolicy`
-        //     (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`) strips the four mutation
+        //     (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`) strips the mutation
         //     capabilities before the model can see them (`trigger_list` stays);
         //   * a subagent runs on the `subagent_tools` surface, whose per-flavor
         //     tool allowlist (`BUILTIN_SUBAGENT_FLAVORS`) never includes any
@@ -288,6 +353,16 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                 )
                 .await?
             }
+            TRIGGER_RUN_CAPABILITY_ID => {
+                run_trigger(
+                    &*self.repository,
+                    &*self.manual_fire_runner,
+                    &request.scope,
+                    request.input,
+                    self.clock.now(),
+                )
+                .await?
+            }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
@@ -309,6 +384,7 @@ fn is_trigger_mutation(capability_id: &str) -> bool {
             | TRIGGER_REMOVE_CAPABILITY_ID
             | TRIGGER_PAUSE_CAPABILITY_ID
             | TRIGGER_RESUME_CAPABILITY_ID
+            | TRIGGER_RUN_CAPABILITY_ID
     )
 }
 
@@ -333,7 +409,7 @@ fn origin_forbids_routine_mutation(origin: Option<&InvocationOrigin>) -> bool {
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum TriggerScheduleInput {
+pub(super) enum TriggerScheduleInput {
     Cron {
         expression: String,
         timezone: String,
@@ -345,20 +421,20 @@ enum TriggerScheduleInput {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TriggerScheduleInputKind {
+pub(super) enum TriggerScheduleInputKind {
     Cron,
     Once,
 }
 
 impl TriggerScheduleInput {
-    fn kind(&self) -> TriggerScheduleInputKind {
+    pub(super) fn kind(&self) -> TriggerScheduleInputKind {
         match self {
             Self::Cron { .. } => TriggerScheduleInputKind::Cron,
             Self::Once { .. } => TriggerScheduleInputKind::Once,
         }
     }
 
-    fn into_schedule(self) -> Result<TriggerSchedule, TriggerError> {
+    pub(super) fn into_schedule(self) -> Result<TriggerSchedule, TriggerError> {
         match self {
             Self::Cron {
                 expression,
@@ -370,20 +446,18 @@ impl TriggerScheduleInput {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TriggerCreateInput {
-    name: String,
-    prompt: String,
-    schedule: TriggerScheduleInput,
-}
-
-#[derive(Deserialize)]
 struct TriggerRemoveInput {
     trigger_id: String,
 }
 
 #[derive(Deserialize)]
 struct TriggerStateInput {
+    trigger_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TriggerRunInput {
     trigger_id: String,
 }
 
@@ -400,25 +474,37 @@ async fn create_trigger(
     input: Value,
     now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
+    let parsed_input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
         .map_err(|error| trigger_create_shape_error(&input, error))?;
-    let schedule_kind = input.schedule.kind();
-    let schedule = input
+    require_explicit_result_delivery(&input)?;
+    let schedule_kind = parsed_input.schedule.kind();
+    let schedule = parsed_input
         .schedule
         .into_schedule()
         .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
     let next_run_at = next_run_at_for_schedule(&schedule, now)
         .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
+    parsed_input
+        .execution_contract
+        .validate()
+        .map_err(trigger_record_error)?;
+    reject_forbidden_scheduled_capabilities(&parsed_input.execution_contract)?;
+    create_hook
+        .validate_execution_policy(scope, &parsed_input.execution_contract.policy)
+        .await
+        .map_err(trigger_record_error)?;
+    let prompt = parsed_input.execution_contract.render_prompt();
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
         creator_user_id: scope.user_id.clone(),
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
-        name: input.name,
+        name: parsed_input.name,
         source: TriggerSourceKind::Schedule,
         schedule,
-        prompt: input.prompt,
+        prompt,
+        execution_spec: Some(parsed_input.execution_contract),
         // Retired stored routing (spec §8): a routine delivers externally only
         // by calling `builtin.outbound_deliver` from its own prompt, so nothing
         // here ever seals a delivery route again. The field survives only to
@@ -452,8 +538,58 @@ async fn create_trigger(
         return Err(hook_error);
     }
     Ok(json!({
+        "authoring_status": "complete",
+        "next_action": "The routine is durably persisted. Treat the returned trigger as authoritative, report its exact state, and stop authoring. Do not call trigger_create again or pause, remove, or replace this routine unless the user explicitly asks.",
         "trigger": trigger_output(&record, &[], None),
     }))
+}
+
+fn require_explicit_result_delivery(input: &Value) -> Result<(), FirstPartyCapabilityError> {
+    let selection = input
+        .get("execution_contract")
+        .and_then(Value::as_object)
+        .and_then(|contract| contract.get("policy"))
+        .and_then(Value::as_object)
+        .and_then(|policy| policy.get("result_delivery"));
+    match selection {
+        Some(Value::String(_)) => Ok(()),
+        Some(_) => Err(invalid_trigger_input(vec![type_mismatch(
+            "execution_contract.policy.result_delivery",
+            "deliver or suppress_when_nothing_to_report",
+        )])),
+        None => Err(invalid_trigger_input(vec![
+            missing_required("execution_contract.policy.result_delivery")
+                .expected("deliver or suppress_when_nothing_to_report"),
+        ])),
+    }
+}
+
+fn reject_forbidden_scheduled_capabilities(
+    spec: &TriggerExecutionSpec,
+) -> Result<(), FirstPartyCapabilityError> {
+    const FORBIDDEN: &[&str] = &[
+        TRIGGER_CREATE_CAPABILITY_ID,
+        TRIGGER_REMOVE_CAPABILITY_ID,
+        TRIGGER_PAUSE_CAPABILITY_ID,
+        TRIGGER_RESUME_CAPABILITY_ID,
+        TRIGGER_RUN_CAPABILITY_ID,
+    ];
+    let forbidden = spec
+        .policy
+        .allowed_capability_ids
+        .iter()
+        .flatten()
+        .find(|capability| FORBIDDEN.contains(&capability.as_str()));
+    if let Some(capability) = forbidden {
+        return Err(FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::InputEncode,
+            format!(
+                "scheduled routines cannot use capability {}",
+                capability.as_str()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 async fn list_triggers(
@@ -589,6 +725,107 @@ async fn set_trigger_state(
     }))
 }
 
+async fn run_trigger(
+    repository: &dyn TriggerRepository,
+    manual_fire_runner: &dyn TriggerManualFireRunner,
+    scope: &ResourceScope,
+    input: Value,
+    now: DateTime<Utc>,
+) -> Result<Value, FirstPartyCapabilityError> {
+    let input: TriggerRunInput =
+        TriggerRunInput::deserialize(&input).map_err(|_| trigger_run_shape_error(&input))?;
+    let trigger_id = TriggerId::parse(&input.trigger_id).map_err(|error| {
+        tracing::debug!(
+            trigger_error_kind = trigger_error_kind(&error),
+            "trigger_run received an invalid trigger id"
+        );
+        trigger_run_input_error(DispatchInputIssueCode::InvalidValue)
+    })?;
+
+    // The worker's manual-fire port is tenant-scoped because it is also used
+    // by trusted product orchestration. Resolve through the same full caller
+    // scope as the other model-facing trigger mutations before crossing that
+    // boundary, so a caller cannot probe or fire another user's routine.
+    let is_caller_scoped = repository
+        .get_trigger(scope.tenant_id.clone(), trigger_id)
+        .await
+        .map_err(|error| trigger_repository_error("get_trigger", error))?
+        .is_some_and(|record| {
+            record.creator_user_id == scope.user_id
+                && record.agent_id == scope.agent_id
+                && record.project_id == scope.project_id
+        });
+    if !is_caller_scoped {
+        return Err(trigger_run_input_error(
+            DispatchInputIssueCode::InvalidValue,
+        ));
+    }
+
+    match manual_fire_runner
+        .run_manual_fire(scope.tenant_id.clone(), trigger_id, now)
+        .await
+        .map_err(|error| trigger_repository_error("run_manual_fire", error))?
+    {
+        TriggerManualFireOutcome::Submitted { run_id } => Ok(json!({
+            "trigger_id": trigger_id.to_string(),
+            "source": "manual",
+            "status": "submitted",
+            "run_id": run_id.to_string(),
+        })),
+        TriggerManualFireOutcome::Replayed { original_run_id } => Ok(json!({
+            "trigger_id": trigger_id.to_string(),
+            "source": "manual",
+            "status": "replayed",
+            "run_id": original_run_id.to_string(),
+        })),
+        TriggerManualFireOutcome::AlreadyActive { .. } => {
+            Err(FirstPartyCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::OperationFailed,
+                "trigger is already running",
+            ))
+        }
+        TriggerManualFireOutcome::Paused => Err(FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::PolicyDenied,
+            "paused trigger cannot be run",
+        )),
+        TriggerManualFireOutcome::Completed => Err(FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::OperationFailed,
+            "completed trigger cannot be run",
+        )),
+        TriggerManualFireOutcome::NotFound => Err(trigger_run_input_error(
+            DispatchInputIssueCode::InvalidValue,
+        )),
+        TriggerManualFireOutcome::Failed { .. } => {
+            Err(FirstPartyCapabilityError::with_safe_summary(
+                RuntimeDispatchErrorKind::OperationFailed,
+                "trigger run failed",
+            ))
+        }
+    }
+}
+
+fn trigger_run_shape_error(input: &Value) -> FirstPartyCapabilityError {
+    let Some(root) = input.as_object() else {
+        return FirstPartyCapabilityError::invalid_input_issues(
+            "trigger_run input failed validation",
+            vec![type_mismatch("input", "object")],
+        );
+    };
+    let mut issues = Vec::new();
+    required_string(root, "trigger_id", "trigger_id", "trigger id", &mut issues);
+    unexpected_fields(root, &["trigger_id"], "unexpected_field", &mut issues);
+    FirstPartyCapabilityError::invalid_input_issues("trigger_run input failed validation", issues)
+}
+
+fn trigger_run_input_error(code: DispatchInputIssueCode) -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::invalid_input_issues(
+        "trigger_run input failed validation",
+        vec![
+            DispatchInputIssue::new("trigger_id", code).expected("known caller-scoped trigger id"),
+        ],
+    )
+}
+
 fn trigger_output(
     record: &TriggerRecord,
     recent_runs: &[TriggerRunRecord],
@@ -603,6 +840,7 @@ fn trigger_output(
         "name": record.name,
         "source": record.source,
         "schedule": record.schedule,
+        "execution_contract": record.execution_spec,
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
@@ -627,6 +865,7 @@ fn trigger_output(
 fn trigger_run_output(run: &TriggerRunRecord) -> Value {
     json!({
         "fire_slot": run.fire_slot,
+        "source": run.source,
         "run_id": run.run_id.as_ref().map(ToString::to_string),
         "thread_id": run.thread_id.as_ref().map(|t| t.as_str()),
         "status": run.status,
@@ -668,13 +907,29 @@ fn classify_trigger_create_shape(input: &Value) -> Vec<DispatchInputIssue> {
 
     let mut issues = Vec::new();
     required_string(root, "name", "name", "string", &mut issues);
-    required_string(root, "prompt", "prompt", "string", &mut issues);
     unexpected_fields(
         root,
-        &["name", "prompt", "schedule"],
+        &["name", "execution_contract", "schedule"],
         "unexpected_field",
         &mut issues,
     );
+    match root.get("execution_contract") {
+        None | Some(Value::Null) => {
+            issues.push(missing_required("execution_contract").expected("object"));
+        }
+        Some(Value::Object(contract)) => {
+            if let Some(Value::Object(policy)) = contract.get("policy")
+                && let Some(result_delivery) = policy.get("result_delivery")
+                && !result_delivery.is_string()
+            {
+                issues.push(type_mismatch(
+                    "execution_contract.policy.result_delivery",
+                    "deliver or suppress_when_nothing_to_report",
+                ));
+            }
+        }
+        Some(_) => issues.push(type_mismatch("execution_contract", "object")),
+    }
 
     let Some(schedule) = root.get("schedule") else {
         issues.push(missing_required("schedule").expected("object with kind"));

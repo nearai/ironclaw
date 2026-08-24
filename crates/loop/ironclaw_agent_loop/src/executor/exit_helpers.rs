@@ -1,4 +1,7 @@
-use ironclaw_host_api::turn::{LoopExitId, LoopMessageRef, SanitizedFailure};
+use ironclaw_host_api::{
+    execution_policy::ResultDeliveryPolicy,
+    turn::{LoopExitId, LoopMessageRef, SanitizedFailure, TurnOriginKind},
+};
 use ironclaw_loop_contracts::{
     AgentLoopDriverHost, LoopCancelReasonKind, LoopCancellationSignal, LoopCancelled,
     LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed,
@@ -14,7 +17,10 @@ pub(super) fn completed_exit(
     state: LoopExecutionState,
     final_checkpoint_id: Option<ironclaw_host_api::turn::TurnCheckpointId>,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
-    let completion_kind = if !state.assistant_refs.is_empty() {
+    let typed_nothing_to_report = is_typed_nothing_to_report(host, &state);
+    let completion_kind = if typed_nothing_to_report {
+        LoopCompletionKind::NothingToReport
+    } else if !state.assistant_refs.is_empty() {
         LoopCompletionKind::FinalReply
     } else if !state.result_refs.is_empty() {
         LoopCompletionKind::ResultOnly
@@ -22,14 +28,46 @@ pub(super) fn completed_exit(
         LoopCompletionKind::NoReply
     };
     let model_usage = state.cumulative_model_usage;
+    // Earlier model iterations may have emitted progress text and ordinary
+    // tool results before the terminal structured result. Retain those
+    // transcript rows, but do not expose any of their refs as deliverable
+    // completion output. Settlement independently verifies the exact typed
+    // terminal call and arguments from the durable transcript.
+    let reply_message_refs = if typed_nothing_to_report {
+        Vec::new()
+    } else {
+        state.assistant_refs
+    };
+    let result_refs = if typed_nothing_to_report {
+        Vec::new()
+    } else {
+        state.result_refs
+    };
     Ok(LoopExit::Completed(LoopCompleted {
         completion_kind,
-        reply_message_refs: state.assistant_refs,
-        result_refs: state.result_refs,
+        reply_message_refs,
+        result_refs,
         final_checkpoint_id,
         model_usage,
         exit_id: exit_id(host, "completed")?,
     }))
+}
+
+pub(super) fn is_typed_nothing_to_report(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &LoopExecutionState,
+) -> bool {
+    !state.result_refs.is_empty()
+        && state.stop_state.structured_result_recorded
+        && host
+            .run_context()
+            .product_context
+            .as_ref()
+            .filter(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+            .and_then(|context| context.execution_policy.as_ref())
+            .is_some_and(|policy| {
+                policy.result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
+            })
 }
 
 pub(super) fn failed_exit(

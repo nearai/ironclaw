@@ -1,21 +1,78 @@
 use chrono::{Datelike, TimeZone};
+use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId};
+use ironclaw_turns::TurnRunId;
 
 use super::*;
 
-/// Delivery is now a step the *prompt* owns, not a stored routing field: a
+/// Accept-all preflight for tests that pin persistence/round-trip behavior of
+/// restrictive policies, which `NoopTriggerCreateHook` now fails closed on.
+#[derive(Debug)]
+struct AcceptAllTriggerCreateHook;
+
+#[async_trait]
+impl TriggerCreateHook for AcceptAllTriggerCreateHook {
+    async fn validate_execution_policy(
+        &self,
+        _scope: &ResourceScope,
+        _policy: &TurnExecutionPolicy,
+    ) -> Result<(), TriggerError> {
+        Ok(())
+    }
+
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Ok(())
+    }
+}
+
+fn execution_contract(goal: impl Into<String>) -> Value {
+    let goal = goal.into();
+    json!({
+        "version": 1,
+        "goal": goal,
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
+    })
+}
+
+/// Delivery is now a step the structured contract owns, not a stored routing field: a
 /// routine's fire delivers externally only by calling
 /// `builtin__outbound_deliver` itself. The description must therefore teach
-/// (a) the prompt is the whole task, written for a memory-less future run,
-/// (b) any wanted delivery is an explicit prompt step naming its destination,
+/// (a) the goal is the whole task, written for a memory-less future run,
+/// (b) any wanted delivery is an explicit goal step naming its destination,
 /// picked while the user is present, and (c) a fire that makes no delivery
 /// call delivers nothing externally — its reply only lands in the routine's
 /// own run thread. It must NOT resurrect the retired `delivery_target_id`
 /// input, which no longer exists on this capability.
 #[test]
-fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_target() {
+fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_target() {
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("Keep the contract concise and outcome-focused")
+            && TRIGGER_CREATE_DESCRIPTION.contains("Do not inspect or enumerate future-work data")
+            && TRIGGER_CREATE_DESCRIPTION
+                .contains("do not prescribe a speculative tool-call sequence"),
+        "trigger_create must avoid creation-time simulation of the future run: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION
+            .contains("A successful response means the routine is durably persisted")
+            && TRIGGER_CREATE_DESCRIPTION.contains("do not call trigger_create again")
+            && TRIGGER_CREATE_DESCRIPTION.contains("unless the user explicitly asks"),
+        "trigger_create success must be a terminal authoring outcome: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION
+            .contains("Derive execution_contract.policy.result_delivery from the user's wording")
+            && TRIGGER_CREATE_DESCRIPTION.contains(
+                "use suppress_when_nothing_to_report when the user says to notify only on a match, change, or actionable result",
+            )
+            && TRIGGER_CREATE_DESCRIPTION.contains("otherwise use deliver"),
+        "trigger_create must derive no-result delivery with a deterministic deliver fallback: {TRIGGER_CREATE_DESCRIPTION}"
+    );
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("full task each fire performs"),
-        "trigger_create description must say the prompt is the whole task: {TRIGGER_CREATE_DESCRIPTION}"
+        "trigger_create description must say the goal is the whole task: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("no memory of this conversation"),
@@ -23,8 +80,8 @@ fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_targe
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION
-            .contains("write that as an explicit step in the prompt naming the destination"),
-        "trigger_create description must make delivery an explicit prompt step: {TRIGGER_CREATE_DESCRIPTION}"
+            .contains("write delivery as an explicit goal step naming the destination"),
+        "trigger_create description must make delivery an explicit goal step: {TRIGGER_CREATE_DESCRIPTION}"
     );
     assert!(
         TRIGGER_CREATE_DESCRIPTION.contains("builtin__outbound_deliver"),
@@ -79,6 +136,12 @@ fn trigger_create_description_teaches_prompt_owned_delivery_with_no_stored_targe
         TRIGGER_CREATE_DESCRIPTION.contains("never through integration messaging tools"),
         "messages to the requester must be steered away from act-as-user vendor sends: {TRIGGER_CREATE_DESCRIPTION}"
     );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION
+            .contains("may use the linked integration capabilities available to the owning user")
+            && !TRIGGER_CREATE_DESCRIPTION.contains("unavailable to scheduled automations"),
+        "trigger_create must allow future scheduled loop-runs to use the owning user's linked integrations: {TRIGGER_CREATE_DESCRIPTION}"
+    );
 }
 
 #[test]
@@ -94,6 +157,23 @@ fn trigger_resume_description_requires_explicit_lifecycle_intent() {
             .contains("explicitly asks to resume or enable"),
         "checking for duplicates or ensuring exactly one routine must stay read-only: {}",
         manifest.description
+    );
+}
+
+#[test]
+fn trigger_run_manifest_is_registered_and_forbids_automation_origin() {
+    let manifest = manifests()
+        .expect("trigger manifests")
+        .into_iter()
+        .find(|manifest| manifest.id.as_str() == TRIGGER_RUN_CAPABILITY_ID)
+        .expect("trigger run manifest");
+
+    assert_eq!(
+        manifest
+            .origin_gate_matrix
+            .expect("trigger run origin gate matrix")
+            .automation,
+        ironclaw_host_api::capability::OriginGatePolicy::Forbidden,
     );
 }
 
@@ -122,7 +202,7 @@ fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {
 fn trigger_create_input_rejects_missing_timezone() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail",
+        "execution_contract": execution_contract("check mail"),
         "schedule": { "kind": "cron", "expression": "0 9 * * *" }  // missing timezone
     });
     let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
@@ -136,7 +216,7 @@ fn trigger_create_input_rejects_missing_timezone() {
 fn trigger_create_input_rejects_invalid_timezone() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail",
+        "execution_contract": execution_contract("check mail"),
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "Not/A/Timezone" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -157,7 +237,14 @@ fn trigger_create_input_rejects_invalid_timezone() {
 fn trigger_create_input_accepts_cron_schedule() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Check mail",
+            "success_criteria": ["Report the mail check result"],
+            "output_instructions": "Return a concise summary",
+            "no_result_text": "No mail found",
+            "policy": { "result_delivery": "deliver" }
+        },
         "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "America/Los_Angeles" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -174,10 +261,182 @@ fn trigger_create_input_accepts_cron_schedule() {
 }
 
 #[test]
+fn trigger_create_input_rejects_new_legacy_prompt() {
+    let input = serde_json::json!({
+        "name": "daily",
+        "prompt": "check mail",
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    let error = match serde_json::from_value::<TriggerCreateInput>(input) {
+        Ok(_) => panic!("new trigger creation must require an execution contract"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("unknown field `prompt`"),
+        "prompt-only creation should fail as a retired field: {error}"
+    );
+}
+
+#[test]
+fn trigger_create_input_accepts_structured_contract_without_legacy_prompt() {
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "required_skills": ["payment-operations"],
+                "result_delivery": "suppress_when_nothing_to_report"
+            }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    let parsed: TriggerCreateInput = serde_json::from_value(input).expect("structured input");
+    assert_eq!(parsed.execution_contract.version, 1);
+    assert_eq!(
+        parsed.execution_contract.policy.result_delivery,
+        ironclaw_host_api::execution_policy::ResultDeliveryPolicy::SuppressWhenNothingToReport
+    );
+}
+
+#[test]
+fn trigger_create_input_rejects_legacy_prompt_and_missing_contract() {
+    let both = serde_json::json!({
+        "name": "invalid",
+        "prompt": "legacy",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failures",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failures",
+            "policy": { "result_delivery": "deliver" }
+        },
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+    let neither = serde_json::json!({
+        "name": "invalid",
+        "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" }
+    });
+
+    assert!(serde_json::from_value::<TriggerCreateInput>(both).is_err());
+    assert!(serde_json::from_value::<TriggerCreateInput>(neither).is_err());
+}
+
+#[tokio::test]
+async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
+    let repository = InMemoryTriggerRepository::default();
+    let scope = ResourceScope::local_default(
+        UserId::new("structured-trigger-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "result_delivery": "deliver"
+            }
+        },
+        "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+    });
+
+    let output = create_trigger(
+        &repository,
+        &AcceptAllTriggerCreateHook,
+        &scope,
+        input,
+        Utc::now(),
+    )
+    .await
+    .expect("structured trigger created");
+    assert_eq!(output["authoring_status"], "complete");
+    assert!(
+        output["next_action"]
+            .as_str()
+            .is_some_and(
+                |guidance| guidance.contains("Do not call trigger_create again")
+                    && guidance.contains("unless the user explicitly asks")
+            ),
+        "successful persistence must give the model an explicit terminal authoring outcome: {output}"
+    );
+    assert_eq!(output["trigger"]["execution_contract"]["version"], 1);
+
+    let records = repository
+        .list_triggers(scope.tenant_id.clone())
+        .await
+        .expect("list records");
+    let record = records.first().expect("created record");
+    let spec = record.execution_spec.as_ref().expect("stored contract");
+    assert_eq!(record.prompt, spec.render_prompt());
+    assert!(record.prompt.contains("## Success criteria"));
+}
+
+#[tokio::test]
+async fn preflight_less_path_rejects_restrictive_policy_and_persists_nothing() {
+    // The compatibility registration path (`NoopTriggerCreateHook`) has no
+    // preflight service; a contract carrying capability/skill restrictions
+    // must fail closed at creation instead of persisting unvalidated
+    // restrictions that every fired run would then trip over.
+    let repository = InMemoryTriggerRepository::default();
+    let scope = ResourceScope::local_default(
+        UserId::new("preflightless-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let input = serde_json::json!({
+        "name": "daily failures",
+        "execution_contract": {
+            "version": 1,
+            "goal": "Find failed payments",
+            "success_criteria": ["Include every failure"],
+            "output_instructions": "Return Markdown",
+            "no_result_text": "No failed payments",
+            "policy": {
+                "allowed_capability_ids": ["stripe.list_payments"],
+                "result_delivery": "deliver"
+            }
+        },
+        "schedule": { "kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC" }
+    });
+
+    create_trigger(
+        &repository,
+        &NoopTriggerCreateHook,
+        &scope,
+        input,
+        Utc::now(),
+    )
+    .await
+    .expect_err("restrictive policy without a preflight service must be rejected");
+
+    let records = repository
+        .list_triggers(scope.tenant_id.clone())
+        .await
+        .expect("list records");
+    assert!(
+        records.is_empty(),
+        "a rejected restrictive policy must not persist a trigger"
+    );
+}
+
+#[test]
 fn trigger_create_input_rejects_missing_schedule() {
     let input = serde_json::json!({
         "name": "daily",
-        "prompt": "check mail"
+        "execution_contract": execution_contract("check mail")
     });
     let result: Result<TriggerCreateInput, _> = serde_json::from_value(input);
     assert!(
@@ -191,7 +450,7 @@ fn trigger_create_input_accepts_once_schedule_and_persists_as_utc() {
     // 2099-06-24T17:00:00 UTC is unambiguous and in the future
     let input = serde_json::json!({
         "name": "one-off reminder",
-        "prompt": "remind me about the meeting",
+        "execution_contract": execution_contract("remind me about the meeting"),
         "schedule": { "kind": "once", "at": "2099-06-24T17:00:00", "timezone": "UTC" }
     });
     let parsed: TriggerCreateInput =
@@ -215,7 +474,7 @@ fn trigger_create_input_rejects_dst_ambiguous_time() {
     // 2026-11-01T01:30:00 in America/New_York occurs twice (DST fall-back overlap)
     let input = serde_json::json!({
         "name": "ambiguous",
-        "prompt": "test",
+        "execution_contract": execution_contract("test"),
         "schedule": { "kind": "once", "at": "2026-11-01T01:30:00", "timezone": "America/New_York" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -237,7 +496,7 @@ fn trigger_create_input_rejects_dst_gap_time() {
     // 2026-03-08T02:30:00 in America/New_York does not exist (DST spring-forward gap)
     let input = serde_json::json!({
         "name": "dst-gap",
-        "prompt": "test",
+        "execution_contract": execution_contract("test"),
         "schedule": { "kind": "once", "at": "2026-03-08T02:30:00", "timezone": "America/New_York" }
     });
     let parsed: TriggerCreateInput = serde_json::from_value(input).expect("deserialize");
@@ -281,6 +540,7 @@ fn test_record(active_fire_slot: Option<DateTime<Utc>>) -> TriggerRecord {
             timezone: "UTC".to_string(),
         },
         prompt: "check mail".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: now,
@@ -376,12 +636,13 @@ const MUTATION_CAPABILITIES: &[&str] = &[
     TRIGGER_REMOVE_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_RESUME_CAPABILITY_ID,
+    TRIGGER_RUN_CAPABILITY_ID,
 ];
 
 fn once_create_input(name: &str) -> Value {
     json!({
         "name": name,
-        "prompt": "remind me later",
+        "execution_contract": execution_contract("remind me later"),
         "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
     })
 }
@@ -392,6 +653,7 @@ fn origin_test_handler(create_hook: Arc<dyn TriggerCreateHook>) -> TriggerManage
         create_hook,
         clock: Arc::new(SystemTriggerManagementClock),
         active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
     }
 }
 
@@ -500,7 +762,7 @@ async fn interactive_and_product_origins_may_create_a_routine() {
 
 #[tokio::test]
 async fn scheduled_origin_may_still_list_routines() {
-    // Read-only `trigger_list` is never denied — only the four mutations are.
+    // Read-only `trigger_list` is never denied — only the mutations are.
     let handler = origin_test_handler(Arc::new(NoopTriggerCreateHook));
     let result = dispatch_with_origin(
         &handler,
@@ -513,6 +775,228 @@ async fn scheduled_origin_may_still_list_routines() {
     assert!(
         result.output["triggers"].is_array(),
         "trigger_list must return a triggers array under a scheduled origin"
+    );
+}
+
+#[derive(Debug)]
+struct FixedManualFireRunner {
+    outcome: TriggerManualFireOutcome,
+}
+
+#[derive(Debug, Default)]
+struct RecordingManualFireRunner {
+    calls: std::sync::Mutex<Vec<(TenantId, TriggerId)>>,
+}
+
+#[async_trait]
+impl TriggerManualFireRunner for RecordingManualFireRunner {
+    async fn run_manual_fire(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        _now: DateTime<Utc>,
+    ) -> Result<TriggerManualFireOutcome, TriggerError> {
+        self.calls
+            .lock()
+            .expect("manual fire calls lock")
+            .push((tenant_id, trigger_id));
+        Ok(TriggerManualFireOutcome::Submitted {
+            run_id: TurnRunId::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl TriggerManualFireRunner for FixedManualFireRunner {
+    async fn run_manual_fire(
+        &self,
+        _tenant_id: ironclaw_host_api::ids::TenantId,
+        _trigger_id: TriggerId,
+        _now: DateTime<Utc>,
+    ) -> Result<TriggerManualFireOutcome, TriggerError> {
+        Ok(self.outcome.clone())
+    }
+}
+
+async fn caller_scoped_trigger_fixture()
+-> (Arc<InMemoryTriggerRepository>, ResourceScope, TriggerId) {
+    let scope = ResourceScope::local_default(
+        UserId::new("trigger-run-user").expect("user"),
+        InvocationId::new(),
+    )
+    .expect("scope");
+    let trigger_id = TriggerId::new();
+    let now = Utc::now();
+    let record = TriggerRecord {
+        trigger_id,
+        tenant_id: scope.tenant_id.clone(),
+        creator_user_id: scope.user_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        name: "manual-run-target".to_string(),
+        source: TriggerSourceKind::Schedule,
+        schedule: TriggerSchedule::Cron {
+            expression: "0 9 * * *".to_string(),
+            timezone: "UTC".to_string(),
+        },
+        prompt: "run the routine".to_string(),
+        execution_spec: None,
+        delivery_target: None,
+        state: TriggerState::Scheduled,
+        next_run_at: now + chrono::Duration::hours(8),
+        last_run_at: None,
+        last_fired_slot: None,
+        last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
+        created_at: now,
+    };
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    repository
+        .upsert_trigger(record)
+        .await
+        .expect("seed caller-scoped trigger");
+    (repository, scope, trigger_id)
+}
+
+#[tokio::test]
+async fn trigger_run_returns_typed_input_issues_for_bad_and_unknown_ids() {
+    let (repository, scope, _) = caller_scoped_trigger_fixture().await;
+    let runner = FixedManualFireRunner {
+        outcome: TriggerManualFireOutcome::NotFound,
+    };
+
+    for input in [
+        json!({}),
+        json!({"trigger_id": "not-an-id"}),
+        json!({
+            "trigger_id": TriggerId::new().to_string()
+        }),
+    ] {
+        let error = run_trigger(&*repository, &runner, &scope, input, Utc::now())
+            .await
+            .expect_err("bad or unknown trigger id must be rejected");
+        let FirstPartyCapabilityError::Dispatch {
+            kind,
+            detail: Some(detail),
+            ..
+        } = error
+        else {
+            panic!("expected structured dispatch input failure");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+        let ironclaw_host_api::dispatch::DispatchFailureDetail::InvalidInput { issues } = *detail
+        else {
+            panic!("expected invalid-input detail");
+        };
+        assert!(!issues.is_empty(), "input failure must carry typed issues");
+    }
+}
+
+#[tokio::test]
+async fn trigger_run_maps_active_and_paused_outcomes_to_safe_failures() {
+    let (repository, scope, trigger_id) = caller_scoped_trigger_fixture().await;
+    for (outcome, expected_kind, expected_summary) in [
+        (
+            TriggerManualFireOutcome::AlreadyActive {
+                active_fire_slot: Some(Utc::now()),
+                active_run_ref: None,
+            },
+            RuntimeDispatchErrorKind::OperationFailed,
+            "trigger is already running",
+        ),
+        (
+            TriggerManualFireOutcome::Paused,
+            RuntimeDispatchErrorKind::PolicyDenied,
+            "paused trigger cannot be run",
+        ),
+        (
+            TriggerManualFireOutcome::Completed,
+            RuntimeDispatchErrorKind::OperationFailed,
+            "completed trigger cannot be run",
+        ),
+    ] {
+        let runner = FixedManualFireRunner { outcome };
+        let error = run_trigger(
+            &*repository,
+            &runner,
+            &scope,
+            json!({"trigger_id": trigger_id.to_string()}),
+            Utc::now(),
+        )
+        .await
+        .expect_err("non-started manual fire must be model-visible failure");
+        let FirstPartyCapabilityError::Dispatch {
+            kind, safe_summary, ..
+        } = error
+        else {
+            panic!("expected dispatch failure");
+        };
+        assert_eq!(kind, expected_kind);
+        assert_eq!(safe_summary.as_deref(), Some(expected_summary));
+    }
+}
+
+#[tokio::test]
+async fn trigger_run_maps_submitted_outcome_to_bounded_success() {
+    let (repository, scope, trigger_id) = caller_scoped_trigger_fixture().await;
+    let run_id = ironclaw_turns::TurnRunId::new();
+    let runner = FixedManualFireRunner {
+        outcome: TriggerManualFireOutcome::Submitted { run_id },
+    };
+
+    let output = run_trigger(
+        &*repository,
+        &runner,
+        &scope,
+        json!({"trigger_id": trigger_id.to_string()}),
+        Utc::now(),
+    )
+    .await
+    .expect("manual trigger fire succeeds");
+
+    assert_eq!(output["trigger_id"], trigger_id.to_string());
+    assert_eq!(output["status"], "submitted");
+    assert_eq!(output["run_id"], run_id.to_string());
+}
+
+#[tokio::test]
+async fn trigger_run_rejects_a_target_outside_the_full_caller_scope() {
+    let (repository, scope, trigger_id) = caller_scoped_trigger_fixture().await;
+    let mut record = repository
+        .get_trigger(scope.tenant_id.clone(), trigger_id)
+        .await
+        .expect("load trigger")
+        .expect("trigger exists");
+    record.creator_user_id = UserId::new("different-user").expect("valid user");
+    record.agent_id = Some(AgentId::new("different-agent").expect("valid agent"));
+    record.project_id = Some(ProjectId::new("different-project").expect("valid project"));
+    repository
+        .upsert_trigger(record)
+        .await
+        .expect("replace trigger scope");
+    let runner = RecordingManualFireRunner::default();
+
+    let error = run_trigger(
+        &*repository,
+        &runner,
+        &scope,
+        json!({"trigger_id": trigger_id.to_string()}),
+        Utc::now(),
+    )
+    .await
+    .expect_err("a trigger outside the caller scope must be hidden");
+    let FirstPartyCapabilityError::Dispatch { kind, .. } = error else {
+        panic!("expected dispatch failure");
+    };
+    assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+    assert!(
+        runner
+            .calls
+            .lock()
+            .expect("manual fire calls lock")
+            .is_empty(),
+        "scope rejection must happen before manual-fire dispatch"
     );
 }
 
@@ -587,7 +1071,7 @@ async fn trigger_create_rejects_the_retired_delivery_target_id_input() {
         TRIGGER_CREATE_CAPABILITY_ID,
         json!({
             "name": "retired-target-field",
-            "prompt": "deliver here",
+            "execution_contract": execution_contract("deliver here"),
             "schedule": {"kind": "once", "at": "2999-01-01T00:00:00", "timezone": "UTC"},
             "delivery_target_id": "slack:personal-dm:T123:user-a",
         }),

@@ -23,11 +23,13 @@ function registryTabSourceForTest() {
 }
 
 function renderRegistryTab(props, filter = "") {
+  const filterUpdates = [];
   const context = {
     ExtensionCard() {},
     RegistryCard() {},
+    SearchField() {},
     React: {
-      useState: () => [filter, () => {}],
+      useState: () => [filter, (value) => filterUpdates.push(value)],
     },
     globalThis: {},
     html(strings, ...values) {
@@ -43,8 +45,21 @@ function renderRegistryTab(props, filter = "") {
   vm.runInNewContext(registryTabSourceForTest(), context);
   return {
     ...context,
+    filterUpdates,
     rendered: context.globalThis.__testExports.RegistryTab(props),
   };
+}
+
+function componentProps(node, component, matches = []) {
+  if (Array.isArray(node)) {
+    for (const item of node) componentProps(item, component, matches);
+    return matches;
+  }
+  if (!node || typeof node !== "object") return matches;
+  if (node.type === component) matches.push(node.props);
+  componentProps(node.children, component, matches);
+  componentProps(node.values, component, matches);
+  return matches;
 }
 
 function collectComponentValues(node, component, matches = []) {
@@ -165,4 +180,38 @@ test("RegistryTab searches installed entries using registry metadata", () => {
   );
 
   assert.equal(collectComponentValues(rendered, ExtensionCard).length, 1);
+});
+
+test("RegistryTab supplies the controlled SearchField contract", () => {
+  const { SearchField, filterUpdates, rendered } = renderRegistryTab(
+    {
+      catalogEntries: [
+        {
+          id: "github",
+          installed: false,
+          entry: {
+            package_ref: { kind: "extension", id: "github" },
+            display_name: "GitHub",
+          },
+          extension: null,
+        },
+      ],
+      onInstall: () => {},
+      onConfigure: () => {},
+      onRemove: () => {},
+      isBusy: false,
+    },
+    "git",
+  );
+
+  const [searchProps] = componentProps(rendered, SearchField);
+  assert.ok(searchProps);
+  assert.equal(searchProps.value, "git");
+  assert.equal(searchProps.placeholder, "Search extensions...");
+  assert.equal(searchProps["aria-label"], "Search extensions...");
+  assert.equal(searchProps.clearLabel, "settings.clearSearch");
+
+  searchProps.onChange("slack");
+  searchProps.onClear();
+  assert.deepEqual(filterUpdates, ["slack", ""]);
 });

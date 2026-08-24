@@ -6,22 +6,54 @@ pub mod store;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::ids::{CapabilityId, ThreadId};
-use ironclaw_host_api::turn::{
-    LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnGateRef, TurnRunId, TurnScope,
-};
+use ironclaw_host_api::turn::{LoopMessageRef, LoopResultRef, TurnGateRef, TurnRunId, TurnScope};
 use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use serde::{Deserialize, Serialize};
 
-/// CAS state machine (§2): `Open -> Settled -> Drained`, `Open -> Abandoned`.
+/// CAS state machine (§2): `Open -> Settled -> Drained`; abandon reaches any
+/// non-terminal state, not just `Open` — the kernel's close-dependency guard
+/// only gates the `consume` door.
+/// A background child's result also walks the delivery chain in between:
+/// `Settled -> ResultAppended -> AttentionScheduled`, with
+/// `ResultAppended -> AttentionDeferredStreakCap -> AttentionScheduled` when a
+/// streak cap parks it. Only `AttentionScheduled` rejoins the closing path, so
+/// the parked state is a detour, never a terminus.
 /// `Drained`/`Abandoned`-final edges are deleted (§2) — these states are
 /// therefore transient on disk, never the long-lived resting state.
+///
+/// This enum is a *projection* of the kernel's `ProcessDependencyState`, which
+/// stays domain-neutral: the kernel's `AttentionDeferred` is spelled
+/// `AttentionDeferredStreakCap` here because the loop tier is the layer that
+/// knows what a streak cap is. The names differ on purpose; neither side
+/// renames to match the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AwaitEdgeState {
     Open,
     Settled,
+    /// The settled child's result is durably appended to the parent thread.
+    ResultAppended,
+    /// The parent has been made attentive to that appended result.
+    AttentionScheduled,
+    /// Attention was withheld on purpose because the parent hit its
+    /// consecutive-interruption cap. In flight, not closed: the edge stays
+    /// claimable, and the next permitted or human-initiated run start drains it
+    /// forward into `AttentionScheduled` (§4.1/§4.2). It is deliberately not
+    /// consumable from here — consuming would strand the undelivered result;
+    /// abandoning it is still allowed.
+    AttentionDeferredStreakCap,
     Drained,
     Abandoned,
+}
+
+/// How the parent was made attentive to an appended background result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionOutcome {
+    /// The parent was mid-run; the result waits in its steering queue.
+    Queued,
+    /// The parent was idle; attention started a run.
+    Activated,
 }
 
 /// Descendant-reservation release tri-state (§5.5), living on the same edge
@@ -69,10 +101,9 @@ impl EdgeTerminalKind {
 }
 
 /// One await-edge: parent-awaits-child bookkeeping, §5.6 assembled — plus
-/// five additive fields beyond the design doc's exact list (`gate_ref`, the
-/// `source_binding_ref`/`reply_target_binding_ref` pair, `parent_run_context`,
-/// `spawn_provider_call_id`, and `terminal_reason`), each named as a spec
-/// deviation in the PR:
+/// additive fields beyond the design doc's exact list (`gate_ref`,
+/// `parent_run_context`, `spawn_provider_call_id`, and `terminal_reason`),
+/// each named as a spec deviation in the PR:
 ///
 /// - `gate_ref` (D3): the pre-existing shared-batch-gate mechanism (one
 ///   `TurnGateRef` covering N children spawned in one call, parent resumes once
@@ -82,13 +113,6 @@ impl EdgeTerminalKind {
 ///   edges under the same `parent_run_id` sharing this field are one
 ///   settle-group (`resolver.rs`); listing is a cheap list+filter under the
 ///   ≤4-spawns/turn, ≤16-descendants caps this ever sees.
-/// - `source_binding_ref`/`reply_target_binding_ref`: these are pure
-///   deterministic functions of `(parent_run_id, child_run_id)` at spawn time
-///   (`ironclaw_loop_host::subagent_spawn_port`'s private `source_binding_ref`/
-///   `reply_target_binding_ref` helpers) — stored here rather than
-///   recomputed, to avoid duplicating that private format-string logic
-///   across the crate boundary and the drift risk of two copies going stale
-///   independently.
 /// - `spawn_provider_call_id`: pins settlement updates to the original spawn
 ///   transcript row when later `result_read` calls share its result reference.
 ///
@@ -115,8 +139,6 @@ pub struct AwaitEdge {
     pub parent_run_context: ironclaw_loop_contracts::LoopRunContext,
     pub tree_root_run_id: TurnRunId,
     pub gate_ref: TurnGateRef,
-    pub source_binding_ref: SourceBindingRef,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
     pub subagent_kind: SubagentKindId,
     pub spawn_capability_id: CapabilityId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,6 +160,16 @@ pub struct AwaitEdge {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
     pub reservation_release: ReservationReleaseState,
+    /// The parent-thread message the child's result was appended as, recorded
+    /// in the same CAS write that moves the edge to `ResultAppended`. It is the
+    /// evidence that the append is durable, so a replayed append returns the
+    /// ref already recorded instead of writing a second message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appended_message_ref: Option<LoopMessageRef>,
+    /// How attention was delivered, recorded in the same CAS write that moves
+    /// the edge to `AttentionScheduled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_outcome: Option<AttentionOutcome>,
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<DateTime<Utc>>,

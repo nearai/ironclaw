@@ -14,27 +14,27 @@ const COPY = {
   "automations.notificationChannels.empty": "No connected channels yet.",
   "automations.notificationChannels.noSelectionHelper":
     "No notification channel is selected — approval prompts, auth prompts, and failure notices won't be delivered anywhere.",
-  "automations.notificationChannels.webPush.deviceHeading": "This browser",
-  "automations.notificationChannels.webPush.checking":
+  "automations.notificationChannels.devicePush.deviceHeading": "This browser",
+  "automations.notificationChannels.devicePush.checking":
     "Checking this browser's notification support…",
-  "automations.notificationChannels.webPush.unsupported":
+  "automations.notificationChannels.devicePush.unsupported":
     "Push notifications aren't available in this browser.",
-  "automations.notificationChannels.webPush.permissionDenied":
+  "automations.notificationChannels.devicePush.permissionDenied":
     "Notifications are blocked for this site. Allow them in your browser's site settings, then try again.",
-  "automations.notificationChannels.webPush.notEnrolled":
+  "automations.notificationChannels.devicePush.notEnrolled":
     "This browser isn't receiving notifications yet.",
-  "automations.notificationChannels.webPush.enrolled":
+  "automations.notificationChannels.devicePush.enrolled":
     "This browser receives notifications.",
-  "automations.notificationChannels.webPush.enroll":
+  "automations.notificationChannels.devicePush.enroll":
     "Enable notifications in this browser",
-  "automations.notificationChannels.webPush.unenroll": "Disable in this browser",
-  "automations.notificationChannels.webPush.deviceCount": "Enrolled browsers: {count}",
-  "automations.notificationChannels.webPush.actionFailed":
+  "automations.notificationChannels.devicePush.unenroll": "Disable in this browser",
+  "automations.notificationChannels.devicePush.deviceCount": "Enrolled browsers: {count}",
+  "automations.notificationChannels.devicePush.actionFailed":
     "Couldn't update this browser's notification enrollment. Please try again.",
-  "automations.notificationChannels.webPush.enrolledOtherAccount":
+  "automations.notificationChannels.devicePush.enrolledOtherAccount":
     "This browser is enrolled for a different account. You can enable it for this account too.",
-  "automations.notificationChannels.webPush.enableForAccount": "Enable for this account",
-  "automations.notificationChannels.webPush.statusFailed":
+  "automations.notificationChannels.devicePush.enableForAccount": "Enable for this account",
+  "automations.notificationChannels.devicePush.statusFailed":
     "Couldn't load this account's enrollment status. Try reloading the page.",
   "automations.notificationChannels.save": "Save",
   "automations.notificationChannels.saved": "Saved",
@@ -65,7 +65,7 @@ function sourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { NotificationChannelsPanel, WebPushDeviceBlock, WebPushDeviceRow };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { NotificationChannelsPanel, DevicePushBlock, SessionChannelRow };`;
 }
 
 function html(strings, ...values) {
@@ -176,7 +176,7 @@ function mergeRows(targets, channels) {
   return { rows, selected };
 }
 
-function createHarness({ saveNotificationChannels = async () => {}, isLoading = false, isSaving = false, error = null, saveError = null, webPushDevice = null } = {}) {
+function createHarness({ saveNotificationChannels = async () => {}, isLoading = false, isSaving = false, error = null, saveError = null, devicePush = null } = {}) {
   const hookValues = [];
   const effectDeps = [];
   let hookCursor = 0;
@@ -249,8 +249,9 @@ function createHarness({ saveNotificationChannels = async () => {}, isLoading = 
     cn: (...parts) => parts.filter(Boolean).join(" "),
     html,
     useT: () => t,
-    useWebPushDevice: () =>
-      webPushDevice || {
+    getSessionChannelExtensionId: () => "session-channel",
+    useDevicePush: () =>
+      devicePush || {
         browser: { state: "not-enrolled" },
         subscriptionCount: 0,
         vapidPublicKey: "test-vapid-key",
@@ -629,15 +630,19 @@ test("NotificationChannelsPanel does not hardcode a catalog row's badge to Ready
   );
 });
 
-// ── Web-push row: the device block under the "Web app" channel ─────────────
+// ── Session-channel row: the device block under the session channel ────────
+// The harness advertises "session-channel" as the deployment's session
+// channel id (see `getSessionChannelExtensionId` above); this target's
+// `channel` matches it, the way the live catalog row matches the
+// `GET /session`-advertised id. No channel name is hardcoded anywhere.
 
-function webPushTarget() {
+function sessionChannelTarget() {
   return {
     target: {
-      target_id: "web-push",
+      target_id: "browser-registration-1",
       display_name: "Web app",
       description: "Browser push notifications to your enrolled devices",
-      channel: "web-push",
+      channel: "session-channel",
     },
     capabilities: { final_replies: true, gate_prompts: true, auth_prompts: true },
   };
@@ -660,45 +665,54 @@ function fakeDevice(overrides = {}) {
 
 // The vm harness never invokes child components — they appear in the panel
 // tree as (component, props) nodes. So the panel-level tests assert the
-// block is MOUNTED with the right props (and only under the web-push row),
+// block is MOUNTED with the right props (and only under the session row),
 // and the block's own rendering is asserted by calling it directly.
 
-test("NotificationChannelsPanel mounts the device row under the web-push row only", () => {
+test("NotificationChannelsPanel mounts the session-channel row under the session-channel target only", () => {
   const harness = createHarness();
-  const withWebPush = harness.render({
-    targets: [target("slack-alpha"), webPushTarget()],
+  const withSessionChannel = harness.render({
+    targets: [target("slack-alpha"), sessionChannelTarget()],
     channels: [],
   });
   assert.equal(
-    componentProps(withWebPush, harness.exports.WebPushDeviceRow).length,
+    componentProps(withSessionChannel, harness.exports.SessionChannelRow).length,
     1,
-    "exactly one device row for the web-push row",
+    "exactly one session-channel row for the session-channel target",
   );
 
-  const withoutWebPush = harness.render({
+  const withoutSessionChannel = harness.render({
     targets: [target("slack-alpha"), target("slack-beta")],
     channels: [],
   });
   assert.equal(
-    componentProps(withoutWebPush, harness.exports.WebPushDeviceRow).length,
+    componentProps(withoutSessionChannel, harness.exports.SessionChannelRow).length,
     0,
-    "no device row without a web-push row — the status query never mounts for users without web push",
+    "no session-channel row without a matching target — the setup-status query never mounts for deployments without one",
   );
 });
 
-test("WebPushDeviceRow wires the device hook into the block", () => {
-  // The row is the only place the web-push device hook runs; the block itself
-  // stays a pure view. Prove the wrapper passes the hook's state through, so
-  // moving the hook off the panel top didn't sever the block from its data.
-  const device = fakeDevice({ browser: { state: "enrolled", accountMatch: true } });
-  const harness = createHarness({ webPushDevice: device });
-  const rendered = harness.exports.WebPushDeviceRow();
-  const [block] = componentProps(rendered, harness.exports.WebPushDeviceBlock);
+test("SessionChannelRow wires the device hook into the block", () => {
+  // The session-channel row is the only place the device hook runs; the block
+  // stays a pure view. Prove the row passes the hook's state through, so owning
+  // the hook here (not at the panel top) didn't sever the block from its data.
+  const device = fakeDevice({
+    subscriptionCount: 2,
+    browser: { state: "enrolled", accountMatch: true },
+  });
+  const harness = createHarness({ devicePush: device });
+  const rendered = harness.exports.SessionChannelRow({
+    row: sessionChannelTarget().target,
+    isSelected: false,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
+  const [block] = componentProps(rendered, harness.exports.DevicePushBlock);
   assert.ok(block, "the row renders the device block");
   assert.equal(block.device, device, "the block receives the hook's device state");
 });
 
-test("NotificationChannelsPanel toggles the web-push target into the full-replace save set like any channel", () => {
+test("NotificationChannelsPanel toggles the session-channel target into the full-replace save set like any channel", () => {
   const saved = [];
   const harness = createHarness({
     saveNotificationChannels: async (targetIds) => {
@@ -706,28 +720,142 @@ test("NotificationChannelsPanel toggles the web-push target into the full-replac
     },
   });
   let rendered = harness.render({
-    targets: [webPushTarget()],
+    targets: [sessionChannelTarget()],
     channels: [],
   });
-  const [checkbox] = nativeProps(rendered, "input");
-  assert.equal(checkbox.checked, false);
-  checkbox.onChange({ target: { checked: true } });
+  // The session channel's checkbox lives inside SessionChannelRow — a child
+  // the vm harness renders as a node without invoking — so drive the panel's
+  // toggle through the callback it hands that row (the same one the child's
+  // checkbox onChange calls).
+  const [sessionRow] = componentProps(rendered, harness.exports.SessionChannelRow);
+  assert.ok(sessionRow, "the panel renders the session-channel row");
+  assert.equal(sessionRow.isSelected, false);
+  sessionRow.onToggle(sessionRow.row.target_id);
 
-  rendered = harness.render({ targets: [webPushTarget()], channels: [] });
+  rendered = harness.render({ targets: [sessionChannelTarget()], channels: [] });
   const [saveButton] = componentProps(rendered, harness.Button);
-  assert.equal(saveButton.disabled, false, "a staged web-push toggle enables Save");
+  assert.equal(saveButton.disabled, false, "a staged session-channel toggle enables Save");
   saveButton.onClick();
   assert.equal(saved.length, 1);
   assert.deepEqual(
     [...saved[0]],
-    ["web-push"],
-    "Save posts the web-push id in target_ids",
+    ["browser-registration-1"],
+    "Save posts the persisted catalog target id, not the session extension id",
   );
 });
 
-test("WebPushDeviceBlock distinguishes unsupported, denied, not-enrolled, and enrolled browsers", () => {
+test("SessionChannelRow stays pending while account enrollment status loads", () => {
+  const harness = createHarness({
+    devicePush: fakeDevice({ isStatusLoading: true, subscriptionCount: 0 }),
+  });
+  const rendered = harness.exports.SessionChannelRow({
+    row: sessionChannelTarget().target,
+    isSelected: false,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  const scalars = collectScalars(rendered);
+
+  assert.equal(checkbox.disabled, true, "pending setup evidence cannot be selected yet");
+  assert.ok(
+    scalars.includes("Checking this browser's notification support…"),
+    "the row must present pending evidence while setup status loads",
+  );
+  assert.ok(!scalars.includes("Unavailable"), "loading is not evidence of unavailability");
+});
+
+test("SessionChannelRow cannot be selected when no browser is enrolled", () => {
+  // subscription_count === 0 → nowhere to deliver a push, so the session
+  // channel is not selectable and its pill is not "Ready". The nested device
+  // block's "Enable notifications in this browser" button is how the user
+  // fixes it (covered by the DevicePushBlock tests below).
+  const harness = createHarness({ devicePush: fakeDevice({ subscriptionCount: 0 }) });
+  const rendered = harness.exports.SessionChannelRow({
+    row: sessionChannelTarget().target,
+    isSelected: false,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  assert.equal(
+    checkbox.disabled,
+    true,
+    "with zero enrolled browsers the session channel's checkbox cannot be selected",
+  );
+  const scalars = collectScalars(rendered);
+  assert.ok(!scalars.includes("Ready"), "an unenrolled session-channel row must not claim it is Ready");
+  assert.ok(
+    scalars.includes("Unavailable"),
+    "the pill reflects that the channel has no enrolled browser to deliver to",
+  );
+});
+
+test("SessionChannelRow keeps an already-selected channel deselectable with zero enrolled browsers", () => {
+  // A browser that unsubscribes after the channel was saved must not leave the
+  // checkbox locked ON: the disable applies only to SELECTING (an unchecked
+  // row), so a stored selection can always be turned back off.
+  const harness = createHarness({ devicePush: fakeDevice({ subscriptionCount: 0 }) });
+  const rendered = harness.exports.SessionChannelRow({
+    row: sessionChannelTarget().target,
+    isSelected: true,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  assert.equal(checkbox.checked, true);
+  assert.equal(
+    checkbox.disabled,
+    false,
+    "a stored session-channel selection stays deselectable even with zero enrolled browsers",
+  );
+});
+
+test("SessionChannelRow is selectable and Ready once a browser is enrolled", () => {
+  const harness = createHarness({
+    devicePush: fakeDevice({
+      subscriptionCount: 1,
+      browser: { state: "enrolled", accountMatch: true },
+    }),
+  });
+  const rendered = harness.exports.SessionChannelRow({
+    row: sessionChannelTarget().target,
+    isSelected: false,
+    isEditingLocked: false,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  assert.equal(checkbox.disabled, false, "an enrolled browser makes the session channel selectable");
+  assert.ok(
+    collectScalars(rendered).includes("Ready"),
+    "an enrolled session-channel row is Ready",
+  );
+});
+
+test("SessionChannelRow keeps the checkbox disabled while editing is locked, even when enrolled", () => {
+  const harness = createHarness({ devicePush: fakeDevice({ subscriptionCount: 2 }) });
+  const rendered = harness.exports.SessionChannelRow({
+    row: sessionChannelTarget().target,
+    isSelected: false,
+    isEditingLocked: true,
+    onToggle: () => {},
+    t,
+  });
+  const [checkbox] = nativeProps(rendered, "input");
+  assert.equal(
+    checkbox.disabled,
+    true,
+    "a locked panel (loading/failed read) disables the session channel's checkbox like every other row",
+  );
+});
+
+test("DevicePushBlock distinguishes unsupported, denied, not-enrolled, and enrolled browsers", () => {
   const harness = createHarness();
-  const block = harness.exports.WebPushDeviceBlock;
+  const block = harness.exports.DevicePushBlock;
   const cases = [
     [
       { state: "unsupported" },
@@ -780,9 +908,9 @@ test("WebPushDeviceBlock distinguishes unsupported, denied, not-enrolled, and en
   }
 });
 
-test("WebPushDeviceBlock enroll and unenroll buttons call the device hook", () => {
+test("DevicePushBlock enroll and unenroll buttons call the device hook", () => {
   const harness = createHarness();
-  const block = harness.exports.WebPushDeviceBlock;
+  const block = harness.exports.DevicePushBlock;
 
   const enrollCalls = [];
   const notEnrolled = block({
@@ -824,9 +952,9 @@ test("WebPushDeviceBlock enroll and unenroll buttons call the device hook", () =
   assert.equal(busyButton.disabled, true, "actions lock while a request is in flight");
 });
 
-test("WebPushDeviceBlock surfaces an action failure", () => {
+test("DevicePushBlock surfaces an action failure", () => {
   const harness = createHarness();
-  const block = harness.exports.WebPushDeviceBlock;
+  const block = harness.exports.DevicePushBlock;
   const rendered = block({
     device: fakeDevice({ actionError: new Error("nope") }),
     t,
@@ -838,9 +966,9 @@ test("WebPushDeviceBlock surfaces an action failure", () => {
   );
 });
 
-test("WebPushDeviceBlock offers enable-for-this-account (never disable) for another account's subscription", () => {
+test("DevicePushBlock offers enable-for-this-account (never disable) for another account's subscription", () => {
   const harness = createHarness();
-  const block = harness.exports.WebPushDeviceBlock;
+  const block = harness.exports.DevicePushBlock;
 
   const enrollCalls = [];
   const unenrollCalls = [];
@@ -879,9 +1007,9 @@ test("WebPushDeviceBlock offers enable-for-this-account (never disable) for anot
   assert.deepEqual(unenrollCalls, []);
 });
 
-test("WebPushDeviceBlock offers no actions for an unverified enrollment", () => {
+test("DevicePushBlock offers no actions for an unverified enrollment", () => {
   const harness = createHarness();
-  const block = harness.exports.WebPushDeviceBlock;
+  const block = harness.exports.DevicePushBlock;
   const rendered = block({
     device: fakeDevice({
       browser: {
@@ -900,9 +1028,9 @@ test("WebPushDeviceBlock offers no actions for an unverified enrollment", () => 
   );
 });
 
-test("WebPushDeviceBlock renders the status failure instead of claiming zero enrolled browsers", () => {
+test("DevicePushBlock renders the status failure instead of claiming zero enrolled browsers", () => {
   const harness = createHarness();
-  const block = harness.exports.WebPushDeviceBlock;
+  const block = harness.exports.DevicePushBlock;
   const rendered = block({
     device: fakeDevice({ statusError: new Error("status query failed") }),
     t,
@@ -918,12 +1046,12 @@ test("WebPushDeviceBlock renders the status failure instead of claiming zero enr
   );
 });
 
-test("WebPushDeviceBlock disables enroll while the VAPID key is missing", () => {
+test("DevicePushBlock disables enroll while the VAPID key is missing", () => {
   // `vapidPublicKey` is "" until the status query resolves (or after it
   // fails). The enroll click would then always throw `vapidPublicKey is
   // required`, so the gate on the key is load-bearing — pin it.
   const harness = createHarness();
-  const block = harness.exports.WebPushDeviceBlock;
+  const block = harness.exports.DevicePushBlock;
   const rendered = block({
     device: fakeDevice({ vapidPublicKey: "" }),
     t,

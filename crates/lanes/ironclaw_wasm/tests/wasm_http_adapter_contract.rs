@@ -442,7 +442,7 @@ async fn wasm_runtime_http_adapter_redacts_credential_errors_before_guest_visibi
         .expect_err("credential failures should not expose secret metadata to WASM");
 
     let rendered = error.to_string();
-    assert!(matches!(error, WasmHostError::Unavailable(_)));
+    assert!(matches!(error, WasmHostError::AuthRequired(_)));
     assert!(rendered.contains("credential_unavailable"));
     assert!(!rendered.contains("gmail-token"));
     assert!(!rendered.contains("sk-test-secret"));
@@ -506,7 +506,14 @@ async fn wasm_runtime_http_adapter_redacts_shared_network_denial_reasons() {
         .expect_err("network denials should be stable and sanitized at the WIT boundary");
 
     let rendered = error.to_string();
-    assert!(matches!(error, WasmHostError::Denied(_)));
+    assert!(matches!(
+        error,
+        WasmHostError::Network {
+            code: Some(ref code),
+            request_sent: false,
+            ..
+        } if code == "network_error"
+    ));
     assert!(rendered.contains("network_error"));
     assert!(!rendered.contains("10.0.0.7"));
     assert!(!rendered.contains("sk-test-secret"));
@@ -573,7 +580,11 @@ async fn wasm_runtime_http_adapter_marks_zero_body_response_failures_after_send(
     let rendered = error.to_string();
     assert!(matches!(
         error,
-        WasmHostError::FailedAfterRequestSent(reason) if reason.contains("network_error")
+        WasmHostError::Network {
+            code: Some(ref code),
+            request_sent: true,
+            ..
+        } if code == "network_error"
     ));
     assert!(!rendered.contains("sk-test-secret"));
 }
@@ -632,7 +643,7 @@ async fn wasm_runtime_http_adapter_redacts_credential_provider_errors() {
         .expect_err("credential provider errors should be sanitized before WASM visibility");
 
     let rendered = error.to_string();
-    assert!(matches!(error, WasmHostError::Unavailable(_)));
+    assert!(matches!(error, WasmHostError::AuthRequired(_)));
     assert!(rendered.contains("credential_unavailable"));
     assert!(!rendered.contains("gmail-token"));
     assert!(!rendered.contains("sk-test-secret"));
@@ -708,7 +719,7 @@ async fn wasm_runtime_http_adapter_discards_staged_policy_on_credential_provider
         })
         .expect_err("credential provider failures should fail before shared egress");
 
-    assert!(matches!(error, WasmHostError::Unavailable(_)));
+    assert!(matches!(error, WasmHostError::AuthRequired(_)));
     assert!(egress.requests.lock().unwrap().is_empty());
     assert_eq!(discarder.discards(), vec![(scope, capability_id)]);
 }

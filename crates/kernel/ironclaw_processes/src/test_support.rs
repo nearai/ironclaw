@@ -1,7 +1,7 @@
 //! Process test doubles and in-memory-backed production-store constructors.
 //!
 //! The Reborn architecture-simplification note
-//! (`docs/reborn/contracts/processes.md`)
+//! (`docs/internal/reborn/contracts/processes.md`)
 //! replaces the hand-written `InMemory*Store` parallel implementations with the
 //! one production `Filesystem*Store<F>` exercised over an in-memory backend:
 //! "in-memory" stops being a store and becomes a filesystem backend

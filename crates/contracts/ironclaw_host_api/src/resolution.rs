@@ -1,7 +1,7 @@
 //! Slice-C kernel vocabulary — the capability result channels.
 //!
 //! Part of the capability-path result collapse
-//! (`docs/reborn/contracts/capability-access.md`,
+//! (`docs/internal/reborn/contracts/capability-access.md`,
 //! §5.3). Today a single overloaded ten-variant `CapabilityOutcome`
 //! (`ironclaw_turns`) carries every non-happy path, and a recoverable
 //! `Ok(Failed)` is structurally indistinguishable from a run-terminating `Err`
@@ -1123,6 +1123,55 @@ mod tests {
             progress: ResultProgress::default(),
             terminate_hint: TerminateHint::default(),
         }
+    }
+
+    #[test]
+    fn persisted_resolution_maps_unknown_failure_tags_and_ignores_additive_fields() {
+        let mut wire = serde_json::to_value(Resolution::Done(outcome(
+            ToolVerdict::recoverable_failure_with_diagnostic(
+                FailureKind::OperationFailed,
+                ModelFailureDiagnostic::Diagnostic {
+                    text: ModelDiagnostic::new("provider rejected the operation").unwrap(),
+                },
+            ),
+        )))
+        .unwrap();
+        let done = wire
+            .get_mut("done")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap();
+        done.insert(
+            "future_additive_field".to_string(),
+            serde_json::json!({ "ignored": true }),
+        );
+        let verdict = done
+            .get_mut("verdict")
+            .and_then(|value| value.get_mut("recoverable_failure"))
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap();
+        verdict.insert(
+            "error_kind".to_string(),
+            serde_json::json!("future_provider_failure"),
+        );
+        verdict.insert(
+            "future_diagnostic_metadata".to_string(),
+            serde_json::json!({ "version": 2 }),
+        );
+
+        let restored: Resolution = serde_json::from_value(wire).unwrap();
+        let Resolution::Done(outcome) = restored else {
+            panic!("persisted recoverable failure must remain a done outcome");
+        };
+        assert_eq!(
+            outcome.verdict.error_kind(),
+            Some(&FailureKind::Unclassified),
+            "an unknown persisted failure tag must fail visibly without becoming success"
+        );
+        assert!(!outcome.verdict.is_success());
+        assert_eq!(
+            outcome.verdict.error_kind().map(|kind| kind.fate()),
+            Some(crate::result_meta::FailureFate::ModelVisible)
+        );
     }
 
     /// The §5.3 acceptance table is the definition of done: every one of today's

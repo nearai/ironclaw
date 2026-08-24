@@ -35,6 +35,14 @@ ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1
 ironclaw_host_ingress = { path = "../ironclaw_host_ingress", version = "0.1.0" }
 ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_assistant = { path = "../ironclaw_assistant", version = "0.1.0" }
+# The prepared lane maps OpenAI wire messages onto the accept door's seed
+# vocabulary (`agent_message`) and runs the door's own
+# `validate_prepared_seed_content` before the idempotency reservation — ONE
+# validator, no mirrored bounds to drift. Thread/turn SERVICES still arrive
+# as composition-built ports; this edge is vocabulary + the door validator
+# only (same edge `ironclaw_webui` holds). BoundaryRule carve-in documented
+# in `reborn_dependency_boundaries.rs`.
+ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -51,7 +59,6 @@ tokio = { version = "1", features = ["sync", "time"] }
 http = "1"
 http-body-util = "0.1"
 ironclaw_assistant = { path = "../ironclaw_assistant", version = "0.1.0", features = ["test-support"] }
-ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../../kernel/ironclaw_turns", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 tower = { version = "0.5", features = ["util"] }

@@ -34,6 +34,7 @@ use crate::input::{
     OAuthDcrCallbackConfig, OAuthProviderBackendConfig, PostgresPoolSource,
     RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput,
 };
+use crate::notification_store_assembly::build_notification_inbox;
 use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
@@ -79,7 +80,8 @@ use ironclaw_capabilities::{
 };
 use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ConversationActorPairingService};
-use ironclaw_event_log::{DurableAuditLog, DurableEventLog};
+use ironclaw_event_log::{DurableAuditLog, DurableEventLog, EventSink, NonBlockingEventSink};
+use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
 use ironclaw_extension_contracts::external::ExternalActorRef;
 use ironclaw_extension_contracts::recipe::RecipeClientCredentials;
 use ironclaw_extension_host::channel_pairing::ChannelPairingRegistry;
@@ -158,7 +160,7 @@ use ironclaw_host_runtime::{
     builtin_first_party_package,
 };
 use ironclaw_host_runtime::{
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend,
+    builtin_first_party_handlers_with_trigger_services_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
 use ironclaw_identity::projects::ProjectRepository;
@@ -168,7 +170,9 @@ use ironclaw_outbound::{CommunicationPreferenceRepository, ReplyAttachmentIntent
 use ironclaw_outbound::{
     DeliveredGateRouteStore, OutboundStateStorePort, TriggeredRunDeliveryStore,
 };
-use ironclaw_processes::{ProcessConcurrencyLimits, ProcessJournalStore, ProcessServices};
+use ironclaw_processes::{
+    ProcessConcurrencyLimits, ProcessJournalStore, ProcessResultStore, ProcessServices,
+};
 use ironclaw_product_contracts::account_setup::{
     ChannelConnectionNoticePolicy, ExtensionAccountSetupDescriptor,
 };
@@ -190,7 +194,6 @@ use ironclaw_triggers::{
 };
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turn_runner::runtime::ProcessRuntimeSystem;
-use ironclaw_turns::AgentTurnRuntimePort;
 use ironclaw_turns::{ExternalToolCatalog, InMemoryExternalToolCatalog};
 use secrecy::SecretString;
 
@@ -202,8 +205,8 @@ use auth_engine_assembly::{
     ProductAuthServicesCompositionInput, compose_product_auth_services, compose_provider_client,
 };
 mod trigger_creation_assembly;
-pub(crate) use trigger_creation_assembly::LateBoundAgentTurnRuntime;
 use trigger_creation_assembly::TriggerCreatorPairingHook;
+pub(crate) use trigger_creation_assembly::TriggerExecutionPolicyPreflight;
 #[cfg(test)]
 use trigger_creation_assembly::pair_trigger_creator;
 pub(crate) mod production_backend_assembly;
@@ -255,19 +258,6 @@ pub(crate) type ComposedToolPermissionOverrideStore =
 
 pub(crate) type ComposedAutoApproveSettingStore = AutoApproveSettingStore<CompositeRootFilesystem>;
 
-/// Composed web-push handles the product surface consumes: the subscription
-/// store behind the subscribe/unsubscribe commands and the (non-secret)
-/// VAPID public key browsers use as `applicationServerKey`.
-#[derive(Clone)]
-pub(crate) struct WebPushComposition {
-    pub(crate) subscriptions: Arc<dyn ironclaw_web_push::WebPushSubscriptionStore>,
-    pub(crate) vapid_public_key: String,
-    /// Push-service hosts enrollments may target, read from the web-push
-    /// manifest's `[[channel.egress]]` declarations (the same list the
-    /// channel's restricted egress enforces at send time).
-    pub(crate) allowed_push_hosts: Vec<String>,
-}
-
 pub(crate) struct RebornRuntimeStores {
     pub(crate) host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime>,
     pub(crate) user_sandbox_process_port:
@@ -288,10 +278,16 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) auto_approve_settings: Arc<ComposedAutoApproveSettingStore>,
     pub(crate) capability_policy: Arc<BuiltinCapabilityPolicy>,
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// Host-owned per-user delivery registrations (channel contract §8).
+    pub(crate) delivery_registrations:
+        Arc<dyn ironclaw_product_contracts::delivery::DeliveryRegistrationService>,
+    /// Publishes each channel's non-secret client-bootstrap document.
+    pub(crate) delivery_client_bootstrap: Arc<dyn ironclaw_assistant::DeliveryClientBootstrap>,
     pub(crate) outbound_delivery_targets:
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
     pub(crate) outbound_state: Arc<dyn OutboundStateStorePort>,
+    pub(crate) notification_inbox: Arc<dyn ironclaw_notifications::NotificationInboxStorePort>,
     pub(crate) reply_attachment_intents: Arc<dyn ReplyAttachmentIntentPort>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
@@ -314,14 +310,6 @@ pub(crate) struct RebornRuntimeStores {
             >,
         >,
     >,
-    /// Sibling read-only reply-target projection; repointed with the lifecycle
-    /// source by test-support harnesses.
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(
-        dead_code,
-        reason = "held for test-support rebinding after runtime construction"
-    )]
-    pub(crate) trigger_source_turn_state: Arc<std::sync::RwLock<Arc<dyn AgentTurnRuntimePort>>>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
@@ -349,6 +337,10 @@ pub(crate) struct RebornRuntimeStores {
     /// Lifecycle hooks declared by the bound memory provider. Host-initiated
     /// retrieval, recording, and profile reads are wired only when declared.
     pub(crate) memory_lifecycle: ironclaw_extension_contracts::memory::MemoryDescriptor,
+    /// The bound memory provider's own memory guidance for the model (#7185),
+    /// resolved from its bundle at the same point `memory_lifecycle` is.
+    /// `None` when unbound or the provider declares no `guidance_doc`.
+    pub(crate) memory_guidance: Option<String>,
     /// The deployment's single workspace scoping decision, read by every
     /// workspace write lane (grants, approval leases, attachment handles).
     pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -362,10 +354,16 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) processes: ProcessRuntimeSystem,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
+    pub(crate) trigger_manual_fire_runner:
+        Arc<crate::automation::trigger_poller::LateBoundTriggerManualFireRunner>,
+    pub(crate) trigger_create_hook: Arc<TriggerCreatorPairingHook>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
     pub(crate) budget_gate_store: Arc<dyn BudgetGateStorePort>,
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
+    /// One composition-owned write-behind sink shared by every runtime-event
+    /// producer over `event_log`.
+    pub(crate) runtime_event_sink: Arc<dyn NonBlockingEventSink>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
     pub(crate) admin_secret_provisioner: Arc<dyn ironclaw_assistant::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ProjectService>,
@@ -394,10 +392,6 @@ pub(crate) struct RebornRuntimeStores {
     /// are consumed by `build_reborn_runtime` when the channel host assembly
     /// starts.
     pub(crate) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
-    /// The web-push channel's composed handles (subscription store + the
-    /// advertised VAPID public key); `None` when the binary supplied no
-    /// web-push runtime slot.
-    pub(crate) web_push: Option<crate::factory::WebPushComposition>,
     /// Manifest-declared deployment channel surfaces, independent of user
     /// installation/activation state.
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
@@ -716,6 +710,47 @@ pub(super) use with_shared_host_runtime_wiring;
 /// here, at build time, from declarative connection config — construction no
 /// longer performs database I/O. The `Prebuilt` arm is the caller-supplied
 /// test escape hatch and is preferred verbatim when present.
+/// Connections the process journal opens for itself.
+///
+/// The journal issues one heartbeat per running turn plus its group-commit
+/// flusher's writes, and nothing else uses this pool — which is exactly why two
+/// connections are enough. The point is not capacity, it is that a heartbeat
+/// never waits behind event-store, trigger, or result-read traffic.
+const PROCESS_JOURNAL_POOL_MAX_SIZE: usize = 2;
+
+/// The pools a PostgreSQL deployment runs on: the shared data plane, and a small
+/// dedicated one for the process journal.
+pub(crate) struct PostgresPools {
+    pub(crate) data_plane: deadpool_postgres::Pool,
+    /// `None` when the caller handed in an already-opened pool and there is no
+    /// connection config to open a second one from; the journal then shares the
+    /// data-plane pool, as it always did.
+    pub(crate) process_journal: Option<deadpool_postgres::Pool>,
+}
+
+fn open_postgres_pools_from_source(
+    source: PostgresPoolSource,
+) -> Result<PostgresPools, RebornBuildError> {
+    match source {
+        PostgresPoolSource::Prebuilt(pool) => Ok(PostgresPools {
+            data_plane: pool,
+            process_journal: None,
+        }),
+        PostgresPoolSource::Config(connection) => {
+            let process_journal = ironclaw_event_store::open_postgres_pool_with_tls_options(
+                connection.url.clone(),
+                PROCESS_JOURNAL_POOL_MAX_SIZE,
+                connection.tls_options,
+            )?
+            .into_driver();
+            Ok(PostgresPools {
+                data_plane: open_postgres_pool_from_source(PostgresPoolSource::Config(connection))?,
+                process_journal: Some(process_journal),
+            })
+        }
+    }
+}
+
 fn open_postgres_pool_from_source(
     source: PostgresPoolSource,
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {
@@ -1004,23 +1039,35 @@ fn write_standalone_secret_master_key(path: &Path, key: &str) -> Result<(), Rebo
                 reason: "standalone secrets master key could not be restricted: USERNAME is unset"
                     .to_string(),
             })?;
-        let status = std::process::Command::new("icacls")
+        // `icacls` writes a success banner to stdout. Capture it so commands
+        // such as `ironclaw extension search --json` keep stdout machine-clean.
+        let output = std::process::Command::new("icacls")
             .arg(path)
             .arg("/inheritance:r")
             .arg("/grant:r")
             .arg(format!("{account}:F"))
-            .status()
+            .output()
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!(
                     "standalone secrets master key permissions could not be set: {error}"
                 ),
             })?;
-        if !status.success() {
+        if !output.status.success() {
             let _ = std::fs::remove_file(path);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
             return Err(RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "standalone secrets master key permissions could not be set: icacls exited with {status}"
-                ),
+                reason: if stderr.is_empty() {
+                    format!(
+                        "standalone secrets master key permissions could not be set: icacls exited with {}",
+                        output.status
+                    )
+                } else {
+                    format!(
+                        "standalone secrets master key permissions could not be set: icacls exited with {}: {stderr}",
+                        output.status
+                    )
+                },
             });
         }
         file.write_all(key.as_bytes())
@@ -1173,12 +1220,14 @@ fn production_first_party_registry_with_trigger_create_hook(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
+    builtin_first_party_handlers_with_trigger_services_for_process_backend(
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
+        manual_fire_runner,
         process_backend,
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -1194,23 +1243,29 @@ fn manifest_channel_account_setup_descriptors(
         .filter_map(|manifest| {
             let channel = manifest.channel.as_ref()?;
             let connection = channel.connection.as_ref()?;
-            if connection.strategy
-                != ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode
-            {
-                return None;
-            }
+            let (account_setup, connect_strategy) = match connection.strategy {
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::WebGeneratedCode => (
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+                    ironclaw_assistant::RebornChannelConnectStrategy::WebGeneratedCode,
+                ),
+                ironclaw_extension_contracts::channel::ChannelConnectionStrategy::DeviceLink => (
+                    ironclaw_host_api::capability::RuntimeCredentialAccountSetup::DeviceLink,
+                    ironclaw_assistant::RebornChannelConnectStrategy::DeviceLink,
+                ),
+                _ => return None,
+            };
             Some(ExtensionAccountSetupDescriptor {
                 extension_id: manifest.id.clone(),
                 auth_requirement: ironclaw_host_api::decision::RuntimeCredentialAuthRequirement {
                     provider: connection.provider.clone(),
-                    setup: ironclaw_host_api::capability::RuntimeCredentialAccountSetup::Pairing,
+                    setup: account_setup,
                     requester_extension: manifest.id.clone(),
                     provider_scopes: Vec::new(),
                 },
                 connection_requirement: ChannelConnectionRequirement {
                     channel: manifest.id.as_str().to_string(),
                     display_name: manifest.name.clone(),
-                    strategy: ironclaw_assistant::RebornChannelConnectStrategy::WebGeneratedCode,
+                    strategy: connect_strategy,
                     instructions: connection.instructions.clone(),
                     input_placeholder: connection.input_placeholder.clone(),
                     submit_label: connection.submit_label.clone(),

@@ -7,9 +7,9 @@
 - Read `CONTRACT.md` — the co-located cross-crate contract (evaluation matrix, requested-vs-effective split, mutation/invalidation orchestration).
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these Reborn contracts as the source of truth before changing behavior:
-- `docs/reborn/contracts/kernel-boundary.md`
-- `docs/reborn/contracts/extensions.md`
-- `docs/reborn/contracts/host-api.md`
+- `docs/internal/reborn/contracts/kernel-boundary.md`
+- `docs/internal/reborn/contracts/extensions.md`
+- `docs/internal/reborn/contracts/host-api.md`
 
 ## What This Crate Owns
 
@@ -54,7 +54,7 @@
   (co-located with the crate so doc + code review stays unified). Update it
   whenever `TrustPolicy::evaluate`, `default_decision`, source match keys,
   `mutate_with`, or `EffectiveTrustClass` semantics change. The Reborn-track
-  docs at `docs/reborn/contracts/host-api.md` / `extensions.md` describe the
+  docs at `docs/internal/reborn/contracts/host-api.md` / `extensions.md` describe the
   broader vocabulary; reference them from CONTRACT.md, do not duplicate them
   here.
 

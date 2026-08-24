@@ -130,7 +130,7 @@ Studied all OAuth issues reported on GitHub (#1537, #902, #1500, #557, #1441, #1
 
 **The problem**: OAuth/credential injection was coupled to WASM `capabilities.json` files. This broke on hosted TEE (#1537), had confusing UX (#902), failed for multi-tool auth (#1500), and lacked user isolation for multi-tenant (#557).
 
-**The insight**: The `skills/github/SKILL.md` already demonstrated the pattern — skill instructs LLM to call `http` tool, credentials auto-injected by host. The gap was that credential declarations lived in WASM, not skills.
+**The insight**: The now-archived `docs/internal/archived-skills/github/SKILL.md` demonstrated the pattern — skill instructs LLM to call `http` tool, credentials auto-injected by host. The gap was that credential declarations lived in WASM, not skills.
 
 **Implementation** (6 files created/modified in `ironclaw_skills`, 4 in main crate):
 
@@ -400,7 +400,7 @@ Rather than adding engine states or new worker modes, plan mode maps to existing
 | Execution | `Mission` (Manual cadence) → spawns `ThreadType::Mission` threads |
 | Progress | `AppEvent::PlanUpdate` SSE event → live UI checklist |
 | Learning | Existing learning missions (auto-fire after thread completion) |
-| Behavior | `skills/plan-mode/SKILL.md` (prompt engineering) |
+| Behavior | `docs/internal/archived-skills/plan-mode/SKILL.md` (prompt engineering) |
 
 ### Implementation
 
@@ -412,7 +412,7 @@ Rather than adding engine states or new worker modes, plan mode maps to existing
 
 4. **`/plan` command** — `PlanSubcommand` enum (Create/Approve/Status/Revise/List) parsed in `submission.rs`. All subcommands rewrite to `Submission::UserInput` with `[PLAN MODE]` prefix, which activates the plan-mode skill. No new handler methods — the LLM + skill use existing tools (`memory_write`, `mission_create`, `mission_fire`, `plan_update`).
 
-5. **Plan-mode skill** (`skills/plan-mode/SKILL.md`) — Trusted skill activated on `[PLAN MODE]` keyword. Defines the full protocol: plan document format (markdown with checkboxes), creation flow (search context → write plan → emit checklist), approval flow (create mission → fire → track), execution protocol (update steps, handle failures), and revision flow.
+5. **Plan-mode skill** (now archived at `docs/internal/archived-skills/plan-mode/SKILL.md`) — Trusted skill activated on `[PLAN MODE]` keyword. Defines the full protocol: plan document format (markdown with checkboxes), creation flow (search context → write plan → emit checklist), approval flow (create mission → fire → track), execution protocol (update steps, handle failures), and revision flow.
 
 6. **Web UI** — `plan_update` SSE listener + `renderPlanChecklist()` in `app.js`. Inline chat widget with status badge, step checklist (checkmarks/spinners/circles), and progress summary. CSS reuses existing activity card patterns.
 
@@ -442,7 +442,7 @@ Rather than adding engine states or new worker modes, plan mode maps to existing
 | `src/agent/submission.rs` | `PlanSubcommand` enum, `Submission::Plan`, parsing |
 | `src/agent/agent_loop.rs` | `Submission::Plan` match arm (rewrite to UserInput) |
 | `src/agent/commands.rs` | Help text for /plan commands |
-| `skills/plan-mode/SKILL.md` | **New** — Full plan protocol skill |
+| `docs/internal/archived-skills/plan-mode/SKILL.md` | **New** — Full plan protocol skill (subsequently archived) |
 | `src/channels/web/static/app.js` | SSE listener + `renderPlanChecklist()` |
 | `src/channels/web/static/style.css` | Plan checklist component styles |
 | `tests/e2e/mock_llm.py` | Plan mode tool call patterns |

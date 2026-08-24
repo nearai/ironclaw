@@ -1,7 +1,145 @@
 use chrono::{Datelike, TimeZone};
 use serde_json::{from_value, json, to_value};
 
+use ironclaw_host_api::{
+    execution_policy::{RequiredSkill, ResultDeliveryPolicy, TurnExecutionPolicy},
+    ids::CapabilityId,
+};
+
 use super::*;
+
+#[test]
+fn structured_execution_spec_validates_and_renders_a_frozen_prompt() {
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Identify yesterday's failed payments.".to_string(),
+        success_criteria: vec![
+            "Include every failed payment exactly once.".to_string(),
+            "Include customer, amount, currency, and failure reason.".to_string(),
+        ],
+        output_instructions: "Return a Markdown table and total.".to_string(),
+        no_result_text: "No failed payments were found yesterday.".to_string(),
+        policy: TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![
+                CapabilityId::new("stripe.list_payments").expect("capability id"),
+            ]),
+            required_skills: vec![
+                RequiredSkill::new("payment-operations").expect("required skill"),
+            ],
+            ..TurnExecutionPolicy::default()
+        },
+    };
+
+    spec.validate().expect("valid execution spec");
+
+    assert_eq!(
+        spec.render_prompt(),
+        "## Goal\n\nIdentify yesterday's failed payments.\n\n## Success criteria\n\n- Include every failed payment exactly once.\n- Include customer, amount, currency, and failure reason.\n\n## Output requirements\n\nReturn a Markdown table and total.\n\n## When there is nothing to report\n\nNo failed payments were found yesterday.\n"
+    );
+}
+
+#[test]
+fn structured_execution_spec_renders_placeholders_in_one_pass() {
+    // A field value that itself contains a placeholder token must be inserted
+    // verbatim — sequential replacement would rewrite text belonging to the
+    // earlier field with the later field's value.
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Report on {{success_criteria}} drift".to_string(),
+        success_criteria: vec!["INJECTED".to_string()],
+        output_instructions: "Return Markdown".to_string(),
+        no_result_text: "Nothing to report".to_string(),
+        policy: TurnExecutionPolicy::default(),
+    };
+
+    let rendered = spec.render_prompt();
+    assert!(
+        rendered.contains("Report on {{success_criteria}} drift"),
+        "goal text must stay verbatim; rendered: {rendered}"
+    );
+    assert_eq!(
+        rendered.matches("INJECTED").count(),
+        1,
+        "criteria must render exactly once; rendered: {rendered}"
+    );
+}
+
+#[test]
+fn structured_execution_spec_requests_typed_no_result_completion_for_explicit_suppression() {
+    let mut spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Check the inbox".to_string(),
+        success_criteria: vec!["Report new messages".to_string()],
+        output_instructions: "Return Markdown, including when no messages are found".to_string(),
+        no_result_text: "No new messages.".to_string(),
+        policy: TurnExecutionPolicy::default(),
+    };
+    assert!(spec.render_prompt().contains("No new messages."));
+    assert!(!spec.render_prompt().contains("builtin__structured_result"));
+
+    spec.policy.result_delivery = ResultDeliveryPolicy::SuppressWhenNothingToReport;
+    let rendered = spec.render_prompt();
+    assert!(
+        rendered.contains(
+            r#"call `builtin__structured_result` with `{"outcome":"nothing_to_report"}`"#
+        )
+    );
+    assert!(rendered.contains("The no-result condition is: No new messages."));
+    assert!(rendered.contains(
+        "This rule overrides any output requirement to report a negative, empty, unchanged, or no-match result."
+    ));
+    assert!(rendered.contains("and do not return an assistant response."));
+}
+
+#[test]
+fn stored_structured_prompt_survives_template_revisions() {
+    // `validate()` runs on stored records before every fire. The persisted
+    // prompt was rendered by whatever template revision was current at
+    // creation, so a record whose prompt no longer matches today's re-render
+    // must stay valid — anything stricter bricks every persisted structured
+    // trigger on a template edit.
+    let mut record = sample_record(TriggerId::new(), tenant("tenant-a"), ts(1_704_070_800));
+    record.execution_spec = Some(TriggerExecutionSpec {
+        version: 1,
+        goal: "Identify yesterday's failed payments.".to_string(),
+        success_criteria: vec!["Include every failed payment exactly once.".to_string()],
+        output_instructions: "Return a Markdown table.".to_string(),
+        no_result_text: "No failed payments were found.".to_string(),
+        policy: TurnExecutionPolicy::default(),
+    });
+    record.prompt = "prompt rendered by an older template revision".to_string();
+
+    record
+        .validate()
+        .expect("persisted prompt is authoritative across template revisions");
+}
+
+#[test]
+fn structured_execution_spec_rejects_duplicate_policy_references() {
+    let capability = CapabilityId::new("stripe.list_payments").expect("capability id");
+    let skill = RequiredSkill::new("payment-operations").expect("required skill");
+    let spec = TriggerExecutionSpec {
+        version: 1,
+        goal: "Inspect payments".to_string(),
+        success_criteria: vec!["Report every failure".to_string()],
+        output_instructions: "Return Markdown".to_string(),
+        no_result_text: "No failures".to_string(),
+        policy: TurnExecutionPolicy {
+            allowed_capability_ids: Some(vec![capability.clone(), capability]),
+            required_skills: vec![skill.clone(), skill],
+            ..TurnExecutionPolicy::default()
+        },
+    };
+
+    let error = spec.validate().expect_err("duplicates must be rejected");
+    assert!(matches!(
+        error,
+        TriggerError::InvalidRecord {
+            kind: TriggerRecordValidationKind::ExecutionSpecInvalid,
+            ..
+        }
+    ));
+}
 
 fn ts(seconds: i64) -> Timestamp {
     Utc.timestamp_opt(seconds, 0)
@@ -52,6 +190,7 @@ fn sample_record(
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
         prompt: "summarize unread mail".to_string(),
+        execution_spec: None,
         delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at,
@@ -177,6 +316,10 @@ fn trigger_enums_serialize_as_snake_case() {
         json!("schedule")
     );
     assert_eq!(
+        to_value(TriggerSourceKind::Manual).unwrap(),
+        json!("manual")
+    );
+    assert_eq!(
         to_value(TriggerState::Scheduled).unwrap(),
         json!("scheduled")
     );
@@ -213,6 +356,38 @@ fn fire_identity_is_stable_domain_separated_and_tenant_scoped() {
 }
 
 #[test]
+fn scheduled_fire_identity_digest_is_frozen_and_manual_is_domain_separated() {
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+    let slot = Utc.with_ymd_and_hms(2026, 5, 30, 8, 0, 0).unwrap();
+    let scheduled = TriggerFireIdentity::new(tenant("tenant-a"), trigger_id, slot);
+    let manual = TriggerFireIdentity::for_source(
+        TriggerSourceKind::Manual,
+        tenant("tenant-a"),
+        trigger_id,
+        slot,
+    );
+
+    assert_eq!(
+        scheduled.route_thread_id.as_str(),
+        "f916bc384a37375fe079690406308ee526a206427c71e30dc7af3cc58ce8148e"
+    );
+    assert_eq!(
+        scheduled.external_event_id.as_str(),
+        "5a07cf9e557e855450d664fb433cd857d86298f056d51fb42cd83fec2bd818a8"
+    );
+    assert_eq!(
+        manual.route_thread_id.as_str(),
+        "ecabccb0989df3fe5e9b5d304b69bf1367c2f144bd46419d0e916924c6071593"
+    );
+    assert_eq!(
+        manual.external_event_id.as_str(),
+        "7fd2f0302e58feb5f7fdd27cfc11958bc5020836b4c9dc88b3d9d719114fd363"
+    );
+    assert_ne!(manual.route_thread_id, scheduled.route_thread_id);
+    assert_ne!(manual.external_event_id, scheduled.external_event_id);
+}
+
+#[test]
 fn fire_identity_length_prefixing_avoids_component_boundary_collisions() {
     let slot = Utc.with_ymd_and_hms(2026, 5, 30, 8, 0, 0).unwrap();
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
@@ -239,13 +414,23 @@ async fn schedule_provider_emits_due_fire_only() {
 
     assert!(
         provider
-            .evaluate(&record, ts(1_704_067_199))
+            .evaluate(
+                &record,
+                record.next_run_at,
+                TriggerSourceKind::Schedule,
+                ts(1_704_067_199),
+            )
             .await
             .expect("not due")
             .is_none()
     );
     let fire = provider
-        .evaluate(&record, ts(1_704_067_200))
+        .evaluate(
+            &record,
+            record.next_run_at,
+            TriggerSourceKind::Schedule,
+            ts(1_704_067_200),
+        )
         .await
         .expect("due")
         .expect("fire");
@@ -333,7 +518,12 @@ async fn prompt_materializer_port_receives_fire_and_returns_materialized_prompt(
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
     let fire = ScheduleTriggerSourceProvider
-        .evaluate(&record, ts(1_704_067_200))
+        .evaluate(
+            &record,
+            record.next_run_at,
+            TriggerSourceKind::Schedule,
+            ts(1_704_067_200),
+        )
         .await
         .expect("due")
         .expect("fire");
@@ -361,7 +551,12 @@ async fn schedule_provider_uses_state_as_fire_gate() {
 
     assert!(
         provider
-            .evaluate(&record, ts(1_704_067_200))
+            .evaluate(
+                &record,
+                record.next_run_at,
+                TriggerSourceKind::Schedule,
+                ts(1_704_067_200),
+            )
             .await
             .expect("scheduled state remains due")
             .is_some()
@@ -370,7 +565,12 @@ async fn schedule_provider_uses_state_as_fire_gate() {
     record.state = TriggerState::Paused;
     assert!(
         provider
-            .evaluate(&record, ts(1_704_067_200))
+            .evaluate(
+                &record,
+                record.next_run_at,
+                TriggerSourceKind::Schedule,
+                ts(1_704_067_200),
+            )
             .await
             .expect("paused state is not due")
             .is_none()
@@ -379,7 +579,12 @@ async fn schedule_provider_uses_state_as_fire_gate() {
     record.state = TriggerState::Completed;
     assert!(
         provider
-            .evaluate(&record, ts(1_704_067_200))
+            .evaluate(
+                &record,
+                record.next_run_at,
+                TriggerSourceKind::Schedule,
+                ts(1_704_067_200),
+            )
             .await
             .expect("completed state is not due")
             .is_none()
@@ -396,7 +601,12 @@ async fn schedule_provider_rejects_invalid_record() {
     record.prompt.clear();
 
     let error = ScheduleTriggerSourceProvider
-        .evaluate(&record, ts(1_704_067_200))
+        .evaluate(
+            &record,
+            record.next_run_at,
+            TriggerSourceKind::Schedule,
+            ts(1_704_067_200),
+        )
         .await
         .expect_err("invalid record rejected");
     assert!(
@@ -660,6 +870,7 @@ async fn in_memory_repository_running_history_does_not_overwrite_terminal_histor
         &tenant_id,
         trigger_id,
         fire_slot,
+        TriggerSourceKind::Schedule,
         Some(run_id),
         TriggerRunHistoryStatus::Ok,
         completed_at,

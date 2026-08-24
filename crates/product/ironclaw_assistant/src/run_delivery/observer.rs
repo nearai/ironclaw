@@ -19,12 +19,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_extension_contracts::channel_adapter::{
-    OutboundPart, ProductTriggerReason, ReactionAction, RunReaction,
+    OutboundPart, OutboundVisibility, ProductTriggerReason, ReactionAction, RunReaction,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
+use ironclaw_notifications::NotificationKind;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
@@ -40,8 +41,8 @@ use ironclaw_threads::{
     AttachmentRef, FinalizedAssistantMessageByRunRequest, ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnExecutionOutcome,
+    TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use tokio::sync::Semaphore;
 
@@ -78,6 +79,38 @@ struct RunNotificationDeliveryContext<'a> {
     scope: &'a TurnScope,
     thread_scope: &'a ThreadScope,
     actor: &'a TurnActor,
+    /// The reply route, owned by the CONVERSATION binding the envelope
+    /// resolved to — runs themselves carry no reply-target binding, so the
+    /// observer routes every notification from the product-side binding it
+    /// already holds.
+    reply_target_binding_ref: &'a ReplyTargetBindingRef,
+}
+
+/// The live working indicator for one run: the currently posted message (if
+/// any) and a monotonic post counter. Notice delivery ids are stable per
+/// `notice_ref`, so every re-post — a nudge refresh, or re-entering the wait
+/// loop after a gate cycle retracted the indicator — must carry a fresh ref;
+/// replaying an already-delivered ref settles `AlreadyDelivered` and no
+/// indicator appears. The counter never resets within a run.
+#[derive(Default)]
+struct WorkingIndicator {
+    message: Option<DeliveredChannelMessage>,
+    posts: u32,
+}
+
+impl WorkingIndicator {
+    /// The next post's notice ref. The first post keeps the historical bare
+    /// `working:{run_id}` bytes; every later post is suffixed with the
+    /// monotonic index.
+    fn next_notice_ref(&mut self, run_id: TurnRunId) -> String {
+        let index = self.posts;
+        self.posts += 1;
+        if index == 0 {
+            format!("working:{run_id}")
+        } else {
+            format!("working:{run_id}:{index}")
+        }
+    }
 }
 
 /// Mutable per-run reaction state threaded through the live delivery loop: the
@@ -419,10 +452,15 @@ impl RunDeliveryObserver {
         let Some(run_id) = submitted_run_id(&ack) else {
             return Ok(());
         };
+        let binding_request = ResolveBindingRequest::from_envelope(&envelope).map_err(|error| {
+            ProductSurfaceFailure::InvalidBindingRequest {
+                reason: error.to_string(),
+            }
+        })?;
         let binding = self
             .services
             .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
+            .lookup_binding(binding_request)
             .await
             .map_err(ProductSurfaceFailure::from)?;
         let actor = TurnActor::new(binding.actor_user_id.clone());
@@ -466,7 +504,7 @@ impl RunDeliveryObserver {
             Err(error) => return Err(error.into()),
         }
         let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
-        let mut working_message: Option<DeliveredChannelMessage> = None;
+        let mut working_indicator = WorkingIndicator::default();
         let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
         // The current run-lifecycle reaction on the triggering message and a
         // monotonic id for each transition. Stays `None` until a working phase
@@ -479,7 +517,7 @@ impl RunDeliveryObserver {
                     &scope,
                     run_id,
                     delivered_blocked_marker.as_ref(),
-                    &mut working_message,
+                    &mut working_indicator,
                     &mut reaction_state,
                 )
                 .await
@@ -490,7 +528,7 @@ impl RunDeliveryObserver {
                     // indicator. Retract it and mark the triggering message ❌;
                     // the caller posts the "taking longer / check the web app"
                     // notice.
-                    if let Some(message) = working_message.take() {
+                    if let Some(message) = working_indicator.message.take() {
                         self.services
                             .retract_message(scope.clone(), Some(run_id), message)
                             .await;
@@ -521,7 +559,7 @@ impl RunDeliveryObserver {
                 actionable_state.status,
                 TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
             ) {
-                if let Some(message) = working_message.take() {
+                if let Some(message) = working_indicator.message.take() {
                     self.services
                         .retract_message(scope.clone(), Some(run_id), message)
                         .await;
@@ -536,6 +574,21 @@ impl RunDeliveryObserver {
                     RunReaction::NeedsInput,
                 )
                 .await;
+            }
+            let next_blocked_marker = blocked_actionable_marker(&actionable_state);
+            if let Some(previous) = delivered_blocked_marker.as_ref()
+                && Some(previous) != next_blocked_marker.as_ref()
+                && let Some(kind) = super::blocked_status_notification_kind(previous.status)
+            {
+                self.services
+                    .resolve_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        previous.gate_ref.as_deref(),
+                    )
+                    .await;
             }
             let notification = match self
                 .notification_for_actionable_state(
@@ -561,7 +614,7 @@ impl RunDeliveryObserver {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .record_delivered(run_id);
-                        if let Some(message) = working_message.take() {
+                        if let Some(message) = working_indicator.message.take() {
                             self.services
                                 .retract_message(scope.clone(), Some(run_id), message)
                                 .await;
@@ -599,9 +652,19 @@ impl RunDeliveryObserver {
                     return Ok(());
                 }
             };
-            let next_blocked_marker = blocked_actionable_marker(&actionable_state);
             let event_kind = notification.event_kind;
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
+            if let Some(kind) = inbox_kind_for_event(event_kind) {
+                self.services
+                    .publish_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        gate_ref_for_routing.as_deref(),
+                    )
+                    .await;
+            }
             let delivered_messages = self
                 .deliver_run_notification(
                     RunNotificationDeliveryContext {
@@ -609,9 +672,9 @@ impl RunDeliveryObserver {
                         scope: &scope,
                         thread_scope: &thread_scope,
                         actor: &actor,
+                        reply_target_binding_ref: &binding.reply_target_binding_ref,
                     },
                     run_id,
-                    &actionable_state,
                     notification,
                 )
                 .await?;
@@ -641,7 +704,7 @@ impl RunDeliveryObserver {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .record_delivered(run_id);
-                if let Some(message) = working_message.take() {
+                if let Some(message) = working_indicator.message.take() {
                     self.services
                         .retract_message(scope.clone(), Some(run_id), message)
                         .await;
@@ -685,7 +748,7 @@ impl RunDeliveryObserver {
         scope: &TurnScope,
         run_id: TurnRunId,
         delivered_blocked_marker: Option<&BlockedActionableMarker>,
-        working_message: &mut Option<DeliveredChannelMessage>,
+        working_indicator: &mut WorkingIndicator,
         reaction_state: &mut SourceReactionState,
     ) -> Result<TurnRunState, RunDeliveryError> {
         let start = Instant::now();
@@ -717,13 +780,14 @@ impl RunDeliveryObserver {
                 return Err(RunDeliveryError::RunWaitTimedOut { run_id });
             }
             if blocked_actionable_marker(&state).is_none() {
-                if working_message.is_none() {
+                if working_indicator.message.is_none() {
                     // First working notice for this running stretch. Vary the
                     // line per run (seeded by the run id) so a channel with
                     // several runs in flight keeps one voice each, and mark the
                     // triggering message with 👀 so the user sees which ping is
                     // being worked on.
-                    *working_message = self
+                    let notice_ref = working_indicator.next_notice_ref(run_id);
+                    working_indicator.message = self
                         .services
                         .post_notice(
                             DeliveryIntent::Working,
@@ -731,7 +795,7 @@ impl RunDeliveryObserver {
                             Some(run_id),
                             envelope.external_conversation_ref(),
                             prompts::working_message(notice_seed),
-                            format!("working:{run_id}"),
+                            notice_ref,
                         )
                         .await;
                     self.set_source_reaction(
@@ -747,7 +811,7 @@ impl RunDeliveryObserver {
                     // repost) with an escalated "still working" line so the user
                     // knows it hasn't stalled, keeping the latest status at the
                     // bottom of the conversation. Each gap doubles.
-                    if let Some(previous) = working_message.take() {
+                    if let Some(previous) = working_indicator.message.take() {
                         self.services
                             .retract_message(scope.clone(), Some(run_id), previous)
                             .await;
@@ -755,7 +819,8 @@ impl RunDeliveryObserver {
                     nudge_count += 1;
                     next_nudge_at += nudge_gap;
                     nudge_gap = nudge_gap.saturating_mul(2);
-                    *working_message = self
+                    let notice_ref = working_indicator.next_notice_ref(run_id);
+                    working_indicator.message = self
                         .services
                         .post_notice(
                             DeliveryIntent::Working,
@@ -763,7 +828,7 @@ impl RunDeliveryObserver {
                             Some(run_id),
                             envelope.external_conversation_ref(),
                             prompts::long_running_message(notice_seed, nudge_count),
-                            format!("working:{run_id}:{nudge_count}"),
+                            notice_ref,
                         )
                         .await;
                 }
@@ -831,6 +896,9 @@ impl RunDeliveryObserver {
         let direct_message = envelope_is_direct_chat(envelope);
         let notification = match state.status {
             TurnStatus::Completed => {
+                if state.execution_outcome == Some(TurnExecutionOutcome::NothingToReport) {
+                    return Ok(None);
+                }
                 let Some(message) = self
                     .read_latest_assistant_message(thread_scope, binding, run_id)
                     .await?
@@ -940,6 +1008,17 @@ impl RunDeliveryObserver {
                                 Some(AuthPromptChallengeKind::OAuthUrl) | None => {
                                     prompts::OAUTH_PRIVATE_SETUP_MESSAGE.to_string()
                                 }
+                                // Unreachable in practice — `DeviceLink` is
+                                // never serviceable, so it exits through the
+                                // cancel-and-redirect arm below rather than
+                                // reaching this private-target narrowing. The
+                                // arm still carries its own copy so that the
+                                // day a device-link frame becomes deliverable,
+                                // the fallback names the real next step
+                                // instead of the generic dead end.
+                                Some(AuthPromptChallengeKind::DeviceLink) => {
+                                    prompts::DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.to_string()
+                                }
                                 Some(
                                     AuthPromptChallengeKind::ManualToken
                                     | AuthPromptChallengeKind::Other,
@@ -987,7 +1066,6 @@ impl RunDeliveryObserver {
         &self,
         context: RunNotificationDeliveryContext<'_>,
         run_id: TurnRunId,
-        state: &TurnRunState,
         notification: ActionableNotification,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
         let RunNotificationDeliveryContext {
@@ -995,8 +1073,9 @@ impl RunDeliveryObserver {
             scope,
             thread_scope,
             actor,
+            reply_target_binding_ref,
         } = context;
-        let reply_target = state.reply_target_binding_ref.clone();
+        let reply_target = reply_target_binding_ref.clone();
         let target_authority = ObservedReplyTargetAuthority {
             scope: scope.clone(),
             actor: actor.clone(),
@@ -1096,17 +1175,58 @@ impl RunDeliveryObserver {
     /// Scope for notices raised outside a resolved delivery loop: the
     /// conversation's binding scope when it resolves, else the host's
     /// fallback notice scope (never silent, always attributed).
+    /// Resolve this envelope's conversation binding for the notice paths that
+    /// DEGRADE rather than fail: an envelope that cannot even produce a
+    /// binding request and a binding that does not resolve are the same
+    /// answer here — no usable conversation — so both collapse to `None`.
+    ///
+    /// Two call sites deliberately do not use this, and the difference is
+    /// behavioral rather than stylistic. The delivery path propagates a
+    /// malformed binding request as an error, because a send with no binding
+    /// is a fault and not a degrade. And `post_rejection_hint_if_authorized`
+    /// keeps the two apart on purpose: an unparseable envelope means it
+    /// posted nothing (`false`), while an unauthorized conversation means it
+    /// handled the case by deliberately staying silent (`true`).
+    async fn degradable_binding(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        degrade: &'static str,
+    ) -> Option<ResolvedBinding> {
+        let request = match ResolveBindingRequest::from_envelope(envelope) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    error = %error,
+                    degrade,
+                    "envelope produced no binding request"
+                );
+                return None;
+            }
+        };
+        match self.services.binding_service.lookup_binding(request).await {
+            Ok(binding) => Some(binding),
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    error = %error,
+                    degrade,
+                    "conversation binding did not resolve"
+                );
+                None
+            }
+        }
+    }
+
     async fn notice_scope(&self, envelope: &ProductInboundEnvelope) -> TurnScope {
         match self
-            .services
-            .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .degradable_binding(envelope, "notice scope falls back to the host scope")
             .await
         {
-            Ok(binding) => thread_scope_from_binding(&binding)
+            Some(binding) => thread_scope_from_binding(&binding)
                 .and_then(|thread_scope| turn_scope_from_thread_scope(&binding, &thread_scope))
                 .unwrap_or_else(|_| self.services.fallback_notice_scope.clone()),
-            Err(_) => self.services.fallback_notice_scope.clone(),
+            None => self.services.fallback_notice_scope.clone(),
         }
     }
 
@@ -1118,10 +1238,13 @@ impl RunDeliveryObserver {
         let Some(hint) = rejection_hint_for_resolution(envelope, ack) else {
             return false;
         };
+        let Ok(binding_request) = ResolveBindingRequest::from_envelope(envelope) else {
+            return false;
+        };
         let binding = match self
             .services
             .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .lookup_binding(binding_request)
             .await
         {
             Ok(binding) => binding,
@@ -1204,10 +1327,9 @@ impl RunDeliveryObserver {
     /// in a shared conversation it lands as a reply anchored on the sender's
     /// own message (the envelope's message-scoped conversation ref carries
     /// the anchor — a threading surface roots a thread on the ping, a flat
-    /// surface quotes it), so the nudge addresses the one unpaired sender
-    /// rather than the room. The
-    /// text is fixed, host-authored, and link-free (OAuth links and pairing
-    /// codes stay out of shared surfaces by the private-setup rules).
+    /// surface quotes it), requested `EphemeralTo` the sender so the nudge —
+    /// and the connect link its manifest text may carry — reaches only that
+    /// one unpaired sender rather than the room (#7681).
     /// Deliberately performs NO binding lookup (the sender is unbound by
     /// definition). Transport retries arrive as `Duplicate`, so this fires
     /// at most once per inbound event, and the per-conversation reservation
@@ -1237,15 +1359,21 @@ impl RunDeliveryObserver {
         let Some(reserved_at) = self.reserve_connect_nudge(conversation_key.clone()) else {
             return true;
         };
+        let visibility = if envelope_is_direct_chat(envelope) {
+            OutboundVisibility::Public
+        } else {
+            OutboundVisibility::EphemeralTo(envelope.external_actor_ref().clone())
+        };
         let delivered = self
             .services
-            .post_notice(
+            .post_notice_with_visibility(
                 DeliveryIntent::ConnectRequired,
                 self.services.fallback_notice_scope.clone(),
                 None,
                 envelope.external_conversation_ref(),
                 &self.connection_notices.connect_required,
                 format!("connect-nudge:{}", envelope.external_event_id().as_str()),
+                visibility,
             )
             .await;
         if delivered.is_none() {
@@ -1343,29 +1471,23 @@ impl RunDeliveryObserver {
         // fall back to the generic copy rather than going silent — the hint
         // replies to the sender's own conversation and leaks nothing.
         let (hint, scope) = match self
-            .services
-            .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .degradable_binding(envelope, "busy-thread hint falls back to generic copy")
             .await
         {
-            Ok(binding) => {
+            Some(binding) => {
                 let hint = self.busy_hint_from_run_state(&binding, active_run_id).await;
                 let scope = thread_scope_from_binding(&binding)
                     .and_then(|thread_scope| turn_scope_from_thread_scope(&binding, &thread_scope))
                     .unwrap_or_else(|_| self.services.fallback_notice_scope.clone());
                 (hint, scope)
             }
-            Err(error) => {
-                tracing::debug!(
-                    target: "ironclaw::reborn::run_delivery",
-                    error = %error,
-                    "busy-thread hint falling back to generic copy because the conversation binding was not resolved"
-                );
-                (
-                    prompts::BUSY_GENERIC_MESSAGE.to_string(),
-                    self.services.fallback_notice_scope.clone(),
-                )
-            }
+            // The helper already logged why; the degrade is the generic copy
+            // on the host's fallback scope, which leaks nothing about a
+            // conversation this caller could not resolve.
+            None => (
+                prompts::BUSY_GENERIC_MESSAGE.to_string(),
+                self.services.fallback_notice_scope.clone(),
+            ),
         };
         self.services
             .post_notice(
@@ -1461,6 +1583,15 @@ impl RunDeliveryObserver {
                 prompts::BUSY_GENERIC_MESSAGE.to_string()
             }
         }
+    }
+}
+
+fn inbox_kind_for_event(event_kind: RunNotificationEventKind) -> Option<NotificationKind> {
+    match event_kind {
+        RunNotificationEventKind::ApprovalNeeded => Some(NotificationKind::ApprovalRequired),
+        RunNotificationEventKind::AuthRequired => Some(NotificationKind::AuthenticationRequired),
+        RunNotificationEventKind::RunBlocked => Some(NotificationKind::RunBlocked),
+        _ => None,
     }
 }
 
@@ -1683,10 +1814,26 @@ fn rejection_ack_for_surface_error(error: &ProductAdapterError) -> Option<Produc
             kind,
             retryable: false,
             ..
-        } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
-            product_rejection_kind_for_surface_rejection(*kind),
-            "workflow rejected resolution",
-        ))),
+        } => {
+            // A duplicate or replay-unavailable resolution is not a policy
+            // verdict on THIS message: the original action already produced
+            // its result and feedback, so these settle silently. Widening
+            // them into `PolicyDenied` rendered the fixed DM-only command
+            // copy at a user retrying a command in a direct conversation —
+            // a false statement that hid the real (already-delivered)
+            // outcome.
+            if matches!(
+                kind,
+                ProductSurfaceRejectionKind::DuplicateAction
+                    | ProductSurfaceRejectionKind::ReplayUnavailable
+            ) {
+                return None;
+            }
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                product_rejection_kind_for_surface_rejection(*kind),
+                "workflow rejected resolution",
+            )))
+        }
         _ => None,
     }
 }
@@ -1702,7 +1849,9 @@ fn product_rejection_kind_for_surface_rejection(
         ProductSurfaceRejectionKind::ThreadBusy
         | ProductSurfaceRejectionKind::AdmissionRejected
         | ProductSurfaceRejectionKind::Unavailable
-        | ProductSurfaceRejectionKind::Conflict => ProductRejectionKind::PolicyDenied,
+        | ProductSurfaceRejectionKind::Conflict
+        | ProductSurfaceRejectionKind::DuplicateAction
+        | ProductSurfaceRejectionKind::ReplayUnavailable => ProductRejectionKind::PolicyDenied,
     }
 }
 
@@ -1755,6 +1904,54 @@ fn envelope_addresses_the_bot(envelope: &ProductInboundEnvelope) -> bool {
 /// OAuth setup links are only safe in a private DM.
 fn auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
     envelope_is_direct_chat(envelope)
+}
+
+#[cfg(test)]
+mod rejection_ack_tests {
+    use super::rejection_ack_for_surface_error;
+    use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
+    use ironclaw_product_contracts::inbound::{ProductInboundAck, ProductRejectionKind};
+
+    fn surface_rejected(kind: ProductSurfaceRejectionKind) -> ProductAdapterError {
+        ProductAdapterError::SurfaceRejected {
+            kind,
+            status_code: 409,
+            retryable: false,
+            reason: ironclaw_host_api::product_adapter::RedactedString::new(
+                "workflow rejected resolution",
+            ),
+        }
+    }
+
+    // Regression: widening Duplicate/Replay into PolicyDenied rendered the
+    // fixed "Commands can only be used in a direct conversation" copy at a
+    // user retrying a command in a DM — false, and it hid the real outcome.
+    // These families settle silently; the original action's feedback stands.
+    #[test]
+    fn duplicate_and_replay_rejections_settle_silently() {
+        for kind in [
+            ProductSurfaceRejectionKind::DuplicateAction,
+            ProductSurfaceRejectionKind::ReplayUnavailable,
+        ] {
+            assert!(
+                rejection_ack_for_surface_error(&surface_rejected(kind)).is_none(),
+                "{kind:?} must not produce user-facing rejection feedback"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_rejections_still_produce_the_denied_ack() {
+        let ack = rejection_ack_for_surface_error(&surface_rejected(
+            ProductSurfaceRejectionKind::AdmissionRejected,
+        ))
+        .expect("a real policy rejection still acks");
+        assert!(matches!(
+            ack,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::PolicyDenied
+        ));
+    }
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@
 use ironclaw_approvals::{ApprovalStatus, ApprovalStoreError};
 use ironclaw_host_api::{
     decision::DenyReason,
-    dispatch::CapabilityDispatcher,
+    dispatch::{CapabilityDispatchResult, CapabilityDispatcher},
     ids::{ApprovalRequestId, CapabilityId},
     resource::ResourceEstimate,
     scope::ExecutionContext,
@@ -19,6 +19,7 @@ use tracing::{debug, warn};
 use super::{
     AuthResumeInput, BlockedResumeKind, CapabilityHost, ResumedDispatchParams, ResumedLeaseState,
 };
+use crate::CapabilityInvocationError;
 use crate::helpers::{
     CapabilityActionKind, approval_not_approved_error_kind, capability_lease_error_kind,
     claim_error_may_be_concurrent_resume, fail_invocation_if_configured,
@@ -26,7 +27,6 @@ use crate::helpers::{
     matching_claimed_approval_lease_for_auth_resume, resume_context_mismatch_kind,
     validate_approval_request_matches_invocation,
 };
-use crate::{CapabilityInvocationError, CapabilityInvocationResult};
 
 impl<'a, D> CapabilityHost<'a, D>
 where
@@ -47,7 +47,7 @@ where
         estimate: ResourceEstimate,
         input: serde_json::Value,
         approval_request_id: Option<ApprovalRequestId>,
-    ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+    ) -> Result<CapabilityDispatchResult, CapabilityInvocationError> {
         let request = AuthResumeInput {
             context,
             capability_id,

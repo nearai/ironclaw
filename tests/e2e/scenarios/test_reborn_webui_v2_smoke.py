@@ -30,7 +30,8 @@ import re
 import sys
 import uuid
 from collections.abc import Callable
-from urllib.parse import parse_qs, urlparse
+from contextlib import AsyncExitStack
+from urllib.parse import parse_qs, quote, urlparse
 
 import aiohttp
 import httpx
@@ -1019,6 +1020,7 @@ async def test_reborn_v2_session_check_failure_blocks_app_and_retries(
             content_type="application/json",
             body=json.dumps(
                 {
+                    "session_channel_extension_id": "web-app",
                     "tenant_id": "reborn-v2-e2e",
                     "user_id": USER_ID,
                     "capabilities": {},
@@ -1342,7 +1344,7 @@ async def test_reborn_v2_chat_request_failure_uses_selected_language(
         "**/api/webchat/v2/threads", handle_create_thread
     )
     await reborn_v2_page.route(
-        f"**/api/webchat/v2/threads/{thread_id}/messages", fail_send
+        "**/api/webchat/v2/channels/*/messages", fail_send
     )
 
     await reborn_v2_page.goto(
@@ -1455,6 +1457,351 @@ async def test_reborn_v2_text_turn_persists(reborn_v2_server):
         assert len(finalized) == 1, (
             f"Expected one finalized assistant message, got {len(finalized)}: {finalized}"
         )
+
+
+async def _restore_model_selection_policy(operator, reborn_v2_server: str) -> None:
+    response = await operator.put(
+        f"{reborn_v2_server}/api/webchat/v2/llm/model-policy",
+        json={
+            "workspace_default": "mock-model",
+            "allowed_models": ["mock-model"],
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+
+
+async def _delete_model_preference_member(
+    operator, reborn_v2_server: str, member_id: str
+) -> None:
+    response = await operator.delete(
+        f"{reborn_v2_server}/api/webchat/v2/admin/users/{member_id}",
+        timeout=10,
+    )
+    response.raise_for_status()
+
+
+async def _reset_model_preference(reborn_v2_server: str, token: str) -> None:
+    async with httpx.AsyncClient(headers=reborn_bearer_headers(token)) as member:
+        response = await member.put(
+            f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
+            json={"model": None},
+            timeout=10,
+        )
+        response.raise_for_status()
+
+
+async def _wait_for_model_selector_layout(selector, description, *, wide: bool) -> None:
+    layout = selector.locator("xpath=../..")
+    last_boxes = None
+    try:
+        async with asyncio.timeout(5):
+            while True:
+                selector_box = await selector.bounding_box()
+                description_box = await description.bounding_box()
+                layout_box = await layout.bounding_box()
+                last_boxes = (selector_box, description_box, layout_box)
+                if selector_box and description_box and layout_box:
+                    if wide:
+                        settled = selector_box["y"] < (
+                            description_box["y"] + description_box["height"]
+                        ) and abs(
+                            selector_box["x"]
+                            + selector_box["width"]
+                            - layout_box["x"]
+                            - layout_box["width"]
+                        ) <= 1
+                    else:
+                        settled = selector_box["y"] >= (
+                            description_box["y"] + description_box["height"]
+                        ) and abs(selector_box["x"] - layout_box["x"]) <= 1 and abs(
+                            selector_box["width"] - layout_box["width"]
+                        ) <= 1
+                    if settled:
+                        return
+                await asyncio.sleep(0.05)
+    except TimeoutError:
+        mode = "wide" if wide else "narrow"
+        raise AssertionError(
+            f"the selector did not settle into the {mode} layout: {last_boxes}"
+        ) from None
+
+
+async def _assert_no_horizontal_overflow(page, *, mode: str) -> None:
+    dimensions = await page.evaluate(
+        """() => ({
+            scrollWidth: document.documentElement.scrollWidth,
+            innerWidth: window.innerWidth,
+        })"""
+    )
+    assert dimensions["scrollWidth"] <= dimensions["innerWidth"], (
+        f"the long model name caused horizontal overflow in the {mode} layout: "
+        f"{dimensions}"
+    )
+
+
+async def _publish_model_selection_policy(
+    page, operator, cleanup, reborn_v2_server: str, selected_model: str
+) -> None:
+    await page.goto(
+        f"{reborn_v2_server}/settings/inference?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    await page.wait_for_selector(SEL_V2["settings_model_policy_editor"], timeout=15000)
+    await page.locator(SEL_V2["settings_model_policy_model_input"]).fill(
+        selected_model
+    )
+    await page.locator(SEL_V2["settings_model_policy_add_model"]).click()
+    async with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith("/api/webchat/v2/llm/model-policy")
+    ) as response_info:
+        await page.locator(SEL_V2["settings_model_policy_save"]).click()
+    response = await response_info.value
+    assert response.ok, f"model policy save failed with {response.status}"
+    cleanup.push_async_callback(
+        _restore_model_selection_policy, operator, reborn_v2_server
+    )
+    await expect(page.locator(SEL_V2["settings_model_policy_status"])).to_contain_text(
+        "Model selection enabled", timeout=15000
+    )
+
+
+async def _create_model_preference_member(
+    operator,
+    cleanup,
+    reborn_v2_server: str,
+    *,
+    display_name: str,
+    email: str,
+) -> tuple[str, str]:
+    response = await operator.post(
+        f"{reborn_v2_server}/api/webchat/v2/admin/users",
+        json={"display_name": display_name, "email": email, "role": "member"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    body = response.json()
+    member_id = body["user"]["user_id"]
+    token = body["api_token"]
+    cleanup.push_async_callback(
+        _delete_model_preference_member, operator, reborn_v2_server, member_id
+    )
+    cleanup.push_async_callback(_reset_model_preference, reborn_v2_server, token)
+    return member_id, token
+
+
+async def _open_model_preference_page(
+    page, reborn_v2_server: str, token: str, path: str, ready_selector: str
+) -> None:
+    separator = "&" if "?" in path else "?"
+    encoded_token = quote(token, safe="")
+    await page.goto(f"{reborn_v2_server}{path}{separator}token={encoded_token}")
+    await page.wait_for_selector(ready_selector, timeout=15000)
+
+
+async def _choose_model_preference(
+    page, reborn_v2_server: str, token: str, selected_model: str
+) -> None:
+    await _open_model_preference_page(
+        page,
+        reborn_v2_server,
+        token,
+        "/settings/inference",
+        SEL_V2["settings_model_selector"],
+    )
+    await expect(page.get_by_role("button", name="Add provider")).to_have_count(0)
+    await expect(page.locator(SEL_V2["settings_model_policy_editor"])).to_have_count(0)
+    selector = page.locator(SEL_V2["settings_model_selector"])
+    button = selector.get_by_role("button")
+    await expect(button).to_be_enabled(timeout=15000)
+    await button.click()
+    await page.get_by_role("option", name=selected_model, exact=True).click()
+    await expect(button).to_contain_text(selected_model)
+    description = page.get_by_text(
+        "Used for future messages in all conversations.", exact=True
+    )
+    await _wait_for_model_selector_layout(selector, description, wide=False)
+    await _assert_no_horizontal_overflow(page, mode="narrow")
+    await page.set_viewport_size({"width": 1440, "height": 720})
+    await _wait_for_model_selector_layout(selector, description, wide=True)
+    await _assert_no_horizontal_overflow(page, mode="wide")
+
+
+async def _wait_for_model_preference(member, reborn_v2_server: str, model) -> None:
+    observed = object()
+    async with asyncio.timeout(15):
+        while observed != model:
+            response = await member.get(
+                f"{reborn_v2_server}/api/webchat/v2/llm/model-preference",
+                timeout=5,
+            )
+            response.raise_for_status()
+            observed = response.json().get("model")
+            if observed != model:
+                await asyncio.sleep(0.1)
+
+
+async def _assert_model_preference_permissions(
+    default_member, default_page, reborn_v2_server: str, token: str, selected_model: str
+) -> None:
+    await _wait_for_model_preference(default_member, reborn_v2_server, None)
+    providers = await default_member.get(
+        f"{reborn_v2_server}/api/webchat/v2/llm/providers", timeout=5
+    )
+    assert providers.status_code == 403
+    policy = await default_member.put(
+        f"{reborn_v2_server}/api/webchat/v2/llm/model-policy",
+        json={
+            "workspace_default": selected_model,
+            "allowed_models": [selected_model],
+        },
+        timeout=5,
+    )
+    assert policy.status_code == 403
+    await _open_model_preference_page(
+        default_page,
+        reborn_v2_server,
+        token,
+        "/settings/inference",
+        SEL_V2["settings_model_selector"],
+    )
+    button = default_page.locator(SEL_V2["settings_model_selector"]).get_by_role(
+        "button"
+    )
+    await expect(button).to_contain_text("mock-model")
+    await expect(button).not_to_contain_text(selected_model)
+
+
+async def _send_model_preference_turn(
+    member, page, reborn_v2_server: str, token: str, prompt: str
+) -> None:
+    thread_id = await _create_thread(member, reborn_v2_server)
+    await _open_model_preference_page(
+        page,
+        reborn_v2_server,
+        token,
+        f"/chat/{thread_id}",
+        SEL_V2["chat_composer"],
+    )
+    composer = page.locator(SEL_V2["chat_composer"])
+    await composer.fill(prompt)
+    await composer.press("Enter")
+    await _wait_for_assistant_message(member, reborn_v2_server, thread_id)
+
+
+async def _assert_model_preference_provider_requests(
+    member,
+    mock_llm_server: str,
+    selected_prompt: str,
+    default_prompt: str,
+    selected_model: str,
+) -> None:
+    response = await member.get(f"{mock_llm_server}/__mock/chat_requests", timeout=10)
+    response.raise_for_status()
+    requests = response.json().get("requests", [])
+    selected = [
+        request
+        for request in requests
+        if selected_prompt in json.dumps(request.get("messages", []))
+    ]
+    default = [
+        request
+        for request in requests
+        if default_prompt in json.dumps(request.get("messages", []))
+    ]
+    assert selected, "the preferred-model turn never reached the mock provider"
+    assert selected[-1].get("model") == selected_model, selected[-1]
+    assert default, "the second member's default-model turn never reached the mock provider"
+    assert default[-1].get("model") == "mock-model", default[-1]
+
+
+async def test_reborn_v2_settings_model_preference_reaches_provider(
+    reborn_v2_server,
+    reborn_v2_browser,
+    mock_llm_server,
+):
+    """A bounded long-name preference reaches the provider without affecting another member."""
+    selected_model = (
+        "deepseek-ai/DeepSeek-V4-Flash-e2e-selected-model-with-a-long-name"
+    )
+    selected_prompt = f"settings selected model routing {uuid.uuid4()}"
+    default_prompt = f"settings default model routing {uuid.uuid4()}"
+    suffix = uuid.uuid4().hex[:8]
+    async with httpx.AsyncClient(
+        headers=reborn_bearer_headers()
+    ) as operator, AsyncExitStack() as cleanup:
+        admin_context = await reborn_v2_browser.new_context(
+            viewport={"width": 1280, "height": 720}
+        )
+        cleanup.push_async_callback(admin_context.close)
+        admin_page = await admin_context.new_page()
+        await _publish_model_selection_policy(
+            admin_page, operator, cleanup, reborn_v2_server, selected_model
+        )
+        _, selected_token = await _create_model_preference_member(
+            operator,
+            cleanup,
+            reborn_v2_server,
+            display_name=f"Selected Model E2E {suffix}",
+            email=f"selected-model-{suffix}@example.com",
+        )
+        _, default_token = await _create_model_preference_member(
+            operator,
+            cleanup,
+            reborn_v2_server,
+            display_name=f"Default Model E2E {suffix}",
+            email=f"default-model-{suffix}@example.com",
+        )
+        reset = await operator.post(
+            f"{mock_llm_server}/__mock/chat_requests/reset", timeout=10
+        )
+        reset.raise_for_status()
+        selected_member = await cleanup.enter_async_context(
+            httpx.AsyncClient(headers=reborn_bearer_headers(selected_token))
+        )
+        default_member = await cleanup.enter_async_context(
+            httpx.AsyncClient(headers=reborn_bearer_headers(default_token))
+        )
+        selected_context = await reborn_v2_browser.new_context(
+            viewport={"width": 1100, "height": 720}
+        )
+        cleanup.push_async_callback(selected_context.close)
+        default_context = await reborn_v2_browser.new_context(
+            viewport={"width": 1280, "height": 720}
+        )
+        cleanup.push_async_callback(default_context.close)
+        selected_page = await selected_context.new_page()
+        default_page = await default_context.new_page()
+        await _choose_model_preference(
+            selected_page, reborn_v2_server, selected_token, selected_model
+        )
+        await _wait_for_model_preference(
+            selected_member, reborn_v2_server, selected_model
+        )
+        await _assert_model_preference_permissions(
+            default_member, default_page, reborn_v2_server, default_token, selected_model
+        )
+        await _send_model_preference_turn(
+            selected_member, selected_page, reborn_v2_server, selected_token, selected_prompt
+        )
+        default_thread_id = await _create_thread(default_member, reborn_v2_server)
+        await _send_message(default_member, reborn_v2_server, default_thread_id, default_prompt)
+        await _wait_for_assistant_message(default_member, reborn_v2_server, default_thread_id)
+        await _assert_model_preference_provider_requests(
+            selected_member, mock_llm_server, selected_prompt, default_prompt, selected_model
+        )
+        await _wait_for_model_preference(selected_member, reborn_v2_server, selected_model)
+        await _wait_for_model_preference(default_member, reborn_v2_server, None)
+        await _open_model_preference_page(
+            selected_page,
+            reborn_v2_server,
+            selected_token,
+            "/settings/inference",
+            SEL_V2["settings_model_selector"],
+        )
+        await expect(
+            selected_page.locator(SEL_V2["settings_model_selector"]).get_by_role("button")
+        ).to_contain_text(selected_model)
 
 
 async def test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages(
@@ -1885,6 +2232,130 @@ async def test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_c
         release_retry.set()
 
 
+async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
+    reborn_v2_server, reborn_v2_page
+):
+    """Run now fires the selected automation and disables unsafe repeats."""
+    runnable_id = "11111111-2222-3333-4444-555555555555"
+    active_id = "22222222-3333-4444-5555-666666666666"
+    scheduler_enabled = True
+    runnable_active = False
+    run_requests: list[str] = []
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    def automation(
+        automation_id: str,
+        name: str,
+        *,
+        has_active_fire: bool,
+        has_running_run: bool = False,
+    ) -> dict:
+        return {
+            "automation_id": automation_id,
+            "name": name,
+            "source": {
+                "type": "schedule",
+                "cron": "0 9 * * *",
+                "timezone": "UTC",
+            },
+            "state": "scheduled",
+            "next_run_at": "2026-07-18T09:00:00Z",
+            "has_active_fire": has_active_fire,
+            "recent_runs": (
+                [
+                    {
+                        "run_id": "33333333-4444-5555-6666-777777777777",
+                        "status": "running",
+                        "fire_slot": "2026-07-17T09:00:00Z",
+                        "source": "manual",
+                    }
+                ]
+                if has_running_run
+                else []
+            ),
+        }
+
+    async def handle_automations(route) -> None:
+        nonlocal runnable_active, scheduler_enabled
+        path = urlparse(route.request.url).path
+        if route.request.method == "GET":
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "scheduler_enabled": scheduler_enabled,
+                        "automations": [
+                            automation(
+                                runnable_id,
+                                "Runnable automation",
+                                has_active_fire=False,
+                                has_running_run=runnable_active,
+                            ),
+                            automation(
+                                active_id,
+                                "Already running",
+                                has_active_fire=True,
+                            ),
+                        ],
+                    }
+                ),
+            )
+            return
+
+        run_requests.append(path)
+        request_started.set()
+        await release_response.wait()
+        runnable_active = True
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"updated": True}),
+        )
+
+    page = reborn_v2_page
+    await page.route("**/api/webchat/v2/automations**", handle_automations)
+    runnable_button = page.locator(
+        SEL_V2["automation_run_now_for"].format(id=runnable_id)
+    )
+    active_button = page.locator(
+        SEL_V2["automation_run_now_for"].format(id=active_id)
+    )
+
+    await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
+    await expect(runnable_button).to_be_enabled(timeout=15000)
+
+    await page.locator(
+        SEL_V2["automation_name_button_for"].format(id=active_id)
+    ).click()
+    await expect(active_button).to_be_disabled()
+
+    await page.locator(
+        SEL_V2["automation_name_button_for"].format(id=runnable_id)
+    ).click()
+    click_task = asyncio.create_task(runnable_button.click())
+    try:
+        await asyncio.wait_for(request_started.wait(), timeout=10)
+        await expect(runnable_button).to_be_disabled()
+        await runnable_button.click(force=True)
+        assert run_requests == [f"/api/webchat/v2/automations/{runnable_id}/run"]
+    finally:
+        release_response.set()
+    await click_task
+
+    await expect(runnable_button).to_be_disabled(timeout=10000)
+    assert run_requests == [f"/api/webchat/v2/automations/{runnable_id}/run"]
+
+    runnable_active = False
+    scheduler_enabled = False
+    await page.reload()
+    await page.locator(
+        SEL_V2["automation_name_button_for"].format(id=runnable_id)
+    ).click()
+    await expect(runnable_button).to_be_disabled(timeout=10000)
+
+
 async def test_reborn_v2_automation_failed_run_actions_are_clickable(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -1909,6 +2380,7 @@ async def test_reborn_v2_automation_failed_run_actions_are_clickable(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -2206,6 +2678,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -2252,7 +2725,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
@@ -2330,6 +2803,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -2384,7 +2858,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
@@ -2458,6 +2932,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -2519,7 +2994,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
     await page.route("**/api/webchat/v2/session", handle_session)
     await page.route("**/api/webchat/v2/threads", handle_threads)
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline)
-    await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
+    await page.route("**/api/webchat/v2/channels/*/messages", handle_send)
 
     try:
         await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
@@ -2645,6 +3120,39 @@ async def test_reborn_v2_desktop_sidebar_can_collapse_and_persist(reborn_v2_page
         "() => localStorage.getItem('ironclaw:v2-sidebar-open') === 'true'",
         timeout=5000,
     )
+
+
+async def test_reborn_v2_expandable_sidebar_sections_can_collapse(reborn_v2_page):
+    """Active expandable navigation sections can be closed and reopened."""
+    origin = await reborn_v2_page.evaluate("location.origin")
+    sidebar = reborn_v2_page.locator(SEL_V2["sidebar"])
+
+    for section_id, path in (
+        ("extensions", "/extensions/registry"),
+        ("settings", "/settings/inference"),
+        ("admin", "/admin/users"),
+    ):
+        await reborn_v2_page.goto(f"{origin}{path}?token={REBORN_V2_AUTH_TOKEN}")
+        parent = sidebar.get_by_test_id(
+            SEL_V2["sidebar_nav_for"].format(id=section_id)
+        )
+        panel_id = await parent.get_attribute("aria-controls")
+        assert panel_id is not None
+        children = sidebar.locator(f"#{panel_id}").get_by_role("link")
+
+        await expect(parent).to_be_visible(timeout=15000)
+        await expect(parent).to_have_attribute("aria-expanded", "true")
+        await expect(children.first).to_be_visible()
+
+        before_collapse_url = reborn_v2_page.url
+        await parent.click()
+        assert reborn_v2_page.url == before_collapse_url
+        await expect(parent).to_have_attribute("aria-expanded", "false")
+        await expect(children).to_have_count(0)
+
+        await parent.click()
+        await expect(parent).to_have_attribute("aria-expanded", "true")
+        await expect(children.first).to_be_visible()
 
 
 async def test_reborn_v2_messages_omit_identity_labels(reborn_v2_page):
@@ -2923,6 +3431,7 @@ async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},
@@ -3273,6 +3782,7 @@ async def test_reborn_v2_loading_older_messages_preserves_viewport(
         await fulfill_json(
             route,
             {
+                "session_channel_extension_id": "web-app",
                 "tenant_id": "reborn-v2-e2e",
                 "user_id": USER_ID,
                 "capabilities": {},

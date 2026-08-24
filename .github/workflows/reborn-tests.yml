@@ -84,6 +84,7 @@ jobs:
   changes:
     name: Detect Reborn test scope
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       plan_mode: ${{ steps.plan.outputs.plan_mode }}
       run_crate_tests: ${{ steps.plan.outputs.run_crate_tests }}
@@ -210,6 +211,15 @@ jobs:
       OPENAI_API_KEY: ""
       RUSTC_BOOTSTRAP: "1"
       RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold -Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
+      # The deep composed-runtime futures (turn -> capability -> skills script
+      # mount, and the channel admission chain) overflow the 2 MiB default
+      # test-thread stack on this lane's Linux codegen — first observed as a
+      # SIGABRT in composition-core's
+      # `the_model_runs_a_skills_script_from_the_workdir_the_body_advertises`.
+      # 8 MiB matches the integration-lane headroom below; the deepest
+      # subtrees stay Box::pin'd at their seams — this is headroom, not a
+      # substitute.
+      RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
       max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}
@@ -650,14 +660,19 @@ jobs:
           shared-key: reborn-sandbox-docker-tests
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
-      - name: Build Python sandbox worker
-        run: docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
+      - name: Prepare sandbox worker and proxy images
+        run: |
+          docker pull ironsh/iron-proxy@sha256:c4628019c24f4cc8d77564a26b7c9cedb00accee6f93d06270e85fb8f9c6a7da
+          docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
 
       - name: Verify production local-sandbox profile wiring
         run: cargo test -p ironclaw local_sandbox_profile_selects_docker_process_binding_when_required -- --nocapture
 
       - name: Run real-Docker user sandbox contract
-        run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture
+        # Each test creates a transport that reconciles the daemon-wide user-container
+        # inventory. Run this shared-Docker contract serially so one test's sweeper
+        # cannot adopt and stop another test's intentionally active container.
+        run: cargo test -p ironclaw_sandbox --test user_sandbox_docker_live -- --nocapture --test-threads=1
 
       - name: Run full-turn sandbox shell integration
         run: cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
@@ -1026,6 +1041,15 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
+      # This job runs `reborn_qa_recorded_behavior`, whose own module docs
+      # require this value: its replay tests build a full Reborn runtime and
+      # drive whole turns, and the combined debug async frames sit within a few
+      # percent of whatever stack they are given. Measured on this suite: it
+      # overflows below 2 MiB and clears at 2 MiB, i.e. the libtest default is
+      # the boundary itself, so any layout shift decides it. The root-tests and
+      # group-suite jobs already set this for the same pathology; this job was
+      # the one that ran the documented binary without it.
+      RUST_MIN_STACK: "67108864"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1117,6 +1141,7 @@ jobs:
   reborn-tests:
     name: Tests (Reborn)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     needs:
       - changes

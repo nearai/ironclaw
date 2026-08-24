@@ -5,9 +5,10 @@
 //! The generic ingress router executes the manifest's verification recipe (HMAC
 //! signature or shared-secret header, replay window, constant-time compare,
 //! body bounds) and only then mints the evidence below. The
-//! `ChannelAdapter::inbound` call that follows is pure parsing: a malicious
-//! adapter can lie about content, but holding no grant it cannot forge
-//! verification or scope.
+//! `ChannelIngress::receive` call that follows may translate the verified
+//! payload through manifest-restricted egress to complete attachments/context.
+//! A malicious package can lie about content, but holding no grant it cannot
+//! forge verification, scope, or wider network authority.
 //!
 //! ## The seal
 //!

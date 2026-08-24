@@ -659,13 +659,10 @@ fn with_binary_host_extension_bindings_from_bundles(
     first_party_bundles: Vec<FirstPartyPackageBundle>,
 ) -> anyhow::Result<RebornHostBindings> {
     crate::first_party::assert_first_party_bundles_present(&first_party_bundles)?;
-    let channel_extensions = native_extensions::bundled_channel_extensions();
-    let mut services_input = services_input
-        .with_channel_extension_bindings(channel_extensions.bindings)
-        .with_web_push_runtime_slot(channel_extensions.web_push_runtime);
-    if let Some(subject) = web_push_vapid_subject_from_env() {
-        services_input = services_input.with_web_push_vapid_subject(subject);
-    }
+    let channel_extensions =
+        native_extensions::bundled_channel_extensions(web_app_vapid_subject_from_env());
+    let services_input =
+        services_input.with_channel_extension_bindings(channel_extensions.bindings);
     Ok(services_input
         .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
         .with_first_party_bundles(first_party_bundles)
@@ -680,7 +677,7 @@ fn with_binary_host_extension_bindings_from_bundles(
 /// back to a stable placeholder). Reads the same env var the serve command
 /// validates for OAuth callbacks; a malformed value degrades to the
 /// placeholder rather than failing boot.
-fn web_push_vapid_subject_from_env() -> Option<String> {
+fn web_app_vapid_subject_from_env() -> Option<String> {
     let raw = std::env::var("IRONCLAW_REBORN_WEBUI_BASE_URL").ok()?; // silent-ok: optional env-derived contact URI, placeholder fallback is safe
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.starts_with("https://") && trimmed.len() > "https://".len() {
@@ -1622,6 +1619,22 @@ fn runner_settings(
                     "config file [runner].heartbeat_interval_secs must be greater than 0"
                 );
             }
+            // A heartbeat costs interval + timeout (the supervisor passes the
+            // interval as the timeout), so one attempt costs 2 * interval. Past
+            // half the process lease TTL the lease can expire before the
+            // worker even records its first failure; the scheduler clamps such
+            // intervals to its lease-derived bound, but an operator's explicit
+            // configuration should be rejected, not silently rewritten.
+            let max_runner_heartbeat_interval_secs =
+                ironclaw_composition::MAX_HEARTBEAT_INTERVAL_WITHIN_LEASE.as_secs();
+            if secs > max_runner_heartbeat_interval_secs {
+                anyhow::bail!(
+                    "config file [runner].heartbeat_interval_secs must not exceed {} seconds \
+                     so a heartbeat attempt and its failure window fit inside the process \
+                     lease TTL",
+                    max_runner_heartbeat_interval_secs,
+                );
+            }
             settings.heartbeat_interval = Duration::from_secs(secs);
         }
         if let Some(ms) = runner.poll_interval_ms {
@@ -1649,6 +1662,10 @@ fn runner_settings(
             runner.max_concurrent_conversation_runs,
             settings.max_concurrent_conversation_runs,
         );
+        settings.max_concurrent_unbound_runs = resolve_concurrency_cap(
+            runner.max_concurrent_unbound_runs,
+            settings.max_concurrent_unbound_runs,
+        );
     }
 
     // Layer 1: environment-variable overrides (highest precedence, applied
@@ -1670,6 +1687,10 @@ fn runner_settings(
     apply_cap_env_override(
         "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS",
         &mut settings.max_concurrent_conversation_runs,
+    )?;
+    apply_cap_env_override(
+        "IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS",
+        &mut settings.max_concurrent_unbound_runs,
     )?;
 
     // Validate the final, fully-merged worker count once (env override has the
@@ -1871,12 +1892,13 @@ mod tests {
         let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section(
-            "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\n",
+            "[runner]\nmax_concurrent_runs_per_user = 0\nmax_concurrent_trigger_runs = 0\nmax_concurrent_conversation_runs = 0\nmax_concurrent_unbound_runs = 0\n",
         );
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
         assert!(settings.max_concurrent_runs_per_user.is_none());
         assert!(settings.max_concurrent_trigger_runs.is_none());
         assert!(settings.max_concurrent_conversation_runs.is_none());
+        assert!(settings.max_concurrent_unbound_runs.is_none());
     }
 
     #[test]
@@ -1884,7 +1906,7 @@ mod tests {
         let _lock = lock_runtime_env();
         let _env = clear_runner_env();
         let cfg = parse_runner_section(
-            "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\n",
+            "[runner]\nmax_concurrent_runs_per_user = 3\nmax_concurrent_trigger_runs = 5\nmax_concurrent_conversation_runs = 2\nmax_concurrent_unbound_runs = 7\n",
         );
         let settings = runner_settings(Some(&cfg)).expect("should succeed");
         assert_eq!(
@@ -1896,20 +1918,25 @@ mod tests {
             Some(5)
         );
         assert_eq!(
+            settings.max_concurrent_unbound_runs.map(|v| v.get()),
+            Some(7)
+        );
+        assert_eq!(
             settings.max_concurrent_conversation_runs.map(|v| v.get()),
             Some(2)
         );
     }
 
-    /// Clear all four runner env knobs so an ambient value in the dev/CI
+    /// Clear all five runner env knobs so an ambient value in the dev/CI
     /// environment cannot leak into a test asserting config-file/default
     /// behavior. Returns the guards; keep them alive for the test body.
-    fn clear_runner_env() -> [EnvGuard; 4] {
+    fn clear_runner_env() -> [EnvGuard; 5] {
         [
             EnvGuard::clear("IRONCLAW_REBORN_RUNNER_WORKER_COUNT"),
             EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
             EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS"),
             EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_CONVERSATION_RUNS"),
+            EnvGuard::clear("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS"),
         ]
     }
 
@@ -2292,6 +2319,29 @@ api_key_env = "NEARAI_API_KEY"
             err.to_string()
                 .contains("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER"),
             "error should name the offending var: {err}"
+        );
+    }
+
+    #[test]
+    fn runner_env_unbound_runs_zero_means_unlimited_and_positive_overrides() {
+        // The unbound cap uses the same zero-sentinel contract as every
+        // runner cap: a positive env value binds it, `0` lifts it entirely
+        // (over the built-in default of 4).
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        {
+            let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS", "9");
+            let settings = runner_settings(None).expect("should succeed");
+            assert_eq!(
+                settings.max_concurrent_unbound_runs.map(|v| v.get()),
+                Some(9)
+            );
+        }
+        let _u = EnvGuard::set("IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_UNBOUND_RUNS", "0");
+        let settings = runner_settings(None).expect("should succeed");
+        assert!(
+            settings.max_concurrent_unbound_runs.is_none(),
+            "zero must mean unlimited, overriding the default cap"
         );
     }
 

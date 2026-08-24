@@ -24,8 +24,8 @@ use ironclaw_approvals::{
 };
 use ironclaw_authorization::{CapabilityLeaseStorePort, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
-    CapabilityHost, CapabilityInvocationError, CapabilityInvocationResult,
-    CapabilityObligationHandler, CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityHost, CapabilityInvocationError, CapabilityObligationHandler, CapabilitySpawnRequest,
+    CapabilitySpawnResult,
 };
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
@@ -33,7 +33,7 @@ use ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID;
 use ironclaw_host_api::{
     approval::sha256_digest_token,
     decision::{DenyReason, RuntimeCredentialAuthRequirement},
-    dispatch::CapabilityDispatcher,
+    dispatch::{CapabilityDispatcher, provider_diagnostic_model_cause},
     ids::{ApprovalRequestId, CapabilityId, InvocationId, SecretHandle},
     resource::ResourceScope,
     result_meta::FailureKind,
@@ -51,6 +51,10 @@ use ironclaw_processes::{
 use ironclaw_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_secrets::SecretStorePort;
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
+
+use crate::capability_response_processor::{
+    CapabilityResponseContext, InlineInvocationMode, process_capability_response,
+};
 
 fn trace_capability_latency_ok(
     operation: &'static str,
@@ -101,12 +105,11 @@ fn trace_capability_latency_error<E: ?Sized>(
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
-    RuntimeAuthGate, RuntimeAuthResume, RuntimeBackendHealth, RuntimeBlockedReason,
-    RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeGateId,
-    RuntimeInvocation, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, obligations::secret_owner_scope,
-    surface::CapabilityCatalog,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalResume, RuntimeAuthGate,
+    RuntimeAuthResume, RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeGateId, RuntimeInvocation, RuntimeStatusRequest,
+    RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    obligations::secret_owner_scope, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -407,35 +410,24 @@ impl HostRuntime for DefaultHostRuntime {
         // run inside the capability kernel's `authorize()` fold (§5.2.7/§5.3.2),
         // reading `HostPolicyFacts` (impl'd by this runtime). A missing credential
         // surfaces as `CapabilityInvocationError::AuthorizationRequiresAuth`, which
-        // `translate_invocation_error` maps back to `auth_required_outcome` (same
-        // gate id, same fields). The kernel orders credential-before-approval and
-        // adopts the first persistent grant that flips the decision to Allow.
+        // the response processor maps back to `auth_required_outcome` (same gate
+        // id, same fields). The kernel orders credential-before-approval and adopts
+        // the first persistent grant that flips the decision to Allow.
 
         let host = self.capability_host(&registry);
 
         let dispatch_started_at = live_latency_started_at();
-        match host
+        let response = host
             .invoke_json(context, capability_id.clone(), estimate, input)
-            .await
-        {
-            Ok(result) => {
+            .await;
+        match &response {
+            Ok(_) => {
                 trace_capability_latency_ok(
                     "capability_host_invoke_json",
                     &capability_id,
                     &scope,
                     dispatch_started_at,
                 );
-                trace_capability_latency_ok(
-                    "invoke_capability",
-                    &capability_id,
-                    &scope,
-                    total_started_at,
-                );
-                Ok(completed_or_output_violation_outcome(
-                    result,
-                    capability_id,
-                    &registry,
-                ))
             }
             Err(error) => {
                 trace_capability_latency_error(
@@ -447,36 +439,39 @@ impl HostRuntime for DefaultHostRuntime {
                 );
                 tracing::debug!(
                     capability_id = %capability_id,
-                    error_kind = failure_kind_from(&error).as_str(),
+                    error_kind = failure_kind_from(error).as_str(),
                     "capability invocation failed"
                 );
-                let translated = self
-                    .translate_invocation_error(
-                        &registry,
-                        error,
-                        capability_id.clone(),
-                        scope.clone(),
-                        invocation_id,
-                    )
-                    .await;
-                match &translated {
-                    Ok(_) => trace_capability_latency_ok(
-                        "invoke_capability",
-                        &capability_id,
-                        &scope,
-                        total_started_at,
-                    ),
-                    Err(error) => trace_capability_latency_error(
-                        "invoke_capability",
-                        &capability_id,
-                        &scope,
-                        total_started_at,
-                        error,
-                    ),
-                }
-                translated
             }
         }
+        let processed = process_capability_response(
+            self,
+            CapabilityResponseContext {
+                registry: &registry,
+                capability_id: capability_id.clone(),
+                scope: &scope,
+                invocation_id,
+                mode: InlineInvocationMode::Fresh,
+            },
+            response,
+        )
+        .await;
+        match &processed {
+            Ok(_) => trace_capability_latency_ok(
+                "invoke_capability",
+                &capability_id,
+                &scope,
+                total_started_at,
+            ),
+            Err(error) => trace_capability_latency_error(
+                "invoke_capability",
+                &capability_id,
+                &scope,
+                total_started_at,
+                error,
+            ),
+        }
+        processed
     }
 
     async fn spawn_capability(
@@ -534,12 +529,16 @@ impl HostRuntime for DefaultHostRuntime {
                     error_kind = failure_kind_from(&error).as_str(),
                     "capability spawn failed"
                 );
-                self.translate_invocation_error(
-                    &registry,
-                    error,
-                    capability_id,
-                    scope,
-                    invocation_id,
+                process_capability_response(
+                    self,
+                    CapabilityResponseContext {
+                        registry: &registry,
+                        capability_id,
+                        scope: &scope,
+                        invocation_id,
+                        mode: InlineInvocationMode::Fresh,
+                    },
+                    Err(error),
                 )
                 .await
             }
@@ -562,8 +561,13 @@ impl HostRuntime for DefaultHostRuntime {
         // which fails the blocked run on a trust rejection (replacing the former
         // host_runtime pre-authorization + `context.trust` stamp).
         let registry = self.registry.snapshot();
+        // `context` is moved into `resume_json` below, so `resource_scope` must be
+        // cloned out first. The response processor uses it if a dispatch failure
+        // also needs to transition this resumed invocation to a terminal state.
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
-        match host
+        let response = host
             .resume_json(
                 context,
                 approval_request_id,
@@ -571,43 +575,26 @@ impl HostRuntime for DefaultHostRuntime {
                 estimate,
                 input,
             )
-            .await
-        {
-            Ok(result) => Ok(completed_or_output_violation_outcome(
-                result,
-                capability_id,
-                &registry,
-            )),
-            // Resume must not start a second approval loop: if the lower layer ever returns
-            // AuthorizationRequiresApproval here, surface it as a failed resume instead of
-            // translating it back into RuntimeCapabilityOutcome::ApprovalRequired.
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    error_kind = failure_kind_from(&error).as_str(),
-                    "capability resume failed"
-                );
-                match error {
-                    CapabilityInvocationError::AuthorizationRequiresAuth {
-                        capability,
-                        required_secrets,
-                        credential_requirements,
-                    } => Ok(auth_required_outcome(
-                        capability,
-                        required_secrets,
-                        credential_requirements,
-                    )),
-                    other => {
-                        let is_standard_write =
-                            capability_is_standard_write(&registry, &capability_id);
-                        Ok(RuntimeCapabilityOutcome::Failed(
-                            failure_from(other, capability_id)
-                                .with_is_standard_write(is_standard_write),
-                        ))
-                    }
-                }
-            }
+            .await;
+        if let Err(error) = &response {
+            tracing::debug!(
+                capability_id = %capability_id,
+                error_kind = failure_kind_from(error).as_str(),
+                "capability resume failed"
+            );
         }
+        process_capability_response(
+            self,
+            CapabilityResponseContext {
+                registry: &registry,
+                capability_id,
+                scope: &scope,
+                invocation_id,
+                mode: InlineInvocationMode::ApprovalResume,
+            },
+            response,
+        )
+        .await
     }
 
     async fn auth_resume_capability(
@@ -631,8 +618,13 @@ impl HostRuntime for DefaultHostRuntime {
         // replacing the former host_runtime pre-authorization + `context.trust`
         // stamp.
         let registry = self.registry.snapshot();
+        // Same clone-before-move as `resume_capability` above: `context` is
+        // consumed by `auth_resume_json`, while the response processor uses the
+        // scope if a dispatch failure must transition this resumed invocation.
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
-        match host
+        let response = host
             .auth_resume_json(
                 context,
                 capability_id.clone(),
@@ -640,40 +632,26 @@ impl HostRuntime for DefaultHostRuntime {
                 input,
                 approval_request_id,
             )
-            .await
-        {
-            Ok(result) => Ok(completed_or_output_violation_outcome(
-                result,
-                capability_id,
-                &registry,
-            )),
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    error_kind = failure_kind_from(&error).as_str(),
-                    "capability auth-resume failed"
-                );
-                match error {
-                    CapabilityInvocationError::AuthorizationRequiresAuth {
-                        capability,
-                        required_secrets,
-                        credential_requirements,
-                    } => Ok(auth_required_outcome(
-                        capability,
-                        required_secrets,
-                        credential_requirements,
-                    )),
-                    other => {
-                        let is_standard_write =
-                            capability_is_standard_write(&registry, &capability_id);
-                        Ok(RuntimeCapabilityOutcome::Failed(
-                            failure_from(other, capability_id)
-                                .with_is_standard_write(is_standard_write),
-                        ))
-                    }
-                }
-            }
+            .await;
+        if let Err(error) = &response {
+            tracing::debug!(
+                capability_id = %capability_id,
+                error_kind = failure_kind_from(error).as_str(),
+                "capability auth-resume failed"
+            );
         }
+        process_capability_response(
+            self,
+            CapabilityResponseContext {
+                registry: &registry,
+                capability_id,
+                scope: &scope,
+                invocation_id,
+                mode: InlineInvocationMode::AuthResume,
+            },
+            response,
+        )
+        .await
     }
 
     async fn decline_auth_capability(
@@ -736,6 +714,8 @@ impl HostRuntime for DefaultHostRuntime {
         // replacing the former host_runtime pre-authorization + `context.trust`
         // stamp.
         let registry = self.registry.snapshot();
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
         let host = self.capability_host(&registry);
         match host
             .resume_spawn_json(
@@ -756,28 +736,18 @@ impl HostRuntime for DefaultHostRuntime {
                     error_kind = failure_kind_from(&error).as_str(),
                     "capability spawn resume failed"
                 );
-                // Mirror resume_capability: AuthorizationRequiresAuth must return
-                // AuthRequired, not Failed. Without this arm a spawned capability
-                // that needs re-auth after an approval resume silently fails.
-                match error {
-                    CapabilityInvocationError::AuthorizationRequiresAuth {
-                        capability,
-                        required_secrets,
-                        credential_requirements,
-                    } => Ok(auth_required_outcome(
-                        capability,
-                        required_secrets,
-                        credential_requirements,
-                    )),
-                    other => {
-                        let is_standard_write =
-                            capability_is_standard_write(&registry, &capability_id);
-                        Ok(RuntimeCapabilityOutcome::Failed(
-                            failure_from(other, capability_id)
-                                .with_is_standard_write(is_standard_write),
-                        ))
-                    }
-                }
+                process_capability_response(
+                    self,
+                    CapabilityResponseContext {
+                        registry: &registry,
+                        capability_id,
+                        scope: &scope,
+                        invocation_id,
+                        mode: InlineInvocationMode::ApprovalResume,
+                    },
+                    Err(error),
+                )
+                .await
             }
         }
     }
@@ -1025,96 +995,33 @@ impl DefaultHostRuntime {
         ))))
     }
 
-    async fn translate_invocation_error(
-        &self,
-        registry: &ExtensionRegistry,
-        error: CapabilityInvocationError,
-        capability_id: CapabilityId,
-        scope: ResourceScope,
-        invocation_id: InvocationId,
-    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        match error {
-            CapabilityInvocationError::AuthorizationRequiresApproval { capability } => {
-                match self.lookup_approval_request_id(&scope, invocation_id).await {
-                    Ok(Some(approval_request_id)) => Ok(
-                        RuntimeCapabilityOutcome::ApprovalRequired(RuntimeApprovalGate {
-                            approval_request_id,
-                            capability_id: capability,
-                            reason: RuntimeBlockedReason::ApprovalRequired,
-                        }),
-                    ),
-                    Ok(None) => Ok(RuntimeCapabilityOutcome::Failed(
-                        RuntimeCapabilityFailure::new(
-                            capability,
-                            FailureKind::Authorization,
-                            Some(
-                                "approval required but no approval request was persisted"
-                                    .to_string(),
-                            ),
-                        ),
-                    )),
-                    Err(host_error) => {
-                        // Surface persistence outages as Unavailable rather than
-                        // pretending the approval was never persisted; otherwise a
-                        // transient run-state failure looks indistinguishable from
-                        // the (separately bug-prone) cap-host-skipped-persist path.
-                        tracing::warn!(
-                            capability_id = %capability,
-                            error = %host_error,
-                            "approval request lookup failed; surfacing as host runtime unavailability"
-                        );
-                        Err(host_error)
-                    }
-                }
-            }
-            CapabilityInvocationError::AuthorizationRequiresAuth {
-                capability,
-                required_secrets,
-                credential_requirements,
-            } => Ok(auth_required_outcome(
-                capability,
-                required_secrets,
-                credential_requirements,
-            )),
-            other => {
-                let should_fail_dispatch_run =
-                    matches!(other, CapabilityInvocationError::Dispatch { .. });
-                let is_standard_write = capability_is_standard_write(registry, &capability_id);
-                let failure =
-                    failure_from(other, capability_id).with_is_standard_write(is_standard_write);
-                if should_fail_dispatch_run {
-                    self.fail_dispatch_run(&failure, &scope, invocation_id)
-                        .await;
-                }
-                Ok(RuntimeCapabilityOutcome::Failed(failure))
-            }
-        }
-    }
-
-    async fn fail_dispatch_run(
+    pub(super) async fn fail_dispatch_run(
         &self,
         failure: &RuntimeCapabilityFailure,
         scope: &ResourceScope,
         invocation_id: InvocationId,
-    ) {
+    ) -> Result<(), HostRuntimeError> {
         let Some(invocation_state) = self.invocation_state.as_ref() else {
-            return;
+            return Ok(());
         };
-        if let Err(error) = invocation_state
+        let result = invocation_state
             .fail(scope, invocation_id, "Dispatch".to_string())
             .await
-        {
+            .map(|_| ())
+            .map_err(unavailable_from_invocation_state);
+        if let Err(error) = &result {
             tracing::warn!(
                 invocation_id = %invocation_id,
                 capability_id = %failure.capability_id,
                 failure_kind = failure.kind.as_str(),
-                transition_error = %unavailable_from_invocation_state(error),
+                transition_error = %error,
                 "terminal dispatch failure could not transition run state; failure is returned to caller",
             );
         }
+        result
     }
 
-    async fn lookup_approval_request_id(
+    pub(super) async fn lookup_approval_request_id(
         &self,
         scope: &ResourceScope,
         invocation_id: InvocationId,
@@ -1265,6 +1172,7 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
 fn unavailable_from_invocation_state(error: ProcessInvocationError) -> HostRuntimeError {
     let reason = match error {
         ProcessInvocationError::UnknownInvocation { .. } => "process invocation not found",
+        ProcessInvocationError::LeaseLost { .. } => "process invocation lease lost or expired",
         ProcessInvocationError::InvocationAlreadyExists { .. } => {
             "process invocation already exists"
         }
@@ -1373,74 +1281,16 @@ fn runtime_kind_rank(runtime: RuntimeKind) -> u8 {
     }
 }
 
-fn completed_outcome_from(
-    result: CapabilityInvocationResult,
-    capability_id: CapabilityId,
-) -> RuntimeCapabilityCompleted {
-    RuntimeCapabilityCompleted {
-        capability_id,
-        output: result.dispatch.output,
-        display_preview: result.dispatch.display_preview,
-        usage: result.dispatch.usage,
-    }
-}
-
-/// Single choke point for every path that turns a successful capability
-/// dispatch into a `Completed` outcome. `completed_outcome_from` above has
-/// exactly three callers — `invoke_capability`, `resume_capability`, and
-/// `auth_resume_capability` (the only resume paths that can complete a
-/// capability rather than suspend or fail it) — and all three call this
-/// function instead so the standard-op output check cannot be skipped on one
-/// entry path while covered on another (see `.claude/rules/review-discipline.md`).
-///
-/// A capability bound to a standard messaging op (`descriptor.standard_op`)
-/// has its dispatch output checked against that op's canonical output schema
-/// before `Completed` is allowed to stick. A violation becomes a
-/// model-visible `Failed` outcome instead, using the same
-/// [`FailureKind::InvalidResult`] kind wasm `InvalidResult` dispatch
-/// errors already produce (`failure_kind_from` /
-/// `RuntimeDispatchErrorKind::InvalidResult` below), so the model can retry
-/// or report rather than the run completing with a shape no downstream
-/// consumer validated. Bespoke capabilities (`standard_op: None`) and an
-/// unknown capability id (descriptor lookup miss — already errors elsewhere)
-/// are returned untouched.
-fn completed_or_output_violation_outcome(
-    result: CapabilityInvocationResult,
-    capability_id: CapabilityId,
-    registry: &ExtensionRegistry,
-) -> RuntimeCapabilityOutcome {
-    let standard_op = registry
-        .get_capability(&capability_id)
-        .and_then(|descriptor| descriptor.standard_op);
-    let completed = completed_outcome_from(result, capability_id.clone());
-
-    if let Some(op) = standard_op
-        && let Some(issues) =
-            crate::standard_op_output::standard_op_output_violations(op, &completed.output)
-    {
-        return RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
-            capability_id,
-            FailureKind::InvalidResult,
-            Some(format!(
-                "standard op output failed validation: {}",
-                issues.join("; ")
-            )),
-        ));
-    }
-
-    RuntimeCapabilityOutcome::Completed(Box::new(completed))
-}
-
 /// Whether `capability_id` resolves (in `registry`) to a capability bound to
 /// a standard messaging WRITE op. Mirrors
-/// [`completed_or_output_violation_outcome`]'s own descriptor lookup just
-/// above (same registry, same `descriptor.standard_op` field) — the retry
+/// [`crate::capability_response_processor::completed_or_output_violation_outcome`]'s
+/// own descriptor lookup (same registry, same `descriptor.standard_op` field) — the retry
 /// carve-out policy (pre-merge amendment W1,
 /// [`crate::capability_failure_disposition`]) needs the same fact that choke
 /// point already resolves for output validation, at the failure-construction
 /// call sites instead of the success-completion one. An unknown capability id
 /// (descriptor lookup miss) resolves to `false`, same as a bespoke tool.
-fn capability_is_standard_write(
+pub(super) fn capability_is_standard_write(
     registry: &ExtensionRegistry,
     capability_id: &CapabilityId,
 ) -> bool {
@@ -1508,18 +1358,22 @@ pub(crate) fn capability_credential_requirements(
     (required_secrets, credential_requirements)
 }
 
-fn auth_required_outcome(
+pub(super) fn auth_required_outcome(
     capability_id: CapabilityId,
     required_secrets: Vec<SecretHandle>,
     credential_requirements: Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
+    model_visible_cause: Option<Box<ironclaw_host_api::dispatch::ProviderDiagnostic>>,
 ) -> RuntimeCapabilityOutcome {
-    RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
-        gate_id: stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
-        capability_id,
-        reason: RuntimeBlockedReason::AuthRequired,
-        required_secrets,
-        credential_requirements,
-    })
+    RuntimeCapabilityOutcome::AuthRequired(
+        RuntimeAuthGate::new(
+            stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
+            capability_id,
+            RuntimeBlockedReason::AuthRequired,
+            required_secrets,
+            credential_requirements,
+        )
+        .with_provider_diagnostic(model_visible_cause),
+    )
 }
 
 fn stable_auth_gate_id(
@@ -1582,6 +1436,7 @@ fn stable_setup_token(
         Setup::ManualToken => "manual_token".to_string(),
         Setup::OAuth { scopes } => format!("oauth:{}", canonical_scope_list(scopes)),
         Setup::Pairing => "pairing".to_string(),
+        Setup::DeviceLink => "device_link".to_string(),
         Setup::Retired => "retired".to_string(),
     }
 }
@@ -1729,7 +1584,7 @@ fn model_visible_cause_scrubber() -> &'static ironclaw_safety::LeakDetector {
     &DETECTOR
 }
 
-fn failure_from(
+pub(super) fn failure_from(
     error: CapabilityInvocationError,
     capability_id: CapabilityId,
 ) -> RuntimeCapabilityFailure {
@@ -1790,12 +1645,24 @@ fn bounded_diagnostic_text(value: &str) -> String {
 
 /// The raw descriptive cause for the model-visible Diagnostic channel, before
 /// any public-surface gating.
+///
+/// A `Some(diagnostic)` with every field empty (`provider_diagnostic_model_cause`
+/// renders `None`) falls through to `safe_summary` rather than collapsing the
+/// whole cause to `None` — an empty diagnostic must not hide an available
+/// safe summary.
 fn raw_failure_cause(error: &CapabilityInvocationError) -> Option<String> {
-    use CapabilityInvocationError::Dispatch;
-    match error {
-        Dispatch { safe_summary, .. } => safe_summary.clone(),
-        _ => None,
-    }
+    let CapabilityInvocationError::Dispatch {
+        provider_diagnostic,
+        safe_summary,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    provider_diagnostic
+        .as_deref()
+        .and_then(provider_diagnostic_model_cause)
+        .or_else(|| safe_summary.clone())
 }
 
 /// Returns a stable, redacted summary message for a capability invocation
@@ -1947,7 +1814,64 @@ mod tests {
             kind,
             safe_summary: None,
             detail: None,
+            provider_diagnostic: None,
         }
+    }
+
+    #[test]
+    fn raw_failure_cause_falls_back_to_safe_summary_when_diagnostic_renders_empty() {
+        // `provider_diagnostic` is `Some`, but every field is `None`, so
+        // `provider_diagnostic_model_cause` renders `None` for it — the empty
+        // diagnostic must not hide an available safe summary.
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("operation failed".to_string()),
+            detail: None,
+            provider_diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: None,
+                retry_after: None,
+            })),
+        };
+
+        assert_eq!(
+            raw_failure_cause(&error),
+            Some("operation failed".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_failure_cause_prefers_non_empty_diagnostic_over_safe_summary() {
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("operation failed".to_string()),
+            detail: None,
+            provider_diagnostic: Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "provider says no",
+                )),
+                retry_after: None,
+            })),
+        };
+
+        assert_eq!(
+            raw_failure_cause(&error),
+            Some("provider message: provider says no".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_failure_cause_falls_back_to_safe_summary_when_diagnostic_absent() {
+        let error = dispatch(DispatchFailureKind::Runtime(
+            RuntimeDispatchErrorKind::OperationFailed,
+        ));
+        let CapabilityInvocationError::Dispatch { safe_summary, .. } = &error else {
+            unreachable!("dispatch() always builds Dispatch");
+        };
+        assert!(safe_summary.is_none());
+
+        assert_eq!(raw_failure_cause(&error), None);
     }
 
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
@@ -1967,9 +1891,30 @@ mod tests {
         let secrets = vec![SecretHandle::new("notion-token").unwrap()];
         let requirements = vec![auth_requirement(&["read", "write"])];
 
-        let first =
-            auth_required_outcome(capability_id.clone(), secrets.clone(), requirements.clone());
-        let second = auth_required_outcome(capability_id, secrets, requirements);
+        let first = auth_required_outcome(
+            capability_id.clone(),
+            secrets.clone(),
+            requirements.clone(),
+            Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "Bad credentials",
+                )),
+                retry_after: None,
+            })),
+        );
+        let second = auth_required_outcome(
+            capability_id,
+            secrets,
+            requirements,
+            Some(Box::new(ironclaw_host_api::dispatch::ProviderDiagnostic {
+                code: None,
+                message: Some(ironclaw_host_api::dispatch::UntrustedProviderMessage::new(
+                    "different provider wording",
+                )),
+                retry_after: None,
+            })),
+        );
 
         let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
             panic!("expected auth gate");
@@ -1978,6 +1923,15 @@ mod tests {
             panic!("expected auth gate");
         };
         assert_eq!(first_gate.gate_id, second_gate.gate_id);
+        assert_eq!(first_gate, second_gate);
+        assert_eq!(
+            first_gate
+                .provider_diagnostic()
+                .and_then(|diagnostic| diagnostic.message.as_ref())
+                .map(|message| message.as_str()),
+            Some("Bad credentials")
+        );
+        assert!(!format!("{first_gate:?}").contains("Bad credentials"));
         assert!(
             first_gate.gate_id.as_str().starts_with("auth-"),
             "gate id should be stable and auth-specific: {}",
@@ -1987,8 +1941,10 @@ mod tests {
 
     #[test]
     fn auth_required_outcome_changes_gate_when_requirements_change() {
-        let first = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["read"])]);
-        let second = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["write"])]);
+        let first =
+            auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["read"])], None);
+        let second =
+            auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["write"])], None);
 
         let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
             panic!("expected auth gate");
@@ -2018,7 +1974,7 @@ mod tests {
         };
         let gate_id = |setup: Setup| {
             let RuntimeCapabilityOutcome::AuthRequired(gate) =
-                auth_required_outcome(cap(), Vec::new(), vec![requirement_with(setup)])
+                auth_required_outcome(cap(), Vec::new(), vec![requirement_with(setup)], None)
             else {
                 panic!("expected auth gate");
             };
@@ -2073,7 +2029,7 @@ mod tests {
                 provider_scopes: scopes,
             };
             let RuntimeCapabilityOutcome::AuthRequired(gate) =
-                auth_required_outcome(cap(), Vec::new(), vec![requirement])
+                auth_required_outcome(cap(), Vec::new(), vec![requirement], None)
             else {
                 panic!("expected auth gate");
             };
@@ -2360,6 +2316,7 @@ mod tests {
                     .to_string(),
             ),
             detail: None,
+            provider_diagnostic: None,
         };
 
         assert_eq!(
@@ -2381,6 +2338,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
             safe_summary: Some(raw),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
@@ -2415,6 +2373,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
             safe_summary: Some("trigger_create input failed validation".to_string()),
             detail: None,
+            provider_diagnostic: None,
         };
         assert_eq!(
             sanitized_failure_message(&clean).as_deref(),
@@ -2437,6 +2396,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw.clone()),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(error, cap());
@@ -2470,6 +2430,7 @@ mod tests {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor),
             safe_summary: Some(raw),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(error, cap());
@@ -2511,6 +2472,7 @@ mod tests {
                     .to_string(),
             ),
             detail: None,
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(error, cap());
@@ -2537,6 +2499,7 @@ mod tests {
                     issues: vec![issue.clone()],
                 },
             ),
+            provider_diagnostic: None,
         };
 
         let failure = failure_from(
@@ -3119,10 +3082,8 @@ output_schema_ref = "schemas/w1fixture/bespoke.output.v1.json"
     }
 
     /// End-to-end proof (the actual regression this wave fixes), composed
-    /// exactly as the five `other =>` call sites in this file now are
-    /// (`translate_invocation_error`, `resume_capability`,
-    /// `auth_resume_capability`, `decline_auth_capability`,
-    /// `resume_spawn_capability`): resolve `is_standard_write` from a REAL
+    /// exactly as the central response processor and the remaining spawn/decline
+    /// paths do: resolve `is_standard_write` from a REAL
     /// registry built by parsing [`W1_STANDARD_OP_MIX_MANIFEST`], thread it
     /// through `failure_from(..).with_is_standard_write(..)`, and read
     /// `.disposition()`. A Dispatch error whose kind maps to a retryable
@@ -3138,6 +3099,7 @@ output_schema_ref = "schemas/w1fixture/bespoke.output.v1.json"
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Network),
             safe_summary: None,
             detail: None,
+            provider_diagnostic: None,
         };
 
         for (capability_id, expect_retry) in [

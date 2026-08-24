@@ -19,6 +19,7 @@ mod skill_management;
 mod spawn_subagent;
 mod time;
 mod trace_commons;
+mod trigger_creation;
 mod trigger_management;
 
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
@@ -87,7 +88,8 @@ pub use trace_commons::{
 pub use trigger_management::TriggerManagementClock;
 pub use trigger_management::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TRIGGER_RUN_CAPABILITY_ID,
+    TriggerCreateHook,
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
@@ -131,6 +133,8 @@ pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
 pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
 pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
+pub const DOCUMENT_EDIT_CAPABILITY_ID: &str = "builtin.document_edit";
+pub const HTML_TO_PDF_CAPABILITY_ID: &str = "builtin.html_to_pdf";
 
 // `builtin.shell` is the only built-in first-party handler that directly
 // requires a RuntimeProcessPort. `builtin.spawn_subagent` declares
@@ -159,7 +163,7 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
     CodingCapabilityMetadata {
         id: READ_FILE_CAPABILITY_ID,
         kind: CodingCapabilityKind::ReadFile,
-        description: "Read text files, and extract text from supported document files, through scoped mounts with v1 read_file output shape",
+        description: "Read text files; return DOCX, XLSX, and PPTX as structured addressable views; and extract text from formats such as PDF, through scoped mounts with v1 read_file output shape",
         effects: &[EffectKind::ReadFilesystem],
         max_input_bytes: MAX_FIRST_PARTY_INPUT_BYTES,
     },
@@ -196,6 +200,20 @@ const CODING_CAPABILITIES: &[CodingCapabilityMetadata] = &[
         kind: CodingCapabilityKind::ApplyPatch,
         description: "Apply exact/fuzzy search-replace edits through scoped mounts",
         effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: DOCUMENT_EDIT_CAPABILITY_ID,
+        kind: CodingCapabilityKind::DocumentEdit,
+        description: "Apply structural edits to a .docx/.xlsx/.pptx (accept or reject tracked changes, set a cell formula, clone a slide) and write the result to a new file, preserving every part the edit does not touch",
+        effects: &[EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+        max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
+    },
+    CodingCapabilityMetadata {
+        id: HTML_TO_PDF_CAPABILITY_ID,
+        kind: CodingCapabilityKind::HtmlToPdf,
+        description: "Render HTML (headings, paragraphs, lists, emphasis) to a new PDF file; existing PDFs are never edited in place",
+        effects: &[EffectKind::WriteFilesystem],
         max_input_bytes: MAX_APPLY_PATCH_INPUT_BYTES,
     },
 ];
@@ -454,6 +472,25 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
     Ok(registry)
 }
 
+/// Create handlers with the complete trigger service set, including the
+/// shared worker-backed manual-fire path used by `builtin.trigger_run`.
+pub fn builtin_first_party_handlers_with_trigger_services(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry()?;
+    trigger_management::insert_handlers_with_services(
+        &mut registry,
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        manual_fire_runner,
+    )?;
+    Ok(registry)
+}
+
 /// Replace the fail-closed default for the explicit model-delivery capability
 /// with the product-owned delivery service selected by composition.
 pub fn register_outbound_deliver_first_party_handler(
@@ -482,6 +519,25 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend
         trigger_repository,
         trigger_create_hook,
         active_run_lookup,
+    )?;
+    if !process_port_backed_builtins_enabled(process_backend) {
+        remove_process_port_backed_builtin_handlers(&mut registry)?;
+    }
+    Ok(registry)
+}
+
+pub fn builtin_first_party_handlers_with_trigger_services_for_process_backend(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
+    process_backend: ProcessBackendKind,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_handlers_with_trigger_services(
+        trigger_repository,
+        trigger_create_hook,
+        active_run_lookup,
+        manual_fire_runner,
     )?;
     if !process_port_backed_builtins_enabled(process_backend) {
         remove_process_port_backed_builtin_handlers(&mut registry)?;

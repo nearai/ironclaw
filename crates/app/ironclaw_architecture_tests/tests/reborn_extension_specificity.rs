@@ -1,7 +1,7 @@
 //! Concrete-name specificity gate for the unified extension runtime.
 // arch-exempt: large_file, unified extension specificity ratchet stays centralized, plan #6175
 //!
-//! Goal (docs/reborn/extension-runtime/overview.md §1): no generic crate
+//! Goal (docs/internal/reborn/extension-runtime/overview.md §1): no generic crate
 //! contains a concrete product name, vendor id, or vendor API host. The
 //! forbidden vocabulary is **derived from the bundled package inventory**
 //! (`crates/extensions/packages/` plus the test fixture
@@ -117,17 +117,20 @@ fn resolve_listed_path(root: &Path, logical: &str) -> String {
 /// inventory was the twelve extension packages plus the fixtures, and it still
 /// is.
 ///
-/// `web-push` joined 2026-08-08 with the browser-notification channel: the id
-/// is the IETF protocol name (RFC 8030/8291/8292), not a vendor, and the
-/// package is first-party deployment infrastructure for the product's own web
-/// surface. Its protocol mechanics live in the `ironclaw_web_push` domain
-/// crate the same way the provider-neutral memory contract lives in
-/// `ironclaw_memory`, so composition wiring, the product wire DTOs, and the
-/// domain crate legitimately name it. Its manifest's egress hosts (the push
-/// services browsers mint endpoints on) are likewise protocol infrastructure,
-/// not vendor vocabulary — and generic code does not hardcode them anyway:
-/// the enrollment allowlist is read from the resolved manifest at composition.
-const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0", "web-push"];
+/// `web-app` joined 2026-08-08 as the browser-notification channel (then
+/// named `web-push`; renamed by the unified-channel-model train 2026-08-10 —
+/// the retired spelling is pinned at zero in generic code by
+/// `reborn_web_push_vocabulary_retired.rs`): the id names the product's own
+/// web surface, not a vendor, and the package is first-party deployment
+/// infrastructure. Its Web Push protocol mechanics (RFC 8030/8291/8292) live
+/// in the `ironclaw_web_app` domain crate the same way the provider-neutral
+/// memory contract lives in `ironclaw_memory`, so composition wiring, the
+/// product wire DTOs, and the domain crate legitimately name it. Its
+/// manifest's egress hosts (the push services browsers mint endpoints on)
+/// are likewise protocol infrastructure, not vendor vocabulary — and generic
+/// code does not hardcode them anyway: the enrollment allowlist is read from
+/// the resolved manifest at composition.
+const NON_VENDOR_PROVIDER_PACKAGE_DIRS: &[&str] = &["memory-native", "mem0", "web-app"];
 
 /// Directories whose `*/manifest.toml` files form the package inventory the
 /// forbidden vocabulary derives from.
@@ -363,11 +366,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "slack",
         "model-visible Diagnostic scrub knows Slack token shapes (xox…) — \
          the leak-scanner carve-out domain (#5965)",
-    ),
-    (
-        "crates/ironclaw_loop_contracts/src/prompt_text.rs",
-        "github",
-        "credential-prefix redaction (github_pat_)",
     ),
     (
         "crates/ironclaw_auth/src/lib.rs",
@@ -696,10 +694,13 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
 /// structural reason, mirroring `reborn_retired_taxonomy.rs`: the one-time
 /// forward data migrations name what they fold forward.
 const SANCTIONED_PATHS: &[&str] = &[
-    "extension_host/extension_installation_store.rs",
     // One-release legacy webhook-path aliases (MIG-5): the compatibility
     // table names the concrete legacy paths it forwards; each entry carries
     // its own removal note.
+    // (A second fragment, `extension_host/extension_installation_store.rs`,
+    // sat here after #6430 deleted that file — matching nothing. Unlike the
+    // taxonomy twin, this list has no staleness check, so keep it pruned by
+    // hand when the named files go away.)
     "product_auth/durable/",
 ];
 
@@ -1067,6 +1068,21 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
     for scan_root in generic_scan_roots(&metadata, root) {
         let src = scan_root.crate_dir.join("src");
         scan_dir(root, &src, terms, &mut hits);
+        // `build.rs` is generic-crate code that ships in the build, and it sat
+        // outside every scan root: a vendor name there was invisible to this
+        // gate (proven by sabotage, 2026-08-13).
+        let build_script = scan_root.crate_dir.join("build.rs");
+        if build_script.is_file() {
+            let matched = scan_file(&build_script, FileKind::Rust, terms);
+            if !matched.is_empty() {
+                let relative = build_script
+                    .strip_prefix(root)
+                    .unwrap_or(&build_script)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                hits.entry(relative).or_default().extend(matched);
+            }
+        }
         let manifest = scan_root.crate_dir.join("Cargo.toml");
         if manifest.exists() {
             let matched = scan_file(&manifest, FileKind::Toml, terms);
@@ -1088,10 +1104,18 @@ fn collect_workspace_hits(root: &Path, terms: &BTreeSet<String>) -> BTreeSet<(St
     assert!(
         frontend.is_dir(),
         "WebUI frontend scan root {} does not exist; the SPA would go unscanned while this \
-         gate still reported success (docs/reborn/target-architecture/CHECKLIST.md WS10)",
+         gate still reported success (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)",
         frontend.display()
     );
     scan_dir(root, &frontend, terms, &mut hits);
+
+    // The frontend's own build/CI scripts are generic-crate code too, and were
+    // the second hole the same sabotage pass found. Absent by choice in some
+    // checkouts, so this one is scanned when present rather than asserted.
+    let frontend_scripts = crate_path(root, "crates/ironclaw_webui/frontend/scripts");
+    if frontend_scripts.is_dir() {
+        scan_dir(root, &frontend_scripts, terms, &mut hits);
+    }
 
     // Resolved through the inventory: these fragments are matched against
     // paths discovered on disk, so a crate that moved makes every fragment
@@ -1263,13 +1287,8 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "github",
     ),
     ("crates/ironclaw_assistant/src/workflow.rs", "slack"),
-    ("crates/ironclaw_host_api/src/dispatch.rs", "slack"),
     (
         "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_host_runtime/src/services/wasm_execution.rs",
         "slack",
     ),
     ("crates/ironclaw_loop_host/src/tool_disclosure.rs", "google"),
@@ -1503,26 +1522,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     // localized pairing copy). Consumed by the generic descriptor-driven
     // pairing seam (extension-runtime P2), which moves product copy and
     // routing onto manifest-declared account-setup descriptors.
-    (
-        "crates/ironclaw_webui/frontend/src/components/telegram-setup-panel.tsx",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/channel-setup-api.ts",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/channel-setup-api.ts",
-        "telegram",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_webui/frontend/src/lib/telegram-setup-api.ts",
-        "telegram",
-    ),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "slack"),
     ("crates/ironclaw_webui/frontend/src/i18n/ar.ts", "telegram"),
     ("crates/ironclaw_webui/frontend/src/i18n/de.ts", "slack"),
@@ -1690,7 +1689,13 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // `loop_driver_host.rs`/"slack" carve-out was retired when the channel-context
 // forwarding it described was reworked, so its now-stale allowlist entry was
 // deleted — the ratchet only ever shrinks.
-const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 117;
+// 112 -> 110 (retire lane-named DispatchError variants, PR 4 stage 1): the
+// `ironclaw_host_api/src/dispatch.rs`/"slack" and
+// `ironclaw_host_runtime/src/services/wasm_execution.rs`/"slack" carve-outs
+// named doc-comment examples on the retired `DispatchError::Wasm` variant;
+// deleting the variant deleted the examples, so the now-stale allowlist
+// entries were deleted too.
+const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 110;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
 ///
@@ -1890,7 +1895,7 @@ fn concrete_extension_crates_link_only_from_the_binary_and_tests() {
         !resolved_concrete.is_empty(),
         "no concrete extension package resolved to a manifest, so the registration guard \
          checked nothing. CONCRETE_EXTENSION_CRATES is {CONCRETE_EXTENSION_CRATES:?} \
-         (docs/reborn/target-architecture/CHECKLIST.md WS10)."
+         (docs/internal/reborn/target-architecture/CHECKLIST.md WS10)."
     );
 
     let mut violations = Vec::new();

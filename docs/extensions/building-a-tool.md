@@ -317,8 +317,11 @@ Required per model-visible `[[tools]]` entry:
 - `default_permission`: use `ask` for writes and high-risk reads; use `allow`
   only for low-risk read capabilities that policy deliberately permits.
 - `visibility`: usually `model` (the default).
-- `input_schema_ref`: relative path to JSON schema.
-- `output_schema_ref`: relative path to JSON schema.
+- `input_schema_ref`: relative path to JSON schema. Required unless the tool
+  binds a `standard_op`, which supplies the host-canonical schemas.
+- `output_schema_ref`: relative path to JSON schema. Optional — omit it when
+  the tool has no structured output contract (the gmail package declares
+  none).
 - `prompt_doc_ref`: relative path to concise operation guidance.
 - `[[tools.credentials]]`: declare every credential the runtime may receive.
 
@@ -334,7 +337,10 @@ Validation catches common mistakes:
 - Credential audiences must be HTTPS with a literal host — wildcards are
   rejected in v3.
 - Duplicate effects and duplicate credential handles are rejected.
-- Unknown fields anywhere in the manifest are rejected.
+- Unknown fields are rejected throughout the manifest, with two deliberate
+  exemptions: the root `[metadata]` table is free-form authoring metadata
+  (ignored), and extra keys in an `[auth.<vendor>].identity` map are named
+  identity-claim pointers, not typos.
 - Schema and prompt refs must be relative package paths, not absolute paths,
   URLs, backslash paths, or paths with `..`.
 

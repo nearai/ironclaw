@@ -46,7 +46,7 @@ crates/ironclaw_turns/prompts/delivery.md        # NEW: the one guidance block (
 crates/ironclaw_webui/frontend/src/pages/automations/
   components/notification-channels-panel.tsx     # RENAMED from automation-delivery-defaults-panel.tsx (Task 10)
 tests/integration/delivery_user_journeys.rs      # rebuilt from retired stub (Tasks 5,6,9,12)
-docs/reborn/extension-runtime/{overview,checklist}.md      # §5.4 rewrite (Task 17)
+docs/internal/reborn/extension-runtime/{overview,checklist}.md      # §5.4 rewrite (Task 17)
 .claude/rules/{tools,tool-evidence}.md           # ported from pushy-today (Task 17)
 ```
 
@@ -308,7 +308,7 @@ Legacy fields (`final_reply_target`, `progress_target`, `approval_prompt_target`
 - Test: `tests/integration/outbound_target.rs` (extend — this file already owns the set/list seam), crate tests beside the service
 
 **Interfaces:**
-- Produces: capability id `builtin.notification_channels_set`, `PermissionMode::Ask`, effects `[DispatchCapability, ExternalWrite]`, `ConcurrencyHint::Exclusive`, full approval-gate dance copied from the existing set handler. Input schema: `{target_ids: {type: array, maxItems: 8, items: {type: string, minLength: 1, maxLength: 512}}}`, `additionalProperties: false`, required `["target_ids"]`. Description (verbatim const):
+- Produces: capability id `builtin.notification_channels_set`, `PermissionMode::Ask`, effects `[DispatchCapability, ExternalWrite]`, full approval-gate dance copied from the existing set handler. Scheduling is not descriptor metadata: model-emitted calls are independent by default, while middleware may require ordered batch invocation for operational safety. Input schema: `{target_ids: {type: array, maxItems: 8, items: {type: string, minLength: 1, maxLength: 512}}}`, `additionalProperties: false`, required `["target_ids"]`. Description (verbatim const):
 
 ```text
 Set the channels where IronClaw notifies this user about background runs (approval gates, re-authorization, failures) — full replace of the current set. Pass target ids from builtin__outbound_delivery_targets_list; an empty list means notifications stay in the web app only. This does not route replies or routine results — deliver those explicitly with builtin__outbound_deliver.
@@ -356,7 +356,7 @@ Set the channels where IronClaw notifies this user about background runs (approv
 
 - [ ] **Step 1:** Failing frontend test: checkbox multi-select renders options, toggles, posts `{target_ids: [...]}`, renders empty-state helper.
 - [ ] **Step 2:** Implement panel/hook/api/routes/i18n/assets pins.
-- [ ] **Step 3:** `pnpm lint && pnpm test` in the frontend; `cargo test -p ironclaw_webui`; extend the Playwright served-API scenario (auth required + shape) and add its `tests/e2e/reborn_coverage_tests.txt` row per `tests/e2e/CLAUDE.md`.
+- [ ] **Step 3:** `pnpm lint && pnpm test` in the frontend; `cargo test -p ironclaw_webui`; extend the Playwright served-API scenario (auth required + shape), update the matching `tests/AGENTS.md` coverage-map row, and add its `tests/e2e/reborn_coverage_tests.txt` row per `tests/e2e/AGENTS.md`.
 - [ ] **Step 4: Commit** `feat(webui): notification channels multi-select`
 
 ### Task 11: Delete the route_current stack + web_app pseudo-target + old set tool
@@ -460,14 +460,14 @@ New ScheduledTrigger origin line (verbatim): `Run origin: scheduled trigger fire
 - Modify/Add: `tests/reborn_qa_recorded_behavior.rs` + `tests/fixtures/llm_traces/` — record two tool-choice fixtures: interactive "send me a summary of X on slack" → model calls `builtin.outbound_deliver` (not `slack.send_message`); a scheduled-fire trace with a delivery step in the prompt → same. Re-validate the two existing `assert_tool_not_called(..., "builtin.outbound_delivery_targets_list")` fixtures still hold (read tasks must still not reach for delivery tools).
 - Test: `scripts/ci/check-reborn-qa-fixtures.sh`
 
-- [ ] **Step 1:** Read `tests/support/reborn_parity_qa/CLAUDE.md` and the recording procedure used by the pushy-today commit `c8f02c2ef` (`git show c8f02c2ef` — donor for the recording workflow only).
+- [ ] **Step 1:** Read `tests/support/reborn_parity_qa/AGENTS.md` and the recording procedure used by the pushy-today commit `c8f02c2ef` (`git show c8f02c2ef` — donor for the recording workflow only).
 - [ ] **Step 2:** Record, pin assertions (`assert_tool_called` on the new capability + argument shape), run the fixture validator (no secrets/PII).
 - [ ] **Step 3: Commit** `test(qa): record explicit-delivery tool choice`
 
 ### Task 17: Law + docs
 
 **Files:**
-- Modify: `docs/reborn/extension-runtime/overview.md` (§5.2 note + §5.4 rewrite per spec §10: model-initiated delivery as policy-class intent through the one coordinator; sole-writer/attempt/crash language restated; boundary note: delivery tool = model delivering as the assistant, vendor send tools = model acting as the user, final replies = lane 1 and never ride either; "emitters never know what channel" scoped to host-emitted intents), `docs/reborn/extension-runtime/checklist.md` (OUT items: add model-delivery evidence — provider refs in the tool result; no queued state in v1)
+- Modify: `docs/internal/reborn/extension-runtime/overview.md` (§5.2 note + §5.4 rewrite per spec §10: model-initiated delivery as policy-class intent through the one coordinator; sole-writer/attempt/crash language restated; boundary note: delivery tool = model delivering as the assistant, vendor send tools = model acting as the user, final replies = lane 1 and never ride either; "emitters never know what channel" scoped to host-emitted intents), `docs/internal/reborn/extension-runtime/checklist.md` (OUT items: add model-delivery evidence — provider refs in the tool result; no queued state in v1)
 - Create: `.claude/rules/tools.md` + `.claude/rules/tool-evidence.md` — start from `git show pushy-today:.claude/rules/tools.md` / `tool-evidence.md`, fix the known stale bits (drop the "Everything Goes Through Tools" heading citation; verify every named path exists on main before committing)
 - Modify: root `CLAUDE.md` (stale-doc rider from spec §10: `[channel.config]` → top-level `[admin_configuration]`, `ChannelAdapter` path, Slack tool count — cross-check each against live code first; also add the delivery-tool row where CLAUDE.md describes outbound), `.claude/skills/reborn-extension-surfaces/SKILL.md` (same drift, per the ironclaw-reborn-skill-maintainer skill's rules)
 - Test: none mechanical (no docs-shape test greps overview.md — verified in recon); `rg` every path named in the edited docs to prove it exists

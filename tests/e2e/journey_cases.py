@@ -23,7 +23,11 @@ from journey_types import (
     ProviderWorld,
     PytestEvidence,
 )
-from provider_capability_inventory import shipped_provider_manifests, EMULATE_SUPPORTED_TOOLS
+from provider_capability_inventory import (
+    EMULATE_SUPPORTED_TOOLS,
+    TESTED_CAPABILITY_IDS,
+    shipped_provider_manifests,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 TRACE_DIR = ROOT / "tests/fixtures/llm_traces/reborn_qa/live_canary"
@@ -57,13 +61,14 @@ _HISTORICAL_MUTATING_PROVIDER_TOOLS = frozenset(
 
 
 def _production_mutating_tools() -> dict[str, ProviderWorld]:
-    """Provider-world writes, taken from the shipped manifests.
+    """Deterministically tested provider-world writes from shipped manifests.
 
     A journey that mutates a provider world must declare that world so the
     harness resets it afterwards; otherwise whatever the journey created
-    survives into the next test. Which tools mutate is not a judgement call --
-    production already states it, as the `external_write` effect on each tool
-    (`crates/extensions/packages/*/manifest.toml`).
+    survives into the next test. Capabilities classified as live-only or waived
+    cannot enter the deterministic harness. For tested tools, which ones mutate
+    is not a judgement call -- production already states it as the
+    `external_write` effect (`crates/extensions/packages/*/manifest.toml`).
 
     This used to be a hand-kept list of five names while production declared
     seventy such tools. Every one of the other sixty-five -- `github__create_issue`,
@@ -76,6 +81,8 @@ def _production_mutating_tools() -> dict[str, ProviderWorld]:
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         for tool in manifest.get("tools", []) or []:
+            if tool["id"] not in TESTED_CAPABILITY_IDS:
+                continue
             if "external_write" not in (tool.get("effects") or []):
                 continue
             # Manifest ids are `github.create_issue`; traces record
@@ -101,12 +108,14 @@ _MUTATING_PROVIDER_TOOLS = _production_mutating_tools()
 
 
 def unreset_mutating_tools() -> frozenset[str]:
-    """Production writes whose provider world no fixture can reset."""
+    """Deterministically tested writes whose provider world cannot be reset."""
     unreset = set()
     for manifest_path in shipped_provider_manifests():
         with manifest_path.open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         for tool in manifest.get("tools", []) or []:
+            if tool["id"] not in TESTED_CAPABILITY_IDS:
+                continue
             if "external_write" not in (tool.get("effects") or []):
                 continue
             tool_name = str(tool["id"]).replace(".", "__", 1)
@@ -369,7 +378,7 @@ PRODUCT_JOURNEY_CASES = (
         ),
     ),
     ProductJourneyCase(
-        case_id="telegram_pairing_chat_unpair_repair",
+        case_id="telegram_bot_pairing_chat_disconnect_repair",
         provider_worlds=(ProviderWorld.TELEGRAM,),
         mutable_provider_worlds=(ProviderWorld.TELEGRAM,),
         ingress=JourneyIngress.TELEGRAM,
@@ -383,8 +392,8 @@ PRODUCT_JOURNEY_CASES = (
         evidence=CargoEvidence(
             source="tests/integration/extension_delivery.rs",
             test=(
-                "unbound_telegram_actor_pairs_via_web_minted_code_then_"
-                "turns_attribute_to_the_paired_user"
+                "paired_telegram_bot_actor_turns_attribute_to_the_user_"
+                "and_disconnect_revokes_admission"
             ),
             target="reborn_integration_extension_delivery",
         ),
@@ -452,17 +461,17 @@ PRODUCT_JOURNEY_CASES = (
     ),
     ProductJourneyCase(
         # A blocked scheduled fire fans its gate-prompt notice to the
-        # creator's enrolled browser through the web-push channel: one
+        # creator's enrolled browser through the web-app channel: one
         # unthreaded push POST to the endpoint capability URL, host-injected
         # VAPID authorization, RFC 8291 body. Web push has no provider world
         # (the endpoint is on the manifest's declared push host, answered by
         # the harness's recording network substrate), so `NONE`.
-        case_id="scheduled_trigger_gate_notice_reaches_web_push_browser",
+        case_id="scheduled_trigger_gate_notice_reaches_web_app_browser",
         provider_worlds=(ProviderWorld.NONE,),
         mutable_provider_worlds=(),
         ingress=JourneyIngress.SCHEDULED_TRIGGER,
         execution=JourneyExecution.REBORN_INTEGRATION,
-        delivery_target=JourneyDeliveryTarget.WEB_PUSH,
+        delivery_target=JourneyDeliveryTarget.WEB_APP,
         assertions=(
             ObservableAssertion.DURABLE_STATE,
             ObservableAssertion.EXACT_DESTINATION,
@@ -471,7 +480,7 @@ PRODUCT_JOURNEY_CASES = (
         ),
         evidence=CargoEvidence(
             source="tests/integration/delivery_user_journeys.rs",
-            test="blocked_fire_pushes_web_push_notice_to_enrolled_browser",
+            test="blocked_fire_pushes_web_app_notice_to_enrolled_browser",
             target="reborn_integration_delivery_user_journeys",
         ),
         delivery_addresses=(
@@ -479,7 +488,7 @@ PRODUCT_JOURNEY_CASES = (
                 conversation_id="https://fcm.googleapis.com/fcm/send/live-subscription-token",
                 thread_anchor=None,
                 exact_count=1,
-                assertion="assert_web_push_delivery_evidence",
+                assertion="assert_web_app_delivery_evidence",
             ),
         ),
     ),
@@ -501,6 +510,15 @@ def _production_channel_capabilities(
             assert isinstance(surface, str) and surface, (
                 f"{manifest_path}: channel manifest declares no non-empty id"
             )
+            # The unified channel model folds the browser send path into the
+            # session channel's inbound surface: a channel whose ingress
+            # verification is `authenticated_session` has no webhook mount —
+            # its inbound IS the WebUI session route, so the `webui` journey
+            # cases are its evidence. Map it onto that built-in ingress
+            # instead of demanding a per-channel journey label.
+            verification = (channel.get("ingress") or {}).get("verification") or {}
+            if direction == "inbound" and verification.get("kind") == "authenticated_session":
+                surface = str(JourneyIngress.WEBUI)
             capabilities[surface] = channel.get("presentation") or {}
     return capabilities
 

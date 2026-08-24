@@ -323,8 +323,8 @@ mod openai_compat_mount_tests {
         openai_compat_routes,
     };
     use ironclaw_turns::{
-        AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef,
-        SubmitTurnRequest, TurnCoordinator, TurnError, TurnRunId,
+        AcceptedMessageRef, IdempotencyKey, SubmitTurnRequest, TurnCoordinator, TurnError,
+        TurnRunId,
     };
 
     const AGENT: &str = "agent-alpha";
@@ -336,15 +336,54 @@ mod openai_compat_mount_tests {
         Arc::new(OpenAiCompatRefStore::new(filesystem))
     }
 
+    /// Prepared-turn port double mirroring the production wiring
+    /// (`build_openai_compat_route_mount` always supplies a gateway): the
+    /// lane rule sends every non-streaming tool-less request through the
+    /// prepared door, so the mount test wires the port exactly as the
+    /// binary does and counts the accepts it receives.
+    #[derive(Default)]
+    struct CountingPreparedTurnPort {
+        accepts: std::sync::Mutex<usize>,
+    }
+
+    impl CountingPreparedTurnPort {
+        fn accept_count(&self) -> usize {
+            *self.accepts.lock().expect("prepared port lock")
+        }
+    }
+
+    #[async_trait]
+    impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for CountingPreparedTurnPort {
+        async fn accept_and_submit(
+            &self,
+            _request: ironclaw_openai_compat::OpenAiCompatPreparedTurnRequest,
+        ) -> Result<
+            ironclaw_product_contracts::inbound::ProductInboundAck,
+            ironclaw_openai_compat::OpenAiCompatHttpError,
+        > {
+            *self.accepts.lock().expect("prepared port lock") += 1;
+            Ok(
+                ironclaw_product_contracts::inbound::ProductInboundAck::Accepted {
+                    accepted_message_ref: AcceptedMessageRef::new("msg:mount-test")
+                        .expect("accepted ref"),
+                    submitted_run_id: TurnRunId::new(),
+                    submission: None,
+                },
+            )
+        }
+    }
+
     #[tokio::test]
     async fn openai_chat_completions_mount_uses_webui_auth_and_product_surface() {
         let workflow = Arc::new(GatewayOpenAiSurface::default());
+        let prepared_port = Arc::new(CountingPreparedTurnPort::default());
         let chat = Arc::new(OpenAiChatCompletionsWorkflow::new(
             workflow.clone(),
             in_memory_openai_compat_ref_store(),
             Arc::new(StaticChatProjectionReader::text(
                 "hello through composition",
             )),
+            prepared_port.clone(),
         ));
         let mount = ProtectedRouteMount::new(
             openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(chat)),
@@ -368,6 +407,7 @@ mod openai_compat_mount_tests {
             .expect("oneshot");
         assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(workflow.submit_count(), 0);
+        assert_eq!(prepared_port.accept_count(), 0);
 
         let authenticated = app
             .oneshot(chat_request(Some(VALID_TOKEN)))
@@ -382,7 +422,10 @@ mod openai_compat_mount_tests {
             body["choices"][0]["message"]["content"],
             "hello through composition"
         );
-        assert_eq!(workflow.submit_count(), 1);
+        // Lane rule: a non-streaming request with no declared client tools
+        // takes the prepared door, not the conversation surface.
+        assert_eq!(prepared_port.accept_count(), 1);
+        assert_eq!(workflow.submit_count(), 0);
     }
 
     #[tokio::test]
@@ -621,17 +664,13 @@ mod openai_compat_mount_tests {
                     let response = self
                         .coordinator
                         .submit_turn(SubmitTurnRequest {
+                            subagent_activation_provenance: None,
                             scope,
                             actor: caller.actor(),
                             accepted_message_ref: accepted_message_ref.clone(),
-                            source_binding_ref: SourceBindingRef::new("source:openai-chat")
-                                .map_err(ProductSurfaceError::internal_from)?,
-                            reply_target_binding_ref: ReplyTargetBindingRef::new(
-                                "reply:openai-chat",
-                            )
-                            .map_err(ProductSurfaceError::internal_from)?,
                             requested_run_profile: None,
                             requested_model: input.model,
+                            output_contract: None,
                             idempotency_key: IdempotencyKey::new(
                                 input
                                     .client_action_id
@@ -1954,6 +1993,7 @@ async fn send_message_body_above_axum_default_but_within_descriptor_cap_reaches_
     let (app, services) = build_app();
     let payload = json!({
         "client_action_id": "large-inline-attachment",
+        "thread_id": "thread-large",
         "content": "read this",
         "attachments": [{
             "mime_type": "text/plain",
@@ -1969,7 +2009,7 @@ async fn send_message_body_above_axum_default_but_within_descriptor_cap_reaches_
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread-large/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(payload))
@@ -3033,20 +3073,22 @@ async fn static_root_emits_a_fresh_nonce_per_request() {
 
 #[tokio::test]
 async fn js_client_send_message_path_shape_reaches_service() {
-    // api.ts → `sendMessage({threadId, content, clientActionId})`
-    // builds `POST /api/webchat/v2/threads/{thread_id}/messages` with
-    // body `{client_action_id, content}` (no thread_id in body —
-    // it lives in the path).
+    // api.ts → `sendMessage({threadId, content, clientActionId})` builds
+    // `POST /api/webchat/v2/channels/{extension_id}/messages` with body
+    // `{client_action_id, thread_id, content}`. The unified channel model
+    // moved thread_id from the path into the body: the path names the
+    // CHANNEL (learned from `GET /session`), not the thread.
     let (app, _) = build_app();
     let body = json!({
         "client_action_id": "act-from-js",
+        "thread_id": "thread.fake",
         "content": "hello from the SPA",
     });
     let response = app
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/threads/thread.fake/messages")
+                .uri("/api/webchat/v2/channels/web-app/messages")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))

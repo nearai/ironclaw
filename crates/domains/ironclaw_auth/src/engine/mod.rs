@@ -1,4 +1,4 @@
-//! The host auth engine (`docs/reborn/extension-runtime/overview.md` §4.3).
+//! The host auth engine (`docs/internal/reborn/extension-runtime/overview.md` §4.3).
 //!
 //! One engine implements `oauth2_code` (with PKCE) and RFC 7591 dynamic client
 //! registration for vendors whose recipe carries no deployment client
@@ -87,8 +87,10 @@ pub use dcr::DCR_CLIENT_HANDLE_PREFIX;
 /// One vendor's recipe, resolved from active extensions or bundled manifests.
 ///
 /// `token_exchange_resource` is the RFC 8707 resource indicator sent with
-/// token requests — for hosted-MCP vendors this is the manifest's
-/// `[mcp].server` URL, i.e. still manifest data, never engine code.
+/// token requests. For hosted-MCP vendors it is the resource admitted from
+/// RFC 9728 metadata: normally the manifest's `[mcp].server` URL, with the
+/// bounded conventional `/mcp`-to-origin compatibility shape admitted by the
+/// auth policy. It remains manifest-derived data, never engine code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedVendorAuthRecipe {
     pub vendor: String,
@@ -377,7 +379,14 @@ impl AuthEngine {
                 resolved.token_exchange_resource,
                 resolved.protected_resource_metadata_url,
             )),
-            VendorAuthRecipe::ApiKey(_) => Err(AuthProductError::MalformedConfig),
+            // Neither is an OAuth authorization-code recipe. `device_link`
+            // additionally has no engine-executable half at all — its
+            // mechanics live behind the extension's `DeviceLinkAdapter` — so
+            // asking this resolver for one is a configuration error, not a
+            // vendor failure.
+            VendorAuthRecipe::ApiKey(_) | VendorAuthRecipe::DeviceLink(_) => {
+                Err(AuthProductError::MalformedConfig)
+            }
         }
     }
 

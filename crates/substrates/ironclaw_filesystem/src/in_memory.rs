@@ -228,6 +228,55 @@ impl RootFilesystem for InMemoryBackend {
         Ok(out)
     }
 
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        if max_entries == 0 {
+            return Ok(Vec::new());
+        }
+        let state = self.state.lock().await;
+        let prefix = with_trailing_slash(path.as_str());
+        let mut page = std::collections::BTreeMap::<String, FileType>::new();
+        for stored_path in state.entries.keys() {
+            let Some(suffix) = stored_path.as_str().strip_prefix(&prefix) else {
+                continue;
+            };
+            let (head, has_more) = first_segment(suffix);
+            if head.is_empty() || after.is_some_and(|cursor| head <= cursor) {
+                continue;
+            }
+            if let Some(existing) = page.get_mut(head) {
+                if has_more {
+                    *existing = FileType::Directory;
+                }
+                continue;
+            }
+            page.insert(
+                head.to_string(),
+                if has_more {
+                    FileType::Directory
+                } else {
+                    FileType::File
+                },
+            );
+            if page.len() > max_entries {
+                page.pop_last();
+            }
+        }
+        page.into_iter()
+            .map(|(name, file_type)| {
+                Ok(DirEntry {
+                    path: VirtualPath::new(join_path(path.as_str(), &name))?,
+                    name,
+                    file_type,
+                })
+            })
+            .collect()
+    }
+
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let state = self.state.lock().await;
         if let Some(stored) = state.entries.get(path) {
@@ -303,16 +352,46 @@ impl RootFilesystem for InMemoryBackend {
                 })
                 .collect());
         }
-        // Audit finding F5: a `Filter::VectorNearest` nested inside
-        // `And`/`Or` is `Unsupported` on both SQL backends (the WHERE-
-        // fragment translator refuses to inline a ranking op as a
-        // predicate; the top of `query` only handles a top-level
-        // `VectorNearest`). The in-memory backend previously treated a
-        // nested `VectorNearest` as "any row with `IndexValue::Bytes` at
-        // `key`", silently changing semantics across backends. Align by
+        // `Filter::FtsRanked` is the second ranking operation: OR over the
+        // query's content terms, ordered by relevance. The reference score is
+        // term coverage (how many DISTINCT query terms the record carries),
+        // tie-broken by path so the reference is deterministic. That is a
+        // coarse stand-in for `bm25()` / `ts_rank`, but the ordering contract
+        // the three backends share — a record matching more query terms
+        // outranks one matching fewer — holds on all of them.
+        if let Some((key, query, limit)) = top_level_fts_ranked(filter) {
+            let terms = crate::index::plain_fts_terms(query);
+            let mut ranked: Vec<(&VirtualPath, &StoredEntry, usize)> = candidates
+                .into_iter()
+                .filter_map(|(candidate_path, stored)| {
+                    let Some(IndexValue::Text(stored_text)) = stored.entry.indexed.get(key) else {
+                        return None;
+                    };
+                    let score = fts_term_coverage(stored_text, &terms);
+                    (score > 0).then_some((candidate_path, stored, score))
+                })
+                .collect();
+            ranked.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.as_str().cmp(b.0.as_str())));
+            ranked.truncate(limit as usize);
+            return Ok(ranked
+                .into_iter()
+                .map(|(matched_path, stored, _)| VersionedEntry {
+                    path: matched_path.clone(),
+                    entry: stored.entry.clone(),
+                    version: stored.version,
+                })
+                .collect());
+        }
+        // Audit finding F5: a ranking filter (`Filter::VectorNearest`, and
+        // since #7185 `Filter::FtsRanked`) nested inside `And`/`Or` is
+        // `Unsupported` on both SQL backends (the WHERE-fragment translator
+        // refuses to inline a ranking op as a predicate; the top of `query`
+        // only handles the top-level shape). The in-memory backend previously
+        // treated a nested `VectorNearest` as "any row with `IndexValue::Bytes`
+        // at `key`", silently changing semantics across backends. Align by
         // surfacing the same `Unsupported` error before the scalar
         // filter loop runs.
-        if contains_nested_vector_nearest(filter) {
+        if contains_nested_ranking_filter(filter) {
             return Err(FilesystemError::Unsupported {
                 path: path.clone(),
                 operation: FilesystemOperation::Query,
@@ -829,7 +908,10 @@ fn filter_matches(
         // `false` (the conservative answer; the caller already errored) so
         // we don't fall through to "match any row with a bytes value at
         // key" the way prior versions did.
-        Filter::VectorNearest { .. } => false,
+        // Same reasoning as `VectorNearest`: `FtsRanked` is a ranking
+        // operation handled at the top of `query`, and nested occurrences are
+        // rejected before this loop runs.
+        Filter::VectorNearest { .. } | Filter::FtsRanked { .. } => false,
         Filter::And(children) => children.iter().all(|f| filter_matches(f, indexed, fts)),
         Filter::Or(children) => children.iter().any(|f| filter_matches(f, indexed, fts)),
     }
@@ -879,14 +961,49 @@ fn fts_naive_matches(stored: &str, terms: &[String]) -> bool {
     if terms.is_empty() {
         return false;
     }
-    let stored_lower = stored.to_lowercase();
-    let tokens: std::collections::HashSet<&str> = stored_lower
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .collect();
+    let tokens = fts_tokens(stored);
     terms
         .iter()
-        .all(|term| tokens.contains(term.to_lowercase().as_str()))
+        .all(|term| tokens.contains(&term.to_lowercase()))
+}
+
+/// The whole-token set of `stored`, lowercased. THE single definition of "what
+/// counts as a term occurrence" for this backend: `Filter::Fts` (all terms) and
+/// `Filter::FtsRanked` (any term, ranked) must agree on it or the two matchers
+/// stop being comparable, so both go through here rather than each carrying its
+/// own copy of the split rule.
+fn fts_tokens(stored: &str) -> std::collections::HashSet<String> {
+    stored
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Reference relevance score for [`Filter::FtsRanked`]: how many DISTINCT
+/// query terms appear as whole tokens in `stored`. Zero means "no term
+/// matched", which the ranked path treats as "not a hit" (OR semantics need at
+/// least one term). Tokenization is the same whole-token rule
+/// [`fts_naive_matches`] uses, so the reference agrees with FTS5's
+/// `unicode61` tokenizer on what counts as a term occurrence.
+fn fts_term_coverage(stored: &str, terms: &[String]) -> usize {
+    if terms.is_empty() {
+        return 0;
+    }
+    let tokens = fts_tokens(stored);
+    terms
+        .iter()
+        .filter(|term| tokens.contains(&term.to_lowercase()))
+        .count()
+}
+
+/// If `filter` is a top-level [`Filter::FtsRanked`], return its components.
+fn top_level_fts_ranked(filter: &Filter) -> Option<(&IndexKey, &str, u32)> {
+    if let Filter::FtsRanked { key, query, limit } = filter {
+        return Some((key, query.as_str(), *limit));
+    }
+    None
 }
 
 /// If `filter` is a top-level `VectorNearest` (the only shape the SQL
@@ -904,14 +1021,15 @@ fn top_level_vector_nearest(filter: &Filter) -> Option<(&IndexKey, &[f32], u32)>
     None
 }
 
-/// Walk `filter` and report whether any `VectorNearest` occurs strictly
-/// inside an `And`/`Or` compound. A top-level `VectorNearest` is handled
-/// by the query method's ranking path; nested occurrences are rejected
-/// with `Unsupported` to match the SQL backends (audit finding F5).
-fn contains_nested_vector_nearest(filter: &Filter) -> bool {
+/// Walk `filter` and report whether any ranking filter (`VectorNearest` or
+/// `FtsRanked`) occurs strictly inside an `And`/`Or` compound. A top-level
+/// ranking filter is handled by the query method's ranking paths; nested
+/// occurrences are rejected with `Unsupported` to match the SQL backends
+/// (audit finding F5).
+fn contains_nested_ranking_filter(filter: &Filter) -> bool {
     fn walk(filter: &Filter, inside_compound: bool) -> bool {
         match filter {
-            Filter::VectorNearest { .. } => inside_compound,
+            Filter::VectorNearest { .. } | Filter::FtsRanked { .. } => inside_compound,
             Filter::And(children) | Filter::Or(children) => {
                 children.iter().any(|child| walk(child, true))
             }
@@ -1853,6 +1971,50 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "a.md");
         assert_eq!(entries[1].name, "b.md");
+    }
+
+    #[tokio::test]
+    async fn list_dir_page_uses_stable_name_keyset_without_duplicates() {
+        let fs = InMemoryBackend::new();
+        for p in [
+            "/projects/a.md",
+            "/projects/b.md",
+            "/projects/c.md",
+            "/projects/sub/nested.md",
+        ] {
+            fs.put(&vpath(p), Entry::bytes(vec![]), CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+
+        let first = fs
+            .list_dir_page(&vpath("/projects"), None, 2)
+            .await
+            .unwrap();
+        let second = fs
+            .list_dir_page(
+                &vpath("/projects"),
+                first.last().map(|entry| entry.name.as_str()),
+                2,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.md", "b.md"]
+        );
+        assert_eq!(
+            second
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c.md", "sub"]
+        );
+        assert_eq!(second[1].file_type, FileType::Directory);
     }
 
     #[tokio::test]

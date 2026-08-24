@@ -71,4 +71,4 @@ IRONCLAW_SKIP_POSTGRES_TESTS=1 cargo test -p ironclaw_outbound --all-features  #
 - Working rules: [`AGENTS.md`](./AGENTS.md) (canonical crate guidance).
 - Family boundary: [`../AGENTS.md`](../AGENTS.md).
 - Design record: `families/domains.md`, PROPOSAL §6.4.15;
-  `docs/reborn/contracts/events-projections.md`.
+  `docs/internal/reborn/contracts/events-projections.md`.

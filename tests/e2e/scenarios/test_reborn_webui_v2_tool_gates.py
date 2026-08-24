@@ -32,6 +32,7 @@ from reborn_webui_harness import (
     send_message,
     start_reborn_webui_v2_server,
     wait_for_assistant_message,
+    session_channel_extension_id,
 )
 
 
@@ -405,9 +406,10 @@ async def test_reborn_v2_cancel_in_flight_turn_ends_cancelled(
         ) as stream:
             assert stream.status == 200
             submitted = await client.post(
-                f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/messages",
+                f"{reborn_v2_server}/api/webchat/v2/channels/{await session_channel_extension_id(client, reborn_v2_server)}/messages",
                 json={
                     "client_action_id": client_action_id(),
+                    "thread_id": thread_id,
                     "content": f"{marker}: hold this response",
                 },
                 timeout=30,
@@ -473,9 +475,10 @@ async def test_reborn_v2_approval_gate_resolves_and_resumes(
         ) as stream:
             assert stream.status == 200
             submitted = await client.post(
-                f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
+                f"{base_url}/api/webchat/v2/channels/{await session_channel_extension_id(client, base_url)}/messages",
                 json={
                     "client_action_id": client_action_id(),
+                    "thread_id": thread_id,
                     "content": f"reborn builtin echo {marker}",
                 },
                 timeout=30,
@@ -528,9 +531,10 @@ async def test_reborn_v2_approval_gate_decline_has_no_successful_tool_result(
         ) as stream:
             assert stream.status == 200
             submitted = await client.post(
-                f"{base_url}/api/webchat/v2/threads/{thread_id}/messages",
+                f"{base_url}/api/webchat/v2/channels/{await session_channel_extension_id(client, base_url)}/messages",
                 json={
                     "client_action_id": client_action_id(),
+                    "thread_id": thread_id,
                     "content": f"reborn builtin echo {marker}",
                 },
                 timeout=30,
@@ -606,9 +610,10 @@ async def test_reborn_v2_manual_token_auth_gate_resolves_and_resumes(
         ) as stream:
             assert stream.status == 200
             submitted = await client.post(
-                f"{reborn_v2_yolo_server}/api/webchat/v2/threads/{thread_id}/messages",
+                f"{reborn_v2_yolo_server}/api/webchat/v2/channels/{await session_channel_extension_id(client, reborn_v2_yolo_server)}/messages",
                 json={
                     "client_action_id": client_action_id(),
+                    "thread_id": thread_id,
                     "content": "reborn install github for auth gate",
                 },
                 timeout=30,

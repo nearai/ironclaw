@@ -830,6 +830,7 @@ async fn direct_construction_serialize_path_resanitizes_error_kind() {
         runtime: Some(RuntimeKind::Wasm),
         process_id: None,
         output_bytes: None,
+        duration_ms: None,
         // Free-form raw text with a path-like fragment — exactly what the
         // redaction invariant forbids in durable storage.
         error_kind: Some("/Users/alice/token=secret raw error".to_string()),

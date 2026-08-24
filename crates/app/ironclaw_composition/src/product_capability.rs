@@ -1,6 +1,6 @@
 //! Generic product command adapter into the canonical host-runtime pipeline.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_assistant::{
@@ -45,9 +45,8 @@ use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceEr
 
 use crate::RebornRuntime;
 use ironclaw_skills::ScopedSkillManagementMountResolver;
-use tokio::sync::Mutex as AsyncMutex;
-
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
+const PRODUCT_RESULT_METADATA_MAX_BYTES: usize = 4 * 1024;
 const PRODUCT_RESULT_ROOT: &str = "/product-results";
 const PRODUCT_INGRESS_EXTENSION_ID: &str = "ironclaw_webui";
 
@@ -64,7 +63,11 @@ pub(crate) struct RuntimeProductCapabilityInvoker {
     // deployment-shape distinction the invoker still needs.
     skill_mount_resolver: Arc<ScopedSkillManagementMountResolver>,
     system_extensions_lifecycle_mounts: MountView,
-    activity_locks: Arc<AsyncMutex<HashMap<ActivityId, Arc<AsyncMutex<()>>>>>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ProductResultMetadata {
+    summary: String,
 }
 
 #[derive(Clone)]
@@ -82,27 +85,6 @@ impl RuntimeProductCapabilityInvoker {
             ))),
             skill_mount_resolver: runtime.skill_management.mount_resolver(),
             system_extensions_lifecycle_mounts: runtime.system_extensions_lifecycle_mounts.clone(),
-            activity_locks: Arc::new(AsyncMutex::new(HashMap::new())),
-        }
-    }
-
-    async fn lock_for_activity(&self, activity_id: ActivityId) -> Arc<AsyncMutex<()>> {
-        let mut locks = self.activity_locks.lock().await;
-        Arc::clone(
-            locks
-                .entry(activity_id)
-                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-        )
-    }
-
-    async fn release_activity_lock(&self, activity_id: ActivityId, lock: &Arc<AsyncMutex<()>>) {
-        let mut locks = self.activity_locks.lock().await;
-        if locks
-            .get(&activity_id)
-            .is_some_and(|current| Arc::ptr_eq(current, lock))
-            && Arc::strong_count(lock) <= 2
-        {
-            locks.remove(&activity_id);
         }
     }
 }
@@ -122,7 +104,6 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
             results,
             skill_mount_resolver,
             system_extensions_lifecycle_mounts,
-            activity_locks: _,
         } = self;
         // The origin-to-gate matrix is still provisional in today's kernel.
         // Encode the direct user gesture as one exact, host-issued grant. The
@@ -142,28 +123,28 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         if let Some(replayed) = results.replay(&scope, invocation_id).await? {
             return Ok(replayed);
         }
-        let activity_lock = self.lock_for_activity(activity_id).await;
-        let _activity_guard = activity_lock.lock().await;
-        if let Some(replayed) = results.replay(&scope, invocation_id).await? {
-            drop(_activity_guard);
-            self.release_activity_lock(activity_id, &activity_lock)
-                .await;
+        let requested_capability = capability.clone();
+        let outcome = host_runtime
+            .invoke_capability((context, capability, ResourceEstimate::default(), input))
+            .await
+            .map_err(ProductSurfaceError::internal_from)?;
+        ensure_matching_capability(&requested_capability, &outcome)?;
+        product_resolution(results, &scope, invocation_id, outcome).await
+    }
+
+    async fn complete_product_result(
+        &self,
+        caller: ProductSurfaceCaller,
+        output: serde_json::Value,
+        activity_id: ActivityId,
+        summary: &'static str,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+        let scope = product_resource_scope(&caller, invocation_id);
+        if let Some(replayed) = self.results.replay(&scope, invocation_id).await? {
             return Ok(replayed);
         }
-        let requested_capability = capability.clone();
-        let result = async {
-            let outcome = host_runtime
-                .invoke_capability((context, capability, ResourceEstimate::default(), input))
-                .await
-                .map_err(ProductSurfaceError::internal_from)?;
-            ensure_matching_capability(&requested_capability, &outcome)?;
-            product_resolution(results, &scope, invocation_id, outcome).await
-        }
-        .await;
-        drop(_activity_guard);
-        self.release_activity_lock(activity_id, &activity_lock)
-            .await;
-        result
+        persist_product_output(&self.results, &scope, invocation_id, output, summary).await
     }
 }
 
@@ -333,29 +314,14 @@ async fn product_resolution(
 ) -> Result<Resolution, ProductSurfaceError> {
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
-            let body = serde_json::to_vec(&completed.output)
-                .map_err(ProductSurfaceError::internal_from)?;
-            if body.len() > PRODUCT_RESULT_MAX_BYTES {
-                return Err(ProductSurfaceError::internal_from(
-                    "product capability result exceeded the durable output bound",
-                ));
-            }
-            let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
-            results.persist(scope, result_ref, body.clone()).await?;
-            Ok(Resolution::Done(Outcome {
-                refs: OutcomeRefs {
-                    result: result_ref,
-                    byte_len: body.len() as u64,
-                    preview: None,
-                    preview_meta: ResultPreviewMeta::default(),
-                    origin: None,
-                    output_digest: None,
-                },
-                verdict: ToolVerdict::Success,
-                summary: fixed_summary("capability completed"),
-                progress: ResultProgress::MadeProgress,
-                terminate_hint: TerminateHint::Continue,
-            }))
+            persist_product_output(
+                results,
+                scope,
+                invocation_id,
+                completed.output,
+                "capability completed",
+            )
+            .await
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
             let resume = ResumeToken::new(invocation_id.to_string())
@@ -414,26 +380,40 @@ async fn product_resolution(
                 diagnostic,
             ))
         }
-        RuntimeCapabilityOutcome::Unknown(unknown) => {
-            let diagnostic = unknown
-                .message
-                .as_deref()
-                .map(model_diagnostic)
-                .unwrap_or_else(|| ModelFailureDiagnostic::Diagnostic {
-                    text: ModelDiagnostic::unavailable(),
-                });
-            let summary = unknown
-                .message
-                .and_then(|value| SafeSummary::new(value).ok())
-                .unwrap_or_else(SafeSummary::placeholder);
-            Ok(recoverable_failure(
-                invocation_id,
-                FailureKind::from_tag(&unknown.kind),
-                summary,
-                diagnostic,
-            ))
-        }
     }
+}
+
+async fn persist_product_output(
+    results: &ProductResultFilesystem,
+    scope: &ResourceScope,
+    invocation_id: InvocationId,
+    output: serde_json::Value,
+    summary: &'static str,
+) -> Result<Resolution, ProductSurfaceError> {
+    let body = serde_json::to_vec(&output).map_err(ProductSurfaceError::internal_from)?;
+    if body.len() > PRODUCT_RESULT_MAX_BYTES {
+        return Err(ProductSurfaceError::internal_from(
+            "product capability result exceeded the durable output bound",
+        ));
+    }
+    let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+    results
+        .persist(scope, result_ref, body.clone(), summary)
+        .await?;
+    Ok(Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: result_ref,
+            byte_len: body.len() as u64,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: fixed_summary(summary),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    }))
 }
 
 fn recoverable_failure(
@@ -498,7 +478,6 @@ fn ensure_matching_capability(
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::SpawnedProcess(process) => &process.capability_id,
         RuntimeCapabilityOutcome::Failed(failure) => &failure.capability_id,
-        RuntimeCapabilityOutcome::Unknown(unknown) => &unknown.capability_id,
     };
     if actual != requested {
         return Err(ProductSurfaceError::internal_from(
@@ -526,10 +505,11 @@ impl ProductResultFilesystem {
         scope: &ResourceScope,
         result_ref: ResultRef,
         body: Vec<u8>,
+        summary: &'static str,
     ) -> Result<(), ProductSurfaceError> {
         match self {
             Self::Composite(filesystem) => {
-                persist_product_result(filesystem, scope, result_ref, body).await
+                persist_product_result(filesystem, scope, result_ref, body, summary).await
             }
         }
     }
@@ -540,10 +520,12 @@ async fn persist_product_result<F>(
     scope: &ResourceScope,
     result_ref: ResultRef,
     body: Vec<u8>,
+    summary: &'static str,
 ) -> Result<(), ProductSurfaceError>
 where
     F: RootFilesystem + ?Sized,
 {
+    persist_product_result_metadata(filesystem, scope, result_ref, summary).await?;
     let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.json"))
         .map_err(ProductSurfaceError::internal_from)?;
     let write_body = body.clone();
@@ -573,6 +555,50 @@ where
     .map_err(ProductSurfaceError::internal_from)
 }
 
+async fn persist_product_result_metadata<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    result_ref: ResultRef,
+    summary: &'static str,
+) -> Result<(), ProductSurfaceError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.meta.json"))
+        .map_err(ProductSurfaceError::internal_from)?;
+    let metadata = serde_json::to_vec(&ProductResultMetadata {
+        summary: summary.to_string(),
+    })
+    .map_err(ProductSurfaceError::internal_from)?;
+    let write_metadata = metadata.clone();
+    cas_update(
+        filesystem,
+        scope,
+        &path,
+        |stored| Ok::<_, String>(stored.to_vec()),
+        |stored| {
+            Ok::<_, String>(Entry::bytes(stored.clone()).with_content_type(ContentType::json()))
+        },
+        move |existing| {
+            let write_metadata = write_metadata.clone();
+            async move {
+                match existing {
+                    None => Ok(CasApply::new(write_metadata, ())),
+                    Some(existing) if existing == write_metadata => {
+                        Ok(CasApply::no_op(existing, ()))
+                    }
+                    Some(_) => Err(
+                        "product result replay produced a different summary for one activity"
+                            .to_string(),
+                    ),
+                }
+            }
+        },
+    )
+    .await
+    .map_err(ProductSurfaceError::internal_from)
+}
+
 async fn replay_product_result<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
@@ -592,6 +618,20 @@ where
         Ok(None) | Err(FilesystemError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(ProductSurfaceError::internal_from(error)),
     };
+    let metadata_path = ScopedPath::new(format!("{PRODUCT_RESULT_ROOT}/{result_ref}.meta.json"))
+        .map_err(ProductSurfaceError::internal_from)?;
+    let summary = match filesystem
+        .read_bytes_bounded(scope, &metadata_path, PRODUCT_RESULT_METADATA_MAX_BYTES)
+        .await
+    {
+        Ok(Some(metadata)) => {
+            serde_json::from_slice::<ProductResultMetadata>(&metadata)
+                .map_err(ProductSurfaceError::internal_from)?
+                .summary
+        }
+        Ok(None) | Err(FilesystemError::NotFound { .. }) => "capability completed".to_string(),
+        Err(error) => return Err(ProductSurfaceError::internal_from(error)),
+    };
     Ok(Some(Resolution::Done(Outcome {
         refs: OutcomeRefs {
             result: result_ref,
@@ -602,7 +642,7 @@ where
             output_digest: None,
         },
         verdict: ToolVerdict::Success,
-        summary: fixed_summary("capability completed"),
+        summary: SafeSummary::new(summary).unwrap_or_else(|_| SafeSummary::placeholder()),
         progress: ResultProgress::MadeProgress,
         terminate_hint: TerminateHint::Continue,
     })))
@@ -792,9 +832,15 @@ mod tests {
         let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
         let body = br#"{"status":"installed"}"#.to_vec();
 
-        persist_product_result(&filesystem, &scope, result_ref, body.clone())
-            .await
-            .expect("product result persists");
+        persist_product_result(
+            &filesystem,
+            &scope,
+            result_ref,
+            body.clone(),
+            "capability completed",
+        )
+        .await
+        .expect("product result persists");
         let replayed = replay_product_result(&filesystem, &scope, invocation_id)
             .await
             .expect("product result replays")
@@ -806,6 +852,28 @@ mod tests {
         assert_eq!(outcome.refs.result, result_ref);
         assert_eq!(outcome.refs.byte_len, body.len() as u64);
         assert_eq!(outcome.verdict, ToolVerdict::Success);
+    }
+
+    #[tokio::test]
+    async fn product_result_replay_preserves_completion_summary() {
+        let filesystem = scoped_product_results_filesystem();
+        let scope = resource_scope();
+        let invocation_id = InvocationId::new();
+        let result_ref = ResultRef::from_uuid(invocation_id.as_uuid());
+        let body = br#"{"status":"submitted"}"#.to_vec();
+
+        persist_product_result(&filesystem, &scope, result_ref, body, "automation started")
+            .await
+            .expect("product result persists");
+        let replayed = replay_product_result(&filesystem, &scope, invocation_id)
+            .await
+            .expect("product result replays")
+            .expect("persisted result should replay");
+
+        let Resolution::Done(replayed) = replayed else {
+            panic!("replayed product result should be completed");
+        };
+        assert_eq!(replayed.summary.as_str(), "automation started");
     }
 
     #[tokio::test]
@@ -833,29 +901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_runtime_outcome_inlines_message_before_summary_fallback() {
-        let cause = "legacy runtime failed at /workspace/project/input.json";
-        let outcome =
-            RuntimeCapabilityOutcome::Unknown(ironclaw_host_runtime::RuntimeCapabilityUnknown {
-                capability_id: CapabilityId::new("demo.legacy").unwrap(),
-                kind: "legacy_failure".to_string(),
-                message: Some(cause.to_string()),
-            });
-
-        let resolution = product_resolution(
-            &empty_product_result_filesystem(),
-            &resource_scope(),
-            InvocationId::new(),
-            outcome,
-        )
-        .await
-        .expect("unknown runtime outcome remains model-recoverable");
-
-        assert_eq!(model_visible_failure_text(&resolution), cause);
-    }
-
-    #[tokio::test]
-    async fn missing_runtime_detail_uses_explicit_fallbacks() {
+    async fn missing_runtime_failure_detail_uses_explicit_fallback() {
         let failed =
             RuntimeCapabilityOutcome::Failed(ironclaw_host_runtime::RuntimeCapabilityFailure::new(
                 CapabilityId::new("demo.read").unwrap(),
@@ -873,25 +919,6 @@ mod tests {
         assert_eq!(
             model_visible_failure_text(&failed_resolution),
             "capability invocation failed"
-        );
-
-        let unknown =
-            RuntimeCapabilityOutcome::Unknown(ironclaw_host_runtime::RuntimeCapabilityUnknown {
-                capability_id: CapabilityId::new("demo.legacy").unwrap(),
-                kind: "legacy_failure".to_string(),
-                message: None,
-            });
-        let unknown_resolution = product_resolution(
-            &empty_product_result_filesystem(),
-            &resource_scope(),
-            InvocationId::new(),
-            unknown,
-        )
-        .await
-        .expect("unknown runtime outcome remains model-recoverable");
-        assert_eq!(
-            model_visible_failure_text(&unknown_resolution),
-            ModelDiagnostic::unavailable().as_str()
         );
     }
 

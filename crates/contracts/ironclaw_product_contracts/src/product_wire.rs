@@ -406,6 +406,56 @@ pub enum RebornSubmitTurnResponse {
     },
 }
 
+/// One active suggestion projected for any product surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSuggestion {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub suggested_prompt: String,
+    pub icon: String,
+    pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
+/// The durable generation phase projected to product surfaces. The lease
+/// owner, storage errors, and model details remain internal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornSuggestionGenerationStatus {
+    Empty,
+    Generating,
+    Ready,
+    Failed,
+}
+
+/// One caller-scoped suggestion snapshot and its durable generation status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSuggestionsResponse {
+    pub status: RebornSuggestionGenerationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u32>,
+    pub suggestions: Vec<RebornSuggestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSuggestionStartResponse {
+    pub suggestion_id: String,
+    pub thread_id: String,
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSuggestionDismissResponse {
+    pub suggestion_id: String,
+    pub dismissed: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornTimelineRequest {
     pub thread_id: String,
@@ -545,6 +595,21 @@ pub struct RebornAutomationMutationResponse {
     pub updated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation: Option<RebornAutomationInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_result: Option<RebornAutomationRunMutationResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationRunMutationResult {
+    pub status: RebornAutomationRunMutationStatus,
+    pub run_id: TurnRunId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationRunMutationStatus {
+    Submitted,
+    Replayed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -960,76 +1025,39 @@ pub struct RebornNotificationChannelsResponse {
     pub channels: Vec<RebornNotificationChannel>,
 }
 
-/// Browser push keys from `PushSubscription.getKey()`, base64url. Validated
-/// shapes (65-byte uncompressed P-256 point / 16-byte auth secret) are
-/// enforced by the web-push domain at the service boundary; the wire carries
-/// the raw strings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornWebPushSubscriptionKeys {
-    pub p256dh: String,
-    pub auth: String,
+/// Browser query naming the channel one notification-setup read is for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RebornNotificationSetupRequest {
+    pub extension_id: String,
 }
 
-/// Enroll (or refresh) the calling user's current browser for web push.
-/// The endpoint is the push-service capability URL the browser minted; the
-/// service validates scheme/host against the supported push-service
-/// allowlist before persisting.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornWebPushSubscribeRequest {
-    pub endpoint: String,
-    pub keys: RebornWebPushSubscriptionKeys,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_agent: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RebornWebPushSubscribeOutcome {
-    Enrolled,
-    Refreshed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornWebPushSubscribeResponse {
-    pub outcome: RebornWebPushSubscribeOutcome,
-}
-
-/// Remove one browser enrollment by its push endpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornWebPushUnsubscribeRequest {
-    pub endpoint: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornWebPushUnsubscribeResponse {
-    pub removed: bool,
-}
-
-/// One enrolled browser, redacted for the settings surface: the endpoint is
-/// a bearer capability URL, so only its push-service host is projected. The
-/// `endpoint_digest` (lowercase-hex SHA-256 of the full endpoint) lets the
-/// browser correlate its own local subscription with the caller's enrolled
-/// set — distinguishing "enrolled for this account" from "enrolled for a
-/// different account in this shared browser profile" — without the URL ever
-/// leaving the backend.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornWebPushSubscriptionInfo {
-    pub subscription_id: String,
-    pub endpoint_host: String,
-    pub endpoint_digest: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_agent: Option<String>,
-    pub created_at: String,
-}
-
-/// The caller's web-push enrollment state plus the deployment's public VAPID
-/// key (`applicationServerKey` for `PushManager.subscribe`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornWebPushStatusResponse {
-    pub vapid_public_key: String,
-    pub subscription_count: u32,
+/// Browser body for the generic notification-setup enable/disable commands.
+/// `payload` is a channel-opaque document only the channel's adapter (and
+/// its own client) interpret — generic code passes it through verbatim.
+/// `extension_id` is defaulted because the ROUTE path is its canonical
+/// source: the handler overwrites whatever the body carries, so a body may
+/// omit it entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RebornNotificationSetupMutationRequest {
     #[serde(default)]
-    pub subscriptions: Vec<RebornWebPushSubscriptionInfo>,
+    pub extension_id: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub payload: serde_json::Value,
+}
+
+/// One channel's per-user notification-setup state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornNotificationSetupStatusResponse {
+    pub extension_id: String,
+    /// Whether this channel needs per-user enrollment at all (from its
+    /// manifest declaration). Channels without setup report `enabled: true`.
+    pub requires_setup: bool,
+    /// Whether notification delivery is enabled for the caller right now.
+    pub enabled: bool,
+    /// Channel-opaque detail for the channel's own client. Never
+    /// interpreted by generic code.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub detail: serde_json::Value,
 }
 
 /// Allowlisted terminal status exposed by automation list projections.
@@ -1454,6 +1482,12 @@ pub enum RebornExtensionCredentialSetup {
     /// Channel pairing: the setup card routes to the channel's pairing panel
     /// (host-issued code + deep link), never a token-submit form.
     Pairing,
+    /// Device link: the setup card routes to the multi-step device-link panel,
+    /// never a token-submit form. There is no secret for the user to paste —
+    /// the vendor issues the payload and the host takes custody of the
+    /// resulting session — so a card that fell back to the manual-token form
+    /// here would ask for a value that does not exist.
+    DeviceLink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

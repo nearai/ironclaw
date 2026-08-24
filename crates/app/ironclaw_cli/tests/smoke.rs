@@ -429,6 +429,17 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         );
     }
 
+    let rust_cache_step = compile_workflow
+        .split("      - name: Restore Rust cache\n")
+        .nth(1)
+        .and_then(|tail| tail.split("      - id: build\n").next())
+        .expect("release compile workflow must contain the Rust cache step before the build step");
+    assert!(
+        rust_cache_step.contains("uses: Swatinem/rust-cache@")
+            && rust_cache_step.contains("cache-on-failure: true"),
+        "the release Rust cache step must preserve failed build caches"
+    );
+
     assert!(
         compile_workflow.contains("fail-fast: false")
             && compile_workflow.contains("cargo build --locked --profile dist")
@@ -443,7 +454,8 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     assert_no_removed_backend_cargo_features(&compile_workflow, "Reborn release CI");
     assert!(
         compile_workflow.matches("musl: true").count() == 2
-            && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils file")
+            && compile_workflow
+                .contains("scripts/ci/install-ci-apt-packages.sh musl-tools binutils file")
             && compile_workflow.contains("CC_x86_64_unknown_linux_musl=musl-gcc")
             && compile_workflow.contains("CC_aarch64_unknown_linux_musl=musl-gcc")
             && !compile_workflow.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER")
@@ -679,6 +691,29 @@ fn docker_reborn_config_defaults_to_standalone() {
 }
 
 #[test]
+fn shipped_reborn_configs_use_conservative_runner_heartbeat() {
+    for name in [
+        "config.toml",
+        "config.production.toml",
+        "config.hosted-single-tenant.toml",
+        "config.hosted-single-tenant-volume.toml",
+    ] {
+        let path = workspace_root().join("docker/reborn").join(name);
+        let config = std::fs::read_to_string(&path).expect("docker reborn config");
+        let parsed =
+            ironclaw_config::RebornConfigFile::parse_text(&config, &path).expect("config parses");
+        assert_eq!(
+            parsed
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.heartbeat_interval_secs),
+            Some(15),
+            "{name} must ship the conservative 15-second runner heartbeat"
+        );
+    }
+}
+
+#[test]
 fn docker_reborn_production_config_uses_postgres_storage() {
     let config =
         std::fs::read_to_string(workspace_root().join("docker/reborn/config.production.toml"))
@@ -707,7 +742,7 @@ fn docker_reborn_production_config_uses_postgres_storage() {
         storage.secret_master_key_env.as_deref(),
         Some("IRONCLAW_REBORN_SECRET_MASTER_KEY")
     );
-    assert_eq!(storage.pool_max_size, Some(2));
+    assert_eq!(storage.pool_max_size, Some(8));
 
     let policy = parsed
         .policy
@@ -1462,10 +1497,7 @@ fn skills_list_reports_reborn_skill_data() {
     );
     assert!(stdout.contains("configured:"), "stdout: {stdout}");
     assert!(stdout.contains("source: standalone"), "stdout: {stdout}");
-    assert!(
-        stdout.contains("- code-review (system)"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("- coding (system)"), "stdout: {stdout}");
     assert!(
         stdout.contains("- catalog-helper (user)"),
         "stdout: {stdout}"
@@ -1474,7 +1506,7 @@ fn skills_list_reports_reborn_skill_data() {
     assert!(!stdout.contains("v1_state"), "stdout: {stdout}");
     assert!(
         !reborn_home
-            .join("standalone/system/skills/code-review/SKILL.md")
+            .join("standalone/system/skills/coding/SKILL.md")
             .exists(),
         "skills list should report bundled skills without installing them"
     );
@@ -1547,7 +1579,7 @@ fn skills_list_json_reports_reborn_skill_data() {
         "json: {json}"
     );
     assert_eq!(json["source"], "standalone");
-    assert_skill_source(&json, "code-review", "system");
+    assert_skill_source(&json, "coding", "system");
     assert_skill_source(&json, "json-helper", "user");
     assert_eq!(json["details"]["profile"], "local-dev");
     assert_eq!(json["details"]["owner_id"], "reborn-cli");
@@ -4864,10 +4896,27 @@ fn drive_real_turn_via_webui(port: u16, webui_token: &str, label: &str) -> Resul
         .ok_or_else(|| format!("create-thread response missing thread_id: {created_json}"))?
         .to_string();
 
-    let message_body =
-        format!(r#"{{"content":"hi","client_action_id":"smoke-send-message-{label}"}}"#);
+    // The unified channel model routes browser sends through the generic
+    // session-inbound route, keyed by the extension id `GET /session`
+    // advertises — the same discovery the SPA performs.
+    let session_request = format!(
+        "GET /api/webchat/v2/session HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n"
+    );
+    let session = http_response(port, &session_request, "session probe")?;
+    let session_json: serde_json::Value =
+        serde_json::from_str(&session.body).map_err(|error| format!("session body: {error}"))?;
+    let session_channel = session_json["session_channel_extension_id"]
+        .as_str()
+        .ok_or_else(|| {
+            format!("session response missing session_channel_extension_id: {session_json}")
+        })?
+        .to_string();
+
+    let message_body = format!(
+        r#"{{"content":"hi","thread_id":"{thread_id}","client_action_id":"smoke-send-message-{label}"}}"#
+    );
     let send_request = format!(
-        "POST /api/webchat/v2/threads/{thread_id}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message_body}",
+        "POST /api/webchat/v2/channels/{session_channel}/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {bearer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{message_body}",
         message_body.len()
     );
     let sent = http_response(port, &send_request, "send message")?;
@@ -6482,7 +6531,7 @@ fn run_warns_when_falling_back_to_stub_gateway() {
     );
     assert!(
         reborn_home
-            .join("local-dev/system/skills/code-review/SKILL.md")
+            .join("local-dev/system/skills/coding/SKILL.md")
             .is_file(),
         "runtime bootstrap should install bundled Reborn skills"
     );
@@ -7002,6 +7051,37 @@ heartbeat_interval_secs = 0
     assert!(
         stderr.contains("heartbeat_interval_secs") && stderr.contains("greater than 0"),
         "stderr should explain heartbeat interval rejection; got: {stderr}"
+    );
+}
+
+#[test]
+fn run_rejects_runner_heartbeat_interval_past_the_lease_ttl_bound() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    std::fs::create_dir_all(&reborn_home).expect("mkdir");
+    std::fs::write(
+        reborn_home.join("config.toml"),
+        r#"
+[runner]
+heartbeat_interval_secs = 60
+"#,
+    )
+    .expect("write config");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "-m", "ping"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+    assert!(
+        !output.status.success(),
+        "a heartbeat interval past the lease TTL bound must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("heartbeat_interval_secs") && stderr.contains("must not exceed"),
+        "stderr should explain the lease-TTL bound rejection; got: {stderr}"
     );
 }
 

@@ -114,7 +114,7 @@ name = "ironclaw_turn_runner"
 # old 85.55% floor by 0.75pp; and the `#[test]`/`#[tokio::test]` roster across
 # the two crates goes 1,070 -> 1,072 (+2 added, zero names lost). A shed
 # re-captures the SOURCE crate's floor; it does not merely floor the
-# destination. See docs/reborn/target-architecture/ (WS3 landing note).
+# destination. See docs/internal/reborn/target-architecture/ (WS3 landing note).
 floor_percent = 82.53
 floor_covered_lines = 9470
 tolerance_percent = 0.5

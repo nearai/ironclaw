@@ -33,8 +33,9 @@ use crate::journal::{
     ProcessTreeReservation, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
     RecoverExpiredProcessLeasesRequest, RecoverExpiredProcessLeasesResponse,
     ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
-    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessRequest,
-    SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
+    SettleProcessDependencyRequest, StopProcessRequest, SubmitProcessAtEdgeRequest,
+    SubmitProcessRequest, SubmitProcessWithCheckpointRequest, SuspendProcessRequest,
+    TransitionProcessDependencyRequest,
 };
 use crate::types::{invalid_path, same_scope_owner};
 
@@ -45,7 +46,10 @@ mod observer;
 mod rows;
 mod state;
 
-pub use state::MAX_CRASH_RECOVERY_RECLAIMS;
+pub use state::{
+    CRASH_RETRY_EXHAUSTED_FAILURE_CATEGORY, LEASE_EXPIRED_FAILURE_CATEGORY,
+    MAX_CRASH_RECOVERY_RECLAIMS,
+};
 mod validation;
 use command::StoredProcessCommand;
 use migration::{
@@ -237,6 +241,18 @@ where
     pub fn with_concurrency_limits(mut self, limits: ProcessConcurrencyLimits) -> Self {
         self.concurrency_limits = limits;
         self
+    }
+
+    /// The configured lease TTL in the journal's millisecond representation.
+    ///
+    /// Claim, heartbeat, and expiry recovery all carry the same TTL into the
+    /// journal command, so they share one conversion and one rejection.
+    fn lease_duration_millis(&self) -> Result<u64, ProcessJournalStoreError> {
+        u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
+            ProcessJournalStoreError::InvalidRequest(
+                "process lease duration exceeds journal representation".to_string(),
+            )
+        })
     }
 
     async fn submit_process_inner(
@@ -659,6 +675,19 @@ where
         Ok(snapshot)
     }
 
+    async fn submit_process_at_edge(
+        &self,
+        request: SubmitProcessAtEdgeRequest,
+    ) -> Result<JournaledProcessSnapshot, Self::Error> {
+        let outcome = self
+            .execute(StoredProcessCommand::SubmitAtEdge(Box::new(request)))
+            .await?;
+        let StoredCommandOutcome::Submitted(snapshot, _changed) = outcome else {
+            return Err(unexpected_outcome("submit_process_at_edge", outcome));
+        };
+        Ok(snapshot)
+    }
+
     async fn submit_process_with_checkpoint(
         &self,
         request: SubmitProcessWithCheckpointRequest,
@@ -705,6 +734,24 @@ where
         snapshots.sort_by_key(|snapshot| snapshot.process_id.as_uuid());
         Ok(snapshots)
     }
+
+    async fn recent_agent_turn_snapshots(
+        &self,
+        scope: &ResourceScope,
+        limit: u32,
+    ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error> {
+        self.ensure_materialized().await?;
+        // `is_system()`, not `== ResourceScope::system()`: the constructor
+        // mints a fresh `invocation_id` on every call, so an equality check
+        // against it can never match and the guard would be dead.
+        if scope.is_system() {
+            return Err(ProcessJournalStoreError::InvalidRequest(
+                "system-wide process snapshot reads are unbounded; use paged process journal reads"
+                    .to_string(),
+            ));
+        }
+        rows::recent_agent_turn_processes_for_scope(self.filesystem.as_ref(), scope, limit).await
+    }
 }
 
 #[async_trait]
@@ -718,12 +765,7 @@ where
         &self,
         request: ClaimProcessesRequest,
     ) -> Result<Vec<ClaimedProcess>, Self::Error> {
-        let lease_duration_millis =
-            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                ProcessJournalStoreError::InvalidRequest(
-                    "process lease duration exceeds journal representation".to_string(),
-                )
-            })?;
+        let lease_duration_millis = self.lease_duration_millis()?;
         let claimed = match self
             .execute(StoredProcessCommand::Claim {
                 request,
@@ -744,12 +786,7 @@ where
         &self,
         request: ProcessLeaseRequest,
     ) -> Result<ProcessJournalCursor, Self::Error> {
-        let lease_duration_millis =
-            u64::try_from(self.lease_duration.as_millis()).map_err(|_| {
-                ProcessJournalStoreError::InvalidRequest(
-                    "process lease duration exceeds journal representation".to_string(),
-                )
-            })?;
+        let lease_duration_millis = self.lease_duration_millis()?;
         let snapshot = match self
             .execute(StoredProcessCommand::Heartbeat {
                 request,
@@ -768,8 +805,12 @@ where
         &self,
         request: RecoverExpiredProcessLeasesRequest,
     ) -> Result<RecoverExpiredProcessLeasesResponse, Self::Error> {
+        let lease_duration_millis = self.lease_duration_millis()?;
         let response = match self
-            .execute(StoredProcessCommand::RecoverExpired(request))
+            .execute(StoredProcessCommand::RecoverExpired {
+                request,
+                lease_duration_millis,
+            })
             .await?
         {
             StoredCommandOutcome::Recovered(response) => response,
@@ -1090,6 +1131,19 @@ where
         }
     }
 
+    async fn transition_process_dependency(
+        &self,
+        request: TransitionProcessDependencyRequest,
+    ) -> Result<Option<ProcessDependencyRecord>, Self::Error> {
+        match self
+            .execute(StoredProcessCommand::TransitionDependency(request))
+            .await?
+        {
+            StoredCommandOutcome::Dependency(record) => Ok(record),
+            outcome => Err(unexpected_outcome("transition_dependency", outcome)),
+        }
+    }
+
     async fn consume_process_dependency(
         &self,
         request: CloseProcessDependencyRequest,
@@ -1134,14 +1188,7 @@ where
                 .as_ref()
                 .is_none_or(|group_ref| record.group_ref.as_ref() == Some(group_ref))
         })
-        .filter(|record| {
-            request.include_closed
-                || !matches!(
-                    record.state,
-                    crate::ProcessDependencyState::Consumed
-                        | crate::ProcessDependencyState::Abandoned
-                )
-        })
+        .filter(|record| request.include_closed || !record.state.is_closed())
         .collect::<Vec<_>>();
         records.sort_by_key(|record| {
             (
@@ -1159,13 +1206,7 @@ where
         let mut records = rows::unresolved_dependencies(self.filesystem.as_ref())
             .await?
             .into_iter()
-            .filter(|record| {
-                !matches!(
-                    record.state,
-                    crate::ProcessDependencyState::Consumed
-                        | crate::ProcessDependencyState::Abandoned
-                )
-            })
+            .filter(|record| !record.state.is_closed())
             .collect::<Vec<_>>();
         records.sort_by_key(|record| {
             (
@@ -1374,16 +1415,6 @@ where
                         scope: snapshot.scope.clone(),
                         owner_user_id: snapshot.owner_user_id.clone(),
                         suspension: snapshot.suspension.clone()?,
-                        resume_source_ref: snapshot
-                            .metadata
-                            .pointer("/agent_turn/source_binding_ref")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        reply_target_ref: snapshot
-                            .metadata
-                            .pointer("/agent_turn/reply_target_binding_ref")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
                         historical: false,
                     })
                 })

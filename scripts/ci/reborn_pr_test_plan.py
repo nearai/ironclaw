@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tomllib
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,9 +26,13 @@ ROOT = Path(__file__).resolve().parents[2]
 # frontend diffs stop routing to the Code Style lane, and the planner reports
 # "no Reborn test surface changed" for a WebUI change — silently, since
 # nothing else covers that lane. See
-# docs/reborn/target-architecture/CHECKLIST.md WS10.
+# docs/internal/reborn/target-architecture/CHECKLIST.md WS10.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+
+# Owns the publication fence (.mintignore parsing and matching).
+import docs_publication_boundary  # noqa: E402
 
 
 @functools.lru_cache(maxsize=None)
@@ -44,23 +48,81 @@ def _webui_frontend_prefix() -> str:
     return f"{directory}/frontend/"
 
 
-def _sandbox_docker_prefixes() -> tuple[str, ...]:
-    """Sandbox source prefixes whose changes require the Docker lane."""
+@functools.lru_cache(maxsize=None)
+def _sandbox_crate_directory() -> str:
+    """`<ironclaw_sandbox crate dir>`, resolved once per process."""
     try:
-        directory = crate_directory("ironclaw_sandbox", ROOT)
+        return crate_directory("ironclaw_sandbox", ROOT)
     except CrateTreeError as error:
         raise RuntimeError(
             "reborn_pr_test_plan: cannot resolve the ironclaw_sandbox crate, so "
-            f"the source path prefixes used to route the Docker lane are unknown: {error}"
+            f"the source paths used to route the Docker lane are unknown: {error}"
         ) from error
-    return (f"{directory}/src/sandbox_process",)
+
+
+def _sandbox_docker_prefixes() -> tuple[str, ...]:
+    """Sandbox source prefixes whose changes require the Docker lane."""
+    directory = _sandbox_crate_directory()
+    return (
+        f"{directory}/src/sandbox_process",
+        f"{directory}/tests/user_sandbox_docker_live/",
+    )
 
 
 MAX_PR_CRATE_BUCKETS = 3
 FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
+# Doc-fact contract tests (#7378) read `docs/` pages from inside owning
+# crates, so a published-page edit can fail a cargo test. Route those edits
+# to exactly the doc-fact test binaries (no reverse-dependency widening —
+# prose can only change the assertions that read it); otherwise docs-only
+# PRs merge green and the failure lands on an unrelated change later.
+DOC_FACT_PAGE_TESTS = {
+    "docs/using/cli.mdx": ("ironclaw", "docs_cli_reference"),
+    "docs/api/responses.mdx": ("ironclaw_openai_compat", "docs_responses_contract"),
+}
+DOC_FACT_PUBLISHED_SWEEP = (
+    "ironclaw_extension_registry",
+    "docs_manifest_schema_version",
+)
+DOCS_PREFIX = "docs/"
+DOCS_MINTIGNORE = "docs/.mintignore"
+
+
+@functools.cache
+def _publication_fence() -> list[str]:
+    """The `.mintignore` patterns, parsed from the authoritative file so a
+    removed fence entry widens the routing with the sweep it selects. A
+    missing file means no fence (everything published), matching
+    docs_publication_boundary.find_violations()."""
+    path = Path(__file__).resolve().parents[2] / DOCS_MINTIGNORE
+    if not path.exists():
+        return []
+    return docs_publication_boundary.parse_mintignore(path.read_text(encoding="utf-8"))
+
+
+def _doc_fact_selections(path: str) -> list[tuple[str, str]]:
+    """(package, test target) pairs whose doc-fact tests read this path."""
+    if not path.startswith(DOCS_PREFIX):
+        return []
+    if path == DOCS_MINTIGNORE:
+        # A fence edit changes the sweep's scope; run it.
+        return [DOC_FACT_PUBLISHED_SWEEP]
+    selections = []
+    page = DOC_FACT_PAGE_TESTS.get(path)
+    if page is not None:
+        selections.append(page)
+    if Path(path).suffix in {".md", ".mdx"} and not docs_publication_boundary.is_ignored(
+        PurePosixPath(path[len(DOCS_PREFIX) :]), _publication_fence()
+    ):
+        selections.append(DOC_FACT_PUBLISHED_SWEEP)
+    return selections
+
+
 # Path classes with no Rust or E2E surface any Reborn lane can exercise.
 # `.claude/` is agent guidance (skills, commands, rules) — prose in the same
-# class as `docs/`. It was unclassified until 2026-08-03, which meant the
+# class as `docs/` (whose published Markdown is escalated by the doc-fact arm
+# above before this class applies; only fenced trees and non-page files reach
+# it). It was unclassified until 2026-08-03, which meant the
 # planner's fail-closed arm rejected every PR that touched agent guidance:
 # the only satisfiable behaviour for that class was "never edit it", which is
 # not a policy anyone chose. Classifying it is the fix; loosening the
@@ -91,8 +153,16 @@ IGNORED_PREFIXES = (
     ".codebase-memory/",
 )
 IGNORED_GUIDANCE_PATHS = {
+    "tests/AGENTS.md",
     "tests/CLAUDE.md",
+    "tests/integration/AGENTS.md",
     "tests/integration/CLAUDE.md",
+    # `check-guidance.py`'s alias rule also requires this pair (`crates/` or
+    # `TESTS_PREFIX`); without an explicit entry here it falls into the
+    # `tests/support/reborn_parity_qa/` arm below and over-selects the root
+    # partition for a pure guidance edit.
+    "tests/support/reborn_parity_qa/AGENTS.md",
+    "tests/support/reborn_parity_qa/CLAUDE.md",
 }
 # Repo-root prose/example files with no build or test surface. Root `*.md` is
 # already handled inline below; this covers the non-`.md` siblings.
@@ -163,6 +233,7 @@ QA_HARNESS_PREFIXES = (
     "scripts/telegram_smoke/",
 )
 CHANGED_COVERAGE_MANIFEST = "tests/integration/changed-coverage-exemptions.toml"
+SANDBOX_DOCKER_PREFIXES = ("docker/sandbox/",)
 SANDBOX_DOCKER_EXACT_PATHS = {
     "Dockerfile.sandbox-worker",
     "crates/app/ironclaw_cli/src/runtime/mod.rs",
@@ -315,6 +386,11 @@ PR_STATIC_CONTROL_PATHS = {
     ".cargo/config.toml",
     "tests/integration/coverage-exemptions.toml",
     "tests/integration/coverage-floor.toml",
+    # Release-smoke Python coverage is executed by Code Style's dedicated
+    # `Release smoke script tests` step. It drives the real
+    # `scripts/ci/smoke-release-binary.py`; no Tests (Reborn) Rust lane owns
+    # this unittest module.
+    "tests/test_smoke_release_binary.py",
     # Repo-root `scripts/` is deliberately NOT prefix-classified — the
     # `unmapped test or CI path` arm below exists to force a per-file decision.
     # These are decided:
@@ -382,13 +458,39 @@ PR_STATIC_CONTROL_PATHS = {
     #     exercise a change to it. Surfaced 2026-08-05 (#7259) when the docs
     #     path sweep touched its docstring.
     "scripts/check-type-duplicates.py",
+    #   * Its self-test, `python3 scripts/test-check-type-duplicates.py`, runs
+    #     under Code Style's "Static-check self-tests" step
+    #     (`.github/workflows/code_style.yml`) — the same lane that runs
+    #     `scripts/ci/test-check-guidance.py` and the other `scripts/ci/`
+    #     self-tests covered by the `PR_STATIC_CONTROL_PREFIXES` rule below.
+    #     Neither this file nor `scripts/check-type-duplicates.py` sits under
+    #     `scripts/ci/`, so unlike its sibling neither tripped the workflow's
+    #     `has_code` path filter on its own — a PR touching only this file had
+    #     `fast-checks` (and thus the self-test step) skipped entirely (review
+    #     on #7797). `has_code`'s scope list now names both scripts
+    #     explicitly, pinned by the `has_code` filter's `in_scope` probes in
+    #     `scripts/ci/ws12_workflow_contracts.py`. Static control here means
+    #     "no Tests (Reborn) lane reads it", not "no workflow runs it": Code
+    #     Style owns this self-test, not a Reborn Rust test lane, so it stays
+    #     classified as static control.
+    "scripts/test-check-type-duplicates.py",
     #   * `render-architecture-video.sh` is a local one-command Remotion
-    #     render for docs/internal/architecture-video; referenced only by the
-    #     `architecture-video` Claude skill, never by a workflow. Same PR,
-    #     same reason: the sweep rewrote its VIDEO_DIR path.
+    #     render for docs/internal/architecture-video; never invoked by a
+    #     workflow (the `architecture-video` Claude skill that used to
+    #     reference it was deleted as stale v1-architecture content — see
+    #     `.claude/skills/`). No lane can exercise a change to it.
     "scripts/render-architecture-video.sh",
     #   * `pre-commit-safety.sh` is a local git hook, not a CI lane.
     "scripts/pre-commit-safety.sh",
+    #   * `preflight-gates.sh` is the local pre-push gate gauntlet proposed by
+    #     the 2026-08 gate audit (docs/internal/gate-audit-2026-08.md §4.3);
+    #     referenced by no workflow, so no lane can be selected for it.
+    "scripts/preflight-gates.sh",
+    #   * `check-boundaries.sh` was DELETED by the same audit (measured broken
+    #     on a clean tree, run by nothing). The entry stays so the deletion
+    #     diff — and any revert — classifies instead of tripping the
+    #     fail-closed arm; the audit's own PR was the first to hit it.
+    "scripts/check-boundaries.sh",
     #   * `test-mutation-audit.sh` is the self-test for the mutation audit,
     #     driven by its own lane rather than by a crate/integration selection.
     "scripts/test-mutation-audit.sh",
@@ -443,15 +545,57 @@ PR_STATIC_CONTROL_PATHS = {
     # real script. (`platform-and-compat.yml`'s `has_docker_risk` deliberately
     # does not cover it — that filter is keyed to `Dockerfile`/`.dockerignore`
     # and owns the image build, not the entrypoint's behaviour. `docker/` stays
-    # per-file, never a prefix: `docker/reborn/config.*.toml` and
-    # `docker/process-sandbox-entrypoint.sh` have no owning lane and must keep
-    # refusing.)
+    # per-file, never a prefix: it mixes classes, and the shipped runtime
+    # configs beside this script belong to a Rust lane instead — see
+    # `DOCKER_RUNTIME_CONFIG_OWNERS` below. `docker/process-sandbox-entrypoint.sh`
+    # has no owning lane and must keep refusing.)
     "docker/reborn/entrypoint.sh",
+}
+# Shipped container configs a Reborn Rust test parses and asserts on, mapped to
+# the test source that owns them. They are NOT static control: the membership
+# rule for that set is "no Reborn test lane reads the file", and
+# `ironclaw_cli`'s `smoke` test reads both of these — it parses each through
+# `ironclaw_config::RebornConfigFile::parse_text` and pins the resulting
+# profile, storage backend and policy (`docker_reborn_production_config_uses_postgres_storage`
+# and its local-config sibling). Calling them prose would silently under-select
+# the one lane that can catch a broken production config.
+#
+# Both were unclassified until 2026-08-11, when #7471's Postgres pool change
+# edited `config.production.toml` and the fail-closed arm failed
+# `Detect Reborn test scope`, cascading into the whole `Tests (Reborn)`
+# roll-up. Classified as the pair they are, rather than one per red run —
+# the same lesson the repo-root metadata block above records.
+#
+# The two `config.hosted-single-tenant*.toml` siblings were undecided until
+# the docs/internal/reborn consolidation (2026-08-12) touched their reader,
+# `tests/dockerfile_runtime_home.rs`, and hit this planner's fail-closed arm.
+# That PR gave the reader a lane — `_root_test_partitions()` and
+# `run-reborn-root-partition.sh` both inventory it alongside
+# `support_unit_tests.rs` — so the configs now map to it: a root-test owner
+# selects its root partition, a crate-test owner selects its exact crate
+# target (both arms below).
+DOCKER_RUNTIME_CONFIG_OWNERS = {
+    "docker/reborn/config.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
+    "docker/reborn/config.production.toml": "crates/app/ironclaw_cli/tests/smoke.rs",
+    "docker/reborn/config.hosted-single-tenant.toml": "tests/dockerfile_runtime_home.rs",
+    "docker/reborn/config.hosted-single-tenant-volume.toml": "tests/dockerfile_runtime_home.rs",
+}
+# Repository configuration that a Reborn crate test reads as an asserted input.
+# These paths are not static CI control: changing one must schedule the test that
+# defines its product/security contract. The linked-device supply-chain test
+# parses Dependabot's Cargo ignore rules so the exact grammers pin cannot be
+# silently reopened by an automated dependency update.
+REPO_CONFIG_TEST_OWNERS = {
+    ".github/dependabot.yml": (
+        "crates/app/ironclaw_architecture_tests/tests/"
+        "reborn_linked_device_supply_chain_pin.rs"
+    ),
 }
 # `.githooks/` is developer-local git hook plumbing: no Reborn lane executes a
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
+SHARED_REBORN_ACTION_PREFIXES = (".github/actions/setup-sccache-dist/",)
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -605,18 +749,18 @@ def _bound_pr_buckets(
 
 
 def _root_test_partitions() -> dict[str, int]:
-    support_tests = (
-        ["support_unit_tests"]
-        if (ROOT / "tests/support_unit_tests.rs").is_file()
-        else []
-    )
+    extra_tests = [
+        name
+        for name in ("dockerfile_runtime_home", "support_unit_tests")
+        if (ROOT / f"tests/{name}.rs").is_file()
+    ]
     names = sorted(
         [
             path.stem
             for path in (ROOT / "tests").glob("reborn_*.rs")
             if path.is_file()
         ]
-        + support_tests
+        + extra_tests
     )
     return {f"tests/{name}.rs": index % 4 for index, name in enumerate(names)}
 
@@ -735,19 +879,21 @@ def build_plan(
     run_sandbox_docker = False
     qa_evidence_changed = False
     nextest_config_changed = False
+    shared_reborn_action_changed = False
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
-    sandbox_docker_prefixes = _sandbox_docker_prefixes()
+    sandbox_crate_prefixes = _sandbox_docker_prefixes()
+    sandbox_docker_prefixes = SANDBOX_DOCKER_PREFIXES + sandbox_crate_prefixes
     sandbox_docker_exact_paths = set(SANDBOX_DOCKER_EXACT_PATHS)
-    if sandbox_docker_prefixes:
-        sandbox_crate_directory = sandbox_docker_prefixes[0].removesuffix(
-            "/src/sandbox_process"
-        )
+    if sandbox_crate_prefixes:
+        sandbox_crate_directory = _sandbox_crate_directory()
         sandbox_docker_exact_paths.update(
             {
                 f"{sandbox_crate_directory}/Cargo.toml",
                 f"{sandbox_crate_directory}/src/lib.rs",
+                f"{sandbox_crate_directory}/tests/support/user_sandbox_live.rs",
+                f"{sandbox_crate_directory}/tests/user_sandbox_docker_live.rs",
             }
         )
 
@@ -774,10 +920,58 @@ def build_plan(
             # `Tests (Reborn)` roll-up on the provider-matrix retirement PR.
             nextest_config_changed = True
             continue
+        if path.startswith(SHARED_REBORN_ACTION_PREFIXES):
+            # Every `Tests (Reborn)` job installs the compiler cache through
+            # this local action. No narrow lane can exercise a change to it
+            # safely, so use the exhaustive plan just as we do for shared
+            # nextest configuration. Keep other `.github/actions/**` paths
+            # fail-closed until their consumers are mapped deliberately.
+            shared_reborn_action_changed = True
+            continue
+        if path in REPO_CONFIG_TEST_OWNERS:
+            owner = REPO_CONFIG_TEST_OWNERS[path]
+            package = next(
+                (
+                    name
+                    for directory, name in package_directories.items()
+                    if owner.startswith(f"{directory}/")
+                ),
+                None,
+            )
+            if package is None:
+                raise ValueError(
+                    f"repository config owner is in no workspace package: {owner}"
+                )
+            direct_test_packages.add(package)
+            exact_test_targets[package].add(("test", Path(owner).stem))
+            reasons.append(f"repository config parsed by {owner}: {path}")
+            continue
         if path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
             reasons.append(f"static CI or workspace-policy checks own: {path}")
+            continue
+        if path in DOCKER_RUNTIME_CONFIG_OWNERS:
+            owner = DOCKER_RUNTIME_CONFIG_OWNERS[path]
+            if owner in root_inventory:
+                root_partitions.add(root_inventory[owner])
+                reasons.append(f"shipped container config parsed by {owner}: {path}")
+                continue
+            package = next(
+                (
+                    name
+                    for directory, name in package_directories.items()
+                    if owner.startswith(f"{directory}/")
+                ),
+                None,
+            )
+            if package is None:
+                raise ValueError(
+                    f"container config owner is in no workspace package: {owner}"
+                )
+            direct_test_packages.add(package)
+            exact_test_targets[package].add(("test", Path(owner).stem))
+            reasons.append(f"shipped container config parsed by {owner}: {path}")
             continue
         if path.startswith(DEDICATED_WORKFLOW_PREFIXES):
             reasons.append(f"dedicated workflow owns: {path}")
@@ -794,6 +988,13 @@ def build_plan(
             continue
         if path == CHANGED_COVERAGE_MANIFEST:
             reasons.append("changed-coverage policy is statically validated")
+            continue
+        doc_fact = _doc_fact_selections(path)
+        if doc_fact:
+            for package, target in doc_fact:
+                direct_test_packages.add(package)
+                exact_test_targets[package].add(("test", target))
+            reasons.append(f"doc-fact contract tests read: {path}")
             continue
         if (
             path in IGNORED_GUIDANCE_PATHS
@@ -829,11 +1030,16 @@ def build_plan(
                 "shared root-test support changed; PR runs a representative partition"
             )
             continue
-        if path == "tests/support/trace_llm.rs":
-            integration_lanes.add(0)
+        if path.startswith("tests/support/") and path not in INTEGRATION_SUPPORT_OWNERS:
+            # Direct shared root-test support (tests/support/mod.rs and the
+            # modules it declares). The integration group targets also compile
+            # this tree via `#[path = "../../support/mod.rs"]`, so schedule a
+            # representative lane of each tier.
             root_partitions.add(0)
+            integration_lanes.add(0)
             reasons.append(
-                "shared scripted-provider support changed; PR runs representative lanes"
+                "shared root-test support changed; PR runs a representative "
+                "partition and integration lane"
             )
             continue
         if path in integration_inventory:
@@ -870,6 +1076,18 @@ def build_plan(
         }:
             qa_evidence_changed = True
             reasons.append("recorded QA evidence changed")
+            continue
+        if path.startswith("tests/fixtures/") and not path.startswith(
+            "tests/fixtures/llm_traces/"
+        ):
+            # Document/binary fixtures (docx, xlsx, pptx, pdf) are consumed by
+            # integration tests through `include_bytes!`, so changing one
+            # changes what those tests assert. Recorded LLM traces under
+            # `reborn_qa` are handled by the QA-evidence arm above;
+            # other trace families require an explicit owner rather than
+            # silently becoming generic integration fixtures.
+            integration_lanes.add(0)
+            reasons.append(f"integration fixture changed: {path}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
             raise ValueError(f"unmapped Reborn test path: {path}")
@@ -1017,6 +1235,11 @@ def build_plan(
     if nextest_config_changed:
         return _full_plan(
             "nextest runner config changed; this PR runs the exhaustive plan",
+            canonical_packages,
+        )
+    if shared_reborn_action_changed:
+        return _full_plan(
+            "shared sccache action changed; this PR runs the exhaustive plan",
             canonical_packages,
         )
 

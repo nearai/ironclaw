@@ -32,9 +32,12 @@ permitted to hold one.
   `WasmRuntimeCredentialProvider`).
 - `wasm_sandbox_core` — engine setup, epoch ticker, minimal WASI p2 linker,
   limits, store-core helpers; deliberately domain-free.
-- The ABI: `wit/tool.wit` (`near:agent@0.3.0`) and `wit/channel.wit`
-  (`near:agent@0.3.1`) — the same WIT package name at two versions, so bindgen
-  is always handed the single file, never the directory.
+- The ABI: `wit/tool.wit` (`near:agent@0.4.1`, typed `wit-result`-shaped
+  `WitToolOutcome::Success`/`Failure` responses) is the sole supported tool
+  contract. `wit/channel.wit` remains `near:agent@0.3.1`; the same WIT package
+  name at two versions means bindgen is always handed the single file, never
+  the directory. Components targeting another tool contract version fail
+  closed during instantiation.
 
 ## Depends on / consumed by
 
@@ -56,6 +59,12 @@ permitted to hold one.
   capabilities composition explicitly wires, nothing by omission.
 - **Fresh store per call**, aggregate memory accounting across multi-memory
   components, fuel/epoch/table/instance ceilings (via the shared limiter).
+- **Guest diagnostic safety:** each guest-authored failure code and message is
+  scrubbed and bounded to 4 KiB at the sandbox-exit boundary without splitting
+  UTF-8, and each buffered guest log record has the same bound. The host-runtime diagnostic seam applies the
+  canonical `MODEL_DIAGNOSTIC_MAX_BYTES` bound again before tracing; typed
+  provider messages are narrowed further before they enter dispatch metadata.
+  Structured JSON envelopes retain their parseable kind/code/message shape.
 - **`wasm_sandbox_core` stays domain-free** — no product, capability,
   registry, filesystem, network, secrets, host-runtime, or composition
   references; scanned by
@@ -81,6 +90,6 @@ cargo test -p ironclaw_architecture_tests   # sandbox-core scan + egress scan + 
 Working rules and safety rules: [`AGENTS.md`](./AGENTS.md) (canonical —
 gate-pinned wording). Family boundary:
 [`crates/lanes/AGENTS.md`](../AGENTS.md), including why `wit/` living here is
-load-bearing. Contracts: `docs/reborn/contracts/wasm.md`,
-`docs/reborn/contracts/runtime-workflows.md`,
-`docs/reborn/contracts/network.md`. Design record: PROPOSAL §6.6.1.
+load-bearing. Contracts: `docs/internal/reborn/contracts/wasm.md`,
+`docs/internal/reborn/contracts/runtime-workflows.md`,
+`docs/internal/reborn/contracts/network.md`. Design record: PROPOSAL §6.6.1.

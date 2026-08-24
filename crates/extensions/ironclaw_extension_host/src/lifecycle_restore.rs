@@ -47,7 +47,7 @@ pub async fn restore_extension_lifecycle_state(
             LifecyclePackageKind::Extension,
             installation.extension_id().as_str(),
         )?;
-        let available = match catalog.resolve(&package_ref) {
+        let mut available = match catalog.resolve(&package_ref) {
             Ok(available) => available,
             Err(error) => {
                 tracing::warn!(
@@ -59,7 +59,8 @@ pub async fn restore_extension_lifecycle_state(
                 continue;
             }
         };
-        if let Err(hash_error) = validate_restored_manifest_hash(&installation, &available) {
+        let hash_matches_catalog = validate_restored_manifest_hash(&installation, &available);
+        if let Err(hash_error) = hash_matches_catalog {
             migrate_host_bundled_manifest_hash(
                 installation_store,
                 &available,
@@ -67,6 +68,28 @@ pub async fn restore_extension_lifecycle_state(
                 hash_error,
             )
             .await?;
+        } else if let Some(stored) = stored_manifest.as_ref()
+            && available.source == ManifestSource::HostBundled
+            && stored
+                .resolved()
+                .mcp
+                .as_ref()
+                .is_some_and(|mcp| !mcp.dynamic_input_schemas.is_empty())
+        {
+            // Same-bundle restart: hosted discovery enriched the durable
+            // resolved contract while leaving the loader-owned definition
+            // hash unchanged. Rehydrate those capabilities only after proving
+            // the stored row still belongs to this exact bundled definition.
+            // On binary upgrades the mismatch path above retains the new
+            // catalog contract and performs the existing migration instead of
+            // reviving stale endpoint/auth/effect policy.
+            if !catalog.refresh_resolved_manifest(stored)? {
+                tracing::warn!(
+                    extension_id = installation.extension_id().as_str(),
+                    "stored discovery metadata did not match the bundled catalog package"
+                );
+            }
+            available = catalog.resolve(&package_ref)?;
         }
         if available.source != ManifestSource::UserRegistered {
             materialize_available_extension(filesystem.as_ref(), &available).await?;

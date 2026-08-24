@@ -416,14 +416,14 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS6",
     },
     SameLayerEdge {
-        // The web-push subscription store rides the scoped-filesystem plane
+        // The web-app subscription store rides the scoped-filesystem plane
         // (per database.md), the same edge every persisting domain crate
         // carries; both sit at the substrates layer by family rule.
-        crate_name: "ironclaw_web_push",
+        crate_name: "ironclaw_web_app",
         dependency_name: "ironclaw_filesystem",
         layer: "substrates",
         owner: "domains/",
-        decided_in: "web-push channel (2026-08-08)",
+        decided_in: "web-app channel (2026-08-08)",
     },
     SameLayerEdge {
         crate_name: "ironclaw_attachments",
@@ -559,6 +559,13 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         decided_in: "WS2",
     },
     SameLayerEdge {
+        crate_name: "ironclaw_notifications",
+        dependency_name: "ironclaw_filesystem",
+        layer: "substrates",
+        owner: "domains/",
+        decided_in: "#7688 (durable notification inbox grammar over ScopedFilesystem)",
+    },
+    SameLayerEdge {
         crate_name: "ironclaw_outbound",
         dependency_name: "ironclaw_attachments",
         layer: "substrates",
@@ -634,6 +641,18 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         layer: "substrates",
         owner: "domains/",
         decided_in: "WS6",
+    },
+    SameLayerEdge {
+        // The prepared-context accept door seeds caller-supplied
+        // `AgentMessage` lists (and their tool-history parts) as transcript
+        // rows: `ironclaw_threads` consumes the canonical message vocabulary
+        // from its owner instead of minting a mirror DTO (unbound-turns
+        // design §4.4; mirror-DTO ban).
+        crate_name: "ironclaw_threads",
+        dependency_name: "ironclaw_llm",
+        layer: "substrates",
+        owner: "domains/",
+        decided_in: "unbound-turns (PR #7633)",
     },
     SameLayerEdge {
         crate_name: "ironclaw_triggers",
@@ -728,7 +747,10 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 /// `ironclaw_first_party_extension_ports` into `ironclaw_loop_host` removed the
 /// `loops` pair the two of them formed. No edge was re-plumbed and none was
 /// added: the crate's five workspace dependencies were already `loop_host`'s.
-const SAME_LAYER_EDGE_BASELINE: usize = 71;
+// 72 -> 73 (#7688): the dedicated notification-record domain is introduced
+// directly at the substrates layer and stores its grammar through the shared
+// filesystem substrate rather than coupling notification state to outbound.
+const SAME_LAYER_EDGE_BASELINE: usize = 73;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (✎ **65**
@@ -768,6 +790,7 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_capabilities", "kernel"),
     ("ironclaw_common", "contracts"),
     ("ironclaw_conversations", "substrates"),
+    ("ironclaw_documents", "substrates"),
     ("ironclaw_event_projections", "substrates"),
     ("ironclaw_event_streams", "substrates"),
     ("ironclaw_event_log", "substrates"),
@@ -796,6 +819,7 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_memory_mem0", "substrates"),
     ("ironclaw_memory_native", "substrates"),
     ("ironclaw_network", "substrates"),
+    ("ironclaw_notifications", "substrates"),
     ("ironclaw_observability", "substrates"),
     ("ironclaw_operator", "products"),
     ("ironclaw_outbound", "substrates"),
@@ -823,8 +847,8 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_telegram_extension", "products"),
     ("ironclaw_threads", "substrates"),
     ("ironclaw_triggers", "substrates"),
-    ("ironclaw_web_push", "substrates"),
-    ("ironclaw_web_push_extension", "products"),
+    ("ironclaw_web_app", "substrates"),
+    ("ironclaw_web_app_extension", "products"),
     ("ironclaw_trust", "kernel"),
     ("ironclaw_turns", "kernel"),
     ("ironclaw_wasm", "runtimes"),

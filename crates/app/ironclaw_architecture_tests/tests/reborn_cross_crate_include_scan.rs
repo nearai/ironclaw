@@ -88,9 +88,16 @@ const WS0_CROSS_CRATE_INCLUDE_SITES: usize = 19;
 /// with three owners, none of them WS10's, and each needs a design decision
 /// rather than a path repoint (CHECKLIST WS2's disposition 3, filed as #7093):
 ///
-///   * `ironclaw_extension_support` → the slack/telegram package crates (4).
+///   * `ironclaw_extension_support` → the slack/telegram package crates (5).
 ///     The obvious inversion is an **upward** `runtimes → products` edge, so it
 ///     may not be fixable as stated.
+///     **Amended 2026-08-10 (device-link):** 16 → 17. The telegram package
+///     gained `prompts/telegram/*.md` when it gained a tool surface, embedded
+///     by the same `include_bytes!` macro shape Slack already uses for its
+///     prompt docs. This is one more instance of the category above, not a new
+///     class of reach-in, and it is not repointable while the layer matrix
+///     forbids `runtimes → products`. Recorded here deliberately, per this
+///     ratchet's own rule that adding a site must edit this file.
 ///   * `ironclaw_host_runtime` → `memory-native`/`mem0` (7) — five of them in
 ///     `first_party_tools/schemas.rs`.
 ///   * source-scraping drift guards (5): `ironclaw_assistant`'s failure-
@@ -104,7 +111,7 @@ const WS0_CROSS_CRATE_INCLUDE_SITES: usize = 19;
 /// that removes a reach-in must lower this constant in the same change and a PR
 /// that adds one is red. When it reaches **0**, flip `REPORT_ONLY` and delete
 /// this constant with the gate that reads it.
-const CROSS_CRATE_INCLUDE_SITES: usize = 16;
+const CROSS_CRATE_INCLUDE_SITES: usize = 17;
 
 /// This file's own fixtures are include-shaped strings; skip it the way the
 /// shared type-def scanner skips the ratchet files (defense in depth).

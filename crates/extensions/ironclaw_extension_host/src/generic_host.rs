@@ -27,9 +27,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, ChannelSurfaces, DeliveryReport,
+    InboundOutcome, OutboundEnvelope, VerifiedInbound,
 };
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -40,16 +40,16 @@ use ironclaw_extension_registry::{
     ExtensionInstallationError, ExtensionInstallationStorePort, ExtensionManifest,
     ExtensionPackage, ResolvedExtensionManifest,
 };
-use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::path::VirtualPath;
+use ironclaw_host_api::{dispatch::RuntimeDispatchErrorKind, ids::ExtensionId};
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
 use ironclaw_resources::ResourceGovernor;
 
 use crate::{
     BindError, ChannelConfigError, ChannelConfigService, DrainController, EgressFactory,
     ExtensionBindings, ExtensionEntrypoint, ExtensionHost, ExtensionHostDeps, ExtensionLoader,
-    HookError, InstallationRecord, LoadContext, LoadedExtension, NativeExtensionFactory,
-    RehydratedInstallationRecordStore, SnapshotToolResolver,
+    HookError, InstallationRecord, LinkedSessionStore, LoadContext, LoadedExtension,
+    NativeExtensionFactory, RehydratedInstallationRecordStore, SnapshotToolResolver,
 };
 
 /// The composed generic host plus the resolver handle composition injects
@@ -64,12 +64,28 @@ pub struct GenericExtensionHost {
 pub struct GenericExtensionHostParams {
     pub binder: ExtensionLaneToolBinder,
     pub native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
-    pub channel_adapters: Vec<(ExtensionId, Arc<dyn ChannelAdapter>)>,
+    pub channel_adapters: Vec<(ExtensionId, ChannelSurfaces)>,
     pub installation_store: Arc<dyn ExtensionInstallationStorePort>,
     pub boot_installations: Vec<InstallationRecord>,
     pub governor: Arc<dyn ResourceGovernor>,
     pub assembly: ExtensionHostAssemblyConfig,
     pub channel_egress_transport: Option<Arc<dyn crate::egress::ChannelEgressTransport>>,
+    /// Linked-account custody. A deployment that wires none passes
+    /// [`LinkedSessionStore::unavailable`] — the fail-closed store, chosen at
+    /// the composition boundary rather than defaulted here, so this type
+    /// cannot claim custody is optional when production always supplies it.
+    pub linked_sessions: Arc<LinkedSessionStore>,
+    /// The per-extension linked-account resolver factory; the unwired shape
+    /// is the explicit `UnavailableLinkedAccountResolution`.
+    pub linked_accounts: Arc<dyn crate::linked_account_resolution::LinkedAccountResolution>,
+    /// Admin-configuration reads for load-time factory construction.
+    ///
+    /// Required, like its two custody siblings: production always supplies it,
+    /// so an `Option` here described a deployment that does not exist and hid
+    /// the fail-closed choice inside this crate. A deployment without admin
+    /// configuration passes `None` at the composition boundary instead, where
+    /// the choice is visible.
+    pub admin_secrets: Option<Arc<crate::ChannelConfigService>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -181,6 +197,9 @@ pub async fn build_generic_extension_host(
         governor,
         assembly,
         channel_egress_transport,
+        linked_sessions,
+        linked_accounts,
+        admin_secrets,
     } = params;
     let factories: HashMap<String, Arc<dyn NativeExtensionFactory>> = native_factories
         .into_iter()
@@ -212,6 +231,9 @@ pub async fn build_generic_extension_host(
             reserved_capability_ids: assembly.reserved_capability_ids,
             reserved_ingress_routes: assembly.reserved_ingress_routes,
             hook_deadline: assembly.hook_deadline,
+            linked_sessions,
+            linked_accounts,
+            admin_secrets,
         })
         .await,
     );
@@ -294,7 +316,7 @@ struct CompositionExtensionLoader {
     /// extensions whose TOOLS load via the runtime lanes (P4 ingress cutover).
     /// An extension without an entry binds the transitional bridge until its
     /// adapter lands.
-    channel_adapters: HashMap<ExtensionId, Arc<dyn ChannelAdapter>>,
+    channel_adapters: HashMap<ExtensionId, ChannelSurfaces>,
     governor: Arc<dyn ResourceGovernor>,
     installation_store: Arc<dyn ExtensionInstallationStorePort>,
 }
@@ -329,7 +351,6 @@ impl ExtensionLoader for CompositionExtensionLoader {
             .resolved
             .to_internal(source)
             .map_err(|error| load_error(format!("resolved contract rebuild failed: {error}")))?;
-        let declares_channel = ctx.resolved.channel.is_some();
         // Pure capability count, mirroring `check_binding`'s own
         // declared-tools test (entrypoint.rs) — the two must stay in
         // lockstep or activation fails the binding-rule check before
@@ -350,7 +371,7 @@ impl ExtensionLoader for CompositionExtensionLoader {
             &ctx.resolved.runtime
             && let Some(factory) = self.factories.get(service)
         {
-            let entrypoint = factory.load(ctx)?;
+            let entrypoint = factory.load(ctx).await?;
             return Ok(LoadedExtension::new(Box::new(SettlingEntrypoint {
                 inner: entrypoint,
                 governor: Arc::clone(&self.governor),
@@ -380,12 +401,19 @@ impl ExtensionLoader for CompositionExtensionLoader {
             // when the binary/composition assembled one (the P4 inbound
             // cutover); otherwise the transitional bridge keeps the binding
             // rule satisfied until the adapter lands.
-            channel: declares_channel.then(|| {
-                self.channel_adapters
-                    .get(&extension_id)
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(HostServedChannelBridge) as Arc<dyn ChannelAdapter>)
-            }),
+            channel: match (
+                &ctx.resolved.channel,
+                self.channel_adapters.get(&extension_id),
+            ) {
+                (Some(_), Some(surfaces)) => surfaces.clone(),
+                // Until a real adapter is assembled, the bridge stands in —
+                // but only for the halves this manifest declares, because the
+                // per-axis binding rule now checks declaration against code.
+                // A bridge with a half nobody declared would fail activation,
+                // which is the rule doing its job.
+                (Some(channel), None) => host_served_bridge(channel),
+                (None, _) => ChannelSurfaces::default(),
+            },
         })))
     }
 }
@@ -568,7 +596,7 @@ fn resolve_package_root(
 /// there is nothing to report as bound.
 struct LaneEntrypoint {
     adapter: Option<Arc<dyn ToolAdapter>>,
-    channel: Option<Arc<dyn ChannelAdapter>>,
+    channel: ChannelSurfaces,
 }
 
 impl ExtensionEntrypoint for LaneEntrypoint {
@@ -576,6 +604,11 @@ impl ExtensionEntrypoint for LaneEntrypoint {
         Ok(ExtensionBindings {
             tools: self.adapter.clone(),
             channel: self.channel.clone(),
+            // A runtime lane cannot carry a device-link handshake: the login is
+            // bound to a live connection the package owns across calls, which
+            // is exactly what a per-invocation lane does not have. A
+            // device-link extension binds through a native entrypoint.
+            device_link: None,
         })
     }
 }
@@ -599,6 +632,10 @@ impl ExtensionEntrypoint for SettlingEntrypoint {
                 }) as Arc<dyn ToolAdapter>
             }),
             channel: bindings.channel,
+            // Passed through undecorated: the settle legs this wrapper adds are
+            // resource reservations on a capability dispatch, and a device-link
+            // call is neither.
+            device_link: bindings.device_link,
         })
     }
 }
@@ -623,14 +660,17 @@ impl ToolAdapter for SettlingToolAdapter {
         let reservation = call.resources.reservation.take();
         let reservation = match reservation {
             Some(reservation) => reservation,
-            None => self
-                .governor
-                .reserve(scope, estimate)
-                .map_err(|_| ToolError::Failed {
-                    kind: ironclaw_host_api::dispatch::RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
-                    model_visible_cause: None,
-                })?,
+            None => self.governor.reserve(scope, estimate).map_err(|error| {
+                // The tool boundary deliberately exposes only the stable
+                // resource failure class. Keep the governor's cause in the
+                // host log before it is redacted from the adapter result.
+                tracing::warn!(%error, "native extension tool resource reservation failed");
+                ToolError::Rejected {
+                    kind: RuntimeDispatchErrorKind::Resource,
+                    diagnostic: None,
+                    detail: None,
+                }
+            })?,
         };
         match self.inner.invoke(call, ports).await {
             Ok(result) => {
@@ -669,28 +709,55 @@ fn release_reservation(
 /// cutovers). Routes nothing; deleted when the real channel adapters bind.
 struct HostServedChannelBridge;
 
+/// Bind the bridge to exactly the halves this manifest declares.
+///
+/// The per-axis binding rule checks declaration against code, so a blanket
+/// bridge implementing everything would fail activation for any channel that
+/// declares only some halves — and a bridge implementing nothing would fail
+/// for any channel that declares any. Deriving the set from the descriptor is
+/// the only shape that stays correct as manifests differ.
+fn host_served_bridge(
+    channel: &ironclaw_extension_contracts::channel::ChannelDescriptor,
+) -> ChannelSurfaces {
+    let bridge = Arc::new(HostServedChannelBridge);
+    let mut surfaces = ChannelSurfaces::default();
+    let expected = crate::entrypoint::channel_half_expectations(channel);
+    if expected.ingress {
+        surfaces = surfaces.with_ingress(bridge.clone());
+    }
+    if expected.reply {
+        surfaces = surfaces.with_reply(bridge.clone());
+    }
+    if expected.delivery {
+        surfaces = surfaces.with_delivery(bridge);
+    }
+    surfaces
+}
+
 #[async_trait]
-impl ChannelAdapter for HostServedChannelBridge {
-    async fn activate(
+impl ChannelIngress for HostServedChannelBridge {
+    async fn receive(
         &self,
-        _ctx: &ChannelContext<'_>,
+        _request: VerifiedInbound<'_>,
         _egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        Ok(())
-    }
-
-    async fn cleanup(
-        &self,
-        _ctx: &ChannelContext<'_>,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<(), ChannelError> {
-        Ok(())
-    }
-
-    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+    ) -> Result<InboundOutcome, ChannelError> {
         Err(ChannelError::Unsupported)
     }
+}
 
+#[async_trait]
+impl ChannelReply for HostServedChannelBridge {
+    async fn send_reply(
+        &self,
+        _envelope: OutboundEnvelope,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+}
+
+#[async_trait]
+impl ChannelDelivery for HostServedChannelBridge {
     async fn deliver(
         &self,
         _envelope: OutboundEnvelope,
@@ -798,19 +865,21 @@ input_schema_ref = "schemas/echo.input.json"
     /// first_party loader branch, no runtime lane required.
     struct FixtureNativeFactory;
 
+    #[async_trait]
     impl NativeExtensionFactory for FixtureNativeFactory {
         fn service(&self) -> &str {
             FIXTURE_SERVICE
         }
 
-        fn load(
+        async fn load(
             &self,
             _ctx: &LoadContext,
         ) -> Result<Box<dyn crate::ExtensionEntrypoint>, BindError> {
             Ok(Box::new(FakeEntrypoint {
                 bindings: ExtensionBindings {
                     tools: Some(Arc::new(FakeToolAdapter)),
-                    channel: None,
+                    channel: ChannelSurfaces::default(),
+                    device_link: None,
                 },
             }))
         }
@@ -897,6 +966,7 @@ input_schema_ref = "schemas/echo.input.json"
             extension_id: id.to_string(),
             installation_id: id.to_string(),
             resolved: Arc::new(record.resolved().clone()),
+            admin_secrets: Arc::new(crate::loaders::UnavailableLoadTimeAdminSecrets),
         }
     }
 
@@ -1023,6 +1093,11 @@ input_schema_ref = "schemas/echo.input.json"
                 Duration::from_secs(30),
             ),
             channel_egress_transport: None,
+            linked_sessions: LinkedSessionStore::unavailable(),
+            linked_accounts: Arc::new(
+                crate::linked_account_resolution::UnavailableLinkedAccountResolution,
+            ),
+            admin_secrets: None,
         })
         .await;
 

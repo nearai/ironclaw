@@ -196,8 +196,7 @@ export function AuthOauthCard({ gate, onCancel }) {
           className="mt-3 rounded-md border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
           role="status"
         >
-          The {providerLabel} authorization window closed before you finished
-          connecting. Re-open it above to try again.
+          {t("authGate.popupClosed", { provider: providerLabel })}
         </div>
       )}
     </AuthGateShell>

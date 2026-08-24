@@ -1,8 +1,8 @@
 # `crates/domains/` — one crate per business-record grammar, no authority decisions
 
-**Layer(s):** `substrates` (all 13 manifests declare it; checked by
+**Layer(s):** `substrates` (all 14 manifests declare it; checked by
 `reborn_workspace_crates_declare_layers_and_follow_layer_matrix`) ·
-**Crates:** 13 · **May depend on:** `contracts/`, `substrates/`, `events/`,
+**Crates:** 14 · **May depend on:** `contracts/`, `substrates/`, `events/`,
 plus five inventoried in-family edges (below) · **Depended on by:** `kernel/`,
 `loop/`, `extensions/`, `product/`, `app/` — every tier above wires against
 these contracts.
@@ -25,18 +25,19 @@ no other crate in the family may acquire either property.
 | Crate | Charter (one line) | Go here when |
 | --- | --- | --- |
 | [`ironclaw_attachments`](./ironclaw_attachments) | Channel-agnostic inbound attachment landing: the landing routine, the `InboundAttachmentLander`/`InboundAttachmentReader` ports with their filesystem default, and the shared size ceilings | Landing inbound file bytes for the agent, or reading advertised attachment budgets |
-| [`ironclaw_auth`](./ironclaw_auth) | Product-facing auth: flow/interaction/credential-account/recovery/cleanup contracts, durable services, and the recipe-driven `AuthEngine` — credential custody without raw secret bytes | Adding or changing a product auth flow, credential-account behavior, or an OAuth recipe interaction |
+| [`ironclaw_auth`](./ironclaw_auth) | Product-facing auth: flow/interaction/credential-account/recovery/cleanup contracts, durable per-user delivery registrations, durable services, and the recipe-driven `AuthEngine` — credential custody without raw secret bytes | Adding or changing a product auth flow, credential-account behavior, delivery registration, or an OAuth recipe interaction |
 | [`ironclaw_conversations`](./ironclaw_conversations) | External↔canonical conversation *binding*, actor pairing, and inbound idempotency; turn submission only via the `ConversationTurnSubmitter` port | Binding an external conversation/actor to a canonical thread, or accepting an inbound message exactly once |
 | [`ironclaw_extractors`](./ironclaw_extractors) | Pure bytes→text extraction (PDF/OOXML/legacy Office/RTF/text), bomb-capped, with a content-free failure `Display` | Turning file bytes into text, with no I/O and no knowledge of the source |
 | [`ironclaw_identity`](./ironclaw_identity) | External identity → stable `UserId` minting, the user profile/directory, and the `projects` records + access-gating service | Resolving who a login or actor is, admin user management, or project membership/ACL |
 | [`ironclaw_llm`](./ironclaw_llm) | The `LlmProvider` contract, one adapter per model vendor, provider auth/sessions, registry, reliability decorators, recording — the family's vendor cone | Adding a model provider, changing provider selection/reliability, or trace recording of model calls |
 | [`ironclaw_memory`](./ironclaw_memory) | The provider-neutral `MemoryService` contract, memory path/scope grammar, prompt-write-safety vocabulary, and the shared conformance suite | Changing what memory *means*; provider implementations live in `extensions/packages/memory-native` and `…/mem0` |
+| [`ironclaw_notifications`](./ironclaw_notifications) | Durable, metadata-only user notification inbox records and lifecycle over `ScopedFilesystem` | Changing notification identity, pagination, retention bounds, or read/resolved/archived state |
 | [`ironclaw_outbound`](./ironclaw_outbound) | Metadata-only outbound authority: sealed access grants, at-most-once delivery-attempt reservation, delivery resolution, preferences and subscription cursors — never a transport | Deciding *whether/where* something may be pushed, or recording a delivery attempt |
 | [`ironclaw_skills`](./ironclaw_skills) | Skill parsing, validation, deterministic selection scoring, scoped filesystem management, and the pure learning path | Changing skill grammar, selection, install records, or learning prompts |
 | [`ironclaw_threads`](./ironclaw_threads) | The canonical transcript service: `SessionThreadService` (filesystem + in-memory), message ordering/status/redaction, tool-result records, display projections | Reading or writing thread/message history or transcript-derived views |
 | [`ironclaw_trace_commons`](./ironclaw_trace_commons) | The Trace Commons client: envelope schema, deterministic redaction, submission queue/credits, device-key onboarding, and the autonomous capture pipeline | Contributing traces to the external Trace Commons service |
 | [`ironclaw_triggers`](./ironclaw_triggers) | Scheduled-trigger records, cron/timezone validation, deterministic fire identity, the poller tick, and sealed trusted-submission minting (prompt-scanned at the mint); SQL backends held under ADR 0003 | Trigger records/schedules, or anything on the host-trusted fire path |
-| [`ironclaw_web_push`](./ironclaw_web_push) | Web Push (RFC 8030/8291/8292) subscription records + CAS store, `aes128gcm` payload encryption, VAPID key-material generation, transport-free push request planning, and the browser channel's identity grammar | Browser push enrollment records or push protocol mechanics (delivery runs through the web-push channel package; the VAPID header is computed at the host egress boundary) |
+| [`ironclaw_web_app`](./ironclaw_web_app) | Web Push (RFC 8030/8291/8292) subscription-document types, `aes128gcm` payload encryption, VAPID key-material generation, transport-free push request planning, and the browser channel's identity grammar | Push protocol mechanics (host-owned delivery registrations and their manifest-derived endpoint allowlist live in `ironclaw_auth`/product orchestration; delivery runs through the web-app package) |
 
 Two boundary facts that have been gotten wrong before, stated precisely:
 
@@ -167,10 +168,10 @@ were chartered.
 
 ## Sources
 
-- Family spec: [`docs/reborn/target-architecture/families/domains.md`](../../docs/reborn/target-architecture/families/domains.md)
+- Family spec: [`docs/internal/reborn/target-architecture/families/domains.md`](../../docs/internal/reborn/target-architecture/families/domains.md)
   (design record; where it and the tree disagree, the code and its gates win —
   see each crate's README for measured deltas).
-- PROPOSAL entries: `docs/reborn/target-architecture/PROPOSAL.md` §6.4.1–§6.4.15
+- PROPOSAL entries: `docs/internal/reborn/target-architecture/PROPOSAL.md` §6.4.1–§6.4.15
   (§5 tree, §8 layer matrix, §12.13 D-P/D-Q for the projects gating fold).
 - Persistence rule: [`.claude/rules/database.md`](../../.claude/rules/database.md).
-- Conventions this file follows: [`docs/reborn/guidance-conventions.md`](../../docs/reborn/guidance-conventions.md).
+- Conventions this file follows: [`docs/internal/reborn/guidance-conventions.md`](../../docs/internal/reborn/guidance-conventions.md).

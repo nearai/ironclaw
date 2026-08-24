@@ -40,7 +40,9 @@ def body_of(text, start):
 
 def collect(min_items):
     types = []
-    for src in Path('crates').glob('*/src'):
+    for src in itertools.chain(
+            Path('crates').glob('*/*/src'),
+            Path('crates/extensions/packages').glob('*/src')):
         crate = src.parent.name.removeprefix('ironclaw_')
         for f in src.rglob('*.rs'):
             try:

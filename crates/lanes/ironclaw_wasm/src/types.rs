@@ -78,11 +78,44 @@ pub struct WasmLogRecord {
     pub message: String,
 }
 
+/// Closed vocabulary for a typed guest failure's category, mirroring the WIT
+/// `error-kind` enum (near:agent@0.4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WitErrorKind {
+    AuthRequired,
+    Input,
+    OutputTooLarge,
+    Executor,
+    NetworkDenied,
+    Client,
+    OperationFailed,
+}
+
+/// Typed guest-reported failure (WIT `guest-failure`, near:agent@0.4.1).
+///
+/// `code` and `message` are free-text carriers scrubbed for secret-shaped
+/// values at the sandbox-exit chokepoint (`runtime::scrub_guest_error`)
+/// before this value is constructed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitGuestFailure {
+    pub kind: WitErrorKind,
+    pub code: Option<String>,
+    pub message: Option<String>,
+}
+
+/// Outcome of one WIT tool `execute` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WitToolOutcome {
+    /// JSON-encoded output on success.
+    Success(String),
+    /// Typed guest failure (near:agent@0.4.1 `guest-failure`).
+    Failure(WitGuestFailure),
+}
+
 /// Result of one WIT tool execution.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WitToolExecution {
-    pub output_json: Option<String>,
-    pub error: Option<String>,
+    pub outcome: WitToolOutcome,
     pub usage: ResourceUsage,
     pub logs: Vec<WasmLogRecord>,
 }

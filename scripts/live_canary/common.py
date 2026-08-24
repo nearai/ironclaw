@@ -364,11 +364,9 @@ def build_gateway_env(
     # tool dispatches parked on an approval gate instead of
     # auto-approving and never reached `installed=true`.
     #
-    # REBORN_TOOL_DISCLOSURE / REBORN_COLLAPSE_REPEATED_FAILURES are the two
-    # default-off reborn context-management flags. They are forwarded only so a
-    # canary lane can exercise the flag-ON path by setting them at the job level;
-    # unset (the default) they never reach the gateway, so the canary's default
-    # run stays byte-identical to production.
+    # Default-off Reborn experiment flags are forwarded only so a canary lane
+    # can exercise the flag-ON path by setting them at the job level. Unset,
+    # they never reach the gateway, so the canary stays on production defaults.
     for var in (
         "ALLOW_LOCAL_TOOLS",
         "AGENT_AUTO_APPROVE_TOOLS",
@@ -391,7 +389,7 @@ async def _pin_mock_llm_settings(
     Required because the gateway's DB settings take priority over the
     LLM_BACKEND / LLM_BASE_URL / LLM_MODEL env vars; the freshly-seeded
     DB defaults llm_backend to `nearai`, which sends the agent into an
-    interactive auth flow that hangs in CI. See tests/e2e/CLAUDE.md.
+    interactive auth flow that hangs in CI. See tests/e2e/AGENTS.md.
     """
     import httpx  # local import: keep top-level import set unchanged
 
@@ -542,7 +540,7 @@ async def start_gateway_stack(
         # defaults llm_backend to `nearai`, so the env config is ignored
         # and the agent attempts an interactive NearAI auth flow that
         # never completes in CI. Mirrors the pattern documented in
-        # tests/e2e/CLAUDE.md.
+        # tests/e2e/AGENTS.md.
         await _pin_mock_llm_settings(base_url, gateway_token, mock_llm_url)
         return GatewayStack(
             base_url=base_url,

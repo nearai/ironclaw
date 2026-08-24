@@ -15,9 +15,10 @@ use aws_sdk_bedrockruntime::Client;
 use aws_sdk_bedrockruntime::operation::converse::ConverseError;
 use aws_sdk_bedrockruntime::types::{
     AnyToolChoice, AutoToolChoice, ContentBlock, ConversationRole, ImageBlock, ImageFormat,
-    ImageSource, InferenceConfiguration, Message, StopReason, SystemContentBlock, Tool, ToolChoice,
-    ToolConfiguration, ToolInputSchema, ToolResultBlock, ToolResultContentBlock, ToolResultStatus,
-    ToolSpecification, ToolUseBlock,
+    ImageSource, InferenceConfiguration, JsonSchemaDefinition, Message, OutputConfig, OutputFormat,
+    OutputFormatStructure, OutputFormatType, SpecificToolChoice, StopReason, SystemContentBlock,
+    Tool, ToolChoice, ToolConfiguration, ToolInputSchema, ToolResultBlock, ToolResultContentBlock,
+    ToolResultStatus, ToolSpecification, ToolUseBlock,
 };
 use aws_smithy_types::{Blob, Document};
 use rust_decimal::Decimal;
@@ -136,6 +137,10 @@ impl LlmProvider for BedrockProvider {
             builder = builder.inference_config(config);
         }
 
+        if let Some(response_format) = request.response_format.as_ref() {
+            builder = builder.output_config(build_output_config(response_format)?);
+        }
+
         let response = builder
             .send()
             .await
@@ -204,6 +209,10 @@ impl LlmProvider for BedrockProvider {
             builder = builder.inference_config(config);
         }
 
+        if let Some(response_format) = request.response_format.as_ref() {
+            builder = builder.output_config(build_output_config(response_format)?);
+        }
+
         let response = builder
             .send()
             .await
@@ -255,6 +264,42 @@ impl LlmProvider for BedrockProvider {
         }
         Ok(())
     }
+}
+
+/// Translate the provider-neutral structured-output envelope to Bedrock's
+/// Converse `outputConfig.textFormat` shape.
+fn build_output_config(
+    format: &crate::provider::CompletionResponseFormat,
+) -> Result<OutputConfig, LlmError> {
+    let crate::provider::CompletionResponseFormat::JsonSchema(format) = format else {
+        return Err(LlmError::InvalidRequest {
+            provider: "bedrock".to_string(),
+            reason: "native JSON-object response mode is not supported by Bedrock Converse"
+                .to_string(),
+        });
+    };
+    let schema =
+        serde_json::to_string(&format.schema).map_err(|error| LlmError::InvalidRequest {
+            provider: "bedrock".to_string(),
+            reason: format!("could not serialize JSON Schema: {error}"),
+        })?;
+    let definition = JsonSchemaDefinition::builder()
+        .schema(schema)
+        .name(format.name.clone())
+        .build()
+        .map_err(|error| LlmError::InvalidRequest {
+            provider: "bedrock".to_string(),
+            reason: format!("invalid JSON Schema output definition: {error}"),
+        })?;
+    let output_format = OutputFormat::builder()
+        .r#type(OutputFormatType::JsonSchema)
+        .structure(OutputFormatStructure::JsonSchema(definition))
+        .build()
+        .map_err(|error| LlmError::InvalidRequest {
+            provider: "bedrock".to_string(),
+            reason: format!("invalid Bedrock output format: {error}"),
+        })?;
+    Ok(OutputConfig::builder().text_format(output_format).build())
 }
 
 // ---------------------------------------------------------------------------
@@ -599,8 +644,17 @@ fn build_tool_config(
             return Ok(None);
         }
         Some("required") => Some(ToolChoice::Any(AnyToolChoice::builder().build())),
-        // "auto" or anything else
-        _ => Some(ToolChoice::Auto(AutoToolChoice::builder().build())),
+        Some("auto") | None => Some(ToolChoice::Auto(AutoToolChoice::builder().build())),
+        // A named tool: Converse supports forcing one specific tool.
+        Some(specific) => Some(ToolChoice::Tool(
+            SpecificToolChoice::builder()
+                .name(specific)
+                .build()
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: "bedrock".to_string(),
+                    reason: format!("Failed to build SpecificToolChoice: {}", e),
+                })?,
+        )),
     };
 
     let mut builder = ToolConfiguration::builder().set_tools(Some(bedrock_tools));
@@ -1426,6 +1480,29 @@ mod tests {
         let doc = json_to_document(&json);
         let back = document_to_json(&doc);
         assert_eq!(json, back);
+    }
+
+    #[test]
+    fn test_build_output_config_encodes_json_schema() {
+        let schema_format = crate::provider::JsonSchemaResponseFormat::strict(
+            "suggestions",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"items": {"type": "array"}}
+            }),
+        );
+        let response_format =
+            crate::provider::CompletionResponseFormat::JsonSchema(schema_format.clone());
+        let config = build_output_config(&response_format).expect("output config");
+        let text_format = config.text_format().expect("text format");
+        assert_eq!(text_format.r#type(), &OutputFormatType::JsonSchema);
+        let structure = text_format.structure().expect("schema structure");
+        let definition = structure.as_json_schema().expect("JSON schema");
+        assert_eq!(definition.name(), Some("suggestions"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(definition.schema()).expect("schema JSON"),
+            schema_format.schema
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 mod config;
 mod diff_preview;
+mod document;
 mod file;
 mod glob_tool;
 mod grep_tool;
@@ -42,6 +43,8 @@ pub enum CodingCapabilityKind {
     Glob,
     Grep,
     ApplyPatch,
+    DocumentEdit,
+    HtmlToPdf,
 }
 
 impl CodingCapabilityKind {
@@ -53,6 +56,8 @@ impl CodingCapabilityKind {
             Self::Glob => "glob",
             Self::Grep => "grep",
             Self::ApplyPatch => "apply_patch",
+            Self::DocumentEdit => "document_edit",
+            Self::HtmlToPdf => "html_to_pdf",
         }
     }
 }
@@ -192,6 +197,12 @@ async fn dispatch(
         CodingCapabilityKind::Grep => grep_tool::grep(request)
             .await
             .map(CodingCapabilityOutput::new),
+        CodingCapabilityKind::DocumentEdit => {
+            document::document_edit(request, edit_locks, read_states).await
+        }
+        CodingCapabilityKind::HtmlToPdf => {
+            document::html_to_pdf_capability(request, edit_locks).await
+        }
         CodingCapabilityKind::ApplyPatch => {
             file::apply_patch(request, edit_locks, read_states).await
         }

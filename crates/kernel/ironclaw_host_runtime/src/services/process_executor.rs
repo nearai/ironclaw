@@ -266,7 +266,9 @@ mod tests {
     use ironclaw_host_api::dispatch_test_support::TestDispatcher;
     use ironclaw_host_api::{
         authorized::{ProcessAuthorizedContinuation, ProcessAuthorizedInvocation},
-        dispatch::{CapabilityDispatchResult, DispatchError, RuntimeDispatchErrorKind},
+        dispatch::{
+            CapabilityDispatchResult, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
+        },
         ids::{
             ActivityId, AgentId, CapabilityId, CorrelationId, ExtensionId, InvocationId, ProcessId,
             ProductKind, ProjectId, ResourceReservationId, TenantId, ThreadId, UserId,
@@ -548,23 +550,29 @@ mod tests {
                 "unsupported_runtime",
             ),
             (
-                DispatchError::Script {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                    model_visible_cause: None,
+                DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Script),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                    diagnostic: None,
+                    detail: None,
                 },
                 "resource",
             ),
             (
-                DispatchError::Mcp {
-                    kind: RuntimeDispatchErrorKind::NetworkDenied,
-                    model_visible_cause: None,
+                DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Mcp),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
+                    diagnostic: None,
+                    detail: None,
                 },
                 "network_denied",
             ),
             (
-                DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::OutputDecode,
-                    model_visible_cause: None,
+                DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode),
+                    diagnostic: None,
+                    detail: None,
                 },
                 "output_decode",
             ),

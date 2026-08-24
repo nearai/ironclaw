@@ -22,7 +22,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_package, native_memory_first_party_package,
+    TRIGGER_RUN_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
+    native_memory_first_party_package,
 };
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
@@ -33,6 +34,17 @@ use parity_qa_support::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
     },
 };
+
+fn trigger_execution_contract(goal: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "goal": goal.into(),
+        "success_criteria": ["Complete the requested task"],
+        "output_instructions": "Return a concise result",
+        "no_result_text": "No result",
+        "policy": { "result_delivery": "deliver" }
+    })
+}
 
 const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     ECHO_CAPABILITY_ID,
@@ -63,6 +75,12 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_RESUME_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID,
+    // Manual trigger runs are user-direct product gestures, not tools exposed
+    // to the ordinary model surface exercised below. Their positive host path
+    // is covered by `builtin_trigger_run_dispatches_submitted_and_replayed_through_host_runtime`;
+    // `scheduled_trigger_fire_cannot_invoke_trigger_mutators` covers the
+    // production-composed scheduled-run denial path.
+    TRIGGER_RUN_CAPABILITY_ID,
     TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID,
     TRACE_COMMONS_CREDITS_CAPABILITY_ID,
@@ -83,6 +101,14 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     // `runtime::tests::outbound_delivery::
     // production_reply_attachment_capability_registers_durable_run_intent`.
     ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID,
+    // #6898 item 3. Both are driven end-to-end by
+    // `reborn_integration_document_edit`: the redline journey reads a .docx
+    // structurally and resolves its tracked changes into a new document, the
+    // spreadsheet journey sets a formula under a named column, the deck journey
+    // clones a slide with its layout, and the PDF journey authors HTML and
+    // renders it.
+    ironclaw_host_runtime::DOCUMENT_EDIT_CAPABILITY_ID,
+    ironclaw_host_runtime::HTML_TO_PDF_CAPABILITY_ID,
 ];
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
@@ -451,7 +477,7 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
                 "call_trigger_create_first_party",
                 serde_json::json!({
                     "name": "Daily trace summary",
-                    "prompt": "Summarize trace state",
+                    "execution_contract": trigger_execution_contract("Summarize trace state"),
                     "schedule": {
                         "kind": "cron",
                         "expression": "0 8 * * *",

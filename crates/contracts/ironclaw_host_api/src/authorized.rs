@@ -1,7 +1,7 @@
 //! Slice-C kernel vocabulary — the sealed `Authorized` witness.
 //!
 //! The security-critical heart of the capability-path collapse
-//! (`docs/reborn/contracts/capability-access.md`,
+//! (`docs/internal/reborn/contracts/capability-access.md`,
 //! §5.3.2). `authorize()` folds ALL pre-flightable policy (trust, approval,
 //! resource reservation, lane resolution) into a single decision; its success
 //! value is an [`Authorized`] — the proof that this exact [`Invocation`] passed

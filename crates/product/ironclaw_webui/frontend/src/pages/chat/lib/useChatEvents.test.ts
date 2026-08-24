@@ -381,6 +381,55 @@ test("useChatEvents: projection text streams into one assistant bubble without e
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
 });
 
+test("useChatEvents: completed projection text adopts the durable timeline identity", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          {
+            text: {
+              id: "live-run-1",
+              run_id: "run-1",
+              body: "final answer",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "completed" } },
+          {
+            text: {
+              id: "assistant-message-1",
+              run_id: "run-1",
+              body: "final answer",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, "msg-assistant-message-1");
+  assert.equal(harness.messages[0].content, "final answer");
+  assert.equal(harness.messages[0].turnRunId, "run-1");
+  assert.equal(harness.messages[0].isFinalReply, true);
+  assert.equal(harness.messages[0].isStreaming, false);
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
 test("useChatEvents: final_reply replaces matching streamed projection bubble", () => {
   const harness = createUseChatEventsHarness();
 
@@ -419,7 +468,7 @@ test("useChatEvents: final_reply replaces matching streamed projection bubble", 
   assert.equal(harness.isProcessing, false);
 });
 
-test("useChatEvents: final_reply preserves earlier assistant phases and replaces only the latest", () => {
+test("useChatEvents: final_reply collapses earlier assistant phases from the same run", () => {
   const harness = createUseChatEventsHarness();
 
   harness.handleEvent({
@@ -474,12 +523,6 @@ test("useChatEvents: final_reply preserves earlier assistant phases and replaces
       isStreaming: message.isStreaming,
     })),
     [
-      {
-        id: "text-text:run-1:1",
-        content: "I’ll research this first.",
-        isFinalReply: false,
-        isStreaming: false,
-      },
       {
         id: "reply-run-1",
         content: "Here is the final answer.",
@@ -1629,6 +1672,7 @@ test("useChatEvents: gate-only projection rebuilds pending gate from gate identi
     authorizationUrl: null,
     expiresAt: null,
     connection: null,
+    deviceLink: null,
   });
   assert.deepEqual(plain(harness.activeRun), {
     runId,

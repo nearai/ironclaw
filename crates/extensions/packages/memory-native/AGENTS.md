@@ -1,7 +1,7 @@
 # Agent Map — ironclaw_memory_native
 
 Canonical working-rules file for this package crate (`CLAUDE.md` here is a
-pointer; consolidated 2026-08-05 per `docs/reborn/guidance-conventions.md`
+pointer; consolidated 2026-08-05 per `docs/internal/reborn/guidance-conventions.md`
 rule 1).
 
 ## Start Here
@@ -14,9 +14,9 @@ rule 1).
   scope/path/context value types, prompt-safety vocabulary, audit/event
   contracts) lives in `crates/domains/ironclaw_memory`, which this crate
   implements and re-exports. Contracts of record:
-  - `docs/reborn/contracts/memory.md`
-  - `docs/reborn/contracts/storage-placement.md`
-  - `docs/reborn/contracts/kernel-boundary.md`
+  - `docs/internal/reborn/contracts/memory.md`
+  - `docs/internal/reborn/contracts/storage-placement.md`
+  - `docs/internal/reborn/contracts/kernel-boundary.md`
 
 ## What This Crate Owns
 
@@ -26,18 +26,32 @@ rule 1).
     `InMemoryMemoryDocumentRepository`, `MemoryBackend` /
     `RepositoryMemoryBackend` / `MemoryBackendCapabilities` (`repo`, `backend`).
   - `/memory` virtual path grammar and scope: `MemoryDocumentPath`,
-    `MemoryDocumentScope` (`path`); document metadata/options
-    (`DocumentMetadata`, `HygieneMetadata`, `MemoryWriteOptions`,
-    `CONFIG_FILE_NAME` — `metadata`) and internal schema validation (`schema`).
+    `MemoryDocumentScope` (`path`); document metadata/options this crate
+    consumes from `ironclaw_memory` (`DocumentMetadata`, `HygieneMetadata`,
+    `CONFIG_FILE_NAME`) plus this crate's own `MemoryWriteOptions`
+    (`metadata`) and internal schema validation (`schema`).
   - Chunking + content hashing (`ChunkConfig`, `chunk_document`,
-    `content_sha256`), the embedding provider seam (`EmbeddingProvider`), and
-    the indexer hooks (`chunking`, `embedding`, `indexer`).
+    `content_sha256`) and the indexer hooks (`chunking`, `indexer`) — no
+    embedding-provider port exists; vector search only activates against
+    pre-supplied embeddings (see `backend.rs`'s fail-closed messages).
   - Hybrid search (FTS + vector via RRF fusion): `MemorySearchRequest`,
     `MemorySearchResult`, `FusionStrategy` (`search`).
   - The memory-document filesystem adapter (`filesystem`), the
     significant-event sink (`events`), and the prompt-write safety engine
     (`PromptWriteSafetyPolicy` + protected-path/decision/event types, `safety`)
     that implements the vocabulary the neutral contract defines.
+- The model-facing memory **guidance** this provider ships
+  (`prompts/memory-guidance.md`, declared as `[memory].guidance_doc`): when a
+  durable fact is worth saving, how to phrase it, what never to save. It is
+  provider-owned because it names this provider's tools and describes this
+  provider's recall behavior; the host appends whatever the bound provider
+  declares and writes none of it. A provider that ships none has nothing
+  appended (mem0 declares none on purpose).
+- The always-on curated prefix of `read_long_term`: this provider serves its
+  standing `MEMORY.md` at the head of its own long-term lane, ahead of the
+  full-text hits and independent of the turn's query (#7185). Budget, line
+  splitting, and the truncation marker are this provider's policy — the host
+  sees ordinary lane snippets and knows no document paths.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Guardrails

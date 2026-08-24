@@ -1,6 +1,7 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Icon } from "../../../design-system/icons";
+import { SearchField } from "../../../design-system/search-field";
 import { useFilePicker } from "../../../hooks/useFilePicker";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import type {
@@ -120,12 +121,14 @@ export function RegistryTab({
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <input
-          type="text"
+        <SearchField
           value={filter}
-          onChange={(e) => setFilter(e.currentTarget.value)}
+          onChange={setFilter}
+          onClear={() => setFilter("")}
           placeholder={t("ext.registry.searchPlaceholder")}
-          className="h-9 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          aria-label={t("ext.registry.searchPlaceholder")}
+          clearLabel={t("settings.clearSearch")}
+          className="flex-1"
         />
         <span className="font-mono text-[11px] text-iron-700">
           {filtered.length} / {catalogEntries.length}

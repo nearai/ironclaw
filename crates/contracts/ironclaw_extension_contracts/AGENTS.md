@@ -4,7 +4,7 @@ Canonical crate guidance (the crate's `CLAUDE.md` is a pointer here).
 Orientation and public surface: [`README.md`](./README.md). Family boundary
 and admission test: [`../AGENTS.md`](../AGENTS.md). Carved out of
 `ironclaw_host_api` by WS1.3 of the target architecture (PROPOSAL §6.1.2,
-`docs/reborn/target-architecture/families/contracts.md`).
+`docs/internal/reborn/target-architecture/families/contracts.md`).
 
 ## What belongs here
 
@@ -14,21 +14,25 @@ it is neutral across vendor, runtime, storage, and deployment; two or more
 consumers need it without importing an owner; it carries no execution,
 persistence, policy engine, or workflow.
 
-Today that is **eighteen shipped modules** plus the feature-gated
-`test_support` (the number is checked against `src/lib.rs`, not incremented by
-hand):
+Re-derive the shipped-module count with
+`rg -n "^pub mod " crates/contracts/ironclaw_extension_contracts/src/lib.rs | wc -l`,
+minus one for the feature-gated `test_support` module (no architecture test
+currently pins this count against the table below — treat the table as a
+map, not an enforced inventory, until one exists):
 
 | Module | Owns |
 | --- | --- |
 | `auth_prompt` | The channel-rendered auth challenge family: `AuthPromptView`, `AuthPromptChallengeKind`, `ConnectionPromptContext`, `PairingPromptView`, `AuthPromptContextView`, and `render_channel_auth_prompt`. Arrived with WS1.4 — `OutboundPart::AuthPrompt` names it and both channel packages render it. |
 | `channel` | Channel manifest-surface descriptors: `ChannelDescriptor`, `ChannelIngressDescriptor`, `ChannelEgressDescriptor`, `ChannelPresentation`, connection strategy/notices, and their validators. |
-| `channel_adapter` | `ChannelAdapter` + its DTO family (`VerifiedInbound`, `InboundOutcome`, `NormalizedInboundMessage`, `OutboundEnvelope`/`Part`/`Target`, `DeliveryReport`, `TargetQuery`/`Candidate`, `ChannelError`, `ChannelAttachmentRef`, `ProductTriggerReason`) — arrived with WS1.4. |
+| `channel_adapter` | The three optional channel capability traits — `ChannelIngress`, `ChannelReply`, and `ChannelDelivery` — plus `ChannelSurfaces` and their DTO family (`VerifiedInbound`, `InboundOutcome`, `NormalizedInboundMessage`/`InboundAttachment`, `OutboundEnvelope`/`Part`/`Target`, `DeliveryReport`, `DirectTargetProvisionRequest`, `ChannelError`, `ProductTriggerReason`). `ChannelAttachmentRef` is package-internal parse→fetch state, never host ingress vocabulary. The traits pair with vendor `[channel.ingress]`, message `[channel.reply]`, and `[channel.delivery]`; authenticated-session ingress and stream replies are host-owned and intentionally bind no adapter half. Direct-target provisioning is an optional typed operation on `ChannelDelivery`, not a target-search grammar. |
 | `channel_identity` | The channel-identity hooks a host runs around binding: `ChannelConnectionScopeSource`, `ChannelIdentityPostBind(Factory)`, `ChannelIdentityOverride`. |
+| `device_link` | The device-link auth hook: `DeviceLinkAdapter`, `DeviceLinkStep`, `DeviceLinkInput`, `DeviceLinkError`. The one auth method whose mechanics an extension implements instead of declaring; `DeviceLinkInput` deliberately does not implement `Serialize` so a step or event physically cannot carry a secret. |
 | `egress` | Channel egress transport vocabulary: `ProtocolHttpEgress`, the `Egress*` request/response types, `DeliveryStatus`/`OutboundDeliverySink`, `DeclaredEgressHost`/`Target` — arrived with WS1.4. |
 | `extension` | `Extension`, `ExtensionContract`, `ExtensionRuntimeIdentity`, `ExtensionInstanceId`, `ExtensionHostAssemblyConfig`. |
 | `external` | Vendor-side refs the adapter cone names: `ExternalActorRef`, `ExternalActorBindingEpoch`, `ExternalConversationRef`, `ExternalEventId`, `ProductAttachmentDescriptor`/`Kind` — arrived with WS1.4; `ExternalActorBindingEpoch` joined with WS2.5's binding-epoch move. |
 | `hosted_mcp` | Untrusted registration input for user-registered hosted MCP servers: `RegisterHostedMcpRequest`, `HostedMcpEndpoint`, `HostedMcpAuthSelection`, `McpAuthChallenge`, the auth-metadata extraction helper, and the WS3 discovery pair (`HostedMcpDiscoveredTool*`). |
 | `lifecycle_id` | The bounded package-identity newtypes both tiers need: `LifecyclePackageId` (which `hosted_mcp` names structurally) and `LifecycleBlockerRef`. |
+| `linked_session` | Linked-account session custody port: the extension-package-facing trait to load and compare-and-swap the one opaque credential blob a linked device session persists. Implemented only by the extension host; the package never names the auth domain directly. |
 | `memory` | The `[memory]` manifest surface: `MemoryDescriptor`, `MemoryLifecycleHook`. |
 | `preference_target` | `PreferenceTargetCodec` + `PreferenceTargetEncodeRequest` — the one vendor-implemented port here. |
 | `product_adapter_section` | The `[product_adapter.*]` manifest surface: `PRODUCT_ADAPTER_HOST_API_ID`/`PRODUCT_ADAPTER_SECTION_PREFIX`, `ProductAdapterSectionDeclaration` (the `Deserialize` wire shape), `ProductAdapterSection` (resolved + validated), `HostIngressRoute`, `ProductAdapterSectionError`. Arrived with WS5 from `ironclaw_assistant::adapter_registry`. Same split as `channel`: the schema and its cross-field invariants are here; the *manifest parsing* — the `HostApiManifestContract`, the raw-TOML inline-secret guard, and pairing a resolved section with its `ManifestSectionPath` — is `ironclaw_extension_registry::host_api::product_adapter` (§6.8.1), because this crate parses no manifests. |
@@ -38,7 +42,7 @@ hand):
 | `surface` | `CapabilitySurfaceKind` — the manifest surface kinds an extension may declare. |
 | `tool_adapter` | `ToolAdapter` + `RestrictedEgress` and their call/result/error vocabulary — arrived with WS1.4. |
 | `verified_inbound` | The **sealed** channel/webhook mint family: `mark_request_signature_verified` and `mark_shared_secret_header_verified` — arrived with WS1.5; their `_for_tenant` variants were deleted as zero-caller dead mint surface by WS8 (2026-08-05). Every entry point consumes a `VerifiedInboundGrant`, so only the generic ingress verifier can call them. |
-| `test_support` | Feature-gated: the exported channel-adapter conformance suite (§11.2.10) and the in-memory egress/delivery fakes. |
+| `test_support` | Feature-gated: the exported channel-capability conformance suite (§11.2.10) and the in-memory egress/delivery fakes. |
 
 ## What must never be here
 
@@ -129,16 +133,18 @@ exactly what §6.1.2 exists to prevent.
 PROPOSAL §6.1.3 assigns it; WS1.3 had it here only as a forced co-mover and
 said so. Nothing here depended on it staying.
 
-`ChannelAdapter`, `ToolAdapter`, and `RestrictedEgress` **arrived**, unblocked
+The channel adapter vocabulary, `ToolAdapter`, and `RestrictedEgress`
+**arrived**, unblocked
 exactly as WS1.3 predicted: `host_api::product_surface` moved to
 `ironclaw_product_contracts`, so nothing that stays in `ironclaw_host_api`
 names them any more. `egress` and `external` came with them (§6.1.2 names both
 in its "fed by" list, and the adapter cone types every one of them).
 
 `auth_prompt` arrived for a reason §6.1.3's prose did not anticipate: it lists
-"auth/approval prompt-view DTOs" as product-tier, but `ChannelAdapter`'s own
-`OutboundPart::AuthPrompt` carries `AuthPromptView`, and both shipped channel
-packages call `render_channel_auth_prompt` from `deliver`. The approval half
+"auth/approval prompt-view DTOs" as product-tier, but the channel output
+traits' `OutboundPart::AuthPrompt` carries `AuthPromptView`, and both shipped
+message-channel packages call `render_channel_auth_prompt` from their send
+methods. The approval half
 stayed in `product_contracts::outbound`. The module doc records the one
 deliberate consequence: two ~15-line display-text validators exist in both
 crates rather than making a generic validator part of this crate's public API.

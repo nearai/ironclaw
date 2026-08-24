@@ -285,6 +285,71 @@ struct AlwaysMismatchBackend {
     put_attempts: AtomicUsize,
 }
 
+/// CAS-capable backend that simulates one competing rewrite before accepting
+/// the caller's retry. The competing rewrite preserves the decoded snapshot,
+/// so this proves a force rewrite bypasses only `cas_update`'s equality
+/// fast-path and still re-reads after a real `VersionMismatch`.
+struct OneMismatchThenSuccessBackend {
+    inner: InMemoryBackend,
+    mismatch_once: AtomicBool,
+    put_attempts: AtomicUsize,
+}
+
+impl OneMismatchThenSuccessBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            mismatch_once: AtomicBool::new(false),
+            put_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn arm_mismatch(&self) {
+        self.mismatch_once.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for OneMismatchThenSuccessBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::in_memory_full()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.put_attempts.fetch_add(1, Ordering::SeqCst);
+        if self.mismatch_once.swap(false, Ordering::SeqCst) {
+            let found = self.inner.put(path, entry, CasExpectation::Any).await?;
+            let expected = match cas {
+                CasExpectation::Version(version) => Some(version),
+                CasExpectation::Absent | CasExpectation::Any => None,
+            };
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected,
+                found: Some(found),
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+}
+
 impl AlwaysMismatchBackend {
     fn new() -> Self {
         Self {
@@ -457,6 +522,68 @@ async fn no_op_apply_skips_write() {
     assert_eq!(
         version_before, version_after,
         "no-op apply must not issue a write"
+    );
+}
+
+#[tokio::test]
+async fn force_write_rewrites_equal_snapshot_and_retries_one_version_mismatch() {
+    let backend = Arc::new(OneMismatchThenSuccessBackend::new());
+    let fs = Arc::new(scoped(Arc::clone(&backend)));
+    let scope = ResourceScope::system();
+
+    cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        |_: Option<Counter>| async move { Ok::<_, TestError>(CasApply::new(Counter { value: 5 }, ())) },
+    )
+    .await
+    .expect("seed counter");
+    let version_before = fs
+        .get(&scope, &counter_path())
+        .await
+        .expect("read seeded counter")
+        .expect("seeded counter exists")
+        .version;
+
+    backend.arm_mismatch();
+    let outcome = cas_update(
+        fs.as_ref(),
+        &scope,
+        &counter_path(),
+        decode_counter,
+        encode_counter,
+        |current: Option<Counter>| async move {
+            Ok::<_, TestError>(CasApply::force_write(
+                current.expect("seeded counter"),
+                "rewritten",
+            ))
+        },
+    )
+    .await
+    .expect("force rewrite retries and succeeds");
+
+    assert_eq!(outcome, "rewritten");
+    assert_eq!(
+        backend.put_attempts.load(Ordering::SeqCst),
+        3,
+        "one seed write, one mismatched rewrite, and one successful retry"
+    );
+    let stored = fs
+        .get(&scope, &counter_path())
+        .await
+        .expect("read force-rewritten counter")
+        .expect("force-rewritten counter exists");
+    assert_eq!(
+        decode_counter(&stored.entry.body).unwrap(),
+        Counter { value: 5 }
+    );
+    assert_eq!(
+        stored.version,
+        version_before.next().next(),
+        "the competing equal rewrite and force rewrite both persist"
     );
 }
 

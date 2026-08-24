@@ -58,7 +58,7 @@ one `products`-layer crate above `ironclaw_composition`. Driven by the
   boundary test enforces this DTO/descriptor-only edge.
 - **v1 anything** — the monolith `src/` tree and `ironclaw_engine` are gone, so there is nothing to import; likewise no v1
   channel code, no v1 secrets / settings / DB. This is a Path A native host
-  surface (`docs/reborn/how-to-port-channel-to-reborn.md`).
+  surface (`docs/internal/reborn/how-to-port-channel-to-reborn.md`).
 - **Business/durable state.** Everything the gateway needs flows through
   `ProductSurface`; this crate stores no threads, transcripts, or projections.
 
@@ -108,7 +108,7 @@ update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
   caller-level route tests mirroring `tests/google_oauth_routes.rs`.
 - **Streaming / events:** never broadcast durable-looking state directly from a
   handler; project through `ProductSurface` into the redacted
-  `WebChatV2EventFrame` first (see `.claude/rules/gateway-events.md`).
+  `WebChatV2EventFrame` first (see `.claude/rules/events.md`).
 
 ## Validation
 

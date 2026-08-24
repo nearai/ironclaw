@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ironclaw_host_api::ids::CapabilityId;
-use ironclaw_loop_contracts::CompactionInitiator;
+use ironclaw_loop_contracts::{CompactionInitiator, LoopContextWindowTruncation};
 
 use super::CapabilityCallSignature;
 
@@ -32,6 +32,11 @@ pub struct CompactionStrategyState {
     /// instead of falling back to `Auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_compact_initiator: Option<CompactionInitiator>,
+    /// Exact durable boundary omitted by the bounded recent-message window.
+    /// This watermark triggers selection of the newest safe compaction cut
+    /// point in the retained prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_eviction: Option<LoopContextWindowTruncation>,
     /// Consecutive completed compactions whose refreshed prompt token
     /// estimate stayed at or above their effectiveness baseline —
     /// compaction ran but did not relieve context pressure, so it would fire
@@ -183,9 +188,10 @@ fn indexed_message_kind_code(kind: IndexedMessageKind) -> u64 {
     match kind {
         IndexedMessageKind::User => 1,
         IndexedMessageKind::Assistant => 2,
-        IndexedMessageKind::System => 3,
-        IndexedMessageKind::Summary => 4,
-        IndexedMessageKind::Other => 5,
+        IndexedMessageKind::ToolResult => 3,
+        IndexedMessageKind::System => 4,
+        IndexedMessageKind::Summary => 5,
+        IndexedMessageKind::Other => 6,
     }
 }
 
@@ -201,6 +207,7 @@ pub struct MessageIndexEntry {
 pub enum IndexedMessageKind {
     User,
     Assistant,
+    ToolResult,
     System,
     Summary,
     Other,
@@ -510,6 +517,13 @@ impl ReplyAdmissionRejection {
             unmet_obligation_refs: Vec::new(),
         }
     }
+
+    pub fn structured_output_required() -> Self {
+        Self {
+            reason_code: ReplyAdmissionRejectionReason::StructuredOutputRequired,
+            unmet_obligation_refs: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -534,6 +548,9 @@ impl ObligationRef {
 #[serde(rename_all = "snake_case")]
 pub enum ReplyAdmissionRejectionReason {
     StopConditionNotMet,
+    /// The run's output contract is a JSON schema: plain-text finals are
+    /// rejected with a repair hint directing the model to the result tool.
+    StructuredOutputRequired,
 }
 
 /// Persistent state owned by `StopConditionStrategy`. Split from a previously
@@ -548,12 +565,23 @@ pub struct StopStrategyState {
     /// finalization.
     #[serde(default)]
     pub trailing_rejected_replies: u32,
-    /// Consecutive completed capability-batch turns whose typed result
-    /// progress reported no new evidence/state.
+    /// Deprecated checkpoint tombstone retained for rollback compatibility.
+    /// The default stop strategy always writes zero and never reads it.
     #[serde(default)]
     pub trailing_no_progress_results: u32,
-    /// Pending or rendered repeated-call warning that must be shown to the
-    /// model before repeated calls can terminalize as no-progress.
+    /// Consecutive completed capability-batch turns in which EVERY invocation
+    /// failed (no completed-call signature was observed). Counted only by the
+    /// structured-result stop strategy, where a run of all-failed
+    /// batches is repeated invalid result-tool output.
+    #[serde(default)]
+    pub trailing_all_failed_batches: u32,
+    /// A completed host-owned structured-result call was observed during this
+    /// run. Failed calls never set this bit. The terminal mapper combines it
+    /// with the scheduled suppression policy before producing NothingToReport.
+    #[serde(default)]
+    pub structured_result_recorded: bool,
+    /// Pending or rendered advisory shown when the same capability call is
+    /// repeated consecutively. This warning never authorizes a heuristic stop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeated_call_warning: Option<RepeatedCallWarningState>,
 }
@@ -590,6 +618,8 @@ impl RepeatedCallWarningState {
     }
 
     pub fn terminal_ready(signature: CapabilityCallSignature) -> Self {
+        // Kept so tests and older checkpoint producers can exercise the legacy
+        // wire value. Runtime observation normalizes it back to `Rendered`.
         Self {
             signature,
             phase: RepeatedCallWarningPhase::TerminalReady,
@@ -602,6 +632,7 @@ impl RepeatedCallWarningState {
 pub enum RepeatedCallWarningPhase {
     PendingRender,
     Rendered,
+    /// Legacy checkpoint value. New runtime policy never creates this phase.
     TerminalReady,
 }
 

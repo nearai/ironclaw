@@ -27,6 +27,8 @@ pub fn build_loop_family_registry_with_overrides(
     LoopFamilyRegistry::with_families(vec![
         Arc::new(default_family),
         Arc::new(families::subagent()),
+        Arc::new(families::unbound_default()),
+        Arc::new(families::unbound_structured()),
     ])
 }
 
@@ -42,11 +44,58 @@ mod tests {
 
         assert!(registry.get(&LoopFamilyId::DEFAULT).is_some());
         assert!(registry.get(&LoopFamilyId::SUBAGENT).is_some());
+        assert!(registry.get(&LoopFamilyId::UNBOUND_DEFAULT).is_some());
+        assert!(registry.get(&LoopFamilyId::UNBOUND_STRUCTURED).is_some());
         assert!(
             registry
                 .get(&LoopFamilyId::new("unknown").expect("valid test id"))
                 .is_none()
         );
-        assert_eq!(registry.ids().count(), 2);
+        assert_eq!(registry.ids().count(), 4);
+    }
+
+    #[test]
+    fn registry_batch_behavior_does_not_require_a_family_variant() {
+        use ironclaw_agent_loop::families::{DEFAULT_FAMILY_DIGEST, SUBAGENT_FAMILY_DIGEST};
+
+        // Default strategy: both families keep their static host-batch
+        // replay identity.
+        let host_batch = build_loop_family_registry().expect("valid production registry");
+        assert_eq!(
+            host_batch
+                .get(&LoopFamilyId::DEFAULT)
+                .expect("default family")
+                .version()
+                .digest,
+            DEFAULT_FAMILY_DIGEST
+        );
+        assert_eq!(
+            host_batch
+                .get(&LoopFamilyId::SUBAGENT)
+                .expect("subagent family")
+                .version()
+                .digest,
+            SUBAGENT_FAMILY_DIGEST
+        );
+
+        // The retired rollout flag no longer creates a second family shape.
+        let bounded = build_loop_family_registry_with_overrides(None, None)
+            .expect("valid production registry");
+        assert_eq!(
+            bounded
+                .get(&LoopFamilyId::DEFAULT)
+                .expect("default")
+                .version()
+                .digest,
+            DEFAULT_FAMILY_DIGEST
+        );
+        assert_eq!(
+            bounded
+                .get(&LoopFamilyId::SUBAGENT)
+                .expect("subagent")
+                .version()
+                .digest,
+            SUBAGENT_FAMILY_DIGEST
+        );
     }
 }

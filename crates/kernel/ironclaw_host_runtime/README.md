@@ -113,5 +113,5 @@ cargo test -p ironclaw_architecture_tests                    # after dependency/
 - [`AGENTS.md`](./AGENTS.md) — working rules, the obligations/egress module
   charters, first-party host-half vs executor-half seam, guardrails.
 - [`../AGENTS.md`](../AGENTS.md) — the kernel family.
-- `docs/reborn/contracts/host-runtime.md`; PROPOSAL §6.5.9 and §12.13 D-R;
-  `docs/reborn/target-architecture/ws12-security-audit.md` (seam 4).
+- `docs/internal/reborn/contracts/host-runtime.md`; PROPOSAL §6.5.9 and §12.13 D-R;
+  `docs/internal/reborn/target-architecture/ws12-security-audit.md` (seam 4).

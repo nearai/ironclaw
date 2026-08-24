@@ -28,6 +28,10 @@ shares this one implementation instead of reimplementing it.
   `IdempotencyLedger`/`ProductInboundAction`, `ProductCommandAdmissionService`.
 - `DeliveryCoordinator` + run-delivery drivers (delivery *semantics*; the
   at-most-once reservation itself is `ironclaw_outbound`'s).
+- `RunOutcomeProcessCommitObserver` — materializes selected scheduled-run
+  completion/failure facts from the authoritative process journal; completion
+  requires the exact finalized assistant reply, while delivery failure remains
+  a separate Inbox fact from the external-delivery caller.
 - `ApprovalInteractionService` / `AuthInteractionService` and their redacted
   read models.
 - The frozen command/view/capability descriptor constants (`*_COMMAND`,
@@ -69,6 +73,14 @@ shares this one implementation instead of reimplementing it.
 - Admission is a durability decision, never an authority one; approval/auth
   interactions are strictly redacted and routed through canonical resolution
   ports (`ApprovalResolutionPort`, `AuthFlowManager`, `TurnCoordinator`).
+- Run delivery publishes metadata-only approval/auth gate records to the
+  actor's or trigger creator's durable notification inbox independently of
+  external-channel availability. After external delivery settles, an
+  Inbox-only observer gets one additional bounded `max_wait` window to resolve
+  or replace the stable gate-derived id without retaining a delivery permit;
+  abandoned gates never create process-lifetime polling tasks. An external
+  preference/catalog outage must not be reclassified as "no channel
+  configured."
 - `AGENTS.md` here is **gate-pinned** (the `reborn_services` module-charter
   map) — edit only with `cargo test -p ironclaw_assistant` green.
 
@@ -84,4 +96,4 @@ cargo test -p ironclaw_architecture_tests reborn_crate_dependency_boundaries_hol
 
 Working rules + charter map: `AGENTS.md` (gate-pinned) · family rules:
 `crates/product/AGENTS.md` · design record:
-`docs/reborn/target-architecture/families/product.md` (§6.9.1).
+`docs/internal/reborn/target-architecture/families/product.md` (§6.9.1).

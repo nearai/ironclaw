@@ -30,7 +30,7 @@ Composition deliberately stops at the
 fully composed `Router` but must never bind a socket. This crate is the
 host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
-The "Native host surface" rules of `docs/reborn/how-to-port-channel-to-reborn.md`
+The "Native host surface" rules of `docs/internal/reborn/how-to-port-channel-to-reborn.md`
 apply: host auth stays host-owned in this crate, and behavior is reached through
 `ironclaw_product_contracts::surface::ProductSurface`. The crate *does* carry a
 direct `ironclaw_assistant` dependency (see `Cargo.toml`), but as of the WS5
@@ -40,7 +40,9 @@ call the surface, which PROPOSAL §6.1.3 keeps in product — plus **nine** wire
 DTOs whose fields name a crate `ironclaw_product_contracts` may not depend on.
 (Corrected 2026-08-02: this read "eleven". The WS5 `attachments widened` slice in
 the same PR moved `ProductAttachmentCapabilities`/`product_attachment_capabilities`
-into `ironclaw_attachments`, taking the residue baseline **102 → 100**. The
+into `ironclaw_attachments`, taking the residue baseline **102 → 100**;
+subsequent command inventory additions, including automation run-now, raised
+it to **104**. The
 authority is `WEBUI_PRODUCT_SYMBOL_BASELINE` in
 `reborn_transport_product_boundary.rs`, not this prose.) Every
 other DTO, request body, and descriptor *type* now comes from
@@ -107,7 +109,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 ## `handlers.rs` module-charter map
 
-`src/webui_v2/handlers.rs` is **4,593 lines** and carries a live
+`src/webui_v2/handlers.rs` is **4,890 lines** and carries a live
 `// arch-exempt: large_file` waiver naming plan #5985 (the WebUI route split).
 This map is **not** that split and does not discharge that waiver — PROPOSAL
 §6.4.15 calls this shape "module-charter work, **not a split**", and §6.9.1
@@ -130,7 +132,8 @@ candidate module.
 | Sub-owner | Owns | Never contains | Items |
 |---|---|---|---|
 | `session` | The session-bootstrap response and the feature flags it carries | A durable read — bootstrap must stay cheap and non-blocking | `GLOBAL_AUTO_APPROVE_FEATURE_TIMEOUT`, `WebUiV2SessionResponse`, `WebUiV2Features`, `get_session`, `global_auto_approve_enabled` |
-| `threads` | Thread lifecycle, message send, and timeline/thread reads | Run control (that is `runs`) or transport (that is `streaming`) | `create_thread`, `delete_thread`, `send_message`, `get_timeline`, `TimelineQuery`, `list_threads`, `ListThreadsQuery` |
+| `threads` | Thread lifecycle, message send, and timeline/thread reads | Run control (that is `runs`) or transport (that is `streaming`) | `create_thread`, `delete_thread`, `session_channel_message`, `get_timeline`, `TimelineQuery`, `list_threads`, `ListThreadsQuery` |
+| `notifications` | Durable notification-inbox listing and lifecycle mutations, including route-edge query/path parsing | External-channel preferences, enrollment, or delivery — those are `outbound` | `list_notifications`, `ListNotificationsQuery`, `NotificationPath`, `mark_notification_read`, `mark_all_notifications_read`, `archive_notification` |
 | `admin-users` | Admin user CRUD, role/status, and per-user secrets; parsing `{user_id}`/`{handle}` into domain types at the edge | Authorization logic — the service enforces admin authorization and last-admin protection | `parse_admin_user_id`, `parse_admin_secret_handle`, `read_admin_user_secret`, `admin_list_users`, `admin_create_user`, `admin_get_user`, `admin_update_user`, `admin_delete_user`, `admin_set_user_status`, `admin_set_user_role`, `admin_list_user_secrets`, `admin_put_user_secret`, `admin_delete_user_secret` |
 | `workspace-fs` | Project-file and mount-catalog reads, and the workspace path-scoping rules that keep a served path inside its projection | Attachment download (that is `attachments`) | `PROJECT_FS_ROOT`, `ProjectFsQuery`, `list_project_files`, `stat_project_file`, `read_project_file`, `project_fs_download_response`, `FsBrowseQuery`, `list_fs_mounts`, `browse_fs_dir`, `stat_fs_path`, `read_fs_file`, `require_fs_browse_path`, `workspace_scoped_projection_required`, `workspace_projection_for`, `workspace_served_path`, `strip_workspace_prefix`, `project_fs_list_path`, `require_project_fs_path` |
 | `projects` | Project CRUD and project membership | Project *files* — those are `workspace-fs` | `ListProjectsQuery`, `list_projects`, `create_project`, `get_project`, `update_project`, `delete_project`, `list_project_members`, `add_project_member`, `update_project_member`, `remove_project_member`, `read_project_member` |
@@ -138,15 +141,16 @@ candidate module.
 | `streaming` | Both live transports and everything that shapes a frame: SSE poll/keepalive tuning, capacity and concurrency rejection, cursor tokens, the envelope→event mapping, and the WebSocket drain loop | A product decision — a stream carries what the surface already produced | `SSE_POLL_INTERVAL`, `SSE_IDLE_POLL_MAX_INTERVAL`, `SSE_KEEPALIVE_INTERVAL`, `LAST_EVENT_ID_HEADER`, `sse_poll_interval_for_idle_polls`, `stream_events`, `sse_capacity_rejected`, `sse_concurrency_exhausted`, `StreamEventsQuery`, `stream_connection_id`, `SseErrorPayload`, `webchat_sse_event_from_envelope`, `sse_error_event`, `sse_keep_alive_event`, `build_sse_stream`, `parse_cursor_token`, `cursor_token`, `stream_events_ws`, `ws_drain_loop`, `ws_send_with_timeout` |
 | `runs` | Run control: cancel, retry, and gate resolution | Anything that reads a run — that is `threads` or `streaming` | `cancel_run`, `CancelRunPath`, `resolve_gate`, `ResolveGatePath`, `retry_run`, `RetryRunPath` |
 | `commands` | The product command surface: listing and executing | A command *constant* — those are `ironclaw_assistant`'s frozen inventory | `list_commands`, `ExecuteCommandBody`, `execute_command` |
-| `automations` | Automation listing and lifecycle (pause/resume/rename/delete) | Trigger evaluation — that is the triggers domain | `list_automations`, `pause_automation`, `resume_automation`, `rename_automation`, `delete_automation`, `ListAutomationsQuery` |
+| `automations` | Automation listing and lifecycle (run/pause/resume/rename/delete) | Trigger evaluation — that is the triggers domain | `list_automations`, `run_automation`, `pause_automation`, `resume_automation`, `rename_automation`, `delete_automation`, `ListAutomationsQuery` |
+| `suggestions` | Suggestion snapshot reads and generation/start/dismiss actions | Suggestion orchestration and durable state — those belong behind `ProductSurface` | `SUGGESTIONS_MAX_RETRY_AFTER_SECONDS`, `list_suggestions`, `generate_suggestions`, `start_suggestion`, `dismiss_suggestion` |
 | `traces` | Trace credits, account traces, the account login link, and hold authorization | Trace *content* — that is `ironclaw_trace_commons` | `trace_credits`, `trace_account_traces`, `trace_account_login_link`, `authorize_trace_hold` |
-| `outbound` | Outbound notification channels, delivery targets, web-push enrollment, and the capability-failure→HTTP classification they introduced | Delivery itself — the host owns the coordinator | `get_notification_channels`, `set_notification_channels`, `CapabilityFailureHttpClass`, `capability_failure_http_class`, `capability_failure_bad_request`, `capability_resolution_succeeded`, `parse_thread_id_for_response`, `outbound_preferences_forbidden`, `outbound_preferences_unavailable`, `list_outbound_delivery_targets`, `web_push_status`, `web_push_subscribe`, `web_push_unsubscribe` |
+| `outbound` | Outbound notification channels, delivery targets, the generic host-owned delivery-registration surface, and its capability-failure→HTTP classification | Delivery itself — the host owns the coordinator; channel-specific enrollment parsing belongs in the channel package | `get_notification_channels`, `set_notification_channels`, `CapabilityFailureHttpClass`, `capability_failure_http_class`, `capability_failure_bad_request`, `capability_resolution_succeeded`, `parse_thread_id_for_response`, `outbound_preferences_forbidden`, `outbound_preferences_unavailable`, `list_outbound_delivery_targets`, `notification_setup_status`, `notification_setup_enable`, `notification_setup_disable` |
 | `skills` | Skill discovery, install/update/remove, content reads, and auto-activation | Skill *selection* — that is `ironclaw_skills` | `list_skills`, `search_skills`, `install_skill`, `get_skill_content`, `update_skill`, `remove_skill`, `set_skill_auto_activate`, `set_auto_activate_learned`, `skill_mutation_succeeded`, `skill_mutation_forbidden`, `skill_mutation_unavailable`, `SkillPath`, `SearchSkillsBody`, `InstallSkillBody`, `UpdateSkillBody`, `SetSkillAutoActivateBody` |
 | `extensions` | Extension listing, registry browse, install/import/remove, hosted-MCP registration, the setup handshake, and the lifecycle response projections | Admin *configuration* of an installed extension — that is `admin-config` | `list_extensions`, `list_extension_registry`, `install_extension`, `register_hosted_mcp_extension`, `import_extension`, `ironhub_deliver_install`, `remove_extension`, `extension_lifecycle_mutation_succeeded`, `extension_install_succeeded`, `membership_is_visible`, `membership_landed_pending_setup`, `ensure_extension_inventory_readback`, `extension_lifecycle_forbidden`, `extension_lifecycle_unavailable`, `extension_action_completed`, `get_extension_setup`, `setup_extension`, `public_lifecycle_json`, `extension_lifecycle_activity_id`, `ExtensionPackagePath`, `InstallExtensionBody`, `RegisterHostedMcpBody`, `RegisterHostedMcpResponse`, `bounded_hosted_mcp_name`, `RemoveExtensionBody`, `extension_package_ref_for_request` |
 | `admin-config` | Per-extension admin configuration: read, replace, idempotency, and its failure projections | Extension lifecycle — that is `extensions` | `ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES`, `require_operator_webui_config`, `ExtensionAdminConfigurationPath`, `ExtensionAdminConfigurationValue`, `ReplaceExtensionAdminConfigurationBody`, `ReplaceExtensionAdminConfigurationInput`, `list_extension_admin_configuration`, `replace_extension_admin_configuration`, `query_extension_admin_configuration`, `select_extension_admin_configuration_group`, `admin_configuration_activity_id`, `admin_configuration_conflict`, `admin_configuration_unavailable`, `admin_configuration_forbidden`, `admin_configuration_done_failure`, `admin_configuration_blocked` |
 | `dispatch` | The shared `ProductSurface` call shapes every other owner goes through: invoke/query/page helpers, the generic activity-id derivation, and idempotency/client-action-id validation | A route-specific decision — those belong to the owner that made them | `CLIENT_ACTION_ID_MAX_BYTES`, `product_surface_input`, `invoke_product_capability`, `invoke_product_capability_with_activity_id`, `invoke_product_command`, `product_capability_activity_id`, `product_surface_activity_id`, `query_product_view`, `query_product_page`, `decode_product_outbound_events`, `validate_idempotency_key`, `parse_client_action_id` |
 | `operator` | The operator console: first-run setup, tool settings, operator config keys, diagnostics, status, logs, and service lifecycle | LLM provider administration — that is `llm-admin` | `SETTINGS_TOOLS_AUTO_APPROVE_KEY`, `SETTINGS_TOOL_CONFIG_PREFIX`, `SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES`, `get_operator_setup`, `query_operator_setup_response`, `run_operator_setup`, `list_settings_tools`, `SettingsToolsAutoApproveRequest`, `set_settings_tools_auto_approve`, `SettingsToolPermissionPath`, `SettingsToolPermissionRequest`, `set_settings_tool_permission`, `validate_settings_tool_capability_id`, `validate_settings_tool_config_response`, `list_operator_config`, `OperatorConfigKeyPath`, `OPERATOR_CONFIG_KEY_MAX_BYTES`, `OPERATOR_CONFIG_RESERVED_VALIDATE_KEY`, `validate_operator_config_key`, `operator_config_key_error`, `query_operator_config_key_response`, `get_operator_config_key`, `set_operator_config_key`, `reject_reserved_operator_config_key`, `validate_operator_config`, `get_operator_diagnostics`, `get_operator_status`, `query_operator_logs`, `query_logs`, `run_operator_service_lifecycle` |
-| `llm-admin` | LLM provider administration and the provider login flows: config snapshot, upsert/delete, active-model selection, connection test, model listing, NEAR AI and Codex login | Anything that *calls* a model | `LlmProviderPath`, `get_llm_config`, `query_llm_config_snapshot`, `upsert_llm_provider`, `delete_llm_provider`, `set_active_llm`, `test_llm_connection`, `list_llm_models`, `start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`, `llm_provider_upsert_activity_id` |
+| `llm-admin` | LLM provider administration, tenant user-model policy/catalog, caller-scoped model preference, and the provider login flows: config snapshot, upsert/delete, active-model selection, connection test, model listing, NEAR AI and Codex login | Anything that *calls* a model | `LlmProviderPath`, `get_user_model_catalog`, `query_user_model_catalog`, `set_user_model_policy`, `get_user_model_preference`, `query_user_model_preference`, `set_user_model_preference`, `get_llm_config`, `query_llm_config_snapshot`, `upsert_llm_provider`, `delete_llm_provider`, `set_active_llm`, `test_llm_connection`, `list_llm_models`, `start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`, `llm_provider_upsert_activity_id` |
 | `run-artifact` | Run and thread artifact reads — already its own file, the one seam plan #5985 has taken so far | Anything not artifact-shaped | `handlers/run_artifact.rs::RunArtifactPath`, `handlers/run_artifact.rs::ThreadArtifactPath`, `handlers/run_artifact.rs::AdminThreadScrapeListQuery`, `handlers/run_artifact.rs::AdminThreadScrapeThreadPath`, `handlers/run_artifact.rs::AdminThreadScrapeRunPath`, `handlers/run_artifact.rs::query_single`, `handlers/run_artifact.rs::get_run_artifact`, `handlers/run_artifact.rs::get_thread_artifact`, `handlers/run_artifact.rs::admin_list_thread_scrape_threads`, `handlers/run_artifact.rs::admin_get_thread_scrape_artifact`, `handlers/run_artifact.rs::admin_get_thread_scrape_run_artifact` |
 
 Three placement calls worth stating, because each is an item whose *name*
@@ -183,8 +187,12 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.get_session` | GET | `/api/webchat/v2/session` | — | `ProjectionOnly` |
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | — | `ProductSurface` |
 | `webui.v2.list_threads` | GET | `/api/webchat/v2/threads` (`?limit&cursor`) | — | `ProjectionOnly` |
+| `webui.v2.list_notifications` | GET | `/api/webchat/v2/notifications` (`?limit&cursor`) | — | `ProductSurface` |
+| `webui.v2.mark_notification_read` | POST | `/api/webchat/v2/notifications/{notification_id}/read` | — | `ProductSurface` |
+| `webui.v2.mark_all_notifications_read` | POST | `/api/webchat/v2/notifications/read-all` | — | `ProductSurface` |
+| `webui.v2.archive_notification` | POST | `/api/webchat/v2/notifications/{notification_id}/archive` | — | `ProductSurface` |
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductSurface` |
-| `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
+| `webui.v2.session_channel_message` | POST | `/api/webchat/v2/channels/{extension_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.get_thread_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/artifact` | — | `ProjectionOnly` |
@@ -192,7 +200,8 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
-| `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
+| `webui.v2.list/run/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
+| `webui.v2.suggestions.list/generate/start/dismiss` | GET/POST/DELETE | `/api/webchat/v2/suggestions…` | — | `ProductSurface` |
 | `webui.v2.list/install/import/remove/get_setup/setup_extension/register_hosted_mcp` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductSurface` |
 | `webui.v2.ironhub_deliver_install` | POST | `/api/webchat/v2/ironhub/install` | — | `ProductSurface` |
 | `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductSurface` |
@@ -201,8 +210,14 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.operator.inspector_*` | GET | `/api/webchat/v2/operator/inspector/threads/{thread_id}/runs/{run_id}[/prompt\|/tools/{activity_id}\|/events]` | `events`: SSE; others — | `ProjectionOnly` |
 | `webui.v2.admin.*` (users CRUD, status, role, secrets) | GET/POST/PATCH/PUT/DELETE | `/api/webchat/v2/admin/users…` | — | `ProductSurface` |
 | `webui.v2.trace_*` (credit, account, account-login-link, holds/authorize) | GET/POST | `/api/webchat/v2/traces/…` | — | `ProductSurface` |
-| `webui.v2.web_push_status` | GET | `/api/webchat/v2/web-push/status` | — | `ProductSurface` |
-| `webui.v2.web_push_subscribe` / `web_push_unsubscribe` | POST | `/api/webchat/v2/web-push/subscriptions[/remove]` | — | `ProductSurface` |
+| `webui.v2.notification_setup_status` | GET | `/api/webchat/v2/channels/{extension_id}/notifications` | — | `ProductSurface` |
+| `webui.v2.notification_setup_enable` / `notification_setup_disable` | POST | `/api/webchat/v2/channels/{extension_id}/notifications/{enable,disable}` | — | `ProductSurface` |
+
+`GET /api/webchat/v2/suggestions` is read-only and returns the persisted
+generation status (`empty`, `generating`, `ready`, or `failed`).
+`POST /api/webchat/v2/suggestions/generate` requires a bounded
+`client_action_id`, returns `202 Accepted` with `Retry-After` while generation
+is in progress, and returns `200 OK` for terminal snapshots.
 
 The exact per-route set (methods, query params, auth, rate/body limits) is the
 descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by
@@ -226,12 +241,16 @@ is all-or-nothing and returns `413` when the thread exceeds 1,000 persisted
 messages, 16 MiB of stored message data, or 20 MiB after redaction and log
 assembly. The endpoint is limited to six requests per caller per minute.
 
-**Operator-gating.** LLM config, operator setup/config/service-control, and
-extension zip-import routes are operator-wide: `webui_v2_app` mounts them only
-when the authenticator advertises an operator config surface, and each handler
-still rejects with `403` when the injected `WebUiV2Capabilities` lacks
-`operator_webui_config`. Multi-user session/OIDC authenticators return
-non-operator capabilities. `webui.v2.admin.*` user management is
+**Operator-gating.** LLM provider/configuration routes (including provider
+credentials and model-policy mutation), operator setup/config/service-control,
+and extension zip-import routes are operator-wide: `webui_v2_app` mounts them
+only when the authenticator advertises an operator config surface, and each
+handler still rejects with `403` when the injected `WebUiV2Capabilities` lacks
+`operator_webui_config`. The safe LLM catalog and model-preference routes are
+normal authenticated-caller routes scoped to the caller's tenant and user;
+they expose neither provider metadata nor policy mutation. Multi-user
+session/OIDC authenticators return non-operator capabilities.
+`webui.v2.admin.*` user management is
 admin/operator-gated server-side in `ProductSurface` (`AdminUserService`,
 last-admin protection); `create_user` returns the one-time API bearer exactly
 once in `api_token`. `webui.v2.settings.tools` is a normal authenticated-caller
@@ -249,12 +268,19 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
   `429` with `retryable: true`.
 - The SPA consumes SSE through `event-source-plus`, which owns event framing,
-  `Last-Event-ID`, abort, and retry/backoff over `fetch`/`ReadableStream`. The
-  bearer is sent in the `Authorization` header rather than the request URL. A
-  bounded, random `connection_id` remains stable for one browser tab across SPA
-  mounts and document reloads, while `connection_generation` increments for
-  every package-managed request. Fresh top-level navigations use a new identity
-  even when a duplicated tab copied `sessionStorage`. A same-caller, same-id
+  `Last-Event-ID`, fetch, and cancellation over `fetch`/`ReadableStream`.
+  IronClaw owns one reconnect coordinator across transport failures, stream
+  endings, activity stalls, visibility recovery, and network recovery. It uses
+  jittered 1/2/4/8/16/30-second backoff and honors `Retry-After`. A valid
+  application frame starts the stability interval, and backoff resets only if
+  that stream remains open for the full 15 seconds; HTTP headers and the
+  immediate admission keep-alive alone do not reset it. The
+  bearer is sent in the `Authorization` header rather than
+  the request URL. A bounded, random `connection_id` remains stable for one
+  browser tab across SPA mounts and document reloads, while
+  `connection_generation` increments for every package-managed request. Fresh
+  top-level navigations use a new identity even when a duplicated tab copied
+  `sessionStorage`. A same-caller, same-id
   stream supersedes its prior generation without consuming another slot; a
   delayed older generation receives `204` and cannot cancel the current stream.
   This prevents proxy-reordered closes/opens during thread navigation or reload
@@ -304,7 +330,7 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
 - `capability_activity` / `capability_display_preview` frames carry only
   bounded, secret-redacted input/output *summaries* (host paths rejected, URLs
   stripped, byte-bounded) — never raw args/results. Full output stays behind the
-  scoped `result_ref` fetch path. See `.claude/rules/gateway-events.md`.
+  scoped `result_ref` fetch path. See `.claude/rules/events.md`.
 
 ### SPA bundle
 
@@ -313,6 +339,12 @@ Cargo's `OUT_DIR` and served from `src/webui_v2/static_assets/`.
 `Dockerfile.reborn` installs `frontend/` deps before the `cargo build` so the
 release image bundles compiled assets; `frontend/README.md` covers the JS
 toolchain.
+
+The Inference tab keeps provider credentials and provider management
+operator-only. An operator also configures the active provider's tenant model
+allowlist and workspace default there before caller-scoped model selectors are
+enabled. Ordinary users receive only the safe catalog and their own preference
+selector; they never receive provider metadata or policy mutation controls.
 
 ## Why the OAuth login router lives here
 

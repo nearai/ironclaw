@@ -36,6 +36,7 @@ futures-util = "0.3"
 glob = "0.3"
 ironclaw_auth = { path = "../../domains/ironclaw_auth" }
 ironclaw_extractors = { path = "../../domains/ironclaw_extractors" }
+ironclaw_documents = { path = "../../substrates/ironclaw_documents", version = "0.1.0" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
 ironclaw_observability = { path = "../../substrates/ironclaw_observability" }

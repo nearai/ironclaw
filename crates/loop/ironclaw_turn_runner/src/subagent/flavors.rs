@@ -431,8 +431,8 @@ mod tests {
         };
         use ironclaw_loop_contracts::{
             AgentLoopHostError, CapabilityDescriptorView, CapabilityInputRef,
-            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopDriverId,
-            LoopRequest, LoopRequestBatch, ProviderToolDefinition, VisibleCapabilityRequest,
+            CapabilitySurfaceVersion, LoopCapabilityPort, LoopDriverId, LoopRequest,
+            LoopRequestBatch, ProviderToolDefinition, VisibleCapabilityRequest,
             VisibleCapabilitySurface, resolution,
         };
         use ironclaw_loop_host::{
@@ -544,7 +544,7 @@ mod tests {
                     .iter()
                     .map(|id| ProviderToolDefinition {
                         capability_id: cap(id),
-                        name: ironclaw_host_api::ids::ProviderToolName::new(id.replace('.', "__"))
+                        name: ironclaw_host_api::ids::ProviderToolName::for_capability(&cap(id))
                             .expect("provider tool name"),
                         description: format!("{id} description"),
                         description_trust: Default::default(),
@@ -570,7 +570,6 @@ mod tests {
                             safe_name: id.to_string(),
                             safe_description: format!("{id} description"),
                             description_trust: Default::default(),
-                            concurrency_hint: ConcurrencyHint::SafeForParallel,
                             parameters_schema: serde_json::json!({"type":"object"}),
                         })
                         .collect(),

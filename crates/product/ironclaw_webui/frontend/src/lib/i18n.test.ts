@@ -83,7 +83,10 @@ const LOCALES = ["ar", "de", "en", "es", "fr", "hi", "ja", "ko", "pt-BR", "uk", 
 //
 // A new sidecar must be added here, or its keys silently fall back to English
 // in all ten other locales.
-const ENGLISH_SIDECAR_PACKS = ["../pages/chat/inspector/inspector-translations.ts"];
+const ENGLISH_SIDECAR_PACKS = [
+  "../components/device-link-translations.ts",
+  "../pages/chat/inspector/inspector-translations.ts",
+];
 
 function runPackSource(specifier, onRegister) {
   const source = readFileSync(new URL(specifier, import.meta.url), "utf8")
@@ -155,6 +158,12 @@ test("non-English locale packs localize exposed workflow copy", () => {
       !technicalTerms.has(key) &&
       (key === "chat.downloadRunArtifact" ||
         key === "chat.downloadThreadArtifact" ||
+        key === "chat.processWorking" ||
+        key === "chat.workedFor" ||
+        key === "chat.reloadHistory" ||
+        key === "chat.busyRejectedResend" ||
+        key === "authGate.popupClosed" ||
+        key.startsWith("admin.configuration.") ||
         key.startsWith("pairing.web.") ||
         key === "extensions.tools" ||
         key === "tools.installed" ||
@@ -162,6 +171,8 @@ test("non-English locale packs localize exposed workflow copy", () => {
         key === "extensions.addCustomMcp" ||
         key === "extensions.emptyToolsTitle" ||
         key === "extensions.emptyToolsDesc" ||
+        key.startsWith("extensions.connectionChoice.") ||
+        key.startsWith("deviceLink.") ||
         key.startsWith("extensions.customMcp")),
   );
 
@@ -173,6 +184,37 @@ test("non-English locale packs localize exposed workflow copy", () => {
         false,
         `${locale} must localize ${key}`,
       );
+    }
+  }
+});
+
+test("non-English locale packs localize model-selection settings", () => {
+  const english = loadLocalePack("en");
+  const keys = [
+    "llm.modelPreference",
+    "llm.modelPreferenceDesc",
+    "llm.policyTitle",
+    "llm.policyDesc",
+    "llm.policyAllowedModels",
+    "llm.policyWorkspaceDefault",
+    "llm.policyModelPlaceholder",
+    "llm.policyAddModel",
+    "llm.policyEnabled",
+    "llm.policyDisabled",
+    "llm.policyNoActiveProvider",
+    "llm.policyInvalidModel",
+    "llm.policyTooManyModels",
+    "llm.policySelectModels",
+    "llm.followWorkspaceDefault",
+    "llm.unavailableModel",
+    "llm.selectionUnavailable",
+    "llm.preferenceSaving",
+  ];
+
+  for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
+    const pack = loadLocalePack(locale);
+    for (const key of keys) {
+      assert.notEqual(pack[key], english[key], `${locale} must localize ${key}`);
     }
   }
 });

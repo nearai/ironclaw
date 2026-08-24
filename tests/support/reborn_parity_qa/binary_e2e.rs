@@ -20,16 +20,16 @@ use async_trait::async_trait;
 use ironclaw_assistant::{
     DefaultInboundTurnService, DefaultProductSurface, IdempotencyLedger, InboundTurnService,
 };
-use ironclaw_event_log::InMemoryDurableEventLog;
+use ironclaw_event_log::{InMemoryDurableEventLog, NonBlockingEventSink};
 use ironclaw_event_projections::{
     EventProjectionService, MAX_PROJECTION_PAGE_LIMIT, ProjectionRequest, ProjectionScope,
     ProjectionSnapshot, ReplayEventProjectionService,
 };
+use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::turn::{
-    IdempotencyKey, ReplyTargetBindingRef, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnGateRef, TurnRunId, TurnScope, TurnStatus,
+    IdempotencyKey, SanitizedCancelReason, TurnActor, TurnGateRef, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_host_api::{
     action::NetworkPolicy,
@@ -117,6 +117,7 @@ pub struct RebornBinaryE2EHarness {
     capability_recorder: HarnessCapabilityRecorder,
     milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
     runtime_event_log: Arc<InMemoryDurableEventLog>,
+    runtime_event_sink: Arc<dyn NonBlockingEventSink>,
     scheduler_handle: Option<TurnRunSchedulerHandle>,
     scheduler_notifier: Arc<SchedulerTurnRunWakeNotifier>,
     _turn_root: Arc<tempfile::TempDir>,
@@ -798,8 +799,12 @@ impl RebornBinaryE2EHarness {
         let milestone_sink =
             Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
         let runtime_event_log = Arc::new(InMemoryDurableEventLog::new());
-        let durable_milestone_sink = Arc::new(DurableLoopHostMilestoneSink::new(
+        let runtime_event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
             Arc::clone(&runtime_event_log) as Arc<dyn ironclaw_event_log::DurableEventLog>,
+            EventBatchConfig::default(),
+        ));
+        let durable_milestone_sink = Arc::new(DurableLoopHostMilestoneSink::new(
+            Arc::clone(&runtime_event_sink),
             DurableLoopHostMilestoneScope::from_thread_scope(&thread_scope)?,
         ));
         let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
@@ -944,6 +949,7 @@ impl RebornBinaryE2EHarness {
             capability_recorder,
             milestone_sink,
             runtime_event_log,
+            runtime_event_sink,
             composition,
             turn_root,
         ))
@@ -964,6 +970,7 @@ impl RebornBinaryE2EHarness {
         capability_recorder: HarnessCapabilityRecorder,
         milestone_sink: Arc<ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink>,
         runtime_event_log: Arc<InMemoryDurableEventLog>,
+        runtime_event_sink: Arc<dyn NonBlockingEventSink>,
         composition: RebornRuntimeLoopComposition<
             dyn SessionThreadService,
             RebornTraceReplayModelGateway,
@@ -987,6 +994,7 @@ impl RebornBinaryE2EHarness {
             capability_recorder,
             milestone_sink,
             runtime_event_log,
+            runtime_event_sink,
             scheduler_handle: Some(composition.scheduler_handle),
             scheduler_notifier,
             _turn_root: turn_root,
@@ -1154,8 +1162,6 @@ impl RebornBinaryE2EHarness {
                 run_id,
                 gate_resolution_ref: gate_ref,
                 precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
-                source_binding_ref: SourceBindingRef::new("src:resume")?,
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
                 resume_disposition: None,
             })
@@ -1293,8 +1299,6 @@ impl RebornBinaryE2EHarness {
                 scope: self.turn_scope.clone(),
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
-                source_binding_ref: SourceBindingRef::new("src:retry")?,
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:retry")?,
                 idempotency_key: IdempotencyKey::new(format!("retry-{run_id}"))?,
             })
             .await?)
@@ -1404,6 +1408,7 @@ impl RebornBinaryE2EHarness {
     }
 
     pub async fn runtime_projection(&self, run_id: TurnRunId) -> HarnessResult<ProjectionSnapshot> {
+        self.runtime_event_sink.flush().await?;
         let user_id = self
             .thread_scope
             .owner_user_id
@@ -1584,7 +1589,10 @@ fn binding_request_from_envelope(envelope: &ProductInboundEnvelope) -> ResolveBi
         external_conversation_ref: envelope.external_conversation_ref().clone(),
         external_event_id: envelope.external_event_id().clone(),
         route_kind: route_kind_for_envelope(envelope),
-        auth_claim: envelope.auth_claim().clone(),
+        auth_claim: envelope
+            .require_verified_auth_claim()
+            .expect("parity harness envelopes carry verified webhook evidence")
+            .clone(),
     }
 }
 

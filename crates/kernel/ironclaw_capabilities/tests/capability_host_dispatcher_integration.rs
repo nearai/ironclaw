@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     Timestamp,
     action::NetworkPolicy,
     capability::{CapabilitySet, EffectKind, GrantConstraints},
-    dispatch::{DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind},
     ids::{ApprovalRequestId, CapabilityId, ExtensionId, InvocationId, UserId},
     mount::MountView,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage},
@@ -51,7 +51,7 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"via":"runtime-dispatcher"}));
+    assert_eq!(result.output, json!({"via":"runtime-dispatcher"}));
     let recorded = adapter.take_request();
     assert_eq!(recorded.capability_id, capability_id());
     assert_eq!(recorded.scope, scope);
@@ -92,11 +92,14 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
 async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_dispatcher() {
     let (registry, dispatcher, _governor, events, adapter) =
         runtime_dispatcher_stack(json!({"approved":true}));
-    let run_state = ironclaw_processes::in_memory_backed_process_invocation_state_store();
+    let process_services = ProcessServices::in_memory();
+    let process_runtime = process_services.process_runtime();
+    let block_run_state = ProcessInvocationStore::new(Arc::clone(&process_runtime));
+    let resume_run_state = ProcessInvocationStore::new(Arc::clone(&process_runtime));
     let approval_requests = ironclaw_approvals::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
-        .with_invocation_state(&run_state)
+        .with_invocation_state(&block_run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
@@ -119,7 +122,11 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
         CapabilityInvocationError::AuthorizationRequiresApproval { .. }
     ));
     assert_eq!(adapter.request_count(), 0);
-    let blocked = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    let blocked = resume_run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(blocked.status, ProcessInvocationStatus::BlockedApproval);
     let approval_id = blocked.approval_request_id.unwrap();
     let lease = approve_dispatch(&approval_requests, &leases, &scope, approval_id, None)
@@ -128,7 +135,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
 
     let resume_authorizer = GrantAuthorizer::new();
     let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
-        .with_invocation_state(&run_state)
+        .with_invocation_state(&resume_run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let result = resume_host
@@ -142,14 +149,15 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
         .await
         .unwrap();
 
-    assert_eq!(result.dispatch.output, json!({"approved":true}));
+    assert_eq!(result.output, json!({"approved":true}));
     assert_eq!(adapter.request_count(), 1);
     let recorded = adapter.take_request();
     assert_eq!(recorded.scope, scope);
     assert_eq!(recorded.estimate, estimate);
     assert_eq!(recorded.input, input);
+    let reloaded_run_state = ProcessInvocationStore::new(Arc::clone(&process_runtime));
     assert_eq!(
-        run_state
+        reloaded_run_state
             .get(&scope, invocation_id)
             .await
             .unwrap()
@@ -399,18 +407,22 @@ impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
             None => self
                 .governor
                 .reserve(request.scope, request.estimate)
-                .map_err(|_| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                    model_visible_cause: None,
+                .map_err(|_| DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                    diagnostic: None,
+                    detail: None,
                 })?,
         };
         let output_bytes = usage.output_bytes;
         let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                diagnostic: None,
+                detail: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

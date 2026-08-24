@@ -20,6 +20,7 @@ use reborn_support::scripted_provider::{
     CONTEXT_OVERFLOW_USED_TOKENS, ModelProviderCallProbe, RecoverableModelFailure,
 };
 use serde_json::json;
+use std::num::NonZeroU32;
 
 const UNPERSISTED_ASSISTANT_REPLY: &str =
     "raw assistant transcript that must never be reported as a reply";
@@ -135,6 +136,51 @@ async fn content_filtered_completion_recovers_with_model_visible_observation() {
         .assert_model_message_content_not_contains("model response was blocked by provider policy")
         .await
         .expect("gateway summaries do not enter the recovery prompt");
+}
+
+#[tokio::test]
+async fn long_tool_run_keeps_the_original_task_after_raw_history_exceeds_window_limit() {
+    const ORIGINAL_TASK: &str = "retain this exact original task through the long tool run";
+    let mut script = Vec::new();
+    for index in 0..130 {
+        if index == 128 {
+            script.push(RebornScriptedReply::text(format!(
+                "durable window compaction summary before iteration {index}"
+            )));
+        }
+        script.push(RebornScriptedReply::tool_call(
+            "test_echo",
+            json!({"message": format!("iteration {index}")}),
+        ));
+    }
+    script.push(RebornScriptedReply::text("long tool run complete"));
+    let harness = RebornIntegrationHarness::test_default()
+        .with_iteration_limit_for_test(NonZeroU32::new(140).expect("non-zero test limit"))
+        .script(script)
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness
+        .submit_turn(ORIGINAL_TASK)
+        .await
+        .expect("long tool run completes");
+    harness
+        .assert_conversation_history_message_count_at_least(132)
+        .await
+        .expect("durable tool results exceed the 128-message window");
+    harness
+        .assert_summary_artifact_count_at_least(1)
+        .await
+        .expect("window eviction produces a durable compaction summary");
+    harness
+        .assert_last_model_message_content_contains(ORIGINAL_TASK)
+        .await
+        .expect("the final interactive request still carries the accepted task");
+    harness
+        .assert_reply_contains("long tool run complete")
+        .await
+        .expect("the final reply persists");
 }
 
 #[tokio::test]
@@ -447,6 +493,13 @@ async fn output_truncation_recovers_without_shrinking_input_context() {
 
 #[tokio::test]
 async fn transcript_write_failure_stops_without_another_model_or_tool_side_effect() {
+    // This debug integration future exceeds libtest's default 2 MiB thread
+    // stack; box it on the heap. CI sets no `RUST_MIN_STACK`, and assertions
+    // remain unchanged in the helper below.
+    Box::pin(transcript_write_failure_stops_without_another_model_or_tool_side_effect_body()).await;
+}
+
+async fn transcript_write_failure_stops_without_another_model_or_tool_side_effect_body() {
     let harness = RebornIntegrationHarness::test_default()
         .with_keyed_http_responses([ScriptedHttpResponse::for_url(
             TRANSCRIPT_FAILURE_TOOL_URL,

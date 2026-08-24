@@ -197,6 +197,44 @@ where
     Ok(())
 }
 
+/// A root filesystem the process journal writes through, over its own backend
+/// handle.
+///
+/// The journal's heartbeat is the liveness signal a run's lease depends on.
+/// While it shared one connection pool with event-store, trigger, and
+/// result-read traffic, a busy turn could starve its own heartbeat until the
+/// lease expired underneath it — the run then failed `lease_expired` while it
+/// was still healthy. Giving the journal its own backend handle means a
+/// heartbeat never queues behind data-plane work.
+///
+/// The mount set is exactly [`mount_database_roots`]', so the journal resolves
+/// the same virtual paths to the same rows the shared filesystem would have
+/// written. Only the connection it travels over differs.
+pub(crate) fn process_journal_root_filesystem<F>(
+    backend: Arc<F>,
+) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    let mut root = CompositeRootFilesystem::new();
+    mount_database_roots(&mut root, backend)?;
+    Ok(Arc::new(root))
+}
+
+/// Build the journal filesystem over libSQL's bounded secondary write lane.
+/// `mount_roots` preserves the data-plane mount layout and row identity; the
+/// runtime owns the writer-admission invariant for #7714.
+pub(crate) fn libsql_journal_lane_filesystem(
+    runtime: &ironclaw_libsql_runtime::LibSqlRuntime,
+    mount_roots: impl FnOnce(
+        Arc<LibSqlRootFilesystem>,
+    ) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError>,
+) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError> {
+    let lane_runtime = Arc::new(runtime.split_journal_lane()?);
+    // The data-plane handle already migrated this database.
+    mount_roots(Arc::new(LibSqlRootFilesystem::from_runtime(lane_runtime)))
+}
+
 pub(crate) fn mount_database_roots<F>(
     root: &mut CompositeRootFilesystem,
     database: Arc<F>,

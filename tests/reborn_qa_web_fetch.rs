@@ -19,6 +19,8 @@ mod parity_qa_support;
 mod reborn_support;
 mod support;
 
+use std::time::Duration;
+
 use axum::{
     Json, Router,
     extract::State,
@@ -30,7 +32,7 @@ use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_runtime::HTTP_CAPABILITY_ID;
 use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_turns::TurnStatus;
-use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
+use parity_qa_support::binary_e2e::{HarnessWaitConfig, RebornBinaryE2EHarness};
 use parity_qa_support::model_replay::{
     RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
 };
@@ -80,7 +82,7 @@ async fn reborn_qa_endpoint_status_check_reports_http_200() {
         .await
         .expect("submit status check request");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, live_http_wait())
         .await
         .expect("completed run");
     harness
@@ -144,7 +146,7 @@ async fn reborn_qa_latest_release_summary_from_github_api() {
         .await
         .expect("submit release summary request");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, live_http_wait())
         .await
         .expect("completed run");
     harness
@@ -217,7 +219,7 @@ async fn reborn_qa_hacker_news_keyword_search_reports_matches() {
         .await
         .expect("submit HN search request");
     harness
-        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .wait_for_status_with_config(submitted.run_id, TurnStatus::Completed, live_http_wait())
         .await
         .expect("completed run");
     harness
@@ -245,6 +247,13 @@ async fn reborn_qa_hacker_news_keyword_search_reports_matches() {
     harness.assert_model_exhausted();
 
     harness.shutdown().await;
+}
+
+fn live_http_wait() -> HarnessWaitConfig {
+    HarnessWaitConfig {
+        timeout: Duration::from_secs(60),
+        poll_interval: Duration::from_millis(20),
+    }
 }
 
 async fn status_ok(State(state): State<LiveLoopbackHttpState>, uri: Uri) -> impl IntoResponse {

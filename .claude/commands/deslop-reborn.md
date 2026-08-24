@@ -1,7 +1,7 @@
 ---
 description: One iteration of the IronClaw Reborn de-slop loop — take ONE Reborn crate, fan out parallel review sub-agents (thermo-nuclear quality, paranoid architect, interface/contract/invariants, test-coverage/wiring), synthesize, apply fixes/refactors/missing tests, open a PR. Stop.
 disable-model-invocation: true
-allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo build:*), Bash(git:*), Bash(gh:*), Bash(grep:*), Bash(rg:*), Bash(ls:*), Bash(wc:*), Bash(scripts/check-boundaries.sh:*), Bash(scripts/reborn-e2e-rust.sh:*), Read, Grep, Glob, Edit, Write, Agent
+allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo build:*), Bash(git:*), Bash(gh:*), Bash(grep:*), Bash(rg:*), Bash(ls:*), Bash(wc:*), Bash(scripts/reborn-e2e-rust.sh:*), Read, Grep, Glob, Edit, Write, Agent
 argument-hint: "[crate name, e.g. ironclaw_turns]"
 ---
 
@@ -12,7 +12,7 @@ simplifications, refactors, contract/README/invariant corrections, and any **mis
 tests** needed to keep the component correct forever. Then **STOP** — a human merges. Do not merge
 anything.
 
-Unlike `/review-crate` (a read-only audit) and `/review-pr` (which reviews an open PR's diff), this
+Unlike a read-only audit or a PR-diff review (`/pr-shepherd`), this
 loop reviews a **whole crate as it stands on the integration branch** and improves it. The unit of
 work is a **Reborn crate**, not a diff.
 
@@ -78,7 +78,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
   findings") and STOP — don't silently rewrite it into something else. When a change would add a trait, a
   crate, a dependency edge, or a re-export, apply the `ironclaw-reborn-architecture-review` skill first.
 - **Respect the Reborn layering.** Product/runtime composition flows **downward** through typed
-  contracts (`crates/AGENTS.md` → "Dependency Mental Model"). Never introduce an upstream dependency in
+  contracts (`crates/AGENTS.md` → "The layer matrix — who may depend on whom"). Never introduce an upstream dependency in
   a lower-level crate to make a fix convenient — `cargo test -p ironclaw_architecture_tests` enforces the
   boundaries and will fail. A de-slop that needs a new upward edge is out of scope; record it (§9).
 - **Scope = ONE coherent, single-crate PR.** If the crate is huge and the findings sprawl, do the
@@ -105,7 +105,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
 - Read the crate's guidance in order: `crates/<crate>/AGENTS.md`, then `CLAUDE.md`, `CONTRACT.md`,
   `README.md` (note the absence of an expected one as a finding), then `Cargo.toml` (deps, features,
   `pub` surface) and `src/lib.rs`/`src/main.rs` to map the module tree. Pull the matching
-  `docs/reborn/contracts/*.md` if the crate has a cross-crate contract.
+  `docs/internal/reborn/contracts/*.md` if the crate has a cross-crate contract.
 - **Small crate (`src` < ~2k lines): read every source file in full** so the review is complete, not
   sampled. **Large crate: read the guidance, the public API (`lib.rs` re-exports), the `CONTRACT.md`,
   and the largest / hottest modules**, and scope the PR to the slice you fully understand (§2).
@@ -286,8 +286,9 @@ after your fixes**.
    loop back to §6.
 2. **Commit:** `refactor(<crate>): de-slop — <one-line summary>` (use `refactor` for structural
    changes, `test` if the PR is mostly added coverage, `docs` if mostly guidance, `fix` if you
-   corrected a real bug a finding exposed). End the message with:
-   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
+   corrected a real bug a finding exposed). End the message with a `Co-Authored-By:` trailer naming
+   the model actually running this session (not a hardcoded one — it goes stale the moment a
+   different model runs the loop), e.g. `Co-Authored-By: <running model's own identity> <its provider's noreply address>`.
    (The commit-msg hook requires a regression test with every `fix` — write it test-first, §Testing
    Discipline in CLAUDE.md.)
 3. **Push and open the PR** with `gh pr create --base main`. PR body states: the **crate**, the

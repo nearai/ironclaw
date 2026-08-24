@@ -61,6 +61,8 @@ use ironclaw_composition::RebornTrajectoryObserver;
 use ironclaw_composition::build_default_budget_accountant;
 use ironclaw_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_config::BudgetDefaults;
+use ironclaw_event_log::{DurableEventLog, NonBlockingEventSink};
+use ironclaw_event_store::{CoalescingEventSink, EventBatchConfig};
 use ironclaw_extension_contracts::channel_adapter::ProductTriggerReason;
 use ironclaw_extension_registry::ExtensionInstallationStorePort;
 use ironclaw_filesystem::CompositeRootFilesystem;
@@ -71,7 +73,7 @@ use ironclaw_llm::testing::{provider_chain_over, provider_chain_over_with_fallba
 use ironclaw_llm::{LlmProvider, SessionConfig, create_session_manager};
 use ironclaw_loop_contracts::{
     CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-    ModelProfileId,
+    LoopHostMilestone, LoopHostMilestoneSink, ModelProfileId,
 };
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
@@ -89,6 +91,9 @@ use ironclaw_resources::{
 use ironclaw_threads::SessionThreadService;
 use ironclaw_turn_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_turn_runner::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
+use ironclaw_turn_runner::milestone_events::{
+    DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink,
+};
 use ironclaw_turn_runner::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, ProcessRuntimeSystem,
     build_default_planned_runtime,
@@ -126,8 +131,8 @@ use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
     ErrLlm, ErrLlmKind, FallbackProviderCallProbe, ModelProviderCallProbe, ParkingModelGate,
     RecoverableModelFailureScript, SCRIPTED_FALLBACK_MODEL_NAME, SCRIPTED_MODEL_NAME,
-    parking_trace_llm, recording_llm, recoverable_failure_trace_llm, scripted_fallback_vendor_pair,
-    scripted_trace_llm,
+    delayed_trace_llm, parking_trace_llm, recording_llm, recoverable_failure_trace_llm,
+    scripted_fallback_vendor_pair, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -240,6 +245,12 @@ pub(crate) struct GroupSharedStorage {
     /// opted in (C-TRACECAP seam); `None` otherwise. Concrete type (not `Arc<dyn
     /// TurnEventSink>`) so a test can read `.events()` back directly.
     pub(crate) turn_event_sink: Option<Arc<InMemoryTurnEventSink>>,
+    /// Production RootFilesystem-backed event log used by the durable loop
+    /// milestone sink when the measured workload opts in.
+    pub(crate) durable_event_log: Option<Arc<dyn DurableEventLog>>,
+    /// Production-shaped non-blocking writer for `durable_event_log`. Retained
+    /// so read-back assertions can flush accepted events before replay.
+    pub(crate) durable_event_sink: Option<Arc<dyn NonBlockingEventSink>>,
     /// W5-WIRING-PARITY: production local-dev always wires a security-audit
     /// sink; the harness mirrors that shape with a recording sink so tests can
     /// assert events emitted through real caller paths.
@@ -273,6 +284,13 @@ pub(crate) struct GroupSharedStorage {
     /// Read by `RebornThreadBuilder::build()` to decide whether to wire the
     /// real approval/auth interaction services into the thread's workflow.
     pub(crate) real_gate_dispatch_services: bool,
+    /// Task 5 (run-artifact-timings): the ONE `InMemoryDiagnosticStore` wired
+    /// into the group's ONE planned runtime as `prompt_diagnostic_sink`,
+    /// mirroring production's single-store shape (`runtime.rs:3455`,
+    /// `product_surface.rs:98`). Retained so `RebornIntegrationHarness::
+    /// diagnostic_store()` reads exactly what the loop actually recorded,
+    /// instead of a second throwaway instance nothing observes.
+    pub(crate) diagnostic_store: Arc<ironclaw_assistant::inspector_store::InMemoryDiagnosticStore>,
 }
 
 impl GroupSharedStorage {
@@ -478,6 +496,7 @@ impl RebornIntegrationGroup {
             safety_context: None,
             turn_event_sink: None,
             trace_capture: false,
+            durable_milestone_event_store: false,
             // General integration groups stay hermetic across production
             // default changes. Disclosure-specific tests opt into Bridged.
             tool_disclosure: ToolDisclosureMode::Off,
@@ -489,6 +508,7 @@ impl RebornIntegrationGroup {
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             planned_default_iteration_limit: None,
+            runner_heartbeat_interval_override: None,
             fail_append_finalized_assistant_message: false,
             fail_append_tool_result_reference: false,
             real_gate_dispatch_services: false,
@@ -825,6 +845,9 @@ pub struct RebornIntegrationGroupBuilder {
     /// group's one planned runtime, fan-out-composed with the in-memory sink
     /// when both are opted in.
     trace_capture: bool,
+    /// Wire the production durable loop-milestone adapter over this group's
+    /// selected RootFilesystem.
+    durable_milestone_event_store: bool,
     /// Enabler (b): pinned to `Off` for general hermetic tests and changed to
     /// `Bridged` only by `.with_tool_disclosure_bridged()`.
     tool_disclosure: ToolDisclosureMode,
@@ -859,6 +882,8 @@ pub struct RebornIntegrationGroupBuilder {
     /// `lease_recovery_interval` (default 10s) when set. Builder method lives
     /// in `group_options.rs`. Default `None` (today's behavior, byte-identical).
     lease_recovery_interval_override: Option<Duration>,
+    /// Test-only scheduler heartbeat interval override for measured workloads.
+    runner_heartbeat_interval_override: Option<Duration>,
     /// Test-only override for the canonical loop's default iteration limit.
     planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// Test-only runtime seam that rejects final assistant transcript writes.
@@ -999,7 +1024,33 @@ impl RebornIntegrationGroupBuilder {
         )?;
 
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
-
+        let (durable_event_log, durable_event_sink) = if self.durable_milestone_event_store {
+            let event_log = ironclaw_event_store::build_reborn_event_stores_from_root_filesystem(
+                Arc::clone(&base.composite),
+            )?
+            .events;
+            let event_sink: Arc<dyn NonBlockingEventSink> = Arc::new(CoalescingEventSink::new(
+                Arc::clone(&event_log),
+                EventBatchConfig::default(),
+            ));
+            (Some(event_log), Some(event_sink))
+        } else {
+            (None, None)
+        };
+        let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
+            if let Some(event_sink) = &durable_event_sink {
+                let durable_scope =
+                    DurableLoopHostMilestoneScope::from_thread_scope(&group_thread_scope)?;
+                Arc::new(FanOutLoopHostMilestoneSink(vec![
+                    milestone_sink.clone() as Arc<dyn LoopHostMilestoneSink>,
+                    Arc::new(DurableLoopHostMilestoneSink::new(
+                        Arc::clone(event_sink),
+                        durable_scope,
+                    )),
+                ]))
+            } else {
+                milestone_sink.clone()
+            };
         let (
             capability_factory,
             capability_surface_resolver,
@@ -1007,7 +1058,7 @@ impl RebornIntegrationGroupBuilder {
             capability_result_writer,
             capability_recorder,
         ) = capability.mode().into_parts(
-            milestone_sink.clone(),
+            Arc::clone(&runtime_milestone_sink),
             group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
             process_system.clone(),
             self.trajectory_observer.clone(),
@@ -1208,13 +1259,19 @@ impl RebornIntegrationGroupBuilder {
                 None => Arc::clone(&user_profile_source),
             };
         let reply_attachment_intent_port = capability.reply_attachment_intent_port();
+        // Production parity: ONE store, connected to the loop's diagnostic
+        // sinks and readable by product services — see runtime.rs:3455 and
+        // product_surface.rs:98. The previous inline `default()` was write-only,
+        // so nothing could observe what the loop recorded.
+        let diagnostic_store =
+            Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
         let parts = DefaultPlannedRuntimeParts {
             process_system: process_system.clone(),
             thread_service: runtime_thread_service,
             thread_scope: group_thread_scope,
             model_gateway,
             loop_checkpoint_store,
-            milestone_sink,
+            milestone_sink: runtime_milestone_sink,
             capability_factory,
             capability_surface_resolver,
             capability_result_writer,
@@ -1235,6 +1292,9 @@ impl RebornIntegrationGroupBuilder {
                 lease_recovery_interval: self
                     .lease_recovery_interval_override
                     .unwrap_or(DefaultPlannedRuntimeConfig::default().lease_recovery_interval),
+                heartbeat_interval: self
+                    .runner_heartbeat_interval_override
+                    .unwrap_or(DefaultPlannedRuntimeConfig::default().heartbeat_interval),
                 // Enabler (b): test groups are hermetically pinned and never
                 // resolve this production mode from the process environment.
                 tool_disclosure: self.tool_disclosure,
@@ -1315,9 +1375,8 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
-            prompt_diagnostic_sink: Some(Arc::new(
-                ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default(),
-            )),
+            prompt_diagnostic_sink: Some(Arc::clone(&diagnostic_store)
+                as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>),
             reply_attachment_intent_port: Some(reply_attachment_intent_port),
             // §5.2.9 render-from-record: the SAME durable gate-record store this
             // group's capability port persists `GateRecord::Auth` into, so the
@@ -1356,6 +1415,8 @@ impl RebornIntegrationGroupBuilder {
                 input_enqueue: host_input_queue,
                 user_profile_source: effective_user_profile_source,
                 turn_event_sink: self.turn_event_sink,
+                durable_event_log,
+                durable_event_sink,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
@@ -1364,6 +1425,7 @@ impl RebornIntegrationGroupBuilder {
                 planned_runtime_parts_shape,
                 real_gate_dispatch_services: self.real_gate_dispatch_services,
                 channel_connection: self.channel_connection,
+                diagnostic_store,
             }),
         })
     }
@@ -1390,6 +1452,29 @@ impl TurnEventSink for FanOutTurnEventSink {
         let mut first_error = None;
         for sink in &self.0 {
             if let Err(error) = sink.publish(event.clone()).await {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Mirrors production's single durable milestone sink while retaining the
+/// integration recorder for focused assertions.
+struct FanOutLoopHostMilestoneSink(Vec<Arc<dyn LoopHostMilestoneSink>>);
+
+#[async_trait::async_trait]
+impl LoopHostMilestoneSink for FanOutLoopHostMilestoneSink {
+    async fn publish_loop_milestone(
+        &self,
+        milestone: LoopHostMilestone,
+    ) -> Result<(), ironclaw_loop_contracts::AgentLoopHostError> {
+        let mut first_error = None;
+        for sink in &self.0 {
+            if let Err(error) = sink.publish_loop_milestone(milestone.clone()).await {
                 first_error.get_or_insert(error);
             }
         }
@@ -1445,6 +1530,8 @@ pub(crate) enum ThreadModelMode {
     /// This thread's model call parks until the gate is released (E-GATEWAY
     /// seam), enabling a mid-turn cancel test.
     Parked(ParkingModelGate),
+    /// Delays each scripted vendor call while keeping the real decorator chain.
+    Delayed(Duration),
     /// Reports a recoverable provider failure a bounded number of times, then
     /// resumes normal scripted playback.
     Recoverable(RecoverableModelFailureScript),
@@ -1548,6 +1635,12 @@ impl<'g> RebornThreadBuilder<'g> {
     /// `'static` (does not borrow `'g`).
     pub async fn build(self) -> HarnessResult<RebornIntegrationHarness> {
         let shared = Arc::clone(&self.group.shared);
+        if self.actor_id.is_some() && shared.durable_event_log.is_some() {
+            return Err(
+                "custom-actor group threads cannot use the canonical-actor durable milestone sink"
+                    .into(),
+            );
+        }
 
         // --- product workflow + per-thread binding -----------------------------
         // A fresh adapter + ingress each time (cheap, stateless). The binding
@@ -1601,6 +1694,12 @@ impl<'g> RebornThreadBuilder<'g> {
                 None,
                 None,
             ),
+            ThreadModelMode::Delayed(delay) => (
+                Arc::new(delayed_trace_llm(delay, scripted_llm.clone())),
+                None,
+                None,
+                None,
+            ),
             ThreadModelMode::Recoverable(script) => {
                 let (provider, probe) = recoverable_failure_trace_llm(
                     script.failure,
@@ -1625,6 +1724,7 @@ impl<'g> RebornThreadBuilder<'g> {
                 (Arc::new(provider), Some(probe), None, None)
             }
             ThreadModelMode::Normal => (scripted_llm.clone(), None, None, None),
+
         };
         let (raw, model_provider_call_probe) =
             if self.record_model_calls && model_provider_call_probe.is_none() {

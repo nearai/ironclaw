@@ -159,8 +159,29 @@ export async function apiFetch(path, options = {}) {
 
 // --- Threads ---
 
-export function fetchSession() {
-  return apiFetch(`${V2_BASE}/session`);
+// The deployment's authenticated-session channel, learned from
+// `GET /session` (`session_channel_extension_id`). The send path plugs it
+// into the generic session-inbound route; the frontend never hardcodes a
+// channel name. Absent until the session loads — sends fail closed with a
+// clear error rather than guessing a channel.
+let sessionChannelExtensionId = "";
+
+export function setSessionChannelExtensionId(extensionId) {
+  sessionChannelExtensionId = extensionId || "";
+}
+
+/** The deployment's authenticated-session channel id (empty until the
+ * session loads). Generic UI keys per-channel affordances — the session
+ * message route, this browser's notification enrollment — off this value
+ * instead of any hardcoded channel name. */
+export function getSessionChannelExtensionId() {
+  return sessionChannelExtensionId;
+}
+
+export async function fetchSession() {
+  const session = await apiFetch(`${V2_BASE}/session`);
+  setSessionChannelExtensionId(session?.session_channel_extension_id);
+  return session;
 }
 
 export function createThread({ clientActionId: clientId, requestedThreadId, projectId } = {}) {
@@ -199,6 +220,35 @@ export function deleteThread({ threadId } = {}) {
   return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}`, {
     method: "DELETE",
   });
+}
+
+// --- Notification inbox ---
+
+export function listNotifications({ limit, cursor, signal } = {}) {
+  const url = new URL(`${V2_BASE}/notifications`, window.location.origin);
+  if (limit != null) url.searchParams.set("limit", String(limit));
+  if (cursor) url.searchParams.set("cursor", cursor);
+  return apiFetch(url.pathname + url.search, { signal });
+}
+
+export function markNotificationRead(notificationId) {
+  if (!notificationId) return Promise.reject(new Error("notificationId is required"));
+  return apiFetch(
+    `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/read`,
+    { method: "POST" },
+  );
+}
+
+export function markAllNotificationsRead() {
+  return apiFetch(`${V2_BASE}/notifications/read-all`, { method: "POST" });
+}
+
+export function archiveNotification(notificationId) {
+  if (!notificationId) return Promise.reject(new Error("notificationId is required"));
+  return apiFetch(
+    `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/archive`,
+    { method: "POST" },
+  );
 }
 
 // --- Project filesystem (download / navigation) ---
@@ -254,6 +304,15 @@ export function pauseAutomation({ automationId } = {}) {
     return Promise.reject(new Error("automationId is required"));
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/pause`, {
+    method: "POST",
+  });
+}
+
+export function runAutomation({ automationId } = {}) {
+  if (!automationId) {
+    return Promise.reject(new Error("automationId is required"));
+  }
+  return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/run`, {
     method: "POST",
   });
 }
@@ -403,37 +462,45 @@ export function setNotificationChannels({ targetIds } = {}) {
   });
 }
 
-// --- Web push (browser notifications) ---
+// --- Notification setup (generic per-channel enrollment) ---
+//
+// One status/enable/disable surface for every channel, keyed by extension id.
+// The `payload` bodies and the status `detail` are channel-opaque documents
+// only the channel's own client interprets — nothing here names a channel.
 
-export function getWebPushStatus() {
-  return apiFetch(`${V2_BASE}/web-push/status`);
+export function getNotificationSetupStatus({ extensionId } = {}) {
+  if (!extensionId) {
+    return Promise.reject(new Error("extensionId is required"));
+  }
+  return apiFetch(
+    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications`,
+  );
 }
 
-export function subscribeWebPush({ endpoint, keys, userAgent } = {}) {
-  if (!endpoint) {
-    return Promise.reject(new Error("endpoint is required"));
+export function enableNotificationSetup({ extensionId, payload } = {}) {
+  if (!extensionId) {
+    return Promise.reject(new Error("extensionId is required"));
   }
-  if (!keys || !keys.p256dh || !keys.auth) {
-    return Promise.reject(new Error("keys.p256dh and keys.auth are required"));
-  }
-  return apiFetch(`${V2_BASE}/web-push/subscriptions`, {
-    method: "POST",
-    body: JSON.stringify({
-      endpoint,
-      keys: { p256dh: keys.p256dh, auth: keys.auth },
-      user_agent: userAgent || undefined,
-    }),
-  });
+  return apiFetch(
+    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications/enable`,
+    {
+      method: "POST",
+      body: JSON.stringify({ payload }),
+    },
+  );
 }
 
-export function unsubscribeWebPush({ endpoint } = {}) {
-  if (!endpoint) {
-    return Promise.reject(new Error("endpoint is required"));
+export function disableNotificationSetup({ extensionId, payload } = {}) {
+  if (!extensionId) {
+    return Promise.reject(new Error("extensionId is required"));
   }
-  return apiFetch(`${V2_BASE}/web-push/subscriptions/remove`, {
-    method: "POST",
-    body: JSON.stringify({ endpoint }),
-  });
+  return apiFetch(
+    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications/disable`,
+    {
+      method: "POST",
+      body: JSON.stringify({ payload }),
+    },
+  );
 }
 
 // --- Operator logs ---
@@ -511,15 +578,21 @@ export function sendMessage({
   attachments = [],
   clientActionId: clientId,
 }) {
+  if (!sessionChannelExtensionId) {
+    return Promise.reject(
+      new Error("no session channel is configured for this deployment"),
+    );
+  }
   const body = {
     client_action_id: clientId || clientActionId(),
+    thread_id: threadId,
     content,
   };
   if (attachments.length > 0) {
     body.attachments = attachments;
   }
   return apiFetch(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/messages`,
+    `${V2_BASE}/channels/${encodeURIComponent(sessionChannelExtensionId)}/messages`,
     {
       method: "POST",
       body: JSON.stringify(body),

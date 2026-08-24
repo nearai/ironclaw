@@ -26,6 +26,7 @@ use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    openai_json_schema_response_format,
 };
 use crate::tool_args::parse_tool_call_args_allow_trailing_lossy;
 
@@ -492,12 +493,21 @@ impl NearAiChatProvider {
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .json(body);
-        let response = tokio::time::timeout(self.stream_idle_timeout, request.send())
+        // One deadline covers both response headers and the first semantic
+        // model progress. Empty SSE frames and usage-only chunks must not
+        // extend this initial wait.
+        let mut progress_deadline = tokio::time::Instant::now()
+            .checked_add(self.stream_idle_timeout)
+            .ok_or_else(|| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: "stream progress deadline overflowed".to_string(),
+            })?;
+        let response = tokio::time::timeout_at(progress_deadline, request.send())
             .await
             .map_err(|_| LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
                 reason: format!(
-                    "timed out waiting {}s for streaming response headers",
+                    "stream was idle for {} seconds before streaming response headers",
                     self.stream_idle_timeout.as_secs()
                 ),
             })?
@@ -512,10 +522,19 @@ impl NearAiChatProvider {
             response.headers().get("retry-after"),
         );
         if !status.is_success() {
-            let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
-                provider: "nearai_chat".to_string(),
-                reason: format!("Failed to read response body: {}", e),
-            })?;
+            let response_text = tokio::time::timeout_at(progress_deadline, response.text())
+                .await
+                .map_err(|_| LlmError::RequestFailed {
+                    provider: "nearai_chat".to_string(),
+                    reason: format!(
+                        "stream was idle for {} seconds while reading error response body",
+                        self.stream_idle_timeout.as_secs()
+                    ),
+                })?
+                .map_err(|e| LlmError::RequestFailed {
+                    provider: "nearai_chat".to_string(),
+                    reason: format!("Failed to read response body: {}", e),
+                })?;
             let status_code = status.as_u16();
             if status_code == 401 && !self.uses_api_key() {
                 let lower = response_text.to_lowercase();
@@ -556,7 +575,7 @@ impl NearAiChatProvider {
         let mut tool_calls: HashMap<usize, NearAiStreamingToolCallState> = HashMap::new();
 
         loop {
-            let next_event = tokio::time::timeout(self.stream_idle_timeout, stream.next())
+            let next_event = tokio::time::timeout_at(progress_deadline, stream.next())
                 .await
                 .map_err(|_| LlmError::RequestFailed {
                     provider: "nearai_chat".to_string(),
@@ -597,6 +616,7 @@ impl NearAiChatProvider {
                         ironclaw_common::truncate_for_preview(data, 512)
                     ),
                 })?;
+            let mut semantic_progress = false;
             if let Some(usage) = chunk.usage.as_ref() {
                 let (input_tokens, output_tokens) = parse_usage(Some(usage));
                 parsed.input_tokens = input_tokens;
@@ -606,37 +626,57 @@ impl NearAiChatProvider {
                     .min(input_tokens);
             }
             for choice in chunk.choices {
-                if let Some(reason) = choice.finish_reason.as_deref() {
+                if let Some(reason) = choice
+                    .finish_reason
+                    .as_deref()
+                    .filter(|reason| !reason.trim().is_empty())
+                {
                     stream_completed = true;
+                    semantic_progress = true;
                     parsed.finish_reason = map_finish_reason(reason);
                 }
                 if let Some(delta) = choice.delta.content.filter(|s| !s.is_empty()) {
+                    semantic_progress = true;
                     parsed.content.push_str(&delta);
                     sink.text_delta(delta).await;
                 }
                 if let Some(reasoning_delta) = choice
                     .delta
                     .reasoning_content
-                    .or(choice.delta.reasoning)
-                    .filter(|s| !s.is_empty())
+                    .filter(|s| !s.trim().is_empty())
+                    .or(choice.delta.reasoning.filter(|s| !s.trim().is_empty()))
                 {
+                    semantic_progress = true;
                     parsed.reasoning.push_str(&reasoning_delta);
                 }
                 for tool_delta in choice.delta.tool_calls.unwrap_or_default() {
                     let state = tool_calls.entry(tool_delta.index).or_default();
                     if let Some(id) = tool_delta.id.filter(|s| !s.is_empty()) {
+                        semantic_progress = true;
                         state.id = id;
                     }
                     if let Some(function) = tool_delta.function {
                         if let Some(name) = function.name.filter(|s| !s.is_empty()) {
+                            semantic_progress = true;
                             state.name = name;
                         }
                         if let Some(arguments) = function.arguments {
                             state.arguments_delta_seen = true;
+                            if !arguments.is_empty() {
+                                semantic_progress = true;
+                            }
                             state.arguments.push_str(&arguments);
                         }
                     }
                 }
+            }
+            if semantic_progress {
+                progress_deadline = tokio::time::Instant::now()
+                    .checked_add(self.stream_idle_timeout)
+                    .ok_or_else(|| LlmError::RequestFailed {
+                        provider: "nearai_chat".to_string(),
+                        reason: "stream progress deadline overflowed".to_string(),
+                    })?;
             }
         }
 
@@ -760,6 +800,7 @@ impl LlmProvider for NearAiChatProvider {
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             stop: req.stop_sequences,
+            response_format: req.response_format.map(openai_json_schema_response_format),
             tools: None,
             tool_choice: None,
             stream: false,
@@ -837,6 +878,7 @@ impl LlmProvider for NearAiChatProvider {
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             stop: req.stop_sequences,
+            response_format: req.response_format.map(openai_json_schema_response_format),
             tools: None,
             tool_choice: None,
             stream: true,
@@ -899,7 +941,10 @@ impl LlmProvider for NearAiChatProvider {
             req.temperature,
             req.max_tokens,
             req.stop_sequences,
-            req.tool_choice,
+            ChatCompletionOutputOptions {
+                response_format: req.response_format,
+                tool_choice: req.tool_choice,
+            },
         );
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
@@ -1011,7 +1056,10 @@ impl LlmProvider for NearAiChatProvider {
             req.temperature,
             req.max_tokens,
             req.stop_sequences,
-            req.tool_choice,
+            ChatCompletionOutputOptions {
+                response_format: req.response_format,
+                tool_choice: req.tool_choice,
+            },
         );
         request.stream = true;
         request.stream_options = Some(ChatCompletionStreamOptions {
@@ -1118,9 +1166,15 @@ struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     stop: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ChatCompletionTool>>,
+    response_format: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_choice: Option<String>,
+    tools: Option<Vec<ChatCompletionTool>>,
+    /// `"auto"`/`"required"`/`"none"` serialize as bare strings; a named
+    /// tool serializes as the OpenAI object form
+    /// `{"type":"function","function":{"name":…}}` — a bare tool-name string
+    /// is rejected by OpenAI-compatible chat servers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "is_false")]
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1438,10 +1492,21 @@ fn build_chat_completion_request(
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     stop: Option<Vec<String>>,
-    tool_choice: Option<String>,
+    output: ChatCompletionOutputOptions,
 ) -> ChatCompletionRequest {
     let tools: Vec<ChatCompletionTool> = tools.into_iter().map(convert_tool_definition).collect();
     let has_tools = !tools.is_empty();
+    let tool_choice = if has_tools {
+        output.tool_choice.map(|tc| match tc.as_str() {
+            "auto" | "required" | "none" => serde_json::Value::String(tc),
+            specific => serde_json::json!({
+                "type": "function",
+                "function": {"name": specific}
+            }),
+        })
+    } else {
+        None
+    };
 
     ChatCompletionRequest {
         model,
@@ -1449,11 +1514,19 @@ fn build_chat_completion_request(
         temperature,
         max_tokens,
         stop,
+        response_format: output
+            .response_format
+            .map(openai_json_schema_response_format),
         tools: if has_tools { Some(tools) } else { None },
-        tool_choice: if has_tools { tool_choice } else { None },
+        tool_choice,
         stream: false,
         stream_options: None,
     }
+}
+
+struct ChatCompletionOutputOptions {
+    response_format: Option<crate::provider::CompletionResponseFormat>,
+    tool_choice: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2221,28 +2294,31 @@ data: [DONE]
                 )
                 .await
                 .expect("write first event");
-            sleep(Duration::from_millis(600)).await;
+            socket.flush().await.expect("flush first event");
+            sleep(Duration::from_millis(1_600)).await;
             socket
                 .write_all(
                     b"data: {\"choices\":[{\"delta\":{\"content\":\" two\"},\"finish_reason\":null}]}\n\n",
                 )
                 .await
                 .expect("write second event");
-            sleep(Duration::from_millis(600)).await;
+            socket.flush().await.expect("flush second event");
+            sleep(Duration::from_millis(1_600)).await;
             socket
                 .write_all(
                     b"data: {\"choices\":[{\"delta\":{\"content\":\" three\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
                 )
                 .await
                 .expect("write terminal events");
+            socket.flush().await.expect("flush terminal events");
         });
 
         let provider =
-            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 1)
+            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 3)
                 .expect("provider");
-        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
         let response = timeout(
-            Duration::from_secs(3),
+            Duration::from_secs(8),
             provider.complete_streaming(
                 CompletionRequest::new(vec![ChatMessage::user("count")]),
                 Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
@@ -2254,6 +2330,288 @@ data: [DONE]
 
         server_task.await.expect("server task");
         assert_eq!(response.content, "one two three");
+        let observed_deltas: Vec<String> =
+            std::iter::from_fn(|| delta_rx.try_recv().ok()).collect();
+        assert_eq!(
+            observed_deltas,
+            vec!["one", " two", " three"],
+            "semantic deltas must arrive in SSE order"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_times_out_while_reading_non_success_body() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+        use tokio::time::{Duration, timeout};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (release_tx, release_rx) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = accept_chat_request(&listener).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain\r\ncontent-length: 64\r\nconnection: keep-alive\r\n\r\nupstream unavailable",
+                )
+                .await
+                .expect("write error response headers");
+            socket.flush().await.expect("flush error response");
+            let _ = release_rx.await;
+        });
+
+        let provider =
+            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 2)
+                .expect("provider");
+        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = timeout(
+            Duration::from_secs(5),
+            provider.complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("wait")]),
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+            ),
+        )
+        .await
+        .expect("provider should enforce the streaming deadline for error bodies");
+
+        let _ = release_tx.send(());
+        server_task.await.expect("server task");
+
+        match result {
+            Err(LlmError::RequestFailed { provider, reason }) => {
+                assert_eq!(provider, "nearai_chat");
+                assert!(
+                    reason.contains("error response body"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected error-body timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_uses_nonempty_reasoning_fallback() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = accept_chat_request(&listener).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"   \",\"reasoning\":\"fallback reasoning\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                .await
+                .expect("write reasoning response");
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let response = provider
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("answer")]),
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+            )
+            .await
+            .expect("streaming completion");
+
+        server_task.await.expect("server task");
+        assert_eq!(response.reasoning.as_deref(), Some("fallback reasoning"));
+        assert_eq!(response.content, "fallback reasoning");
+    }
+
+    async fn assert_streaming_times_out_before_late_content(
+        idle_timeout_secs: u64,
+        outer_timeout_secs: u64,
+        events_before_late_content: usize,
+        steps: Vec<(std::time::Duration, &'static [u8])>,
+        expected_deltas: &[&str],
+    ) {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+        use tokio::time::{Duration, sleep, timeout};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (prefix_sent_tx, prefix_sent_rx) = oneshot::channel();
+        let mut prefix_sent_tx = Some(prefix_sent_tx);
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = accept_chat_request(&listener).await;
+            for (index, (delay, bytes)) in steps.into_iter().enumerate() {
+                sleep(delay).await;
+                if socket.write_all(bytes).await.is_err() {
+                    return;
+                }
+                socket.flush().await.expect("flush SSE event");
+                if index + 1 == events_before_late_content
+                    && let Some(prefix_sent_tx) = prefix_sent_tx.take()
+                {
+                    let _ = prefix_sent_tx.send(());
+                }
+            }
+        });
+
+        let provider = NearAiChatProvider::new_with_timeout(
+            test_nearai_config(&base_url),
+            test_session(),
+            idle_timeout_secs,
+        )
+        .expect("provider");
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel();
+        let completion_task = tokio::spawn(async move {
+            provider
+                .complete_streaming(
+                    CompletionRequest::new(vec![ChatMessage::user("wait")]),
+                    Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+                )
+                .await
+        });
+        timeout(Duration::from_secs(idle_timeout_secs), prefix_sent_rx)
+            .await
+            .expect("SSE event prefix should be sent before the deadline")
+            .expect("server should signal the SSE event prefix");
+        let result = timeout(Duration::from_secs(outer_timeout_secs), completion_task)
+            .await
+            .expect("provider must enforce its own first-content timeout")
+            .expect("streaming completion task should not panic");
+
+        server_task.await.expect("server task");
+        let observed_deltas: Vec<String> =
+            std::iter::from_fn(|| delta_rx.try_recv().ok()).collect();
+        assert_eq!(observed_deltas, expected_deltas);
+        match result {
+            Err(LlmError::RequestFailed { provider, reason }) => {
+                assert_eq!(provider, "nearai_chat");
+                assert!(reason.contains("idle"), "unexpected reason: {reason}");
+            }
+            other => panic!("expected first-content timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_empty_events_do_not_extend_time_to_first_content() {
+        use tokio::time::Duration;
+
+        assert_streaming_times_out_before_late_content(
+            3,
+            8,
+            4,
+            vec![
+                (
+                    Duration::ZERO,
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                ),
+                (Duration::from_millis(650), b"data:\n\n"),
+                (Duration::from_millis(650), b"data:\n\n"),
+                (Duration::from_millis(650), b"data:\n\n"),
+                (
+                    Duration::from_millis(1_800),
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                ),
+            ],
+            &[],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_uses_one_deadline_for_headers_and_first_content() {
+        use tokio::time::Duration;
+
+        assert_streaming_times_out_before_late_content(
+            3,
+            8,
+            1,
+            vec![
+                (
+                    Duration::from_millis(1_000),
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+                ),
+                (
+                    Duration::from_millis(2_800),
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                ),
+            ],
+            &[],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_empty_and_usage_events_do_not_extend_idle_after_progress() {
+        use tokio::time::Duration;
+
+        assert_streaming_times_out_before_late_content(
+            3,
+            8,
+            3,
+            vec![
+                (
+                    Duration::ZERO,
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+                ),
+                (
+                    Duration::from_millis(1_000),
+                    b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+                ),
+                (Duration::from_millis(1_000), b"data:\n\n"),
+                (
+                    Duration::from_millis(1_800),
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                ),
+            ],
+            &["partial"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_reasoning_and_tool_fragments_rearm_idle_deadline() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+        use tokio::time::{Duration, sleep, timeout};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = accept_chat_request(&listener).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null}]}\n\n",
+                )
+                .await
+                .expect("write reasoning progress");
+            for event in [
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_search\"}]},\"finish_reason\":null}]}\n\n".as_slice(),
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"search\"}}]},\"finish_reason\":null}]}\n\n".as_slice(),
+                b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"query\\\":\\\"near ai\\\"}\"}}]},\"finish_reason\":null}]}\n\n".as_slice(),
+                b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n".as_slice(),
+            ] {
+                sleep(Duration::from_millis(1_250)).await;
+                socket.write_all(event).await.expect("write model progress");
+                socket.flush().await.expect("flush model progress");
+            }
+        });
+
+        let provider =
+            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 3)
+                .expect("provider");
+        let response = timeout(
+            Duration::from_secs(10),
+            complete_search_tool_streaming(provider),
+        )
+        .await
+        .expect("semantic progress must keep the stream alive")
+        .expect("streaming tool response");
+
+        server_task.await.expect("server task");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "search");
+        assert_eq!(response.finish_reason, FinishReason::ToolUse);
     }
 
     #[tokio::test]
@@ -3868,7 +4226,10 @@ data: [DONE]
             Some(0.2),
             Some(16),
             None,
-            Some("auto".to_string()),
+            ChatCompletionOutputOptions {
+                response_format: None,
+                tool_choice: Some("auto".to_string()),
+            },
         );
 
         let tools = request.tools.expect("tools present");
@@ -3934,6 +4295,7 @@ data: [DONE]
             temperature: None,
             max_tokens: None,
             stop: None,
+            response_format: None,
             tools: None,
             tool_choice: None,
             stream: false,
@@ -3958,6 +4320,7 @@ data: [DONE]
             temperature: Some(0.7),
             max_tokens: Some(1024),
             stop: None,
+            response_format: None,
             tools: Some(vec![ChatCompletionTool {
                 tool_type: "function".to_string(),
                 function: ChatCompletionFunction {
@@ -3971,7 +4334,7 @@ data: [DONE]
                     })),
                 },
             }]),
-            tool_choice: Some("auto".to_string()),
+            tool_choice: Some(serde_json::Value::String("auto".to_string())),
             stream: false,
             stream_options: None,
         };
@@ -3990,6 +4353,61 @@ data: [DONE]
     }
 
     #[test]
+    fn test_request_serialization_with_native_response_schema() {
+        let schema = crate::provider::JsonSchemaResponseFormat::strict(
+            "suggestions",
+            serde_json::json!({"type": "object", "properties": {"items": {"type": "array"}}}),
+        );
+        let request = build_chat_completion_request(
+            "gpt-4o".to_string(),
+            vec![ChatMessage::user("Return suggestions").into()],
+            vec![],
+            None,
+            None,
+            None,
+            ChatCompletionOutputOptions {
+                response_format: Some(crate::provider::CompletionResponseFormat::JsonSchema(
+                    schema,
+                )),
+                tool_choice: None,
+            },
+        );
+        let json = serde_json::to_value(request).expect("serialize request");
+        assert_eq!(
+            json["response_format"],
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "suggestions",
+                    "strict": true,
+                    "schema": {"type": "object", "properties": {"items": {"type": "array"}}}
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_request_serialization_preserves_native_json_object_mode() {
+        let request = build_chat_completion_request(
+            "gpt-4o".to_string(),
+            vec![ChatMessage::user("Return an object").into()],
+            vec![],
+            None,
+            None,
+            None,
+            ChatCompletionOutputOptions {
+                response_format: Some(crate::provider::CompletionResponseFormat::JsonObject),
+                tool_choice: None,
+            },
+        );
+        let json = serde_json::to_value(request).expect("serialize request");
+        assert_eq!(
+            json["response_format"],
+            serde_json::json!({"type": "json_object"})
+        );
+    }
+
+    #[test]
     fn test_request_omits_tool_choice_without_tools() {
         let request = build_chat_completion_request(
             "gpt-4o".to_string(),
@@ -3998,7 +4416,10 @@ data: [DONE]
             None,
             None,
             None,
-            Some("auto".to_string()),
+            ChatCompletionOutputOptions {
+                response_format: None,
+                tool_choice: Some("auto".to_string()),
+            },
         );
 
         let json = serde_json::to_value(&request).unwrap();
@@ -4006,6 +4427,57 @@ data: [DONE]
         assert!(
             json.get("tool_choice").is_none(),
             "tool_choice is invalid without tools on OpenAI-compatible chat APIs"
+        );
+    }
+
+    #[test]
+    fn test_request_encodes_named_tool_choice_as_the_openai_object_form() {
+        let request = build_chat_completion_request(
+            "gpt-4o".to_string(),
+            vec![ChatMessage::user("finish").into()],
+            vec![crate::provider::ToolDefinition {
+                name: "builtin__structured_result".to_string(),
+                description: "record the result".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            None,
+            None,
+            None,
+            ChatCompletionOutputOptions {
+                response_format: None,
+                tool_choice: Some("builtin__structured_result".to_string()),
+            },
+        );
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json["tool_choice"],
+            serde_json::json!({
+                "type": "function",
+                "function": {"name": "builtin__structured_result"}
+            }),
+            "a bare tool-name string is rejected by OpenAI-compatible chat servers"
+        );
+        assert_eq!(
+            serde_json::to_value(build_chat_completion_request(
+                "gpt-4o".to_string(),
+                vec![ChatMessage::user("finish").into()],
+                vec![crate::provider::ToolDefinition {
+                    name: "lookup".to_string(),
+                    description: "lookup".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }],
+                None,
+                None,
+                None,
+                ChatCompletionOutputOptions {
+                    response_format: None,
+                    tool_choice: Some("required".to_string()),
+                },
+            ))
+            .unwrap()["tool_choice"],
+            serde_json::json!("required"),
+            "mode strings stay bare strings"
         );
     }
 
@@ -4482,20 +4954,14 @@ data: [DONE]
         );
     }
 
-    /// Verify the default request timeout sits below the Reborn runner lease
-    /// (90 s) so the HTTP layer fails a hung request before the lease
-    /// reclaims the runner.
+    /// The default request budget must leave room for the shared connection
+    /// handshake cap; streaming then applies it as a progress/idle budget.
     #[test]
-    fn default_request_timeout_below_runner_lease() {
-        // Runner lease is 90 s (DEFAULT_RUNNER_LEASE_TTL_SECONDS in ironclaw_turns).
-        // ironclaw_llm must not depend on ironclaw_turns, so the bound is
-        // tested here by constant; the turns crate owns the invariant test on
-        // its own side.
+    fn default_request_timeout_exceeds_connect_timeout() {
         const {
             assert!(
-                crate::config::DEFAULT_REQUEST_TIMEOUT_SECS < 90,
-                "DEFAULT_REQUEST_TIMEOUT_SECS must be below the Reborn runner lease \
-                 (90 s) so the HTTP layer times out first",
+                crate::config::CONNECT_TIMEOUT_SECS < crate::config::DEFAULT_REQUEST_TIMEOUT_SECS,
+                "the request budget must exceed the connection timeout",
             );
         }
     }

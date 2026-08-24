@@ -62,6 +62,7 @@ where
             trusted_project_id,
             trusted_owner_user_id,
             kind,
+            execution_policy,
         } = request;
         self.handle_inbound_turn_inner(
             request,
@@ -70,6 +71,7 @@ where
                 trusted_project_id,
                 trusted_owner_user_id,
                 kind,
+                execution_policy,
             },
         )
         .await
@@ -109,6 +111,14 @@ where
             }
             BindingResolutionPolicy::Untrusted => ConversationInboundClassification::Untrusted,
         };
+        let execution_policy = match &binding_policy {
+            BindingResolutionPolicy::Trusted {
+                kind: TrustedInboundKind::Trigger,
+                execution_policy,
+                ..
+            } => execution_policy.clone(),
+            BindingResolutionPolicy::Trusted { .. } | BindingResolutionPolicy::Untrusted => None,
+        };
         let surface_type = match &route_kind {
             ConversationRouteKind::Direct => Some(TurnSurfaceType::Direct),
             ConversationRouteKind::Shared => Some(TurnSurfaceType::Channel),
@@ -139,6 +149,7 @@ where
                     classification,
                     run_adapter,
                     surface_type,
+                    execution_policy.clone(),
                 )
                 .await;
         }
@@ -169,6 +180,7 @@ where
                 trusted_project_id,
                 trusted_owner_user_id,
                 kind: _,
+                execution_policy: _,
             } => {
                 self.binding_service
                     .resolve_or_create_binding_with_trusted_scope(
@@ -206,6 +218,7 @@ where
             classification,
             run_adapter,
             surface_type,
+            execution_policy,
         )
         .await
     }
@@ -217,6 +230,7 @@ where
         classification: ConversationInboundClassification,
         run_adapter: RunOriginAdapter,
         surface_type: Option<TurnSurfaceType>,
+        execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
         resolution.actor = accepted_message.actor.clone();
 
@@ -244,14 +258,13 @@ where
                 scope: resolution.turn_scope.clone(),
                 actor: accepted_message.actor.clone(),
                 accepted_message_ref: accepted_message.message_ref.clone(),
-                source_binding_ref: accepted_message.source_binding_ref.clone(),
-                reply_target_binding_ref: accepted_message.reply_target_binding_ref.clone(),
                 requested_run_profile: accepted_message.requested_run_profile.clone(),
                 idempotency_key,
                 received_at: accepted_message.received_at,
                 classification,
                 origin_adapter: run_adapter,
                 surface_type,
+                execution_policy,
             })
             .await;
         let turn_submission = match turn_submission_result {
@@ -403,6 +416,7 @@ fn trusted_inbound_request_from_trigger(
         fire.project_id,
         Some(fire.creator_user_id),
         TrustedInboundKind::Trigger,
+        fire.execution_policy,
     ))
 }
 
@@ -414,6 +428,7 @@ enum BindingResolutionPolicy {
         trusted_project_id: Option<ironclaw_host_api::ids::ProjectId>,
         trusted_owner_user_id: Option<ironclaw_host_api::ids::UserId>,
         kind: TrustedInboundKind,
+        execution_policy: Option<ironclaw_host_api::execution_policy::TurnExecutionPolicy>,
     },
 }
 
@@ -502,7 +517,10 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::{
+        execution_policy::TurnExecutionPolicy,
+        ids::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId},
+    };
     use ironclaw_triggers::{
         TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
         TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerFire, TriggerFireIdentity, TriggerId,
@@ -699,6 +717,7 @@ mod tests {
             Some(project()),
             Some(creator.clone()),
             TrustedInboundKind::Trigger,
+            None,
         );
 
         let response = service
@@ -729,6 +748,7 @@ mod tests {
             Some(project()),
             None,
             TrustedInboundKind::Trigger,
+            None,
         );
         service
             .handle_inbound_turn_with_trusted_scope(first)
@@ -747,6 +767,7 @@ mod tests {
             Some(project()),
             Some(creator),
             TrustedInboundKind::Trigger,
+            None,
         );
         let response = service
             .handle_inbound_turn_with_trusted_scope(second)
@@ -787,6 +808,13 @@ mod tests {
             agent_id: Some(agent()),
             project_id: Some(project()),
             prompt: "test trigger prompt".to_string(),
+            execution_policy: Some(TurnExecutionPolicy {
+                allowed_capability_ids: Some(vec![
+                    CapabilityId::new("mail.list_messages").expect("capability id"),
+                ]),
+                required_skills: Vec::new(),
+                ..TurnExecutionPolicy::default()
+            }),
         };
         let content_ref =
             TriggerInboundContentRef::new("content:test-trigger-creator").expect("content ref");
@@ -820,6 +848,17 @@ mod tests {
             submissions[0].requested_run_profile,
             Some(RunProfileRequest::new(RunProfileId::scheduled_trigger().as_str()).unwrap()),
             "trigger fire must request the scheduled_trigger run profile"
+        );
+        assert_eq!(
+            submissions[0]
+                .product_context
+                .as_ref()
+                .and_then(|context| context.execution_policy.as_ref())
+                .and_then(|policy| policy.allowed_capability_ids.as_ref())
+                .and_then(|ids| ids.first())
+                .map(CapabilityId::as_str),
+            Some("mail.list_messages"),
+            "trusted trigger execution policy must reach the persisted turn request"
         );
     }
 
@@ -1054,7 +1093,6 @@ mod tests {
                 resolved_run_profile_version: RunProfileVersion::new(1),
                 event_cursor: ironclaw_host_api::turn::EventCursor(0),
                 accepted_message_ref,
-                reply_target_binding_ref,
             }),
             replayed_turn_submission,
         }
@@ -1070,6 +1108,7 @@ mod tests {
             trusted_project_id,
             None,
             TrustedInboundKind::Trigger,
+            None,
         )
     }
 
@@ -1328,20 +1367,27 @@ mod tests {
     /// value a coordinator receives rather than a paraphrase of it. The
     /// production copy is pinned by that adapter's own seam tests.
     fn submit_turn_request(submission: ConversationTurnSubmission) -> SubmitTurnRequest {
-        let product_context = product_context::resolve_inbound(
+        let is_trusted_trigger = matches!(
+            submission.classification,
+            ConversationInboundClassification::TrustedTrigger
+        );
+        let mut product_context = product_context::resolve_inbound(
             inbound_classification(submission.classification),
             submission.origin_adapter,
             submission.surface_type,
             submission.scope.product_owner(&submission.actor),
         );
+        if is_trusted_trigger {
+            product_context.execution_policy = submission.execution_policy;
+        }
         SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
             scope: submission.scope,
             actor: submission.actor,
             accepted_message_ref: submission.accepted_message_ref,
-            source_binding_ref: submission.source_binding_ref,
-            reply_target_binding_ref: submission.reply_target_binding_ref,
             requested_run_profile: submission.requested_run_profile,
+            output_contract: None,
             idempotency_key: submission.idempotency_key,
             received_at: submission.received_at,
             requested_run_id: None,
@@ -1377,7 +1423,6 @@ mod tests {
             resolved_run_profile_version: ironclaw_host_api::turn::RunProfileVersion::new(1),
             event_cursor: ironclaw_host_api::turn::EventCursor(0),
             accepted_message_ref: request.accepted_message_ref.clone(),
-            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
         }
     }
 
@@ -1582,6 +1627,7 @@ mod tests {
             Some(project()),
             None,
             TrustedInboundKind::Other,
+            None,
         );
 
         inbound

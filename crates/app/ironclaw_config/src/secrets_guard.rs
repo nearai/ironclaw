@@ -1,7 +1,7 @@
 //! Reject inline secret material at parse time.
 //!
 //! Mirrors the epic [#3036](https://github.com/nearai/ironclaw/issues/3036)
-//! invariant for blueprints — `docs/reborn/contracts/secrets.md` requires
+//! invariant for blueprints — `docs/internal/reborn/contracts/secrets.md` requires
 //! that values containing secret material are rejected at *write* time, and
 //! the only legitimate way to reference a secret in declarative config is
 //! through an opaque handle (env-var name, secret-store key, etc.).
@@ -176,7 +176,7 @@ impl fmt::Display for SecretPattern {
 #[error(
     "config field `{label}` looks like inline secret material ({pattern}); \
      this file must reference secrets by env-var name (e.g. `api_key_env = \"OPENAI_API_KEY\"`), \
-     never paste the value directly (see docs/reborn/contracts/secrets.md, epic #3036)"
+     never paste the value directly (see docs/internal/reborn/contracts/secrets.md, epic #3036)"
 )]
 pub struct InlineSecretError {
     pub(crate) label: Cow<'static, str>,

@@ -341,7 +341,8 @@ async fn hot_capability_catalog_fails_closed_when_bounded_backend_returns_too_ma
 
 /// `standard_op` binding (standardized messaging framework, task 4): a v3
 /// manifest tool bound to `send_message` carries host-synthesized
-/// `standard:messaging/send_message.{input,output}.v1` refs (task 2/3) —
+/// `standard:messaging/send_message.input.v1` + `.output.v2` refs (task 2/3;
+/// the output graduated to `.v2` for the `sent_unverified` evidence branch) —
 /// `publish_hot_capability_catalog` must resolve both from the compiled-in
 /// registry and never touch the filesystem/package root.
 #[tokio::test]
@@ -879,23 +880,31 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .contains("delivery_target_id"),
         "trigger_create description must not advertise the retired delivery_target_id input"
     );
-    let trigger_prompt_description = trigger_properties
-        .get("prompt")
+    assert!(
+        !trigger_properties.contains_key("prompt"),
+        "trigger_create schema must not advertise the retired raw prompt input"
+    );
+    let execution_contract = trigger_properties
+        .get("execution_contract")
+        .expect("structured execution contract should be present");
+    let trigger_goal_description = execution_contract
+        .get("properties")
+        .and_then(|properties| properties.get("goal"))
         .and_then(|property| property.get("description"))
         .and_then(serde_json::Value::as_str)
-        .expect("trigger prompt description should be present");
+        .expect("trigger execution goal description should be present");
     assert!(
-        trigger_prompt_description.contains("builtin__outbound_deliver"),
-        "trigger_create prompt schema should teach delivery as an explicit prompt step"
+        trigger_goal_description.contains("builtin__outbound_deliver"),
+        "trigger_create goal schema should teach delivery as an explicit execution step"
     );
     assert!(
-        trigger_prompt_description.contains("builtin__outbound_delivery_targets_list")
-            && trigger_prompt_description.contains("while the user is present"),
-        "trigger_create prompt schema should require the destination be picked at creation time"
+        trigger_goal_description.contains("builtin__outbound_delivery_targets_list")
+            && trigger_goal_description.contains("selected now"),
+        "trigger_create goal schema should require the destination be picked at creation time"
     );
     assert!(
-        !trigger_prompt_description.contains("delivery_target_id"),
-        "trigger_create prompt schema must not reference the retired stored delivery target"
+        !trigger_goal_description.contains("delivery_target_id"),
+        "trigger_create goal schema must not reference the retired stored delivery target"
     );
 
     let outbound_deliver = surface
@@ -2513,7 +2522,7 @@ prompt_doc_ref = "prompts/echo/say.md"
 
 /// v3 manifest with one `[[tools]]` entry bound to the `send_message`
 /// standard op: no declared schema refs (the host synthesizes
-/// `standard:messaging/send_message.{input,output}.v1`), matching the
+/// `standard:messaging/send_message.input.v1` and `.output.v2`), matching the
 /// canonical `<extension>.<op_name>` id shape and the `external_write` effect
 /// the write-op rule requires.
 const SLACK_STANDARD_OP_MANIFEST: &str = r#"

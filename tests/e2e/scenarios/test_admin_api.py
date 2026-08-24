@@ -519,7 +519,6 @@ async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps
         "Slack deployment configuration",
         "Telegram deployment configuration",
         "Google OAuth client credentials",
-        "Web push deployment configuration",
     ]
     for group_name in group_names:
         await expect(
@@ -528,6 +527,11 @@ async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps
 
     groups = page.get_by_test_id("admin-configuration-group")
     assert await groups.count() == len(group_names)
+    await expect(
+        page.get_by_role(
+            "heading", name="Web app deployment configuration", exact=True
+        )
+    ).to_have_count(0)
     for index in range(await groups.count()):
         assert "· installed" not in await groups.nth(index).inner_text()
 

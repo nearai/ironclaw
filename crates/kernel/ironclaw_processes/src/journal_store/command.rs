@@ -8,7 +8,8 @@ use crate::{
     ClaimProcessesRequest, CloseProcessDependencyRequest, OpenProcessDependencyRequest,
     ProcessConcurrencyLimits, ProcessLeaseRequest, PruneReleasedProcessRequest,
     RecordProcessCheckpointRequest, RecoverExpiredProcessLeasesRequest, ReleaseProcessTreeRequest,
-    ReserveProcessTreeRequest, SettleProcessDependencyRequest, SubmitProcessRequest,
+    ReserveProcessTreeRequest, SettleProcessDependencyRequest, SubmitProcessAtEdgeRequest,
+    SubmitProcessRequest, TransitionProcessDependencyRequest,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +17,7 @@ use crate::{
 pub(super) enum StoredProcessCommand {
     ImportLegacyState(Box<ProcessJournalMaterializedState>),
     Submit(Box<SubmitProcessRequest>),
+    SubmitAtEdge(Box<SubmitProcessAtEdgeRequest>),
     SubmitWithCheckpoint {
         request: Box<SubmitProcessRequest>,
         checkpoint: Box<RecordProcessCheckpointRequest>,
@@ -32,7 +34,13 @@ pub(super) enum StoredProcessCommand {
         now: ironclaw_host_api::Timestamp,
         lease_duration_millis: u64,
     },
-    RecoverExpired(RecoverExpiredProcessLeasesRequest),
+    RecoverExpired {
+        request: RecoverExpiredProcessLeasesRequest,
+        /// Lease TTL in force at sweep time. Recovery uses it as the grace
+        /// window a checkpointed process must sit past expiry before being
+        /// requeued.
+        lease_duration_millis: u64,
+    },
     LeasedTransition {
         request: ProcessLeaseRequest,
         mutation: ProcessTransitionMutation,
@@ -43,6 +51,7 @@ pub(super) enum StoredProcessCommand {
     PruneTree(PruneReleasedProcessRequest),
     OpenDependency(OpenProcessDependencyRequest),
     SettleDependency(SettleProcessDependencyRequest),
+    TransitionDependency(TransitionProcessDependencyRequest),
     ConsumeDependency(CloseProcessDependencyRequest),
     AbandonDependency(CloseProcessDependencyRequest),
     RecordCheckpoint(RecordProcessCheckpointRequest),
@@ -99,13 +108,19 @@ impl StoredProcessCommand {
                         .push(checkpoint.checkpoint_id.clone());
                 }
             }
+            Self::SubmitAtEdge(request) => {
+                references.process_ids.push(request.submission.process_id);
+                references
+                    .submission_idempotency_keys
+                    .extend(submission_replay_key(&request.submission)?);
+            }
             Self::Claim {
                 request, limits, ..
             } => {
                 references.process_ids.extend(request.process_id_filter);
                 references.claims.push((request.clone(), limits.clone()));
             }
-            Self::RecoverExpired(request) => {
+            Self::RecoverExpired { request, .. } => {
                 references.recover_expired.push(request.clone());
             }
             Self::Heartbeat { request, .. } | Self::LeasedTransition { request, .. } => {
@@ -141,6 +156,13 @@ impl StoredProcessCommand {
                     .push((request.dependent_process_id, request.dependency_process_id));
             }
             Self::SettleDependency(request) => {
+                add_dependency_references(
+                    &mut references,
+                    request.dependent_process_id,
+                    request.dependency_process_id,
+                );
+            }
+            Self::TransitionDependency(request) => {
                 add_dependency_references(
                     &mut references,
                     request.dependent_process_id,

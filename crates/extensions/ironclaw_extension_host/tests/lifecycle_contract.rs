@@ -10,16 +10,16 @@
 //! production removal is the service path (`remove_record` + auth cleanup) and
 //! is covered through the composition services.
 
+use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::state::InstallationState;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use ironclaw_extension_contracts::channel_adapter::ChannelAdapter;
 use ironclaw_extension_contracts::tool_adapter::ToolAdapter;
 use ironclaw_extension_host::test_support::{
-    FakeChannelAdapter, FakeEgressFactory, FakeLoader, RecordingDrain, mcp_manifest,
-    tool_and_channel_manifest,
+    FakeChannelAdapter, FakeEgressFactory, FakeLoader, RecordingDrain, RecordingEgressFactory,
+    mcp_manifest, registering_channel_manifest, tool_and_channel_manifest,
 };
 use ironclaw_extension_host::{
     ExtensionBindings, ExtensionHost, ExtensionHostDeps, InstallationRecord,
@@ -52,6 +52,11 @@ async fn harness_full(bindings: ExtensionBindings, fail_load: bool) -> Harness {
         reserved_capability_ids: Default::default(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
     };
     let host = ExtensionHost::new(deps).await;
     Harness {
@@ -81,8 +86,71 @@ fn tool_and_channel_bindings(channel: Arc<FakeChannelAdapter>) -> ExtensionBindi
             Arc::new(ironclaw_extension_host::test_support::FakeToolAdapter)
                 as Arc<dyn ToolAdapter>,
         ),
-        channel: Some(channel as Arc<dyn ChannelAdapter>),
+        // The fixture manifest declares a webhook ingress, a message reply,
+        // and a delivery section, so every half must be bound or the per-axis
+        // binding rule fails activation.
+        channel: ChannelSurfaces::default()
+            .with_ingress(channel.clone())
+            .with_reply(channel.clone())
+            .with_delivery(channel),
+        device_link: None,
     }
+}
+
+/// Bindings for the registration fixture: same three halves, no tools.
+fn channel_only_bindings(channel: Arc<FakeChannelAdapter>) -> ExtensionBindings {
+    ExtensionBindings {
+        tools: None,
+        channel: ChannelSurfaces::default()
+            .with_ingress(channel.clone())
+            .with_reply(channel.clone())
+            .with_delivery(channel),
+        device_link: None,
+    }
+}
+
+async fn harness_with_egress(
+    bindings: ExtensionBindings,
+    egress: Arc<RecordingEgressFactory>,
+) -> Harness {
+    let store = Arc::new(RehydratedInstallationRecordStore::default());
+    let load_calls = Arc::new(AtomicUsize::new(0));
+    let deps = ExtensionHostDeps {
+        store: Arc::clone(&store) as Arc<dyn InstallationRecordStore>,
+        loader: Arc::new(FakeLoader {
+            bindings,
+            load_calls: Arc::clone(&load_calls),
+            fail_load: false,
+        }),
+        drain: Arc::new(RecordingDrain::default()) as Arc<_>,
+        egress,
+        reserved_capability_ids: Default::default(),
+        reserved_ingress_routes: Default::default(),
+        hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
+    };
+    Harness {
+        host: ExtensionHost::new(deps).await,
+        store,
+        load_calls,
+    }
+}
+
+fn registering_record(config: Vec<(String, String)>) -> InstallationRecord {
+    let mut record = record("acme-hook", registering_channel_manifest());
+    record.config = config;
+    record
+}
+
+fn webhook_config() -> Vec<(String, String)> {
+    vec![(
+        "acme_webhook_url".to_string(),
+        "https://host.example/webhooks/extensions/acme-hook/events".to_string(),
+    )]
 }
 
 // -------------------------------------------------------------------------
@@ -115,7 +183,8 @@ async fn hosted_mcp_connection_template_alone_fails_activation() {
             tools: Some(Arc::new(
                 ironclaw_extension_host::test_support::FakeToolAdapter,
             )),
-            channel: None,
+            channel: Default::default(),
+            device_link: None,
         },
         channel,
     )
@@ -141,39 +210,180 @@ async fn hosted_mcp_connection_template_alone_fails_activation() {
 }
 
 // -------------------------------------------------------------------------
-// LIFE-9: channel.activate() runs; failure aborts activation
+// LIFE-9: the ingress-wiring recipes run at activation/deactivation, and a
+// registration failure aborts activation.
+//
+// This is where `ChannelAdapter::activate`/`cleanup` went. The assertions
+// below are the ones the deleted Telegram adapter tests made, re-aimed at the
+// generic executor that now owns the behavior — the credential travels as a
+// HANDLE and never as bytes, the shared secret rides `body_credentials` so the
+// host inserts its VALUE at the manifest's declared pointer, and the rendered
+// body carries neither the secret nor the handle name.
 // -------------------------------------------------------------------------
 
 #[tokio::test]
-async fn channel_activate_runs_and_its_failure_aborts() {
-    let channel = Arc::new(FakeChannelAdapter {
-        fail_activate: true,
-        ..FakeChannelAdapter::default()
-    });
-    let activate_calls = Arc::clone(&channel.activate_calls);
-    let h = harness_with(
-        tool_and_channel_bindings(Arc::clone(&channel)),
-        Arc::clone(&channel),
+async fn ingress_registration_runs_at_activation_with_host_side_credentials() {
+    let egress = Arc::new(RecordingEgressFactory::ok());
+    let h = harness_with_egress(
+        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
+    )
+    .await;
+    h.host
+        .install(registering_record(webhook_config()))
+        .await
+        .unwrap();
+    h.host.activate("acme-hook").await.unwrap();
+
+    let requests = egress.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "activation runs the registration recipe once"
+    );
+    let request = &requests[0];
+    assert_eq!(
+        request.url, "https://api.acme.example/bot{acme_hook_token}/setWebhook",
+        "the credential placeholder reaches egress UNRESOLVED — the host \
+         substitutes it, so token bytes never pass through the executor"
+    );
+    assert_eq!(
+        request
+            .body_credentials
+            .iter()
+            .map(ironclaw_host_api::ids::SecretHandle::as_str)
+            .collect::<Vec<_>>(),
+        vec!["acme_hook_secret"],
+        "the shared secret rides as a declared body-credential handle"
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(request.body.as_deref().expect("body")).expect("json");
+    assert_eq!(
+        body["url"], "https://host.example/webhooks/extensions/acme-hook/events",
+        "non-secret config substitutes normally"
+    );
+    assert!(
+        body.get("secret_token").is_none(),
+        "insertion at the declared pointer is host-side; the executor must not fabricate it"
+    );
+    assert!(
+        !String::from_utf8_lossy(request.body.as_deref().unwrap()).contains("acme_hook_secret"),
+        "a handle name must never be sent to the vendor"
+    );
+
+    // Deactivation runs the deregistration half.
+    h.host.deactivate("acme-hook").await.unwrap();
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].url.ends_with("/deleteWebhook"));
+    assert!(
+        requests[1].body.is_none(),
+        "a bodyless recipe sends no body"
+    );
+}
+
+#[tokio::test]
+async fn ingress_registration_selects_its_declared_egress_independent_of_order() {
+    let egress = Arc::new(RecordingEgressFactory::ok());
+    let h = harness_with_egress(
+        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
+    )
+    .await;
+    let mut manifest = registering_channel_manifest();
+    let channel = manifest.channel.as_mut().expect("channel");
+    let mut decoy = channel.egress[0].clone();
+    decoy.host = "decoy.example".to_string();
+    decoy.paths = vec!["/unrelated".to_string()];
+    channel.egress.insert(0, decoy);
+    let mut record = record("acme-hook", manifest);
+    record.config = webhook_config();
+    h.host.install(record).await.expect("install");
+
+    h.host.activate("acme-hook").await.expect("activate");
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].url.starts_with("https://api.acme.example/"),
+        "reordering unrelated egress entries must not retarget registration: {}",
+        requests[0].url
+    );
+}
+
+#[tokio::test]
+async fn a_failing_ingress_registration_aborts_activation() {
+    let egress = Arc::new(RecordingEgressFactory::failing());
+    let h = harness_with_egress(
+        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
+    )
+    .await;
+    h.host
+        .install(registering_record(webhook_config()))
+        .await
+        .unwrap();
+
+    let error = h.host.activate("acme-hook").await.unwrap_err();
+    assert!(
+        matches!(error, LifecycleError::ActivationHook { .. }),
+        "{error:?}"
+    );
+    assert_eq!(egress.requests().len(), 1, "the recipe was attempted");
+    assert!(
+        h.host.snapshot().await.extension("acme-hook").is_none(),
+        "a failed registration publishes nothing"
+    );
+    let stored = h.store.get("acme-hook").await.unwrap().unwrap();
+    assert_eq!(stored.state, InstallationState::Failed);
+    assert!(stored.last_error.is_some());
+}
+
+/// Deregistration is best-effort by contract: the extension is already
+/// unpublished, so an unreachable vendor must not strand the deactivation.
+#[tokio::test]
+async fn a_failing_deregistration_does_not_strand_deactivation() {
+    let egress = Arc::new(RecordingEgressFactory::ok());
+    let h = harness_with_egress(
+        channel_only_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
+    )
+    .await;
+    h.host
+        .install(registering_record(webhook_config()))
+        .await
+        .unwrap();
+    h.host.activate("acme-hook").await.unwrap();
+    egress.set_status(500);
+    h.host
+        .deactivate("acme-hook")
+        .await
+        .expect("a vendor failure must not block deactivation");
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 2, "deregistration must be attempted");
+    assert!(requests[1].url.ends_with("/deleteWebhook"));
+    assert_eq!(
+        h.store.get("acme-hook").await.unwrap().unwrap().state,
+        InstallationState::Installed
+    );
+}
+
+/// A channel declaring no recipes is a no-op — what "default no-op" used to
+/// mean when these were trait methods, minus the trait surface.
+#[tokio::test]
+async fn a_channel_without_recipes_makes_no_vendor_call() {
+    let egress = Arc::new(RecordingEgressFactory::ok());
+    let h = harness_with_egress(
+        tool_and_channel_bindings(Arc::new(FakeChannelAdapter::default())),
+        Arc::clone(&egress),
     )
     .await;
     h.host
         .install(record("acme", tool_and_channel_manifest()))
         .await
         .unwrap();
-    let error = h.host.activate("acme").await.unwrap_err();
-    assert!(
-        matches!(error, LifecycleError::ActivationHook { .. }),
-        "{error:?}"
-    );
-    assert_eq!(
-        activate_calls.load(Ordering::SeqCst),
-        1,
-        "activate hook ran"
-    );
-    assert!(h.host.snapshot().await.extension("acme").is_none());
-    let stored = h.store.get("acme").await.unwrap().unwrap();
-    assert_eq!(stored.state, InstallationState::Failed);
-    assert!(stored.last_error.is_some());
+    h.host.activate("acme").await.unwrap();
+    assert!(egress.requests().is_empty());
 }
 
 // -------------------------------------------------------------------------
@@ -196,7 +406,6 @@ async fn activation_publishes_and_resolves() {
 
     let snapshot = h.host.snapshot().await;
     assert!(snapshot.extension("acme").is_some());
-    assert_eq!(channel.activate_calls.load(Ordering::SeqCst), 1);
     // Tool resolves (TOOL-1 groundwork: prebound adapter by capability id).
     let capability = ironclaw_host_api::ids::CapabilityId::new("acme.ping").unwrap();
     let binding = snapshot.resolve_tool(&capability).expect("tool resolves");
@@ -378,7 +587,9 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
         ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
     };
     use ironclaw_host_api::{
-        dispatch::DispatchError,
+        dispatch::{
+            DispatchAuthRequirement, DispatchError, ProviderDiagnostic, UntrustedProviderMessage,
+        },
         ids::{CapabilityId, SecretHandle},
     };
 
@@ -392,8 +603,17 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
             _ports: &ToolPorts<'_>,
         ) -> Result<ToolResult, ToolError> {
             Err(ToolError::AuthRequired {
-                required_secrets: vec![SecretHandle::new("acme_token").unwrap()],
-                credential_requirements: Vec::new(),
+                requirement: Box::new(DispatchAuthRequirement {
+                    required_secrets: vec![SecretHandle::new("acme_token").unwrap()],
+                    credential_requirements: Vec::new(),
+                    model_visible_cause: Some(ProviderDiagnostic {
+                        code: None,
+                        message: Some(UntrustedProviderMessage::new(
+                            "provider error code: github_api_error_status_401; provider message: Bad credentials",
+                        )),
+                        retry_after: None,
+                    }),
+                }),
             })
         }
     }
@@ -402,7 +622,8 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
     let h = harness_with(
         ExtensionBindings {
             tools: Some(Arc::new(AuthGatingAdapter)),
-            channel: Some(Arc::clone(&channel) as Arc<dyn ChannelAdapter>),
+            channel: channel_only_bindings(Arc::clone(&channel)).channel,
+            device_link: None,
         },
         channel,
     )
@@ -438,14 +659,111 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
     match err {
         DispatchError::AuthRequired {
             capability,
-            required_secrets,
-            ..
+            requirement,
         } => {
             assert_eq!(capability.as_str(), "acme.ping");
-            assert_eq!(required_secrets.len(), 1);
+            assert_eq!(requirement.required_secrets.len(), 1);
+            assert_eq!(
+                requirement
+                    .model_visible_cause
+                    .as_ref()
+                    .and_then(|diagnostic| diagnostic.message.as_ref())
+                    .map(|message| message.as_str()),
+                Some(
+                    "provider error code: github_api_error_status_401; provider message: Bad credentials"
+                )
+            );
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn snapshot_resolver_preserves_typed_provider_rejection() {
+    use ironclaw_capabilities::ToolResolver;
+    use ironclaw_extension_contracts::tool_adapter::{
+        ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
+    };
+    use ironclaw_host_api::{
+        dispatch::{
+            DispatchError, ProviderDiagnostic, ProviderErrorCode, RuntimeDispatchErrorKind,
+            UntrustedProviderMessage,
+        },
+        ids::CapabilityId,
+    };
+
+    struct RejectingAdapter;
+
+    #[async_trait::async_trait]
+    impl ToolAdapter for RejectingAdapter {
+        async fn invoke(
+            &self,
+            _call: ToolCall,
+            _ports: &ToolPorts<'_>,
+        ) -> Result<ToolResult, ToolError> {
+            Err(ToolError::Rejected {
+                kind: RuntimeDispatchErrorKind::Client,
+                diagnostic: Some(Box::new(ProviderDiagnostic {
+                    code: Some(ProviderErrorCode::new("mcp_tool_rejected")),
+                    message: Some(UntrustedProviderMessage::new("Bad credentials")),
+                    retry_after: None,
+                })),
+                detail: None,
+            })
+        }
+    }
+
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let h = harness_with(
+        ExtensionBindings {
+            tools: Some(Arc::new(RejectingAdapter)),
+            channel: channel_only_bindings(Arc::clone(&channel)).channel,
+            device_link: None,
+        },
+        channel,
+    )
+    .await;
+    h.host
+        .install(record("acme", tool_and_channel_manifest()))
+        .await
+        .unwrap();
+    h.host.activate("acme").await.unwrap();
+
+    let resolver = ironclaw_extension_host::SnapshotToolResolver::new(h.host.snapshot_watch());
+    let resolved = resolver
+        .resolve(&CapabilityId::new("acme.ping").unwrap())
+        .expect("resolves");
+    let error = resolved
+        .adapter
+        .dispatch_json(ironclaw_capabilities::CapabilityDispatchRequest {
+            run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            capability_id: CapabilityId::new("acme.ping").unwrap(),
+            scope: sample_scope(),
+            estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            authenticated_actor_user_id: None,
+            input: serde_json::json!({}),
+        })
+        .await
+        .unwrap_err();
+
+    let DispatchError::Rejected {
+        diagnostic: Some(diagnostic),
+        ..
+    } = error
+    else {
+        panic!("provider rejection must survive snapshot resolver");
+    };
+    assert_eq!(
+        diagnostic.code.as_ref().map(|code| code.as_str()),
+        Some("mcp_tool_rejected")
+    );
+    assert_eq!(
+        diagnostic.message.as_ref().map(|message| message.as_str()),
+        Some("Bad credentials")
+    );
 }
 
 #[tokio::test]
@@ -474,6 +792,11 @@ async fn extension_capabilities_colliding_with_host_bridges_fail_activation() {
         reserved_capability_ids: reserved_capability_ids.clone(),
         reserved_ingress_routes: Default::default(),
         hook_deadline: Duration::from_secs(5),
+        linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+        linked_accounts: std::sync::Arc::new(
+            ironclaw_extension_host::UnavailableLinkedAccountResolution,
+        ),
+        admin_secrets: None,
     };
     let host = ExtensionHost::new(deps).await;
 

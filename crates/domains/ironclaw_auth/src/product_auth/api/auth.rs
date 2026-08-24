@@ -203,16 +203,68 @@ impl From<AuthProductError> for RebornAuthProductError {
 /// Stable sanitized callback failure safe for route rendering.
 pub type RebornOAuthCallbackError = RebornAuthProductError;
 
-/// Compensating action returned by a provider-identity hook that committed
-/// durable state (e.g. the Slack identity binding) before the flow completes.
-/// Awaited only when `complete_oauth_callback` fails after the hook
-/// succeeded; dropped unpolled on the success path. Infallible by contract —
-/// implementations log their own failures.
-pub type OAuthProviderIdentityBindingRollback = Pin<Box<dyn Future<Output = ()> + Send>>;
+/// One infallible action attached to a provider-identity binding transaction.
+/// Implementations report best-effort failures through their own telemetry.
+pub type OAuthProviderIdentityBindingAction = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Commit/rollback work for durable state written by a provider-identity hook.
+///
+/// The auth engine rolls the binding back if OAuth completion fails. Once the
+/// callback is durably complete, it awaits the post-commit work instead. This
+/// prevents channel provisioning from escaping into an untracked task or
+/// running for a binding the callback later rolls back.
+pub struct OAuthProviderIdentityBindingTransaction {
+    after_commit: OAuthProviderIdentityBindingAction,
+    rollback: OAuthProviderIdentityBindingAction,
+}
+
+/// Failure of the post-completion continuation dispatch, carrying whether the
+/// flow was durably terminalized (a terminal lifecycle-activation failure:
+/// flow fenced, extension credential revoked). The callback path needs that
+/// fact to pick the identity-binding compensation: a retryable failure keeps
+/// the credential independently valid — the binding commits — while a
+/// terminalized one revoked it, so the binding must roll back or the user is
+/// shown "connected" with no usable credential.
+#[derive(Debug)]
+struct ContinuationDispatchFailure {
+    error: AuthProductError,
+    terminalized_lifecycle: bool,
+}
+
+impl ContinuationDispatchFailure {
+    fn retryable(error: AuthProductError) -> Self {
+        Self {
+            error,
+            terminalized_lifecycle: false,
+        }
+    }
+}
+
+impl OAuthProviderIdentityBindingTransaction {
+    pub fn new(
+        after_commit: OAuthProviderIdentityBindingAction,
+        rollback: OAuthProviderIdentityBindingAction,
+    ) -> Self {
+        Self {
+            after_commit,
+            rollback,
+        }
+    }
+
+    pub async fn commit(self) {
+        self.after_commit.await;
+    }
+
+    pub async fn rollback(self) {
+        self.rollback.await;
+    }
+}
+
 pub type OAuthProviderIdentityCheckFuture = Pin<
     Box<
-        dyn Future<Output = Result<Option<OAuthProviderIdentityBindingRollback>, AuthProductError>>
-            + Send,
+        dyn Future<
+                Output = Result<Option<OAuthProviderIdentityBindingTransaction>, AuthProductError>,
+            > + Send,
     >,
 >;
 pub type OAuthProviderIdentityCheck =
@@ -333,7 +385,15 @@ impl CredentialAccountRecordSource for UnsupportedCredentialAccountRecordSource 
         &self,
         _scope: &AuthProductScope,
     ) -> Result<Vec<crate::CredentialAccount>, AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
+        // Typed as *unsupported* rather than *unavailable* so callers can tell
+        // "this bundle has no account read model" from "the read model
+        // failed". Linked-device cleanup needs exactly that distinction: the
+        // former means there is no device to log out, the latter must never be
+        // treated as one. The projected `AuthErrorCode` is unchanged
+        // (`BackendUnavailable`), so nothing on the wire moves.
+        Err(AuthProductError::UnsupportedOperation {
+            operation: "accounts_for_owner",
+        })
     }
 }
 
@@ -551,6 +611,18 @@ pub struct RebornProductAuthServices {
     auth_engine: Option<Arc<crate::AuthEngine>>,
     /// One recipe-driven blocked-gate OAuth driver covering every vendor.
     oauth_gate_driver: Option<Arc<OAuthGateFlowDriver>>,
+    /// One recipe-driven device-link flow driver covering every vendor.
+    ///
+    /// A deferred slot rather than a builder because the build order inverts:
+    /// the vendor half is the extension host's snapshot driver, and the
+    /// extension host is composed *after* this bundle. Filled once by
+    /// [`RebornProductAuthServices::attach_device_link`]; absent, the
+    /// device-link routes answer unavailable.
+    device_link_driver: Arc<std::sync::OnceLock<Arc<crate::DeviceLinkFlowDriver>>>,
+    /// The linked-device revoker behind lifecycle cleanup — same deferred
+    /// shape, same reason. Unfilled it fails closed: a deactivate quarantines
+    /// `RevokeFailed` rather than silently skipping the vendor logout.
+    linked_device_revoker: Arc<crate::DeferredLinkedDeviceRevoker>,
     /// Optional read projection for WebUI/standalone auth interactions.
     ///
     /// `RebornProductAuthServices` may still support OAuth callbacks,
@@ -654,6 +726,8 @@ impl RebornProductAuthServices {
             host_managed_nearai_credential_scope: None,
             auth_engine: None,
             oauth_gate_driver: None,
+            device_link_driver: Arc::new(std::sync::OnceLock::new()),
+            linked_device_revoker: Arc::new(crate::DeferredLinkedDeviceRevoker::default()),
             flow_record_source: None,
             continuation_dispatch_inflight: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -854,6 +928,28 @@ impl RebornProductAuthServices {
 
     pub fn oauth_gate_driver(&self) -> Option<Arc<OAuthGateFlowDriver>> {
         self.oauth_gate_driver.clone()
+    }
+
+    /// Fill the deferred device-link slots: the flow driver the routes
+    /// dispatch to, and the revoker lifecycle cleanup logs devices out
+    /// through. One method because the two halves are the same engine — an
+    /// attach that wired only one would leave either un-completable links or
+    /// silently-skipped logouts.
+    ///
+    /// `&self` and idempotent by construction (first fill wins): the bundle is
+    /// already shared by the time the extension host — whose snapshot the
+    /// vendor half rides — exists.
+    pub fn attach_device_link(
+        &self,
+        driver: Arc<crate::DeviceLinkFlowDriver>,
+        revoker: Arc<dyn crate::LinkedDeviceRevoker>,
+    ) {
+        let _ = self.device_link_driver.set(driver);
+        self.linked_device_revoker.fill(revoker);
+    }
+
+    pub fn device_link_driver(&self) -> Option<Arc<crate::DeviceLinkFlowDriver>> {
+        self.device_link_driver.get().cloned()
     }
 
     fn with_manual_token_flow_service(
@@ -1063,8 +1159,25 @@ impl RebornProductAuthServices {
         &self,
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, RebornCredentialLifecycleError> {
-        let report = self
-            .cleanup_service
+        // Linked devices are logged out **before** the credential they hang
+        // off is unbound (PROPOSAL §4.5) — after the unbind, the session blob
+        // the logout needs is gone and the extension that could make the
+        // vendor call may be deactivated. The ordering lives in
+        // `LinkedDeviceCleanupService`, which is composed here rather than at
+        // construction: the record source it reads is only final once every
+        // builder has run, and a decorator captured earlier would have
+        // discovered devices through the unsupported default.
+        //
+        // Behavior-preserving where no device exists: the decorator acts only
+        // on accounts pinned `ExtensionOwned` with a live `link_revision`.
+        // Where one does and the revoker slot is unfilled, it quarantines
+        // `RevokeFailed` rather than silently skipping the vendor logout.
+        let cleanup = crate::LinkedDeviceCleanupService::new(
+            self.credential_account_record_source.clone(),
+            self.linked_device_revoker.clone() as Arc<dyn crate::LinkedDeviceRevoker>,
+            self.cleanup_service.clone(),
+        );
+        let report = cleanup
             .cleanup_for_lifecycle(request)
             .await
             .map_err(RebornCredentialLifecycleError::from)?;
@@ -1102,6 +1215,8 @@ impl RebornProductAuthServices {
         mut provider_identity_check: Option<OAuthProviderIdentityCheck>,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
         let mut provider_identity = None;
+        let mut identity_binding_transaction: Option<OAuthProviderIdentityBindingTransaction> =
+            None;
         let (mut completed, should_dispatch_continuation) = match request.outcome {
             RebornOAuthCallbackOutcome::Authorized { provider_request } => {
                 let claimed = self
@@ -1159,12 +1274,9 @@ impl RebornProductAuthServices {
                             return Err(error.into());
                         }
                     };
-                    let mut identity_binding_rollback: Option<
-                        OAuthProviderIdentityBindingRollback,
-                    > = None;
                     if let Some(check) = provider_identity_check.take() {
                         match check(exchange.provider_identity.clone()).await {
-                            Ok(rollback) => identity_binding_rollback = rollback,
+                            Ok(transaction) => identity_binding_transaction = transaction,
                             Err(error) => {
                                 let error_code = error.code();
                                 if let Err(cleanup_error) = self
@@ -1250,8 +1362,8 @@ impl RebornProductAuthServices {
                             // completed-flow replay path never re-runs the
                             // hook — undo it so a failed completion cannot
                             // leave "connected with no usable credential".
-                            if let Some(rollback) = identity_binding_rollback.take() {
-                                rollback.await;
+                            if let Some(transaction) = identity_binding_transaction.take() {
+                                transaction.rollback().await;
                             }
                             return Err(error.into());
                         }
@@ -1277,12 +1389,39 @@ impl RebornProductAuthServices {
             }
         };
 
-        if should_dispatch_continuation {
-            completed = self
-                .dispatch_completed_continuation(completed)
-                .await
-                .map_err(RebornOAuthCallbackError::from)?;
-        }
+        let completion = if should_dispatch_continuation {
+            self.dispatch_completed_continuation(completed).await
+        } else {
+            Ok(completed)
+        };
+        completed = match completion {
+            Ok(completed) => {
+                if let Some(transaction) = identity_binding_transaction.take() {
+                    transaction.commit().await;
+                }
+                completed
+            }
+            Err(failure) => {
+                if let Some(transaction) = identity_binding_transaction.take() {
+                    if failure.terminalized_lifecycle {
+                        // The terminal lifecycle failure revoked the flow's
+                        // credential — committing the binding here would show
+                        // "connected" with no usable credential, the exact
+                        // state this transaction exists to prevent.
+                        transaction.rollback().await;
+                    } else {
+                        // Retryable dispatch failure: the callback is durably
+                        // complete and the credential remains independently
+                        // valid, so the binding stands (the completed-flow
+                        // replay path never re-runs the hook — rolling back
+                        // here would lose the binding for a flow whose
+                        // continuation succeeds on retry).
+                        transaction.commit().await;
+                    }
+                }
+                return Err(RebornOAuthCallbackError::from(failure.error));
+            }
+        };
 
         Ok(RebornOAuthCallbackResponse {
             flow_id: completed.id,
@@ -1354,8 +1493,25 @@ impl RebornProductAuthServices {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowStatus, RebornOAuthCallbackError> {
+        self.flow_record(scope, flow_id)
+            .await
+            .map(|record| record.status)
+    }
+
+    /// The durable flow record itself, for callers that must project more than
+    /// its status — the device-link card needs the whole frame (§8.12).
+    ///
+    /// Shares `flow_status`'s existence semantics exactly, and must: the
+    /// cross-scope remap below is the control that stops a caller probing
+    /// another owner's flows, and a sibling reader that skipped it would be an
+    /// oracle around the one that has it.
+    pub async fn flow_record(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<AuthFlowRecord, RebornOAuthCallbackError> {
         match self.flow_manager.get_flow(scope, flow_id).await {
-            Ok(Some(record)) => Ok(record.status),
+            Ok(Some(record)) => Ok(record),
             Ok(None) => Err(AuthProductError::UnknownOrExpiredFlow.into()),
             // Never distinguish "owned by another scope" from "unknown": both
             // return not-found so a caller cannot probe another owner's flows.
@@ -1390,7 +1546,7 @@ impl RebornProductAuthServices {
                 .dispatch_completed_continuation(record)
                 .await
                 .map(|reconciled| reconciled.status)
-                .map_err(RebornOAuthCallbackError::from);
+                .map_err(|failure| RebornOAuthCallbackError::from(failure.error));
         }
         Ok(record.status)
     }
@@ -1639,7 +1795,7 @@ impl RebornProductAuthServices {
         };
         self.dispatch_completed_continuation(completed)
             .await
-            .map_err(RebornManualTokenError::from)?;
+            .map_err(|failure| RebornManualTokenError::from(failure.error))?;
 
         Ok(RebornManualTokenSubmitResponse {
             account_id: result.account_id,
@@ -1718,7 +1874,7 @@ impl RebornProductAuthServices {
     async fn dispatch_completed_continuation(
         &self,
         completed: AuthFlowRecord,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
+    ) -> Result<AuthFlowRecord, ContinuationDispatchFailure> {
         if completed.continuation_emitted_at.is_some() {
             return Ok(completed);
         }
@@ -1731,7 +1887,9 @@ impl RebornProductAuthServices {
         // covers every return path below (success, terminalized failure, and the
         // retryable non-lifecycle failure).
         let Some(_lease) = self.acquire_continuation_dispatch_lease(completed.id) else {
-            return Err(AuthProductError::BackendUnavailable);
+            return Err(ContinuationDispatchFailure::retryable(
+                AuthProductError::BackendUnavailable,
+            ));
         };
         let emitted_at = Utc::now();
         let event = AuthContinuationEvent {
@@ -1762,6 +1920,7 @@ impl RebornProductAuthServices {
             // Non-lifecycle continuations (setup-only, turn-gate resume, …) stay
             // retryable: their credential is independently useful and the caller
             // may re-drive the same flow.
+            let mut terminalized_lifecycle = false;
             if !is_retryable_auth_error(dispatch_error_code)
                 && matches!(
                     &completed.continuation,
@@ -1769,7 +1928,9 @@ impl RebornProductAuthServices {
                 )
             {
                 self.terminalize_failed_lifecycle_activation(&completed, dispatch_error_code)
-                    .await?;
+                    .await
+                    .map_err(ContinuationDispatchFailure::retryable)?;
+                terminalized_lifecycle = true;
             }
             let error = match error {
                 AuthProductError::TokenExchangeFailed
@@ -1777,11 +1938,15 @@ impl RebornProductAuthServices {
                 | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
                 error => error,
             };
-            return Err(error);
+            return Err(ContinuationDispatchFailure {
+                error,
+                terminalized_lifecycle,
+            });
         }
         self.flow_manager
             .mark_continuation_dispatched(&completed.scope, completed.id, emitted_at)
             .await
+            .map_err(ContinuationDispatchFailure::retryable)
     }
 
     /// Fence a terminally-failed lifecycle activation.

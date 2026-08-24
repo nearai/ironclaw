@@ -24,10 +24,17 @@ test-support = []
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+# Device-link inputs (login code, account password) cross the host↔extension
+# membrane as `SecretString`, so they cannot be echoed into a step, an error,
+# or a `Debug` line. Same crate and version the sibling contracts crate uses.
+secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+# `SessionBytes` holds a decrypted linked-account credential in memory; the
+# wrapper clears it on drop.
+zeroize = "1"
 
 [dev-dependencies]
 serde_json = "1"

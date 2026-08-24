@@ -1,6 +1,6 @@
 # `crates/contracts/` — neutral vocabulary and ports; nothing here runs, stores, or decides
 
-**Layer(s):** `contracts` (all 6 crates) · **Crates:** 6 · **May depend on:** nothing outside this family — the three foundational crates hold zero internal deps; the three port crates hold only the intra-family edges named below · **Depended on by:** every other family (53 workspace manifests name `ironclaw_host_api` alone — `grep -rl '^ironclaw_host_api = ' --include=Cargo.toml crates tests Cargo.toml`).
+**Layer(s):** `contracts` (all 6 crates) · **Crates:** 6 · **May depend on:** nothing outside this family — the three foundational crates hold zero internal deps; the three port crates hold only the intra-family edges named below · **Depended on by:** every other family (re-derive the fan-in with `grep -rl '^ironclaw_host_api = ' --include=Cargo.toml crates tests Cargo.toml | wc -l`).
 
 ## What this family is
 
@@ -140,8 +140,8 @@ All gates live in `crates/app/ironclaw_architecture_tests` (run:
 
 ## Sources
 
-- Design record: [`docs/reborn/target-architecture/families/contracts.md`](../../docs/reborn/target-architecture/families/contracts.md);
+- Design record: [`docs/internal/reborn/target-architecture/families/contracts.md`](../../docs/internal/reborn/target-architecture/families/contracts.md);
   PROPOSAL §6.1 (per-crate as-built inventories), §8 (dependency model).
-- Conventions this file follows: [`docs/reborn/guidance-conventions.md`](../../docs/reborn/guidance-conventions.md).
+- Conventions this file follows: [`docs/internal/reborn/guidance-conventions.md`](../../docs/internal/reborn/guidance-conventions.md).
 - Moving a crate between families is not a rename — the family word never
   enters the crate name (PROPOSAL §5.1).

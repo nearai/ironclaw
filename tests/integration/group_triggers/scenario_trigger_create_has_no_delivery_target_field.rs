@@ -51,7 +51,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 "builtin.trigger_create",
                 json!({
                     "name": ROUTINE_NAME,
-                    "prompt": ROUTINE_PROMPT,
+                    "execution_contract": super::support::trigger_execution_contract(ROUTINE_PROMPT),
                     "schedule": {"kind": "once", "at": ONCE_AT, "timezone": "UTC"},
                 }),
             ),
@@ -97,6 +97,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .get_trigger(tenant_id.clone(), trigger_id)
         .await?
         .ok_or("the created routine must be readable from the shared repository")?;
+    legacy.prompt = ROUTINE_PROMPT.to_string();
+    legacy.execution_spec = None;
     legacy.delivery_target = Some(TriggerDeliveryTargetId::new(LEGACY_TARGET_ID)?);
     repository.upsert_trigger(legacy).await?;
 
