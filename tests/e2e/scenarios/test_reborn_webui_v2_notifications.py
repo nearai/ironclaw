@@ -4,6 +4,7 @@ import json
 import re
 from urllib.parse import urlparse
 
+import pytest
 from playwright.async_api import expect
 
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
@@ -218,6 +219,44 @@ async def test_reborn_v2_notification_open_persists_read_without_hiding_message(
         await expect(panel).to_be_visible(timeout=5000)
         await expect(panel).to_contain_text("Authentication required")
         await expect(panel.locator(SEL_V2["notification_row"])).to_have_count(1)
+
+        # A reload drops the React Query cache and asks the server again. The
+        # record must remain read because Inbox state, not browser storage,
+        # owns the lifecycle.
+        await page.reload()
+        await expect(page.locator(SEL_V2["notification_unread_dot"])).to_have_count(0)
+        await page.locator(SEL_V2["notification_bell"]).click()
+        reloaded_panel = page.locator(SEL_V2["notification_panel"])
+        await expect(reloaded_panel).to_contain_text("Authentication required")
+        await expect(reloaded_panel.locator(SEL_V2["notification_row"])).to_have_count(1)
+    finally:
+        await context.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_text"),
+    [
+        ("approval_required", "Approval required"),
+        ("run_failed", "Run failed"),
+    ],
+)
+async def test_reborn_v2_notification_inbox_presents_actionable_and_failed_runs(
+    reborn_v2_server,
+    reborn_v2_browser,
+    kind,
+    expected_text,
+):
+    """The generic Inbox presents producer kinds without a legacy thread feed."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    try:
+        await _route_notification_inbox(page, kind=kind)
+        await _open_v2(page, reborn_v2_server)
+
+        await page.locator(SEL_V2["notification_bell"]).click()
+        panel = page.locator(SEL_V2["notification_panel"])
+        await expect(panel).to_contain_text(expected_text)
+        await expect(panel.locator(SEL_V2["notification_row"])).to_have_count(1)
     finally:
         await context.close()
 
@@ -300,7 +339,7 @@ async def test_reborn_v2_completion_waits_for_matching_final_reply_render(
                 [RUN_ID, "The scheduled report is ready."],
             )
 
-        await expect(page.locator(SEL_V2["msg_assistant"])).to_contain_text(
+        await expect(page.locator(SEL_V2["msg_assistant"]).last).to_contain_text(
             "The scheduled report is ready.",
             timeout=5000,
         )
