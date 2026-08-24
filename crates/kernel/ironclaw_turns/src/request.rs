@@ -7,6 +7,7 @@ use crate::{
     ProductTurnContext, RunProfileRequest, SanitizedCancelReason, TurnActor, TurnGateRef,
     TurnRunId, TurnScope, TurnStatus,
 };
+use ironclaw_loop_contracts::ResolvedRunProfile;
 
 pub type TurnTimestamp = DateTime<Utc>;
 
@@ -103,6 +104,11 @@ pub struct ActivateThreadRequest {
     pub received_at: TurnTimestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_run_profile: Option<RunProfileRequest>,
+    /// Trusted internal continuation state. This is deliberately omitted from
+    /// serialized requests so an external caller cannot mint or replay a
+    /// resolved profile snapshot.
+    #[serde(skip)]
+    pub resolved_run_profile: Option<ResolvedRunProfile>,
 }
 
 /// Request shape for callers that are creating a child run from an existing

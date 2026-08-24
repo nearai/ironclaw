@@ -10,6 +10,10 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_loop_contracts::{
+    InMemoryRunProfileResolver, ResolvedRunProfile, RunProfileRequestAuthority,
+    RunProfileResolutionRequest, RunProfileResolver,
+};
 use ironclaw_processes::{
     ClaimProcessesRequest, ProcessKind, ProcessLeaseRequest, ProcessStateTransitionRequest,
     ProcessWorkerId,
@@ -86,7 +90,21 @@ fn activate_request(
         idempotency_key: IdempotencyKey::new(key).expect("idempotency key"),
         received_at: Utc::now(),
         requested_run_profile: None,
+        resolved_run_profile: None,
     }
+}
+
+async fn resolved_profile(profile: &str) -> ResolvedRunProfile {
+    InMemoryRunProfileResolver::default()
+        .resolve_run_profile(
+            RunProfileResolutionRequest::interactive_default()
+                .with_authority(RunProfileRequestAuthority::ProductSurface)
+                .with_requested_run_profile(
+                    ironclaw_turns::RunProfileRequest::new(profile).expect("run profile request"),
+                ),
+        )
+        .await
+        .expect("profile resolves")
 }
 
 fn submit_request(scope: TurnScope, key: &str) -> SubmitTurnRequest {
@@ -194,6 +212,81 @@ async fn activate_distinguishes_parent_agent_from_system_provenance() {
         record.subagent_activation_provenance,
         Some(ActivationProvenance::ParentAgent)
     );
+}
+
+#[tokio::test]
+async fn internal_activation_persists_the_supplied_profile_snapshot() {
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
+    let resolver = Arc::new(InMemoryRunProfileResolver::default());
+    let coordinator =
+        DefaultTurnCoordinator::new(runtime.clone()).with_run_profile_resolver(resolver);
+    let scope = scope("thread-activate-profile-snapshot");
+    let snapshot = resolved_profile("long_running_mission").await;
+
+    let SubmitTurnResponse::Accepted { run_id, .. } = coordinator
+        .activate(ActivateThreadRequest {
+            resolved_run_profile: Some(snapshot.clone()),
+            ..activate_request(
+                scope.clone(),
+                ActivationProvenance::System,
+                "activate-profile-snapshot",
+            )
+        })
+        .await
+        .expect("internal activation succeeds");
+
+    let record = runtime
+        .get_run_record(&scope, run_id)
+        .await
+        .expect("run record read")
+        .expect("run record exists");
+    assert_eq!(record.profile.resolved, snapshot);
+}
+
+#[tokio::test]
+async fn human_activation_rejects_a_trusted_profile_snapshot_without_creating_a_run() {
+    let system = in_memory_agent_turn_process_system();
+    let runtime = Arc::new(system.runtime());
+    let coordinator = DefaultTurnCoordinator::new(runtime.clone());
+    let scope = scope("thread-human-profile-snapshot");
+    let snapshot = resolved_profile("long_running_mission").await;
+
+    let error = coordinator
+        .activate(ActivateThreadRequest {
+            resolved_run_profile: Some(snapshot),
+            ..activate_request(
+                scope.clone(),
+                ActivationProvenance::Human,
+                "human-profile-snapshot",
+            )
+        })
+        .await
+        .expect_err("human callers cannot supply trusted continuation state");
+    assert!(matches!(error, TurnError::InvalidRequest { .. }));
+    assert!(
+        runtime
+            .recent_runs_for_thread(&scope, 10)
+            .await
+            .expect("run window read")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn trusted_activation_snapshot_is_not_part_of_the_serialized_request() {
+    let mut request = activate_request(
+        scope("thread-activation-wire"),
+        ActivationProvenance::System,
+        "activation-wire",
+    );
+    request.resolved_run_profile = Some(resolved_profile("long_running_mission").await);
+
+    let wire = serde_json::to_value(&request).expect("activation serializes");
+    assert!(wire.get("resolved_run_profile").is_none());
+    let decoded: ActivateThreadRequest =
+        serde_json::from_value(wire).expect("activation deserializes");
+    assert!(decoded.resolved_run_profile.is_none());
 }
 
 /// A coordinator that has not opted into activation must refuse rather than

@@ -553,12 +553,16 @@ async fn recover_scope_delivers_a_settled_background_edge_through_activation() {
     assert_eq!(activations.len(), 1, "recovery must activate exactly once");
     assert_eq!(activations[0].provenance, ActivationProvenance::System);
     assert_eq!(
-        activations[0].requested_run_profile,
-        Some(
-            ironclaw_turns::RunProfileRequest::new(profile_id.as_str())
-                .expect("run profile request")
-        ),
+        activations[0].requested_run_profile, None,
         "the parent's own resolved run profile must survive recovery"
+    );
+    assert_eq!(
+        activations[0]
+            .resolved_run_profile
+            .as_ref()
+            .map(|profile| &profile.profile_id),
+        Some(&profile_id),
+        "recovery must carry the parent's full profile snapshot"
     );
 }
 

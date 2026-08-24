@@ -1145,6 +1145,7 @@ async fn streak_capped_result_waits_for_human() {
                     .expect("idempotency key"),
                 received_at: Utc::now(),
                 requested_run_profile: None,
+                resolved_run_profile: None,
             })
             .await
             .unwrap_or_else(|error| panic!("streak wake {index} must be admitted, got {error:?}"));

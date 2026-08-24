@@ -2263,9 +2263,14 @@ async fn background_delivery_activates_parked_parent_with_system_provenance_and_
         ))
         .expect("idempotency key")
     );
+    assert_eq!(request.requested_run_profile, None);
     assert_eq!(
-        request.requested_run_profile,
-        Some(RunProfileRequest::new("long_running_mission").expect("run profile request"))
+        request
+            .resolved_run_profile
+            .as_ref()
+            .expect("profile snapshot")
+            .profile_id,
+        ironclaw_host_api::turn::RunProfileId::long_running_mission()
     );
     let expected_scope = TurnScope::new_with_owner(
         fixture.tenant_id.clone(),

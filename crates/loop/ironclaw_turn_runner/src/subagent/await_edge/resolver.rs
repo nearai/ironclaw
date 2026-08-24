@@ -38,7 +38,7 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, ActivateThreadRequest, ActivationProvenance, AdmissionRejectionReason,
     AgentTurnSpawnTreeRuntimePort, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    RunProfileRequest, TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunRecord,
+    TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunRecord,
 };
 
 use super::{AwaitEdge, AwaitEdgeState, EdgeTerminalKind, store::AwaitEdgeStore};
@@ -836,14 +836,6 @@ where
         let idempotency_key =
             IdempotencyKey::new(format!("subagent-activate:{parent_run_id}:{child_run_id}"))
                 .map_err(|reason| TurnError::InvalidRequest { reason })?;
-        let requested_run_profile = RunProfileRequest::new(
-            edge.parent_run_context
-                .resolved_run_profile
-                .profile_id
-                .as_str(),
-        )
-        .map_err(|reason| TurnError::InvalidRequest { reason })?;
-
         let activation = coordinator
             .activate(ActivateThreadRequest {
                 scope: edge.parent_run_context.scope.clone(),
@@ -852,7 +844,8 @@ where
                 provenance: ActivationProvenance::System,
                 idempotency_key,
                 received_at: chrono::Utc::now(),
-                requested_run_profile: Some(requested_run_profile),
+                requested_run_profile: None,
+                resolved_run_profile: Some(edge.parent_run_context.resolved_run_profile.clone()),
             })
             .await;
 
