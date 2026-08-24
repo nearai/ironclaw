@@ -247,6 +247,12 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Keep suggestion cards and their start/dismiss actions isolated to the authenticated tenant and user scope | `suggestions.rs::suggestions_are_isolated_by_authenticated_scope` |
 | Dismiss a started suggestion across restart without deleting its thread or timeline | `suggestions.rs::dismissing_a_started_suggestion_persists_across_restart` |
 | Settle failed or contract-invalid suggestion generation as failed with no visible cards | `suggestions.rs::failed_suggestion_run_settles_failed_and_retryable_via_list_view`, `suggestions.rs::semantically_invalid_completed_suggestion_output_settles_failed`, `suggestions.rs::unknown_field_in_completed_suggestion_output_settles_failed` |
+| Reach the user's connected extension tools in an autonomous run under the system default, and lose exactly one of them to a per-tool override | `suggestions.rs::connected_extensions_are_reachable_under_the_system_default` |
+| Shrink the autonomous surface when the user turns the global auto-approve toggle off, leaving only the synthetic capabilities that bypass surface policy | `suggestions.rs::disabling_global_auto_approve_shrinks_the_autonomous_surface` |
+| Remove exactly one capability from an autonomous run when the user sets it to ask-each-time | `suggestions.rs::per_tool_ask_each_time_override_removes_only_that_tool` |
+| Keep a disabled capability out of an autonomous run even while global auto-approve is on | `suggestions.rs::per_tool_disabled_override_removes_the_tool_even_with_auto_approve_on` |
+| Reach a connected extension's capability in an autonomous run only through the user's own always-allow grant when auto-approve is off | `suggestions.rs::connected_gmail_tool_is_reachable_only_via_the_users_own_grant` |
+| Refuse rather than dispatch a capability the autonomous surface excluded, when the model calls it anyway | `suggestions.rs::excluded_capability_call_is_refused_not_dispatched` |
 
 **Tools**
 | Behavior | Evidence |

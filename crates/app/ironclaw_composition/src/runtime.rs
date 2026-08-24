@@ -5116,24 +5116,15 @@ fn validate_runtime_identity(
     })
 }
 
-/// Capabilities denied to a run that declared `require_no_approval`.
+/// The mutating synthetic capabilities denied to an unattended run.
 ///
-/// These are SYNTHETIC capabilities that mutate state. `SyntheticCapabilityPort`
-/// appends synthetics to the surface after the host catalog has applied effect
-/// and approval filtering, so no surface-policy narrowing can gate them — an id
-/// deny-list is the only lever, and it is enforced at dispatch rather than only
-/// at listing.
+/// Why the list has to exist, and why it lives here rather than in the loop
+/// layer that enforces it: see
+/// `DefaultPlannedRuntimeConfig::unattended_denied_capability_ids`.
 ///
-/// The append itself is correct for loop infrastructure (`result_read`,
-/// `structured_result`, `capability_info`): those must always be present. It is
-/// accidental for product capabilities that merely happen to be implemented
-/// synthetically, which is what this list corrects. Composition owns the list
-/// because it is the only layer that can name all of these ids — the loop layer
-/// cannot depend on product or domain crates.
-///
-/// The set is derived by measurement, not by inspection: with the global
-/// auto-approve toggle off, these are the capabilities that survive because they
-/// bypass the filter. `tests/integration/suggestions.rs` pins it.
+/// Derived by measurement, not inspection — with global auto-approve off these
+/// are the capabilities that survive because they bypass the surface policy.
+/// `tests/integration/suggestions.rs` pins the resulting set.
 fn unattended_denied_capability_ids() -> Result<Vec<CapabilityId>, RebornRuntimeError> {
     [
         ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID,
