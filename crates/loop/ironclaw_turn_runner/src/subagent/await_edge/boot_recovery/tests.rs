@@ -737,6 +737,47 @@ async fn recover_scope_is_idempotent_on_a_second_pass() {
     );
 }
 
+#[tokio::test]
+async fn check_scope_recovered_rejects_when_recovery_reports_a_failure() {
+    let fixture = recovery_fixture(ironclaw_host_api::turn::RunProfileId::default_profile()).await;
+    let (child_run_id, child_scope) = fixture
+        .open_edge("failed-admission", SpawnSubagentMode::Background)
+        .await;
+    fixture
+        .edge_store
+        .settle(
+            &child_scope,
+            fixture.parent_run_id,
+            child_run_id,
+            EdgeTerminalKind::Completed,
+            Some(2),
+            None,
+        )
+        .await
+        .expect("settle")
+        .expect("edge exists");
+
+    // Leave the resolver's coordinator unbound so recovery reaches a real
+    // delivery failure after the durable edge is found.
+    let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
+        Arc::clone(&fixture.edge_store),
+        Arc::new(NoLiveRunRuntime),
+        Arc::new(RecordingUpdateWriter::default()),
+        Arc::clone(&fixture.thread_service),
+    ));
+    let recovery_driver = ScopeRecoveryDriver::new(resolver, Arc::clone(&fixture.edge_store));
+
+    let result = ironclaw_loop_host::AwaitEdgeWriter::check_scope_recovered(
+        &recovery_driver,
+        &fixture.parent_scope,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "scope admission must reject when recovery reports a failure"
+    );
+}
+
 /// Blocking-mode edges keep their pre-existing `drain_settled_group` path —
 /// unaffected by the background delivery-chain arms this task adds.
 #[tokio::test]

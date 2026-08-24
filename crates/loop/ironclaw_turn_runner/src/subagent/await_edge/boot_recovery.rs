@@ -107,7 +107,12 @@ where
         &self,
         scope: &TurnScope,
     ) -> Result<(), ironclaw_loop_host::ScopeRecoveryInProgress> {
-        let _ = recover_scope(&self.resolver, &self.store, scope).await;
+        let report = recover_scope(&self.resolver, &self.store, scope).await;
+        if report.failed > 0 {
+            return Err(ironclaw_loop_host::ScopeRecoveryInProgress {
+                retry_after_hint: std::time::Duration::from_millis(50),
+            });
+        }
         Ok(())
     }
 
