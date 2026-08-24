@@ -2755,10 +2755,16 @@ where
                 {
                     return Ok(());
                 }
-                // D14: a subagent result row is terminal on arrival. The queue's
+                // D14: a subagent result row (`MessageKind::System`, written by
+                // `accept_subagent_result`) is terminal on arrival. The queue's
                 // best-effort Submitted flip must treat it as already-settled, not as a
                 // transition violation — an already-terminal row has nothing to flip.
-                if message.status == MessageStatus::Finalized {
+                // Scoped to `System` specifically: any OTHER finalized kind
+                // (Assistant, ToolResultReference, CapabilityDisplayPreview, ...) still
+                // falls through to `ensure_user_accepted` and fails loud — a caller bug
+                // targeting the wrong message id must surface, not silently succeed.
+                if message.kind == MessageKind::System && message.status == MessageStatus::Finalized
+                {
                     return Ok(());
                 }
                 ensure_user_accepted(message, "mark_message_submitted")?;
