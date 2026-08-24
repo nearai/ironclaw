@@ -3248,13 +3248,16 @@ mod tests {
 
         let request = GeminiOauthProvider::to_gemini_request(
             &messages,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "gemini-3-pro-preview",
-            &HashMap::new(),
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-3-pro-preview",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
         );
         let contents = request["contents"].as_array().expect("contents array");
         let function_call = contents

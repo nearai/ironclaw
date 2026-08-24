@@ -329,37 +329,7 @@ impl InstructionBundleBuilder {
             }
         }
 
-        // Memory snippets arrive already ordered by the host's two-lane retrieval
-        // (short-term before long-term) so the active conversation keeps priority
-        // under the shared budget. Preserve that insertion order — do NOT re-sort
-        // by opaque ref like instruction snippets do, which would scramble the lane
-        // priority before the model sees it. (CR review: lane priority at the
-        // render boundary.)
         let memory_snippets = request.context_bundle.memory_snippets;
-        if !memory_snippets.is_empty() {
-            requires_materialization_store = true;
-            // Open the memory section with the recall framing (#7294): the
-            // snippets below are recollections to verify, not live state.
-            push_memory_recall_framing(
-                &mut messages,
-                &mut materialized_messages,
-                &mut fingerprint,
-                &mut synthetic_refs,
-            )?;
-        }
-        for (ordinal, snippet) in memory_snippets.into_iter().enumerate() {
-            let content_ref =
-                snippet_message_ref("memory", &snippet, ordinal, &mut synthetic_refs)?;
-            push_snippet_message(
-                &mut messages,
-                &mut materialized_messages,
-                &mut fingerprint,
-                "memory",
-                ordinal,
-                content_ref,
-                &snippet,
-            )?;
-        }
 
         if let Some(safety_context) = request.safety_context {
             requires_materialization_store = true;
@@ -416,6 +386,35 @@ impl InstructionBundleBuilder {
                 },
                 &mut synthetic_refs,
                 message,
+            )?;
+        }
+
+        // Recalled memory is turn-dependent context, so it follows the durable
+        // transcript and reaches the provider as tail-positioned host reminders.
+        // Putting it in the leading system run would invalidate the provider
+        // prompt cache whenever retrieval changes across turns. Preserve the
+        // host's two-lane ordering (short-term before long-term) within the
+        // memory section; do not sort by opaque ref.
+        if !memory_snippets.is_empty() {
+            requires_materialization_store = true;
+            push_memory_recall_framing(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                &mut synthetic_refs,
+            )?;
+        }
+        for (ordinal, snippet) in memory_snippets.into_iter().enumerate() {
+            let content_ref =
+                snippet_message_ref("memory", &snippet, ordinal, &mut synthetic_refs)?;
+            push_snippet_message(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                "memory",
+                ordinal,
+                content_ref,
+                &snippet,
             )?;
         }
 
@@ -1194,28 +1193,6 @@ mod tests {
         );
     }
 
-    fn auth_vocabulary_surface(trust: CapabilityDescriptionTrust) -> VisibleCapabilitySurface {
-        // Keep the feature's auth-vocabulary helper; it captures the same
-        // visible-surface shape as the main helper but with the canonical
-        // description used by the broader auth-vocab tests.
-        VisibleCapabilitySurface {
-            version: crate::CapabilitySurfaceVersion::new("surface:auth-vocab").unwrap(),
-            descriptors: vec![CapabilityDescriptorView {
-                capability_id: ironclaw_host_api::ids::CapabilityId::new(
-                    "builtin.extension_register_hosted_mcp",
-                )
-                .unwrap(),
-                provider: None,
-                runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
-                safe_name: "extension_register_hosted_mcp".to_string(),
-                safe_description: "Choose oauth for a browser authorization-code flow.".to_string(),
-                description_trust: trust,
-                parameters_schema: serde_json::json!({"type": "object"}),
-            }],
-            callable_capability_ids: None,
-        }
-    }
-
     fn capability_description_surface(
         trust: CapabilityDescriptionTrust,
         description: &str,
@@ -1364,6 +1341,54 @@ mod tests {
              {:?}",
             contents[framing_index]
         );
+    }
+
+    /// Recalled memory changes with the active turn. It must follow the
+    /// persisted transcript so the gateway can frame it as a host reminder
+    /// instead of folding it into the provider-cached leading system block.
+    #[test]
+    fn recalled_memory_follows_the_persisted_transcript() {
+        let bundle = InstructionBundleBuilder::new(test_context())
+            .build(InstructionBundleRequest {
+                context_bundle: LoopContextBundle {
+                    memory_snippets: vec![memory_snippet(
+                        "Untrusted memory content: remembered preference",
+                    )],
+                    messages: vec![LoopContextMessage {
+                        message_ref: None,
+                        role: "user".to_string(),
+                        safe_summary: "current user turn".to_string(),
+                        compaction: None,
+                    }],
+                    ..LoopContextBundle::default()
+                },
+                visible_surface: None,
+                safety_context: None,
+                runtime_context: None,
+                inline_messages: Vec::new(),
+            })
+            .expect("instruction bundle builds");
+
+        let contents = bundle
+            .materialized_messages
+            .iter()
+            .map(|message| message.model_content.as_str())
+            .collect::<Vec<_>>();
+        let thread_index = contents
+            .iter()
+            .position(|content| *content == "current user turn")
+            .expect("thread message is materialized");
+        let framing_index = contents
+            .iter()
+            .position(|content| content.starts_with("Recalled memory notice:"))
+            .expect("memory recall framing is materialized");
+        let snippet_index = contents
+            .iter()
+            .position(|content| content.contains("remembered preference"))
+            .expect("memory snippet is materialized");
+
+        assert!(thread_index < framing_index);
+        assert!(framing_index < snippet_index);
     }
 
     /// The framing is a memory-section header: with no memory snippets it must

@@ -2450,13 +2450,22 @@ fn convert_messages(
     Ok(coalesce_system_messages_at_start(converted))
 }
 
+/// Coalesce only the leading run of system messages into the provider-cached
+/// system block. Later system messages retain their transcript position as
+/// host reminders so per-turn context cannot invalidate that prefix.
 fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut system_content = Vec::new();
     let mut transcript = Vec::with_capacity(messages.len());
+    let mut in_leading_run = true;
     for message in messages {
         if message.role == Role::System {
-            system_content.push(message.content);
+            if in_leading_run {
+                system_content.push(message.content);
+            } else {
+                transcript.push(ChatMessage::host_reminder(&message.content));
+            }
         } else {
+            in_leading_run = false;
             transcript.push(message);
         }
     }

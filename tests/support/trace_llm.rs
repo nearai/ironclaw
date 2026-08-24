@@ -1086,7 +1086,7 @@ mod prompt_cache_tests {
                         ChatMessage::user(tag.clone()),
                     ];
                     let tools = vec![tool(&tag, serde_json::json!({"type": "object"}))];
-                    llm.next_step(&messages, Some(&tools))
+                    llm.next_step(&messages, Some(&tools), None)
                         .expect("concurrent trace step is available");
                 })
             })
@@ -1095,7 +1095,7 @@ mod prompt_cache_tests {
             thread.join().expect("capture thread completes");
         }
 
-        let captures = llm.captured_requests.lock().unwrap().clone();
+        let captures = llm.captured_calls.lock().unwrap().clone();
         assert_eq!(captures.len(), 16);
         for capture in captures {
             let user = capture
@@ -1115,6 +1115,7 @@ mod prompt_cache_tests {
                     ChatMessage::user("first"),
                 ],
                 Some(&stable_tools),
+                None,
             )
             .expect("first trace step is available");
         sequential
@@ -1124,6 +1125,7 @@ mod prompt_cache_tests {
                     ChatMessage::user("second"),
                 ],
                 Some(&stable_tools),
+                None,
             )
             .expect("second trace step is available");
         assert_eq!(sequential.prompt_cache_prefix_churn().len(), 1);

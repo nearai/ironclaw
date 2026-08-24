@@ -49,7 +49,7 @@ fn host_reminder_merges_into_the_trailing_tool_result_message() {
         blocks[0],
         AnthropicContentBlock::ToolResult { .. }
     ));
-    let AnthropicContentBlock::Text { text } = &blocks[1] else {
+    let AnthropicContentBlock::Text { text, .. } = &blocks[1] else {
         panic!("expected the reminder appended as a text block");
     };
     assert!(text.contains("Current date/time at loop start"));
