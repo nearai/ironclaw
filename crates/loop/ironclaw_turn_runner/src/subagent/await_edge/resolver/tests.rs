@@ -1782,19 +1782,18 @@ async fn background_delivery_appends_and_enqueues_for_live_parent() {
         .expect("background delivery to a live parent succeeds");
     assert_eq!(outcome, ResolveOutcome::Drained);
 
-    assert!(
-        fixture
-            .edge_store
-            .peek(
-                &fixture.child_scope,
-                fixture.parent_run_id,
-                fixture.child_run_id
-            )
-            .await
-            .expect("peek edge")
-            .is_none(),
-        "a delivered-and-attended edge must be closed"
-    );
+    let edge = fixture
+        .edge_store
+        .peek(
+            &fixture.child_scope,
+            fixture.parent_run_id,
+            fixture.child_run_id,
+        )
+        .await
+        .expect("peek edge")
+        .expect("the queue ack effect keeps the edge recoverable");
+    assert_eq!(edge.state, AwaitEdgeState::ResultAppended);
+    assert!(edge.attention_outcome.is_none());
 
     let row = single_system_message(&fixture).await;
     assert_eq!(row.status, MessageStatus::Finalized);
@@ -1821,6 +1820,154 @@ async fn background_delivery_appends_and_enqueues_for_live_parent() {
             child_run_id: fixture.child_run_id,
             message_ref: expected_ref,
         }
+    );
+    assert!(
+        request.ack_effect.is_some(),
+        "live background enqueue must carry the deferred edge acknowledgment"
+    );
+}
+
+#[tokio::test]
+async fn background_ack_effect_closes_edge_exactly_once() {
+    let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+        recon_scoped_fs(),
+    ));
+    let dependencies = Arc::clone(&process_store)
+        as Arc<
+            dyn ironclaw_processes::ProcessDependencyPort<
+                    Error = ironclaw_processes::ProcessJournalStoreError,
+                >,
+        >;
+    let enqueue = Arc::new(RecordingEnqueue::accepting());
+    let fixture = bg_fixture(
+        process_store,
+        dependencies,
+        Arc::clone(&enqueue),
+        Some((TurnRunId::new(), ironclaw_host_api::turn::TurnId::new())),
+        Arc::new(RecordingResumeCoordinator::default()) as Arc<dyn TurnCoordinator>,
+        None,
+    )
+    .await;
+    fixture
+        .resolver
+        .handle_child_terminal(&fixture.event)
+        .await
+        .expect("enqueue leaves the edge awaiting durable input acknowledgment");
+    let effect = BackgroundSubagentAck {
+        child_scope: fixture.child_scope.clone(),
+        parent_run_id: fixture.parent_run_id,
+        child_run_id: fixture.child_run_id,
+    };
+
+    <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_background_subagent_ack(
+        &fixture.resolver,
+        effect.clone(),
+    )
+    .await
+    .expect("first callback records attention and closes");
+    assert!(
+        fixture
+            .edge_store
+            .peek(
+                &fixture.child_scope,
+                fixture.parent_run_id,
+                fixture.child_run_id,
+            )
+            .await
+            .expect("peek after callback")
+            .is_none()
+    );
+
+    <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_background_subagent_ack(
+        &fixture.resolver,
+        effect,
+    )
+    .await
+    .expect("duplicate callback is idempotent");
+}
+
+#[tokio::test]
+async fn background_ack_effect_retries_close_after_attention_commit() {
+    let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
+        recon_scoped_fs(),
+    ));
+    let dependencies = Arc::new(
+        ScriptedDependencyFailures::new(Arc::clone(&process_store)
+            as Arc<
+                dyn ironclaw_processes::ProcessDependencyPort<
+                        Error = ironclaw_processes::ProcessJournalStoreError,
+                    >,
+            >)
+        .fail_consume_once(),
+    )
+        as Arc<
+            dyn ironclaw_processes::ProcessDependencyPort<
+                    Error = ironclaw_processes::ProcessJournalStoreError,
+                >,
+        >;
+    let enqueue = Arc::new(RecordingEnqueue::accepting());
+    let fixture = bg_fixture(
+        process_store,
+        dependencies,
+        Arc::clone(&enqueue),
+        Some((TurnRunId::new(), ironclaw_host_api::turn::TurnId::new())),
+        Arc::new(RecordingResumeCoordinator::default()) as Arc<dyn TurnCoordinator>,
+        None,
+    )
+    .await;
+    fixture
+        .resolver
+        .handle_child_terminal(&fixture.event)
+        .await
+        .expect("enqueue leaves the edge recoverable");
+    let effect = BackgroundSubagentAck {
+        child_scope: fixture.child_scope.clone(),
+        parent_run_id: fixture.parent_run_id,
+        child_run_id: fixture.child_run_id,
+    };
+
+    let first =
+        <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_background_subagent_ack(
+            &fixture.resolver,
+            effect.clone(),
+        )
+        .await;
+    assert!(
+        first.is_err(),
+        "the scripted close failure must be retained"
+    );
+    assert_eq!(
+        fixture
+            .edge_store
+            .peek(
+                &fixture.child_scope,
+                fixture.parent_run_id,
+                fixture.child_run_id,
+            )
+            .await
+            .expect("peek after failed close")
+            .expect("edge remains recoverable")
+            .state,
+        AwaitEdgeState::AttentionScheduled
+    );
+
+    <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_background_subagent_ack(
+        &fixture.resolver,
+        effect,
+    )
+    .await
+    .expect("retry closes the already-attended edge");
+    assert!(
+        fixture
+            .edge_store
+            .peek(
+                &fixture.child_scope,
+                fixture.parent_run_id,
+                fixture.child_run_id,
+            )
+            .await
+            .expect("peek after retry")
+            .is_none()
     );
 }
 
@@ -1889,7 +2036,7 @@ async fn background_delivery_replays_idempotently_after_crash_before_result_appe
 }
 
 #[tokio::test]
-async fn background_delivery_replays_safely_after_crash_before_record_attention() {
+async fn background_delivery_replays_safely_before_queue_acknowledgment() {
     let process_store = Arc::new(ironclaw_processes::ProcessJournalStore::new(
         recon_scoped_fs(),
     ));
@@ -1921,18 +2068,17 @@ async fn background_delivery_replays_safely_after_crash_before_record_attention(
     )
     .await;
 
-    let first = fixture.resolver.handle_child_terminal(&fixture.event).await;
-    assert!(
-        first.is_err(),
-        "a crash between the enqueue and record_attention must surface as an error"
-    );
+    fixture
+        .resolver
+        .handle_child_terminal(&fixture.event)
+        .await
+        .expect("enqueue succeeds without closing the await edge");
 
-    let second = fixture.resolver.handle_child_terminal(&fixture.event).await;
-    assert!(
-        second.is_err(),
-        "the scripted close/consume failure keeps the edge observable at AttentionScheduled \
-         instead of letting this same re-drive also close it"
-    );
+    fixture
+        .resolver
+        .handle_child_terminal(&fixture.event)
+        .await
+        .expect("re-drive remains idempotent before queue acknowledgment");
 
     let edge = fixture
         .edge_store
@@ -1944,11 +2090,8 @@ async fn background_delivery_replays_safely_after_crash_before_record_attention(
         .await
         .expect("peek edge")
         .expect("edge is not yet closed");
-    assert_eq!(edge.state, AwaitEdgeState::AttentionScheduled);
-    assert_eq!(
-        edge.attention_outcome,
-        Some(crate::subagent::await_edge::AttentionOutcome::Queued)
-    );
+    assert_eq!(edge.state, AwaitEdgeState::ResultAppended);
+    assert_eq!(edge.attention_outcome, None);
 
     assert_eq!(
         enqueue.requests().len(),
@@ -2665,10 +2808,10 @@ async fn sweep_fixture(
     }
 }
 
-/// (a) One `ResultAppended` background edge: the sweep re-attends — enqueues
-/// into the just-starting live run — then closes.
+/// (a) One `ResultAppended` background edge: the sweep re-attends and enqueues
+/// into the just-starting live run, leaving the edge for queue acknowledgment.
 #[tokio::test]
-async fn sweep_result_appended_edge_enqueues_into_starting_run_and_closes() {
+async fn sweep_result_appended_edge_enqueues_into_starting_run_and_waits_for_ack() {
     let enqueue = Arc::new(RecordingEnqueue::accepting());
     let live_run_id = TurnRunId::new();
     let live_turn_id = ironclaw_host_api::turn::TurnId::new();
@@ -2718,15 +2861,13 @@ async fn sweep_result_appended_edge_enqueues_into_starting_run_and_closes() {
     let requests = enqueue.requests();
     assert_eq!(requests.len(), 1, "the sweep must enqueue exactly once");
     assert_eq!(requests[0].run_id, live_run_id);
-    assert!(
-        fixture
-            .edge_store
-            .peek(&child_scope, fixture.parent_run_id, child_run_id)
-            .await
-            .expect("peek edge")
-            .is_none(),
-        "a delivered edge must close"
-    );
+    let edge = fixture
+        .edge_store
+        .peek(&child_scope, fixture.parent_run_id, child_run_id)
+        .await
+        .expect("peek edge")
+        .expect("the queue acknowledgment still owns closure");
+    assert_eq!(edge.state, AwaitEdgeState::ResultAppended);
     assert!(
         coordinator.activations().is_empty(),
         "a live starting run must never be woken by activate()"
@@ -2812,11 +2953,13 @@ async fn sweep_caps_at_max_queued_inputs_per_run_leaving_the_remainder_unclosed(
         }
     }
     assert_eq!(
-        closed,
-        ironclaw_loop_host::MAX_QUEUED_INPUTS_PER_RUN,
-        "the sweep must drain exactly its cap"
+        closed, 0,
+        "the sweep must not close before queue acknowledgment"
     );
-    assert_eq!(still_pending, 1, "exactly the remainder stays unclosed");
+    assert_eq!(
+        still_pending, total,
+        "all enqueued edges remain recoverable"
+    );
     assert_eq!(
         enqueue.requests().len(),
         ironclaw_loop_host::MAX_QUEUED_INPUTS_PER_RUN

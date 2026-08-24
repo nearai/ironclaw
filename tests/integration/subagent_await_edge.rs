@@ -12,9 +12,9 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{LoopInputCursorToken, LoopRunContext};
 use ironclaw_loop_host::{
     AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, EnqueueQueuedMessageRequest,
-    HostInputEnqueuePort, HostInputEnvelope, HostInputQueue, HostInputQueueError,
-    HostInputQueueReconcile, InMemoryHostInputQueue, LoopCapabilityResultWriter, ResolveOutcome,
-    SpawnSubagentMode, SubagentKindId,
+    HostInputAckEffectHandler, HostInputBatch, HostInputEnqueuePort, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostInputQueueReconcile, InMemoryHostInputQueue,
+    LoopCapabilityResultWriter, ResolveOutcome, SpawnSubagentMode, SubagentKindId,
 };
 use ironclaw_processes::{
     ClaimProcessesRequest, CloseProcessDependencyRequest, OpenProcessDependencyRequest,
@@ -571,6 +571,9 @@ async fn build_bg_fixture_custom(
     resolver
         .bind_input_enqueue(enqueue_port)
         .expect("bind input enqueue");
+    queue
+        .bind_ack_effect_handler(Arc::clone(&resolver) as Arc<dyn HostInputAckEffectHandler>)
+        .expect("bind await-edge acknowledgment effect handler");
 
     BgIntegrationFixture {
         system,
@@ -737,6 +740,21 @@ async fn system_messages(
         .collect()
 }
 
+async fn ack_batch(fixture: &BgIntegrationFixture, run_id: TurnRunId, batch: &HostInputBatch) {
+    fixture
+        .queue
+        .ack_consumed(
+            run_id,
+            batch
+                .inputs
+                .iter()
+                .map(|input| input.ack_token.clone())
+                .collect(),
+        )
+        .await
+        .expect("ack queued subagent result inputs");
+}
+
 // ─── Scenario 1: per-child delivery while the parent keeps running ────────
 
 /// Two background children settle (in this call order) while the parent's
@@ -812,6 +830,20 @@ async fn background_child_result_is_delivered_per_child_while_parent_runs() {
         (child_a, child_b),
         "arrival order matches settle order"
     );
+
+    for child_run_id in [child_a, child_b] {
+        assert_eq!(
+            fixture
+                .edge_store
+                .peek(&fixture.parent_scope, fixture.parent_run_id, child_run_id)
+                .await
+                .expect("peek edge before input ack")
+                .expect("the edge remains recoverable until input ack")
+                .state,
+            AwaitEdgeState::ResultAppended
+        );
+    }
+    ack_batch(&fixture, fixture.parent_run_id, &batch).await;
 
     for (scope, child_run_id) in [
         (&fixture.parent_scope, child_a),
@@ -1080,6 +1112,7 @@ async fn background_delivery_replay_is_idempotent() {
         1,
         "exactly one attention outcome survives the replay"
     );
+    ack_batch(&fixture, fixture.parent_run_id, &batch).await;
     assert!(
         fixture
             .edge_store
@@ -1188,14 +1221,15 @@ async fn streak_capped_result_waits_for_human() {
         .await
         .expect("human-initiated sweep drains the streak-capped edge");
 
-    assert!(
+    assert_eq!(
         fixture
             .edge_store
             .peek(&child_scope, fixture.parent_run_id, child_run_id)
             .await
             .expect("peek edge")
-            .is_none(),
-        "the human-provenance run-start sweep must drain and close the parked edge"
+            .expect("the edge remains recoverable until input ack")
+            .state,
+        AwaitEdgeState::AttentionDeferredStreakCap
     );
     let batch = fixture
         .queue
@@ -1206,6 +1240,16 @@ async fn streak_capped_result_waits_for_human() {
         batch.inputs.len(),
         1,
         "the streak-parked result is delivered into the human run's queue"
+    );
+    ack_batch(&fixture, human_run_id, &batch).await;
+    assert!(
+        fixture
+            .edge_store
+            .peek(&child_scope, fixture.parent_run_id, child_run_id)
+            .await
+            .expect("peek edge after input ack")
+            .is_none(),
+        "the human-provenance queue acknowledgment closes the parked edge"
     );
     let rows = system_messages(&fixture).await;
     assert_eq!(rows.len(), 1);

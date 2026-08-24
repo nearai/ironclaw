@@ -24,8 +24,9 @@ use ironclaw_loop_contracts::{AgentLoopHostError, LoopInput, LoopRunContext};
 #[cfg(test)]
 use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, EnqueueQueuedMessageRequest, HostInputEnqueuePort, HostInputQueueError,
-    ResolveOutcome, SpawnSubagentMode,
+    AwaitEdgeSettler, BackgroundSubagentAck, EnqueueQueuedMessageRequest,
+    HostInputAckEffectHandler, HostInputEnqueuePort, HostInputQueueError, ResolveOutcome,
+    SpawnSubagentMode,
 };
 #[cfg(test)]
 use ironclaw_threads::ThreadHistoryRequest;
@@ -183,6 +184,70 @@ where
             .map_err(|_| TurnError::InvalidRequest {
                 reason: "await-edge resolver input enqueue port already bound".to_string(),
             })
+    }
+
+    /// Apply a queue acknowledgment effect. The queue calls this only after
+    /// the parent has durably acknowledged consumption of its
+    /// `SubagentSettled` input. Both steps are idempotent: a retry first
+    /// re-observes `AttentionScheduled` or an already-closed edge, then only
+    /// performs the missing close operation.
+    async fn handle_background_subagent_ack_inner(
+        &self,
+        effect: BackgroundSubagentAck,
+    ) -> Result<(), TurnError> {
+        let Some(edge) = self
+            .store
+            .peek(
+                &effect.child_scope,
+                effect.parent_run_id,
+                effect.child_run_id,
+            )
+            .await
+            .map_err(store_error)?
+        else {
+            // A queue retry can race a successful callback's final CAS. The
+            // edge is already gone from the unclosed projection, so the
+            // durable effect is satisfied.
+            return Ok(());
+        };
+        match edge.state {
+            AwaitEdgeState::AttentionScheduled
+            | AwaitEdgeState::Drained
+            | AwaitEdgeState::Abandoned => self
+                .store
+                .close(
+                    &effect.child_scope,
+                    effect.parent_run_id,
+                    effect.child_run_id,
+                )
+                .await
+                .map_err(store_error),
+            AwaitEdgeState::ResultAppended | AwaitEdgeState::AttentionDeferredStreakCap => {
+                self.store
+                    .record_attention(
+                        &effect.child_scope,
+                        effect.parent_run_id,
+                        effect.child_run_id,
+                        super::AttentionOutcome::Queued,
+                    )
+                    .await
+                    .map_err(store_error)?;
+                self.store
+                    .close(
+                        &effect.child_scope,
+                        effect.parent_run_id,
+                        effect.child_run_id,
+                    )
+                    .await
+                    .map_err(store_error)
+            }
+            AwaitEdgeState::Open | AwaitEdgeState::Settled => Err(TurnError::Unavailable {
+                reason: format!(
+                    "background subagent acknowledgment arrived before result delivery (state: {:?})",
+                    edge.state
+                ),
+            }),
+        }
     }
 
     // ─── Owner-recovery (ported near-verbatim) ────────────────────────────
@@ -705,6 +770,11 @@ where
                     child_run_id,
                     message_ref: message_ref.clone(),
                 },
+                ack_effect: Some(BackgroundSubagentAck {
+                    child_scope: edge.child_scope.clone(),
+                    parent_run_id,
+                    child_run_id,
+                }),
             })
             .await;
         match enqueue_result {
@@ -724,22 +794,11 @@ where
                 });
             }
         }
-        self.store
-            .record_attention(
-                &edge.child_scope,
-                parent_run_id,
-                child_run_id,
-                super::AttentionOutcome::Queued,
-            )
-            .await
-            .map_err(store_error)?;
-
-        // Step 3: close only from `AttentionScheduled`.
-        self.store
-            .close(&edge.child_scope, parent_run_id, child_run_id)
-            .await
-            .map_err(store_error)?;
-
+        // The queue owns the durable acknowledgment boundary. The effect is
+        // retained on the queue entry until the parent loop acknowledges its
+        // consumed input; only that callback records attention and closes the
+        // await edge. Until then the edge remains `ResultAppended` and is
+        // recoverable after a crash between enqueue and consumption.
         Ok(ResolveOutcome::Drained)
     }
 
@@ -1270,6 +1329,23 @@ where
         self: Arc<Self>,
     ) -> Arc<dyn ironclaw_turns::TurnCommittedEventObserver> {
         self
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> HostInputAckEffectHandler for AwaitEdgeResolver<S>
+where
+    S: SessionThreadService + ?Sized + 'static,
+{
+    async fn handle_background_subagent_ack(
+        &self,
+        effect: BackgroundSubagentAck,
+    ) -> Result<(), HostInputQueueError> {
+        self.handle_background_subagent_ack_inner(effect)
+            .await
+            .map_err(|error| HostInputQueueError::Unavailable {
+                reason: error.to_string(),
+            })
     }
 }
 

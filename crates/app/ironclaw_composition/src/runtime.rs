@@ -65,7 +65,7 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{LoopHostMilestoneSink, LoopRunContext, RunProfileResolutionRequest};
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    AwaitEdgeWriter, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
     HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -236,7 +236,7 @@ struct RuntimeStoreParts {
     /// `AwaitEdgeSettler::bind_result_writer` (a deferred-binding trait method
     /// mirroring `bind_coordinator`).
     subagent_await_edge_writer: Arc<dyn AwaitEdgeWriter>,
-    subagent_await_edge_settler: Arc<dyn AwaitEdgeSettler>,
+    subagent_await_edge_resolver: Arc<AwaitEdgeResolver<dyn SessionThreadService>>,
     subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     /// Process lifecycle source for trigger active-run lookup. Every substrate
@@ -264,7 +264,7 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         processes.checkpoints(),
     )) as Arc<dyn ironclaw_turns::LoopCheckpointStore>;
 
-    let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = {
+    let (subagent_await_edge_writer, subagent_await_edge_resolver, subagent_await_edge_evidence) = {
         let store = Arc::new(AwaitEdgeStore::new(processes.dependencies()));
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
             Arc::clone(&store),
@@ -277,7 +277,7 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         ));
         (
             driver as Arc<dyn AwaitEdgeWriter>,
-            resolver as Arc<dyn AwaitEdgeSettler>,
+            resolver,
             store as Arc<dyn AwaitDependentRunEvidenceStore>,
         )
     };
@@ -295,7 +295,7 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         budget_gate_store,
         broadcast_budget_event_sink,
         subagent_await_edge_writer,
-        subagent_await_edge_settler,
+        subagent_await_edge_resolver,
         subagent_await_edge_evidence,
         trigger_repository: Arc::clone(&services.trigger_repository),
         admin_secret_provisioner,
@@ -3217,7 +3217,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         budget_gate_store,
         broadcast_budget_event_sink,
         subagent_await_edge_writer,
-        subagent_await_edge_settler,
+        subagent_await_edge_resolver,
         subagent_await_edge_evidence,
         trigger_repository,
         admin_secret_provisioner,
@@ -3786,7 +3786,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
     // `runtime_store_parts` before `capability_result_writer` existed. Bind it
     // now, exactly once, before the resolver's settler ever runs.
-    subagent_await_edge_settler
+    subagent_await_edge_resolver
         .bind_result_writer(Arc::clone(&capability_result_writer))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("await-edge resolver result writer bind failed: {error}"),
@@ -3813,6 +3813,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
             Arc::clone(&thread_service),
         ))
     };
+    host_input_queue
+        .bind_ack_effect_handler(Arc::clone(&subagent_await_edge_resolver) as Arc<_>)
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("await-edge resolver ack effect handler bind failed: {error}"),
+        })?;
     let host_input_queue_reader: Arc<dyn ironclaw_loop_host::HostInputQueue> =
         host_input_queue.clone();
     let host_input_queue_for_cancel_reconcile: Arc<
@@ -3824,7 +3829,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
     // Deferred bind: background delivery enqueues a settled child's result as
     // steering input for the parent's live run through this queue.
-    subagent_await_edge_settler
+    subagent_await_edge_resolver
         .bind_input_enqueue(Arc::clone(&host_input_enqueue))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("await-edge resolver input enqueue port bind failed: {error}"),
@@ -3889,7 +3894,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         capability_surface_resolver,
         capability_result_writer,
         subagent_await_edge_writer,
-        subagent_await_edge_settler,
+        subagent_await_edge_settler: subagent_await_edge_resolver,
         subagent_await_edge_evidence,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
