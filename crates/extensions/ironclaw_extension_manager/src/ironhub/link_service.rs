@@ -516,7 +516,8 @@ fn authenticate_install(
     if let Some(url) = request.private_manifest_url.as_deref()
         && (url.is_empty()
             || url.len() > MAX_PRIVATE_MANIFEST_URL_BYTES
-            || url.chars().any(char::is_control))
+            || url.chars().any(char::is_control)
+            || !url.starts_with("https://"))
     {
         return Err(IronhubLinkError::InvalidInput {
             reason: "invalid install private_manifest_url".to_string(),
@@ -776,6 +777,18 @@ mod tests {
             (
                 "private_manifest_url",
                 format!("https://hub.ironclaw.com/{}", "x".repeat(2048)),
+            ),
+            (
+                "private_manifest_url",
+                "http://hub.ironclaw.com/private/manifest".to_string(),
+            ),
+            (
+                "private_manifest_url",
+                "file:///etc/passwd".to_string(),
+            ),
+            (
+                "private_manifest_url",
+                "javascript:alert(1)".to_string(),
             ),
         ] {
             let mut request = valid.clone();
