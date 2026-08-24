@@ -102,8 +102,40 @@ async def test_rate_limit_retry_uses_safe_default_for_invalid_header(monkeypatch
         sleeps.append(delay)
 
     monkeypatch.setattr(asyncio, "sleep", capture_sleep)
+    deadline = asyncio.get_running_loop().time() + 10.0
 
     assert await helpers.retry_after_rate_limit(
-        response(429, headers={"retry-after": "not-a-number"})
+        response(429, headers={"retry-after": "not-a-number"}), deadline=deadline
+    )
+    assert sleeps == [1.0]
+
+
+async def test_rate_limit_retry_never_sleeps_past_polling_deadline(monkeypatch):
+    sleeps = []
+
+    async def capture_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", capture_sleep)
+    deadline = asyncio.get_running_loop().time() + 0.25
+
+    assert await helpers.retry_after_rate_limit(
+        response(429, headers={"retry-after": "3600"}), deadline=deadline
+    )
+    assert len(sleeps) == 1
+    assert 0.0 <= sleeps[0] <= 0.25
+
+
+async def test_rate_limit_retry_rejects_non_finite_header(monkeypatch):
+    sleeps = []
+
+    async def capture_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", capture_sleep)
+    deadline = asyncio.get_running_loop().time() + 10.0
+
+    assert await helpers.retry_after_rate_limit(
+        response(429, headers={"retry-after": "nan"}), deadline=deadline
     )
     assert sleeps == [1.0]

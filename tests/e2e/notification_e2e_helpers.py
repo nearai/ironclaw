@@ -1,13 +1,14 @@
 """Helpers for exercising the production-wired notification Inbox in E2E tests."""
 
 import asyncio
+import math
 
 import httpx
 
 from reborn_webui_harness import create_thread, send_message, wait_for_assistant_message
 
 
-async def retry_after_rate_limit(response: httpx.Response) -> bool:
+async def retry_after_rate_limit(response: httpx.Response, *, deadline: float) -> bool:
     """Sleep for a bounded Retry-After delay when the API throttles polling."""
     if response.status_code != 429:
         return False
@@ -15,7 +16,10 @@ async def retry_after_rate_limit(response: httpx.Response) -> bool:
         retry_after = float(response.headers.get("retry-after", "1"))
     except (TypeError, ValueError):
         retry_after = 1.0
-    await asyncio.sleep(max(retry_after, 0.5))
+    if not math.isfinite(retry_after):
+        retry_after = 1.0
+    remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
+    await asyncio.sleep(min(max(retry_after, 0.5), remaining))
     return True
 
 
@@ -49,7 +53,7 @@ async def create_notification_automation(
             params={"include_completed": "true", "limit": 100, "run_limit": 0},
             timeout=10,
         )
-        if await retry_after_rate_limit(response):
+        if await retry_after_rate_limit(response, deadline=deadline):
             continue
         response.raise_for_status()
         last_body = response.json()
@@ -94,7 +98,7 @@ async def run_notification_automation(
             params={"include_completed": "true", "limit": 100, "run_limit": 10},
             timeout=10,
         )
-        if await retry_after_rate_limit(listed):
+        if await retry_after_rate_limit(listed, deadline=deadline):
             continue
         listed.raise_for_status()
         last_body = listed.json()
@@ -140,7 +144,7 @@ async def wait_for_notification(
             params={"limit": 100},
             timeout=10,
         )
-        if await retry_after_rate_limit(response):
+        if await retry_after_rate_limit(response, deadline=deadline):
             continue
         response.raise_for_status()
         last_body = response.json()
