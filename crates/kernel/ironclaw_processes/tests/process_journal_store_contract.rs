@@ -3252,9 +3252,19 @@ async fn assert_actionable_dependency_query_merges_states_with_one_pair_cursor<F
 
 #[tokio::test]
 async fn actionable_dependency_query_pages_each_state_after_dependent_filter() {
-    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    assert_actionable_dependency_query_pages_each_state_after_dependent_filter(
+        ProcessJournalStore::new(in_memory_backed_processes_filesystem()),
+    )
+    .await;
+}
+
+async fn assert_actionable_dependency_query_pages_each_state_after_dependent_filter<F>(
+    store: ProcessJournalStore<F>,
+) where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
     let root_scope = scope();
-    let dependent = ProcessId::from_uuid(Uuid::from_u128(0x100));
+    let dependent = ProcessId::from_uuid(Uuid::from_u128(0x500));
     submit_internal_process(&store, &root_scope, dependent).await;
 
     let settled_dependency = ProcessId::from_uuid(Uuid::from_u128(0x300));
@@ -3470,6 +3480,10 @@ async fn query_process_dependencies_bounded_mode_holds_on_libsql() {
         ProcessJournalStore::new(Arc::clone(&filesystem)),
     )
     .await;
+    assert_actionable_dependency_query_pages_each_state_after_dependent_filter(
+        ProcessJournalStore::new(Arc::clone(&filesystem)),
+    )
+    .await;
     assert_actionable_dependency_query_does_not_starve_behind_open_rows(ProcessJournalStore::new(
         filesystem,
     ))
@@ -3495,6 +3509,10 @@ async fn query_process_dependencies_bounded_mode_holds_on_postgres() {
     ))
     .await;
     assert_actionable_dependency_query_merges_states_with_one_pair_cursor(
+        ProcessJournalStore::new(Arc::clone(&filesystem)),
+    )
+    .await;
+    assert_actionable_dependency_query_pages_each_state_after_dependent_filter(
         ProcessJournalStore::new(Arc::clone(&filesystem)),
     )
     .await;
