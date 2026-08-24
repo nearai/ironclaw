@@ -117,7 +117,7 @@ pub enum DbWriteMeasurementError {
     BeginAndCleanup {
         #[source]
         primary: DbProbeError,
-        cleanup: DbProbeError,
+        cleanup: Box<DbProbeError>,
     },
     #[error("measured workload failed: {0}")]
     Workload(#[source] BoxError),
@@ -125,7 +125,7 @@ pub enum DbWriteMeasurementError {
     WorkloadAndCleanup {
         #[source]
         primary: BoxError,
-        cleanup: DbProbeError,
+        cleanup: Box<DbProbeError>,
     },
     #[error("database probe capture failed: {0}")]
     Capture(#[source] DbProbeError),
@@ -133,7 +133,7 @@ pub enum DbWriteMeasurementError {
     CaptureAndCleanup {
         #[source]
         primary: DbProbeError,
-        cleanup: DbProbeError,
+        cleanup: Box<DbProbeError>,
     },
     #[error("database probe cleanup failed: {0}")]
     Cleanup(#[source] DbProbeError),
@@ -144,7 +144,7 @@ impl DbWriteMeasurementError {
         match self {
             Self::BeginAndCleanup { cleanup, .. }
             | Self::WorkloadAndCleanup { cleanup, .. }
-            | Self::CaptureAndCleanup { cleanup, .. } => Some(cleanup),
+            | Self::CaptureAndCleanup { cleanup, .. } => Some(cleanup.as_ref()),
             Self::Cleanup(error) => Some(error),
             Self::Begin(_) | Self::Workload(_) | Self::Capture(_) => None,
         }
@@ -165,7 +165,10 @@ where
         Err(primary) => {
             return match finish(config).await {
                 Ok(()) => Err(DbWriteMeasurementError::Begin(primary)),
-                Err(cleanup) => Err(DbWriteMeasurementError::BeginAndCleanup { primary, cleanup }),
+                Err(cleanup) => Err(DbWriteMeasurementError::BeginAndCleanup {
+                    primary,
+                    cleanup: Box::new(cleanup),
+                }),
             };
         }
     };
@@ -176,9 +179,10 @@ where
         Err(primary) => {
             return match finish(config).await {
                 Ok(()) => Err(DbWriteMeasurementError::Workload(primary)),
-                Err(cleanup) => {
-                    Err(DbWriteMeasurementError::WorkloadAndCleanup { primary, cleanup })
-                }
+                Err(cleanup) => Err(DbWriteMeasurementError::WorkloadAndCleanup {
+                    primary,
+                    cleanup: Box::new(cleanup),
+                }),
             };
         }
     };
@@ -188,9 +192,10 @@ where
         Err(primary) => {
             return match finish(config).await {
                 Ok(()) => Err(DbWriteMeasurementError::Capture(primary)),
-                Err(cleanup) => {
-                    Err(DbWriteMeasurementError::CaptureAndCleanup { primary, cleanup })
-                }
+                Err(cleanup) => Err(DbWriteMeasurementError::CaptureAndCleanup {
+                    primary,
+                    cleanup: Box::new(cleanup),
+                }),
             };
         }
     };

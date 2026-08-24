@@ -4,15 +4,17 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ironclaw_host_api::ids::ProcessId;
-use ironclaw_host_api::turn::{TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{LoopMessageRef, TurnRunId, TurnScope};
 use ironclaw_processes::{
     CloseProcessDependencyRequest, ProcessDependencyPort, ProcessDependencyQuery,
     ProcessDependencyRecord, ProcessDependencyState, ProcessJournalStoreError,
     ProcessLifecycleStatus, ProcessTerminalEvidence, SettleProcessDependencyRequest,
+    TransitionProcessDependencyRequest,
 };
 
 use super::{
-    AwaitEdge, AwaitEdgeState, AwaitEdgeStoreError, EdgeTerminalKind, ReservationReleaseState,
+    AttentionOutcome, AwaitEdge, AwaitEdgeState, AwaitEdgeStoreError, EdgeTerminalKind,
+    ReservationReleaseState,
 };
 
 pub struct AwaitEdgeStore {
@@ -48,50 +50,71 @@ impl AwaitEdgeStore {
         }
     }
 
+    /// Rebuild the edge from the one blob production ever writes into
+    /// dependency metadata: `AwaitedChildSetRecord` (`subagent_spawn_port.rs`),
+    /// which the delivery-chain CAS then merges `appended_message_ref` and
+    /// `attention_outcome` into as sibling top-level keys — never replacing the
+    /// shape, only widening it. Those two keys are read back off the raw blob
+    /// because `AwaitedChildSetRecord` does not carry them.
     fn edge_from_record(record: ProcessDependencyRecord) -> Result<AwaitEdge, AwaitEdgeStoreError> {
-        let mut edge = match serde_json::from_value::<AwaitEdge>(record.metadata.clone()) {
-            Ok(edge) => edge,
-            Err(_) => {
-                let submitted: ironclaw_loop_host::AwaitedChildSetRecord =
-                    serde_json::from_value(record.metadata).map_err(|error| {
-                        AwaitEdgeStoreError::Backend {
-                            reason: format!(
-                                "process dependency metadata deserialize failed: {error}"
-                            ),
-                        }
-                    })?;
-                AwaitEdge {
-                    child_scope: submitted.child_scope,
-                    child_thread_id: submitted.child_thread_id,
-                    parent_thread_id: submitted.parent_run_context.thread_id.clone(),
-                    parent_run_context: submitted.parent_run_context,
-                    tree_root_run_id: submitted.tree_root_run_id,
-                    gate_ref: submitted.gate_ref,
-                    subagent_kind: submitted.subagent_kind,
-                    spawn_capability_id: submitted.spawn_capability_id,
-                    spawn_provider_call_id: submitted.spawn_provider_call_id,
-                    result_ref: submitted.result_ref,
-                    mode: submitted.mode,
-                    state: AwaitEdgeState::Open,
-                    terminal_kind: None,
-                    terminal_byte_len: None,
-                    terminal_reason: None,
-                    reservation_release: ReservationReleaseState::Unclaimed,
-                    created_at: record.created_at,
-                    settled_at: None,
+        let appended_message_ref = record
+            .metadata
+            .get("appended_message_ref")
+            .cloned()
+            .map(serde_json::from_value::<LoopMessageRef>)
+            .transpose()
+            .map_err(|error| AwaitEdgeStoreError::Backend {
+                reason: format!("appended_message_ref deserialize failed: {error}"),
+            })?;
+        let attention_outcome = record
+            .metadata
+            .get("attention_outcome")
+            .cloned()
+            .map(serde_json::from_value::<AttentionOutcome>)
+            .transpose()
+            .map_err(|error| AwaitEdgeStoreError::Backend {
+                reason: format!("attention_outcome deserialize failed: {error}"),
+            })?;
+        let submitted: ironclaw_loop_host::AwaitedChildSetRecord =
+            serde_json::from_value(record.metadata).map_err(|error| {
+                AwaitEdgeStoreError::Backend {
+                    reason: format!("process dependency metadata deserialize failed: {error}"),
                 }
-            }
+            })?;
+        let mut edge = AwaitEdge {
+            child_scope: submitted.child_scope,
+            child_thread_id: submitted.child_thread_id,
+            parent_thread_id: submitted.parent_run_context.thread_id.clone(),
+            parent_run_context: submitted.parent_run_context,
+            tree_root_run_id: submitted.tree_root_run_id,
+            gate_ref: submitted.gate_ref,
+            subagent_kind: submitted.subagent_kind,
+            spawn_capability_id: submitted.spawn_capability_id,
+            spawn_provider_call_id: submitted.spawn_provider_call_id,
+            result_ref: submitted.result_ref,
+            mode: submitted.mode,
+            state: AwaitEdgeState::Open,
+            terminal_kind: None,
+            terminal_byte_len: None,
+            terminal_reason: None,
+            reservation_release: ReservationReleaseState::Unclaimed,
+            appended_message_ref,
+            attention_outcome,
+            created_at: record.created_at,
+            settled_at: None,
         };
         edge.state = match record.state {
             ProcessDependencyState::Open => AwaitEdgeState::Open,
             ProcessDependencyState::Settled => AwaitEdgeState::Settled,
+            ProcessDependencyState::ResultAppended => AwaitEdgeState::ResultAppended,
+            ProcessDependencyState::AttentionScheduled => AwaitEdgeState::AttentionScheduled,
+            // The kernel keeps this name domain-neutral; the loop tier is where
+            // "which cap deferred it" is knowable, so the spelling differs.
+            ProcessDependencyState::AttentionDeferred => AwaitEdgeState::AttentionDeferredStreakCap,
             ProcessDependencyState::Consumed => AwaitEdgeState::Drained,
             ProcessDependencyState::Abandoned => AwaitEdgeState::Abandoned,
         };
-        edge.reservation_release = if matches!(
-            record.state,
-            ProcessDependencyState::Consumed | ProcessDependencyState::Abandoned
-        ) {
+        edge.reservation_release = if record.state.is_closed() {
             ReservationReleaseState::Released
         } else {
             ReservationReleaseState::Unclaimed
@@ -143,6 +166,102 @@ impl AwaitEdgeStore {
                     sanitized_reason: terminal_reason,
                 },
                 settled_at: Utc::now(),
+            })
+            .await
+            .map_err(map_process_error)?
+            .map(Self::edge_from_record)
+            .transpose()
+    }
+
+    /// `Settled -> ResultAppended`, recording the parent-thread message the
+    /// child's result landed as. Replaying an append that already landed
+    /// returns the ref already recorded rather than writing a second one.
+    pub async fn record_result_appended(
+        &self,
+        scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        message_ref: LoopMessageRef,
+    ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
+        self.transition(
+            scope,
+            parent_run_id,
+            child_run_id,
+            ProcessDependencyState::ResultAppended,
+            Some(serde_json::json!({"appended_message_ref": message_ref.as_str()})),
+        )
+        .await
+    }
+
+    /// `ResultAppended | AttentionDeferred -> AttentionScheduled`, recording how
+    /// the parent was made attentive.
+    ///
+    /// Two predecessors are legal, because draining a parked edge *is*
+    /// scheduling attention (design §4.1/§4.2: a streak-capped edge stays
+    /// unclosed "until a permitted or human-initiated run start drains it").
+    /// Without the second one `AttentionDeferredStreakCap` would be a dead end:
+    /// no forward path, and `consume` takes only `Settled | AttentionScheduled`.
+    /// The kernel owns that relation, so this caller names only its target.
+    pub async fn record_attention(
+        &self,
+        scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        outcome: AttentionOutcome,
+    ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
+        let outcome_value =
+            serde_json::to_value(outcome).map_err(|error| AwaitEdgeStoreError::Backend {
+                reason: format!("attention outcome serialize failed: {error}"),
+            })?;
+        self.transition(
+            scope,
+            parent_run_id,
+            child_run_id,
+            ProcessDependencyState::AttentionScheduled,
+            Some(serde_json::json!({"attention_outcome": outcome_value})),
+        )
+        .await
+    }
+
+    /// `ResultAppended -> AttentionDeferred`: the result is durably appended
+    /// but the parent hit its consecutive-interruption cap, so attention is
+    /// parked. The edge stays unclosed and claimable.
+    pub async fn defer_streak_capped(
+        &self,
+        scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
+        self.transition(
+            scope,
+            parent_run_id,
+            child_run_id,
+            ProcessDependencyState::AttentionDeferred,
+            None,
+        )
+        .await
+    }
+
+    /// One CAS over the kernel's state column: the write lands only if the
+    /// stored state is a legal predecessor of `next`. `metadata` is merged into
+    /// the stored blob — which *is* the serialized edge — never substituted for
+    /// it.
+    async fn transition(
+        &self,
+        scope: &TurnScope,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        next: ProcessDependencyState,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Option<AwaitEdge>, AwaitEdgeStoreError> {
+        self.dependencies
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: Self::process_id(parent_run_id),
+                dependency_process_id: Self::process_id(child_run_id),
+                scope: scope.to_resource_scope(),
+                next,
+                metadata,
+                transitioned_at: Utc::now(),
             })
             .await
             .map_err(map_process_error)?
@@ -235,8 +354,20 @@ impl AwaitEdgeStore {
             return Ok(());
         };
         match edge.state {
-            AwaitEdgeState::Settled => self.consume(scope, parent_run_id, child_run_id).await,
-            AwaitEdgeState::Open | AwaitEdgeState::Drained | AwaitEdgeState::Abandoned => Ok(()),
+            // The two states the kernel will consume — closing releases the
+            // descendant reservation in the same journal command.
+            AwaitEdgeState::Settled | AwaitEdgeState::AttentionScheduled => {
+                self.consume(scope, parent_run_id, child_run_id).await
+            }
+            // Still in flight. `ResultAppended` has no attention recorded yet
+            // and a streak-capped edge is parked for a later sweep; the kernel
+            // refuses to consume either, because closing would strand the
+            // parent with an undelivered result.
+            AwaitEdgeState::Open
+            | AwaitEdgeState::ResultAppended
+            | AwaitEdgeState::AttentionDeferredStreakCap
+            | AwaitEdgeState::Drained
+            | AwaitEdgeState::Abandoned => Ok(()),
         }
     }
 }
@@ -309,196 +440,4 @@ fn map_process_error(error: ironclaw_processes::ProcessJournalStoreError) -> Awa
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::Utc;
-    use ironclaw_host_api::ids::{AgentId, CapabilityId, ProcessId, TenantId, ThreadId, UserId};
-    use ironclaw_host_api::turn::{LoopResultRef, TurnActor, TurnGateRef, TurnRunId, TurnScope};
-    use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
-    use ironclaw_processes::{ProcessDependencyRecord, ProcessDependencyState};
-
-    use super::*;
-
-    fn edge_fixture() -> (TurnRunId, TurnRunId, AwaitEdge) {
-        let tenant_id = TenantId::new("store-transition-tenant").expect("tenant");
-        let user_id = UserId::new("store-transition-user").expect("user");
-        let agent_id = AgentId::new("store-transition-agent").expect("agent");
-        let parent_thread_id =
-            ThreadId::new("store-transition-parent-thread").expect("parent thread");
-        let child_thread_id = ThreadId::new("store-transition-child-thread").expect("child thread");
-        let parent_run_id = TurnRunId::new();
-        let child_run_id = TurnRunId::new();
-        let parent_scope = TurnScope::new_with_owner(
-            tenant_id.clone(),
-            Some(agent_id.clone()),
-            None,
-            parent_thread_id.clone(),
-            Some(user_id.clone()),
-        );
-        let child_scope = TurnScope::new_with_owner(
-            tenant_id,
-            Some(agent_id),
-            None,
-            child_thread_id.clone(),
-            Some(user_id.clone()),
-        );
-        let mut parent_run_context =
-            ironclaw_agent_loop::test_support::test_run_context("await-store-transition");
-        parent_run_context.scope = parent_scope;
-        parent_run_context.thread_id = parent_thread_id.clone();
-        parent_run_context.run_id = parent_run_id;
-        parent_run_context.actor = Some(TurnActor::new(user_id));
-        (
-            parent_run_id,
-            child_run_id,
-            AwaitEdge {
-                child_scope,
-                child_thread_id,
-                parent_thread_id,
-                parent_run_context,
-                tree_root_run_id: parent_run_id,
-                gate_ref: TurnGateRef::new("gate:store-transition").expect("gate"),
-                subagent_kind: SubagentKindId::new("general").expect("kind"),
-                spawn_capability_id: CapabilityId::new(
-                    ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
-                )
-                .expect("capability"),
-                spawn_provider_call_id: Some("spawn-call-store-transition".to_string()),
-                result_ref: LoopResultRef::new("result:store-transition").expect("result"),
-                mode: SpawnSubagentMode::Blocking,
-                state: AwaitEdgeState::Open,
-                terminal_kind: None,
-                terminal_byte_len: None,
-                terminal_reason: None,
-                reservation_release: ReservationReleaseState::Unclaimed,
-                created_at: Utc::now(),
-                settled_at: None,
-            },
-        )
-    }
-
-    fn record(
-        parent_run_id: TurnRunId,
-        child_run_id: TurnRunId,
-        edge: &AwaitEdge,
-        state: ProcessDependencyState,
-        status: ProcessLifecycleStatus,
-    ) -> ProcessDependencyRecord {
-        ProcessDependencyRecord {
-            dependent_process_id: ProcessId::from_uuid(parent_run_id.as_uuid()),
-            dependency_process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
-            root_process_id: ProcessId::from_uuid(parent_run_id.as_uuid()),
-            scope: edge.child_scope.to_resource_scope(),
-            group_ref: Some(edge.gate_ref.as_str().to_string()),
-            state,
-            terminal: Some(ProcessTerminalEvidence {
-                status,
-                output_bytes: Some(42),
-                sanitized_reason: Some("terminal-reason".to_string()),
-            }),
-            created_at: edge.created_at,
-            settled_at: Some(Utc::now()),
-            consumed_at: None,
-            metadata: serde_json::to_value(edge).expect("serialize edge"),
-        }
-    }
-
-    #[test]
-    fn edge_projection_matrix_covers_every_dependency_and_terminal_state() {
-        let (parent_run_id, child_run_id, edge) = edge_fixture();
-        let cases = [
-            (
-                ProcessDependencyState::Open,
-                AwaitEdgeState::Open,
-                ReservationReleaseState::Unclaimed,
-                ProcessLifecycleStatus::Completed,
-                Some(EdgeTerminalKind::Completed),
-            ),
-            (
-                ProcessDependencyState::Settled,
-                AwaitEdgeState::Settled,
-                ReservationReleaseState::Unclaimed,
-                ProcessLifecycleStatus::Failed,
-                Some(EdgeTerminalKind::Failed),
-            ),
-            (
-                ProcessDependencyState::Consumed,
-                AwaitEdgeState::Drained,
-                ReservationReleaseState::Released,
-                ProcessLifecycleStatus::Cancelled,
-                Some(EdgeTerminalKind::Cancelled),
-            ),
-            (
-                ProcessDependencyState::Abandoned,
-                AwaitEdgeState::Abandoned,
-                ReservationReleaseState::Released,
-                ProcessLifecycleStatus::RecoveryRequired,
-                Some(EdgeTerminalKind::RecoveryRequired),
-            ),
-            (
-                ProcessDependencyState::Open,
-                AwaitEdgeState::Open,
-                ReservationReleaseState::Unclaimed,
-                ProcessLifecycleStatus::Running,
-                None,
-            ),
-        ];
-
-        for (state, expected_state, expected_release, terminal, expected_terminal) in cases {
-            let projected = AwaitEdgeStore::edge_from_record(record(
-                parent_run_id,
-                child_run_id,
-                &edge,
-                state,
-                terminal,
-            ))
-            .expect("project edge");
-            assert_eq!(projected.state, expected_state);
-            assert_eq!(projected.reservation_release, expected_release);
-            assert_eq!(projected.terminal_kind, expected_terminal);
-            assert_eq!(projected.terminal_byte_len, Some(42));
-            assert_eq!(
-                projected.terminal_reason.as_deref(),
-                Some("terminal-reason")
-            );
-        }
-    }
-
-    #[test]
-    fn legacy_edge_metadata_fallback_and_malformed_metadata_fail_closed() {
-        let (parent_run_id, child_run_id, edge) = edge_fixture();
-        let submitted = AwaitedChildSetRecord {
-            gate_ref: edge.gate_ref.clone(),
-            parent_run_context: edge.parent_run_context.clone(),
-            tree_root_run_id: edge.tree_root_run_id,
-            child_scope: edge.child_scope.clone(),
-            child_run_id,
-            child_thread_id: edge.child_thread_id.clone(),
-            subagent_kind: edge.subagent_kind.clone(),
-            spawn_capability_id: edge.spawn_capability_id.clone(),
-            spawn_provider_call_id: edge.spawn_provider_call_id.clone(),
-            result_ref: edge.result_ref.clone(),
-            mode: edge.mode,
-        };
-        let mut legacy = record(
-            parent_run_id,
-            child_run_id,
-            &edge,
-            ProcessDependencyState::Open,
-            ProcessLifecycleStatus::Completed,
-        );
-        legacy.metadata = serde_json::to_value(submitted).expect("serialize legacy metadata");
-        let projected = AwaitEdgeStore::edge_from_record(legacy).expect("project legacy edge");
-        assert_eq!(projected.state, AwaitEdgeState::Open);
-        assert_eq!(projected.gate_ref, edge.gate_ref);
-
-        let mut malformed = record(
-            parent_run_id,
-            child_run_id,
-            &edge,
-            ProcessDependencyState::Open,
-            ProcessLifecycleStatus::Completed,
-        );
-        malformed.metadata = serde_json::json!({"unexpected": true});
-        assert!(AwaitEdgeStore::edge_from_record(malformed).is_err());
-    }
-}
+mod tests;

@@ -6,15 +6,18 @@ use std::{
 
 use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy},
+    dispatch::truncate_capability_display_text,
     http::{
         RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, is_sensitive_runtime_response_header,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, is_sensitive_runtime_response_header,
     },
     ids::{CapabilityId, SecretHandle},
     resource::ResourceScope,
+    result_meta::MODEL_DIAGNOSTIC_MAX_BYTES,
     runtime::RuntimeKind,
 };
+use ironclaw_safety::LeakDetector;
 use serde_json::{Map, Value};
 use tokio::runtime::Handle;
 
@@ -31,6 +34,9 @@ static WASM_HTTP_EGRESS_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, WasmHo
                 WasmHostError::Failed(format!("WASM HTTP runtime unavailable: {error}"))
             })
     });
+
+static WASM_CREDENTIAL_DIAGNOSTIC_LEAK_DETECTOR: LazyLock<LeakDetector> =
+    LazyLock::new(LeakDetector::new);
 
 /// HTTP request shape exposed through the WIT `host.http-request` import.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,16 +530,25 @@ fn encode_wasm_headers(headers: Vec<(String, String)>) -> Result<String, WasmHos
 fn wasm_http_error(error: RuntimeHttpEgressError) -> WasmHostError {
     let request_was_sent = wasm_http_request_was_sent(&error);
     let reason = wasm_http_error_reason(&error).to_string();
-    if request_was_sent {
-        return WasmHostError::FailedAfterRequestSent(reason);
-    }
-
-    match error {
-        RuntimeHttpEgressError::Credential { .. } => WasmHostError::Unavailable(reason),
-        RuntimeHttpEgressError::Request { .. } | RuntimeHttpEgressError::Network { .. } => {
+    let code = Some(reason.clone());
+    match error.reason_code() {
+        RuntimeHttpEgressReasonCode::CredentialUnavailable => WasmHostError::AuthRequired(reason),
+        RuntimeHttpEgressReasonCode::RequestDenied | RuntimeHttpEgressReasonCode::PolicyDenied => {
             WasmHostError::Denied(reason)
         }
-        RuntimeHttpEgressError::Response { .. } => WasmHostError::Failed(reason),
+        RuntimeHttpEgressReasonCode::NetworkError => WasmHostError::Network {
+            message: reason,
+            code,
+            request_sent: request_was_sent,
+        },
+        RuntimeHttpEgressReasonCode::ResponseError
+        | RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded
+            if request_was_sent =>
+        {
+            WasmHostError::FailedAfterRequestSent(reason)
+        }
+        RuntimeHttpEgressReasonCode::ResponseError
+        | RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => WasmHostError::Failed(reason),
     }
 }
 
@@ -553,8 +568,18 @@ fn wasm_http_error_reason(error: &RuntimeHttpEgressError) -> &'static str {
     error.stable_runtime_reason()
 }
 
-fn wasm_credential_provider_error(_error: WasmHostError) -> WasmHostError {
-    WasmHostError::Unavailable("credential_unavailable".to_string())
+fn wasm_credential_provider_error(error: WasmHostError) -> WasmHostError {
+    let cause = sanitize_wasm_credential_diagnostic(&error.to_string());
+    tracing::debug!(
+        credential_error = %cause,
+        "WASM runtime credential provider failure cause"
+    );
+    WasmHostError::AuthRequired("credential_unavailable".to_string())
+}
+
+fn sanitize_wasm_credential_diagnostic(value: &str) -> String {
+    let (redacted, _) = WASM_CREDENTIAL_DIAGNOSTIC_LEAK_DETECTOR.redact_all_secrets(value);
+    truncate_capability_display_text(&redacted, MODEL_DIAGNOSTIC_MAX_BYTES).text
 }
 
 fn redacted_http_url_origin(url: &str) -> String {
@@ -700,7 +725,11 @@ impl Default for WitToolHost {
 
 #[cfg(test)]
 mod tests {
-    use super::redacted_http_url_origin;
+    use super::{
+        redacted_http_url_origin, sanitize_wasm_credential_diagnostic,
+        wasm_credential_provider_error,
+    };
+    use crate::WasmHostError;
 
     #[test]
     fn redacted_http_url_origin_drops_path_query_and_fragment() {
@@ -713,5 +742,23 @@ mod tests {
             "https://example.com:8443"
         );
         assert_eq!(redacted_http_url_origin("not a url"), "<invalid-url>");
+    }
+
+    #[test]
+    fn credential_provider_failure_is_redacted_before_fixed_auth_mapping() {
+        let leaked_token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let cause = format!("credential backend rejected token {leaked_token}");
+        let sanitized = sanitize_wasm_credential_diagnostic(&cause);
+        let mapped = wasm_credential_provider_error(WasmHostError::Failed(cause));
+
+        assert_eq!(
+            mapped,
+            WasmHostError::AuthRequired("credential_unavailable".to_string())
+        );
+        assert!(sanitized.contains("credential backend rejected token"));
+        assert!(
+            !sanitized.contains(leaked_token),
+            "credential diagnostics must be redacted before tracing"
+        );
     }
 }

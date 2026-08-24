@@ -1,6 +1,6 @@
 # `crates/extensions/` — everything "installable package"
 
-**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, the channel packages) · **Crates:** 10 (re-derive: `ls -d crates/extensions/*/` for the family crates, `ls -d crates/extensions/packages/*/` for the 15 packages, of which 5 carry crates) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
+**Layer(s):** substrates (`ironclaw_extension_registry`, both memory providers) · runtimes (`ironclaw_extension_support`) · loops (`ironclaw_extension_host`) · products (`ironclaw_extension_manager`, the channel packages) · **Crates:** 9 (re-derive: `find crates/extensions -maxdepth 3 -name Cargo.toml | wc -l` — 4 family crates + 5 crate-bearing packages under `ls -d crates/extensions/packages/*/`, which lists 15 packages total) · **May depend on:** downward only, per crate — the registry reaches contracts + `ironclaw_filesystem`; the host reaches kernel, domains, and loop; packages reach contracts (+ the domain contract a provider implements) · **Depended on by:** the binary (`ironclaw_cli`) and `ironclaw_composition`; the registry additionally by kernel/lanes/loop/events crates that read manifest vocabulary; `ironclaw_webui` holds one sanctioned edge onto the host (pairing).
 
 ## What this family is
 
@@ -15,39 +15,19 @@ generic changes.
 
 ## The unified extension model (read this before touching anything here)
 
-This is the most misunderstood area of the codebase. The model, in five rules:
+This is the most misunderstood area of the codebase. See root `AGENTS.md` →
+"Extension/Auth Invariants" for the canonical model: the top-level product
+object is always an extension, a channel is one capability surface an
+extension's manifest declares, runtime (`wasm`/`mcp`/`first_party`) is
+implementation and never taxonomy, `ExtensionId` vs `VendorId` are never
+conflated, and there is no separate channel registry or extension `kind` wire
+string (`reborn_retired_taxonomy.rs` pins that vocabulary at zero). What
+follows here is family-specific and has no root-file counterpart:
 
-1. **The top-level product object is always an *extension*.** A *channel* is
-   not a sibling product type — it is one **capability surface** an extension's
-   manifest declares, exactly like tools and auth. The surface vocabulary is
-   `CapabilitySurfaceKind` (`tool` / `channel` / `auth`, + reserved kinds) in
-   `crates/contracts/ironclaw_extension_contracts/src/surface.rs`. At most one
-   channel surface exists per extension.
-2. **Runtime is implementation, never taxonomy.** `[runtime] kind =
-   "first_party" | "wasm"` (or an `[mcp]` section for hosted-MCP extensions) says
-   how the extension's code *loads*. Every loader produces the identical binding
-   shape (`ExtensionBindings`, `crates/extensions/ironclaw_extension_host/src/entrypoint.rs`);
-   nothing in the registry, host, or manager branches on which loader built an
-   extension.
-3. **Two identities, never conflated.** `ExtensionId` (`slack`, `gmail`,
-   `github`) is the product/installed identity. `VendorId` (`slack`, `google`,
-   `github`) is the credential-authority namespace — the manifest field is
-   `vendor = "…"`, and one vendor may back many extensions: six manifests here
-   declare `[auth.google]` (gmail + google-calendar/docs/drive/sheets/slides;
-   count them with `rg -l '^\[auth\.google\]' crates/extensions/packages/*/manifest.toml`).
-   Both newtypes live in `ironclaw_host_api::ids`. (Older docs call `VendorId`
-   "`ProviderId`" — the stored id strings are unchanged, and some struct fields
-   still read `provider`.)
-4. **Surfaces are derived, never stored as a parallel taxonomy.** The manifest
+1. **Surfaces are derived, never stored as a parallel taxonomy.** The manifest
    (`schema_version = "reborn.extension_manifest.v3"`) compiles once per install
    into a resolved, digested record; production projection reads the resolved
    record, never re-parsed TOML.
-5. **The retired vocabulary stays dead.** There is no separate channel
-   registry, no `slack_bot`/`slack_personal` split, and no extension `kind`
-   wire string. `crates/app/ironclaw_architecture_tests/tests/reborn_retired_taxonomy.rs`
-   pins that vocabulary at zero occurrences across Reborn `.rs`, frontend
-   `.ts`/`.js`, and `.toml` sources — if a change trips it, a deleted model is
-   being reintroduced, not a style rule.
 
 **The four-responsibility lookup** (where does this code go?):
 

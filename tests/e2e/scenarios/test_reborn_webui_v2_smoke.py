@@ -2232,6 +2232,130 @@ async def test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_c
         release_retry.set()
 
 
+async def test_reborn_v2_automation_run_now_respects_active_fire_and_scheduler(
+    reborn_v2_server, reborn_v2_page
+):
+    """Run now fires the selected automation and disables unsafe repeats."""
+    runnable_id = "11111111-2222-3333-4444-555555555555"
+    active_id = "22222222-3333-4444-5555-666666666666"
+    scheduler_enabled = True
+    runnable_active = False
+    run_requests: list[str] = []
+    request_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    def automation(
+        automation_id: str,
+        name: str,
+        *,
+        has_active_fire: bool,
+        has_running_run: bool = False,
+    ) -> dict:
+        return {
+            "automation_id": automation_id,
+            "name": name,
+            "source": {
+                "type": "schedule",
+                "cron": "0 9 * * *",
+                "timezone": "UTC",
+            },
+            "state": "scheduled",
+            "next_run_at": "2026-07-18T09:00:00Z",
+            "has_active_fire": has_active_fire,
+            "recent_runs": (
+                [
+                    {
+                        "run_id": "33333333-4444-5555-6666-777777777777",
+                        "status": "running",
+                        "fire_slot": "2026-07-17T09:00:00Z",
+                        "source": "manual",
+                    }
+                ]
+                if has_running_run
+                else []
+            ),
+        }
+
+    async def handle_automations(route) -> None:
+        nonlocal runnable_active, scheduler_enabled
+        path = urlparse(route.request.url).path
+        if route.request.method == "GET":
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "scheduler_enabled": scheduler_enabled,
+                        "automations": [
+                            automation(
+                                runnable_id,
+                                "Runnable automation",
+                                has_active_fire=False,
+                                has_running_run=runnable_active,
+                            ),
+                            automation(
+                                active_id,
+                                "Already running",
+                                has_active_fire=True,
+                            ),
+                        ],
+                    }
+                ),
+            )
+            return
+
+        run_requests.append(path)
+        request_started.set()
+        await release_response.wait()
+        runnable_active = True
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"updated": True}),
+        )
+
+    page = reborn_v2_page
+    await page.route("**/api/webchat/v2/automations**", handle_automations)
+    runnable_button = page.locator(
+        SEL_V2["automation_run_now_for"].format(id=runnable_id)
+    )
+    active_button = page.locator(
+        SEL_V2["automation_run_now_for"].format(id=active_id)
+    )
+
+    await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
+    await expect(runnable_button).to_be_enabled(timeout=15000)
+
+    await page.locator(
+        SEL_V2["automation_name_button_for"].format(id=active_id)
+    ).click()
+    await expect(active_button).to_be_disabled()
+
+    await page.locator(
+        SEL_V2["automation_name_button_for"].format(id=runnable_id)
+    ).click()
+    click_task = asyncio.create_task(runnable_button.click())
+    try:
+        await asyncio.wait_for(request_started.wait(), timeout=10)
+        await expect(runnable_button).to_be_disabled()
+        await runnable_button.click(force=True)
+        assert run_requests == [f"/api/webchat/v2/automations/{runnable_id}/run"]
+    finally:
+        release_response.set()
+    await click_task
+
+    await expect(runnable_button).to_be_disabled(timeout=10000)
+    assert run_requests == [f"/api/webchat/v2/automations/{runnable_id}/run"]
+
+    runnable_active = False
+    scheduler_enabled = False
+    await page.reload()
+    await page.locator(
+        SEL_V2["automation_name_button_for"].format(id=runnable_id)
+    ).click()
+    await expect(runnable_button).to_be_disabled(timeout=10000)
+
+
 async def test_reborn_v2_automation_failed_run_actions_are_clickable(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -2996,6 +3120,39 @@ async def test_reborn_v2_desktop_sidebar_can_collapse_and_persist(reborn_v2_page
         "() => localStorage.getItem('ironclaw:v2-sidebar-open') === 'true'",
         timeout=5000,
     )
+
+
+async def test_reborn_v2_expandable_sidebar_sections_can_collapse(reborn_v2_page):
+    """Active expandable navigation sections can be closed and reopened."""
+    origin = await reborn_v2_page.evaluate("location.origin")
+    sidebar = reborn_v2_page.locator(SEL_V2["sidebar"])
+
+    for section_id, path in (
+        ("extensions", "/extensions/registry"),
+        ("settings", "/settings/inference"),
+        ("admin", "/admin/users"),
+    ):
+        await reborn_v2_page.goto(f"{origin}{path}?token={REBORN_V2_AUTH_TOKEN}")
+        parent = sidebar.get_by_test_id(
+            SEL_V2["sidebar_nav_for"].format(id=section_id)
+        )
+        panel_id = await parent.get_attribute("aria-controls")
+        assert panel_id is not None
+        children = sidebar.locator(f"#{panel_id}").get_by_role("link")
+
+        await expect(parent).to_be_visible(timeout=15000)
+        await expect(parent).to_have_attribute("aria-expanded", "true")
+        await expect(children.first).to_be_visible()
+
+        before_collapse_url = reborn_v2_page.url
+        await parent.click()
+        assert reborn_v2_page.url == before_collapse_url
+        await expect(parent).to_have_attribute("aria-expanded", "false")
+        await expect(children).to_have_count(0)
+
+        await parent.click()
+        await expect(parent).to_have_attribute("aria-expanded", "true")
+        await expect(children.first).to_be_visible()
 
 
 async def test_reborn_v2_messages_omit_identity_labels(reborn_v2_page):

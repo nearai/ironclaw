@@ -95,41 +95,32 @@ It is the native host-owned surface that enters `ProductSurface` directly
 
 ### Middleware stack composed by `webui_v2_app`
 
-Inbound order (outer → inner → handler):
+Inbound order (outer → inner → handler) is the invariant; exact byte/rate
+limits live in `descriptors.rs`, `webui_body_limit.rs`, and
+`webui_rate_limit.rs` — read those, not this file, for today's numbers:
 
-1. `SetResponseHeaderLayer` — static security headers
-   (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, CSP).
+1. `SetResponseHeaderLayer` — static security headers (`nosniff`, `DENY`,
+   CSP).
 2. `CorsLayer` — allow-origin from `config.allowed_origins`; empty list
    means fail-closed (no echoing attacker-supplied origin).
 3. `CatchPanicLayer` — panic boundary, logs truncated detail.
-4. **Outer `RequestBodyLimitLayer`** — `config.max_body_bytes` (14 MiB
-   default). Defense in depth for paths that don't match any v2
-   descriptor (e.g. axum's 404 fallback). v2 routes are additionally
-   capped, strictly tighter, by the per-route limit below.
+4. **Outer `RequestBodyLimitLayer`** (`config.max_body_bytes`) — defense in
+   depth for paths that don't match any v2 descriptor (e.g. axum's 404
+   fallback). v2 routes are additionally capped, strictly tighter, by the
+   per-route limit below.
 5. **Descriptor-driven per-route body limit**
    (`webui_body_limit::enforce_body_limit`) — reads each route's
-   `BodyLimitPolicy` from `ironclaw_webui::webui_v2_routes()` and,
-   when present, product-auth route descriptors at composition time and
-   enforces it before auth runs (so an oversized payload never spends a
-   bearer-validation step). Today: `create_thread`, product-auth OAuth
-   start, manual-token setup/secret-submit, accounts list/select/recovery/
-   refresh, and lifecycle cleanup — all 16 KiB; `send_message` 14 MiB
-   (text + base64 inline attachments); `import_extension` 8 MiB (zip tool
-   bundle: WASM module + manifest/schemas/prompts); `cancel_run`,
-   `resolve_gate`, and `rename_automation` 4 KiB; `get_timeline`,
-   `stream_events`, and product-auth OAuth callback `NoBody`.
-   `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
-   upstream fails the build rather than silently disabling
-   enforcement.
+   `BodyLimitPolicy` from `ironclaw_webui::webui_v2_routes()` and, when
+   present, product-auth route descriptors at composition time, and
+   enforces it **before auth runs** (so an oversized payload never spends a
+   bearer-validation step). `BodyLimitPolicy` is an exhaustive `match`, so
+   a new variant added upstream fails the build rather than silently
+   disabling enforcement.
 6. **WS same-origin enforcement** (`webui_ws_origin::enforce_websocket_origin`)
    — runs only on descriptors that declare a non-`NotApplicable`
    `WebSocketOriginPolicy`. The browser does not pre-flight WebSocket
    upgrades, so origin enforcement happens inline; absence or mismatch
    yields a `403` before the v2 handler executes the WS upgrade.
-   `SameOriginRequired` (today's `stream_events_ws` descriptor)
-   matches `Origin` against `Host`; `HostConfiguredAllowlist` /
-   `LocalhostAllowed` are additional shapes future descriptors can
-   opt into.
 7. **Bearer auth + `?token=` shim** (`webui_serve::authenticate_request`)
    — `Authorization: Bearer <token>` for every route; `?token=` is
    honored ONLY on `GET /api/webchat/v2/threads/{id}/events` because
@@ -154,9 +145,8 @@ Inbound order (outer → inner → handler):
    Composition fails closed if a future descriptor declares an unsupported
    scope.
 9. `webui_v2_router(WebUiV2State::new(bundle.product_surface))` — the v2
-   handlers from `ironclaw_webui` (create-thread, list-threads, delete-thread,
-   send-message, get-timeline, stream-events SSE, stream-events WS,
-   cancel-run, resolve-gate, setup-extension, list/rename automations).
+   handler set from `ironclaw_webui`; see that crate's router source for the
+   current route list.
 
 After the complete descriptor set is assembled, composition derives every
 literal root namespace and supplies it to `static_router_with_config`. Exact
@@ -298,36 +288,17 @@ This is a deliberate divergence from the v1 gateway, which sets a
 `Set-Cookie: ironclaw_session=...; HttpOnly` on its OAuth
 callback. v1 cookie code is NOT shared with the v2 listener.
 
-### Entrypoint inventory (#3580)
+### #3580 v1→v2 entrypoint migration: complete
 
-Mapping of every v1 gateway entrypoint to its Reborn native-surface
-counterpart. "v1-only" means the v2 service does not yet expose this
-shape and a future native-surface ticket owns the migration — these
-rows are inventoried here, not implemented in the current PR.
+✎ Every v1 gateway entrypoint (`src/channels/web/`, since deleted) has a
+Reborn native-surface (`/api/webchat/v2/*`) counterpart; the one-off
+engine-v1 auth-token/auth-cancel compatibility shim did not carry forward.
+The full old-route → new-route mapping was a migration-tracking table, not
+an ongoing invariant, and is retired now that #3580 is done — the current
+route set lives in the router source (`ironclaw_webui::webui_v2_routes()`
+and the auth/product-auth mounts below), not in this prose.
 
-| Concern | v1 entrypoint (under `src/channels/web/`) | v2 native counterpart | Status | <!-- check-guidance: path-ok -->
-|---|---|---|---|
-| Send message | `POST /api/chat/send` | `POST /api/webchat/v2/threads/{thread_id}/messages` | Mapped |
-| Create thread | `POST /api/chat/thread/new` | `POST /api/webchat/v2/threads` | Mapped |
-| Session/profile capabilities | `GET /api/profile` | `GET /api/webchat/v2/session` | Mapped to authenticated tenant/user plus request-scoped WebUI capabilities; `operator_webui_config` follows the matched bearer token, not just the deployment-wide route-mount decision |
-| List threads | `GET /api/chat/threads` | `GET /api/webchat/v2/threads` | Mapped |
-| Delete thread | (none) | `DELETE /api/webchat/v2/threads/{thread_id}` | Mapped |
-| Read history / timeline | `GET /api/chat/history` | `GET /api/webchat/v2/threads/{thread_id}/timeline` | Mapped |
-| SSE stream | `GET /api/chat/events` | `GET /api/webchat/v2/threads/{thread_id}/events` | Mapped (incl. `?token=` shim) |
-| WebSocket stream | `GET /api/chat/ws` | `GET /api/webchat/v2/threads/{tid}/ws` | Mapped |
-| Cancel run | (engine v1 surface) | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/cancel` | Mapped |
-| Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
-| Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
-| Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface |
-| Extension import from zip (#5459) | (none — v2-only surface) | `POST /api/webchat/v2/extensions/import` | Admin-only (`operator_webui_config` capability on the matched bearer): uploads a standalone WASM tool bundle (zip with `manifest.toml` + `wasm/` + `schemas/` + `prompts/`). Validated as `ManifestSource::InstalledLocal` (never first-party/system trust or runtime, wasm runtime only, all manifest-declared assets required, duplicate zip entries rejected), then materialized under `/system/extensions/<id>/` and added to the catalog under the catalog-write + operation locks; duplicate installed/catalog ids are rejected. Restart-safe: startup filesystem discovery stamps everything it finds `InstalledLocal` (`HostBundled` is reserved for binary-compiled extensions), so a restart cannot relabel an upload into the first-party trust tier. 8 MiB body cap, mutation rate limit |
-| LLM provider config | v1 settings/provider config surface | `GET /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers/{provider_id}/delete`, `POST /api/webchat/v2/llm/active`, `POST /api/webchat/v2/llm/{test-connection,list-models}` | Mapped for trusted operator-token deployments; left unmounted for multi-user authenticators until an admin role boundary exists |
-| Operator status/readiness | v1 doctor/readiness surfaces | `GET /api/webchat/v2/operator/status` | Mapped to Reborn readiness projection through the product service; left unmounted with other operator routes for multi-user authenticators |
-| Operator logs | the CLI `logs` command path | `GET /api/webchat/v2/operator/logs` | Mapped to the in-process operator log buffer with bounded query, tail, follow, filter, cursor, and redaction behavior |
-| Operator service lifecycle | the CLI `service` command path | `POST /api/webchat/v2/operator/service` | Mapped to a Reborn composition lifecycle backend; launchd/systemd user services are supported, other OS targets report unsupported |
-| SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_webui::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
-
-### Security invariants on every "Mapped" row
+### Security invariants on every v2 route
 
 - **Bearer / OIDC / cookie auth** — none of these are shared with v1's
   `auth_middleware`. The Reborn binary owns its own
@@ -352,15 +323,19 @@ rows are inventoried here, not implemented in the current PR.
   preflight.
 - **Body limit** — descriptor-driven per-route via
   `webui_body_limit::enforce_body_limit`. Caps come from
-  `ironclaw_webui::webui_v2_routes()`: `create_thread` 16 KiB,
-  `send_message` 14 MiB, `cancel_run` / `resolve_gate` 4 KiB,
-  `get_timeline` / `stream_events` `NoBody`. The outer
-  `RequestBodyLimitLayer` at `config.max_body_bytes` (14 MiB default)
-  is kept as defense in depth for paths that don't match any v2
-  descriptor.
+  `ironclaw_webui::webui_v2_routes()` — `descriptors.rs` is the sole
+  authoritative source; the figures below are a snapshot, re-derive with
+  `rg -n 'body_limit_kib' crates/product/ironclaw_webui/src/webui_v2/descriptors.rs`
+  before trusting them: `create_thread` 16 KiB, `send_message` 14 MiB,
+  `cancel_run` / `resolve_gate` 4 KiB, `get_timeline` / `stream_events`
+  `NoBody`. The outer `RequestBodyLimitLayer` at `config.max_body_bytes`
+  (14 MiB default) is kept as defense in depth for paths that don't match
+  any v2 descriptor.
 - **Rate limit** — descriptor-driven; the v2 crate declares mutation
-  60/60, read 120/60, stream 30/60 per `(tenant, user)`. Reading and
-  enforcing happens in `webui_rate_limit::build_rate_limit_state`.
+  60/60, read 120/60, stream 30/60 per `(tenant, user)` — snapshot,
+  `webui_rate_limit.rs` and `descriptors.rs` are authoritative; re-derive
+  with `rg -n 'rate_limit_per_caller' crates/product/ironclaw_webui/src/webui_v2/descriptors.rs`.
+  Reading and enforcing happens in `webui_rate_limit::build_rate_limit_state`.
 - **Static security headers** — `nosniff`, `DENY`, CSP applied via
   outer `SetResponseHeaderLayer`s; default CSP is
   `default-src 'self'; object-src 'none'; frame-ancestors 'none';
@@ -436,56 +411,21 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 
 ### Tests
 
-- `src/runtime/tests/core.rs::standalone_cli_send_uses_saved_user_model_preference`
-  — caller-level regression guard that the CLI runtime resolves the actor's
-  saved model preference before durable message acceptance and carries that
-  choice through replay-aware acceptance into the model gateway request.
-- `src/runtime/tests/core.rs::standalone_runtime_webui_bundle_reuses_thread_and_turn_services`
-  — regression guard that the product surface reuses the runtime turn/thread
-  services.
-- `crates/product/ironclaw_assistant/src/projection/tests/runtime_stream.rs::product_event_stream_drains_run_status_projection_from_event_stream_manager`
-  — regression guard that the product event stream drains the current
-  run-status projection slice from a real `EventStreamManager` snapshot
-  into product outbound envelopes.
-- `crates/product/ironclaw_assistant/src/projection/tests/turn_stream.rs::product_event_stream_uses_request_actor_for_projection_scope`
-  — regression guard that the product projection adapter uses the service
-  request actor when selecting the runtime event stream, rather than a
-  hidden runtime owner actor.
-- `crates/product/ironclaw_assistant/src/projection/tests/live_progress_stream.rs::live_text_microburst_keeps_latest_snapshot_and_precedes_tool_activity`
-  (with `provider_cadence_text_updates_are_not_visibly_batched` in the same file)
-  — caller-level regression guard that provider-rate cumulative text remains
-  smooth without terminating the bounded WebUI subscription, provider-cadence
-  snapshots precede the next capability milestone, and a sub-frame microburst
-  retains its latest cumulative snapshot before that milestone.
-- `tests/webui_v2_serve.rs` — caller-level tests driving the composed
-  `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
-  missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,
-  security headers, CORS allow + reject, malformed-id rejection,
-  rate-limit 429 after descriptor budget exhausted, per-caller
-  rate-limit independence, descriptor-driven body-limit 413 on
-  oversized mutation payload, in-budget mutation reaches service, and
-  NoBody policy rejecting a non-empty body on a read route. The
-  `static_*` cases additionally serve the embedded SPA bundle through
-  the same composed router and assert asset content shape — including
-  `static_i18n_module_guards_locale_race_and_clears_failed_pack_cache`
-  (the `setLang` latest-request guard plus `pending[lang]` clear on
-  both settle paths) and `static_typing_dot_animation_respects_reduced_motion`
-  (typing dots animate by default, suppressed under
-  `prefers-reduced-motion`). These lock source shape only; behavioral
-  JS/`getComputedStyle` coverage needs a browser harness this workspace
-  does not own and is deferred to the JS/e2e scaffold.
-- `crates/product/ironclaw_webui/src/webui_serve.rs::tests` — unit tests for `is_v2_sse_event_request`
-  matcher and query-token extraction.
-- `crates/product/ironclaw_webui/src/webui_route_match.rs::tests` — unit tests for the pattern
-  parser and segment matcher shared by both descriptor-driven
-  middlewares.
-- `crates/product/ironclaw_webui/src/webui_rate_limit.rs::tests` — unit tests for the sliding-window
-  policy resolver, a regression test that `build_rate_limit_state`
-  accepts every descriptor returned by
-  `ironclaw_webui::webui_v2_routes()`, and
-  `unsupported_scope_is_rejected_at_composition` locking the
-  fail-closed branch for non-`PerCaller` scopes.
-- `crates/product/ironclaw_webui/src/webui_body_limit.rs::tests` — composition-time tests that
-  `build_body_limit_state` accepts every v2 descriptor and preserves
-  the per-route caps (regression guard against silently widening the
-  `send_message` cap or relaxing a `NoBody` policy).
+Caller-level and unit coverage for the seams above — see each file for
+current test names and assertions rather than a prose transcription here:
+
+- `src/runtime/tests/core.rs` — standalone CLI/WebUI runtime regressions
+  (saved model preference resolution, product surface reuses runtime
+  turn/thread services).
+- `crates/product/ironclaw_assistant/src/projection/tests/runtime_stream.rs`,
+  `turn_stream.rs`, `live_progress_stream.rs` — product event-stream
+  projection regressions (run-status drain, request-actor scoping, live-text
+  microburst/cadence behavior).
+- `tests/webui_v2_serve.rs` — the composed `Router` driven through
+  `tower::ServiceExt::oneshot`: auth, SSE `?token=`, security headers, CORS,
+  rate-limit, body-limit, and static-asset-serving cases.
+- `crates/product/ironclaw_webui/src/webui_serve.rs`,
+  `webui_route_match.rs`, `webui_rate_limit.rs`, `webui_body_limit.rs`
+  (`::tests` modules in each) — matcher/extraction unit tests and
+  composition-time tests that the rate-limit/body-limit state accepts every
+  v2 descriptor and preserves its declared policy.

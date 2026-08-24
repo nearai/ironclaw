@@ -108,6 +108,8 @@ export function Chat({
   gatewayStatus,
   regressionArtifactExportEnabled = false,
   globalAutoApproveEnabled = false,
+  pendingRenderedNotification = null,
+  onNotificationRendered = null,
   onConnectionStatusChange,
 }) {
   const t = useT();
@@ -201,6 +203,27 @@ export function Chat({
     activeThreadIsProcessing ||
     activeThreadHasGate ||
     activeThreadHasOnboarding;
+  const pendingCompletionRendered = React.useMemo(() => {
+    if (
+      !pendingRenderedNotification ||
+      pendingRenderedNotification.threadId !== activeThreadId
+    ) {
+      return false;
+    }
+    return messages.some(
+      (message) =>
+        message.role === "assistant" &&
+        message.isFinalReply === true &&
+        message.turnRunId === pendingRenderedNotification.turnRunId,
+    );
+  }, [activeThreadId, messages, pendingRenderedNotification]);
+  React.useEffect(() => {
+    if (!pendingCompletionRendered || !pendingRenderedNotification) return;
+    onNotificationRendered?.({
+      threadId: pendingRenderedNotification.threadId,
+      turnRunId: pendingRenderedNotification.turnRunId,
+    });
+  }, [onNotificationRendered, pendingCompletionRendered, pendingRenderedNotification]);
   // Don't show the landing composer when history failed to load — show the
   // error banner instead so the user is not misled into thinking the thread
   // is empty.
@@ -348,6 +371,18 @@ export function Chat({
     [composerSendDisabled, handleSend, setSuggestions]
   );
 
+  // Starting an OOBE suggestion is a server-side operation: the backend creates
+  // the suggestion's own thread and submits its turn through the normal
+  // ProductSurface path, then returns the binding. The browser only navigates
+  // to the thread it is handed — it does not inject the prompt itself.
+  const handleOpenSuggestionThread = React.useCallback(
+    (threadId) => {
+      if (!threadId || !onSelectThread) return;
+      onSelectThread(threadId, { replace: true });
+    },
+    [onSelectThread]
+  );
+
   const handleCancelRun = React.useCallback(
     async () => {
       try {
@@ -446,6 +481,7 @@ export function Chat({
           <EmptyState
             onSuggestion={handleSuggestion}
             onSend={handleSend}
+            onOpenThread={handleOpenSuggestionThread}
             commands={activeThreadId ? chatCommands : []}
             disabled={false}
             sendDisabled={composerSendDisabled}

@@ -1,0 +1,1 @@
+{"time":"2026-08-19T11:26:00.564519806Z","level":"WARN","msg":"request","audit":{"host":"denied.invalid","method":"GET","path":"/","remote_addr":"172.28.20.4:34558","sni":"denied.invalid","mode":"mitm","action":"reject","status_code":403,"duration_ms":0.005},"rejected_by":"allowlist","request_transforms":[{"name":"allowlist","action":"reject","duration_ms":0.001}]}

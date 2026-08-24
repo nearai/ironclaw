@@ -23,6 +23,9 @@ use ironclaw_approvals::{
     ToolPermissionOverrideKey,
 };
 use ironclaw_assistant::EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID;
+use ironclaw_assistant::inspector_store::{
+    DiagnosticStoreError, DiagnosticStoreLimits, DiagnosticStorePort, InMemoryDiagnosticStore,
+};
 use ironclaw_assistant::{
     ADMIN_THREAD_SCRAPE_ARTIFACT_VIEW, ADMIN_THREAD_SCRAPE_RUN_ARTIFACT_VIEW,
     ADMIN_THREAD_SCRAPE_THREADS_VIEW, ADMIN_USER_DELETE_CAPABILITY_ID,
@@ -31,24 +34,25 @@ use ironclaw_assistant::{
     ADMIN_USER_SET_STATUS_CAPABILITY_ID, ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW,
     ADMIN_USERS_VIEW, AUTOMATION_DELETE_CAPABILITY_ID, AUTOMATION_LIST_DEFAULT_PAGE_SIZE,
     AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_RENAME_CAPABILITY_ID,
-    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
-    AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
-    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
-    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    AutomationListRequest, AutomationProductService, ChannelConnectionRequirement,
-    CommandResultView, EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
-    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, EmptyProductCommandInput,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
-    FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
-    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
-    LOGS_VIEW, LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RUN_CAPABILITY_ID,
+    AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW, ApprovalInteractionActionView,
+    ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
+    AuthInteractionDecision, AuthInteractionService, AutomationListRequest,
+    AutomationProductService, ChannelConnectionRequirement, CommandResultView,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
+    EXTENSIONS_VIEW, EmptyProductCommandInput, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FS_LIST_VIEW,
+    FS_MOUNTS_VIEW, FS_STAT_VIEW, FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecycleChannelDirections,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
@@ -62,9 +66,10 @@ use ironclaw_assistant::{
     ProductCapabilityInvoker, ProductNewCommandInput, ProductNewCommandOutput,
     ProductStatusCommandInput, ProductSurfaceFailure, ProjectCaller, ProjectFilesystemReader,
     ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
-    RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
+    RebornAutomationRunMutationResult, RebornAutomationRunMutationStatus,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExecuteProductCommandRequest,
@@ -126,8 +131,9 @@ use ironclaw_host_api::product_adapter::{
     ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_host_api::turn::{
-    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SanitizedFailure, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, CapabilityActivityId, EventCursor, ReplyTargetBindingRef, RunProfileId,
+    RunProfileVersion, SanitizedFailure, TurnActor, TurnGateRef, TurnId, TurnRunId, TurnScope,
+    TurnStatus,
 };
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -153,12 +159,21 @@ use ironclaw_product_contracts::inbound_requests::{
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
     ProductRetryRunRequest, ProductSetupExtensionRequest, ProductSubmitTurnRequest,
 };
+use ironclaw_product_contracts::inspector::{
+    BoundedDiagnosticText, DiagnosticActivityEvent, DiagnosticCursor, DiagnosticModelCallId,
+    DiagnosticScope, DiagnosticSnapshot, DiagnosticUpdateBatch, InspectorModelCallStatus,
+    ModelCallDiagnostic, PromptDiagnostic, ToolExecutionDiagnostic,
+};
 use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
     IronhubInstallDeliveryResult, IronhubLinkError, IronhubLinkService, IronhubRegisterRequest,
 };
 use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService,
+};
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID, NOTIFICATIONS_MARK_READ_COMMAND_ID, NOTIFICATIONS_VIEW,
+    ProductNotificationMutationRequest, ProductNotificationMutationResponse,
 };
 use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
@@ -1292,6 +1307,7 @@ struct ListAutomationCall {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AutomationMutationAction {
+    Run,
     Pause,
     Resume,
     Rename { name: AutomationName },
@@ -1309,9 +1325,76 @@ struct AutomationMutationCall {
 struct RecordingAutomationService {
     list_calls: Mutex<Vec<ListAutomationCall>>,
     mutation_calls: Mutex<Vec<AutomationMutationCall>>,
+    run_updated: Option<bool>,
+    run_result: Option<RebornAutomationRunMutationResult>,
+}
+
+#[derive(Clone, Default)]
+struct RecordingProductResultInvoker {
+    outputs: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl RecordingProductResultInvoker {
+    fn outputs(&self) -> Vec<serde_json::Value> {
+        self.outputs.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ProductCapabilityInvoker for RecordingProductResultInvoker {
+    async fn invoke(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _capability: CapabilityId,
+        _input: serde_json::Value,
+        _activity_id: ActivityId,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        panic!("runtime-owned capability invocation is not expected")
+    }
+
+    async fn complete_product_result(
+        &self,
+        _caller: ProductSurfaceCaller,
+        output: serde_json::Value,
+        activity_id: ActivityId,
+        summary: &'static str,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        let byte_len = serde_json::to_vec(&output)
+            .expect("recorded product result serializes")
+            .len() as u64;
+        self.outputs.lock().expect("lock").push(output);
+        Ok(Resolution::Done(Outcome {
+            refs: OutcomeRefs {
+                result: ResultRef::from_uuid(activity_id.as_uuid()),
+                byte_len,
+                preview: None,
+                preview_meta: ResultPreviewMeta::default(),
+                origin: None,
+                output_digest: None,
+            },
+            verdict: ToolVerdict::Success,
+            summary: SafeSummary::new(summary).expect("static summary is safe"),
+            progress: ResultProgress::MadeProgress,
+            terminate_hint: TerminateHint::Continue,
+        }))
+    }
 }
 
 impl RecordingAutomationService {
+    fn with_run_result(run_result: RebornAutomationRunMutationResult) -> Self {
+        Self {
+            run_result: Some(run_result),
+            ..Self::default()
+        }
+    }
+
+    fn with_missing_run_target() -> Self {
+        Self {
+            run_updated: Some(false),
+            ..Self::default()
+        }
+    }
+
     fn list_calls(&self) -> Vec<ListAutomationCall> {
         self.list_calls.lock().expect("lock").clone()
     }
@@ -1375,6 +1458,30 @@ impl AutomationProductService for RecordingAutomationService {
                 "0 9 * * *",
                 None,
             )),
+            run_result: None,
+        })
+    }
+
+    async fn run_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        self.mutation_calls
+            .lock()
+            .expect("lock")
+            .push(AutomationMutationCall {
+                caller,
+                automation_id,
+                action: AutomationMutationAction::Run,
+            });
+        Ok(RebornAutomationMutationResponse {
+            updated: self.run_updated.unwrap_or(true),
+            automation: self
+                .run_updated
+                .unwrap_or(true)
+                .then(|| automation_info("trigger-running", "Daily status", "0 9 * * *", None)),
+            run_result: self.run_result.clone(),
         })
     }
 
@@ -1399,6 +1506,7 @@ impl AutomationProductService for RecordingAutomationService {
                 "0 9 * * *",
                 None,
             )),
+            run_result: None,
         })
     }
 
@@ -1424,6 +1532,7 @@ impl AutomationProductService for RecordingAutomationService {
                 "0 9 * * *",
                 None,
             )),
+            run_result: None,
         })
     }
 
@@ -1443,6 +1552,7 @@ impl AutomationProductService for RecordingAutomationService {
         Ok(RebornAutomationMutationResponse {
             updated: true,
             automation: None,
+            run_result: None,
         })
     }
 }
@@ -7834,6 +7944,31 @@ async fn pause_automation_rejects_missing_agent_id() {
 }
 
 #[tokio::test]
+async fn run_automation_rejects_missing_agent_id() {
+    let automation_service = Arc::new(RecordingAutomationService::default());
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_service(automation_service.clone());
+
+    let err = invoke_json_product_capability(
+        &services,
+        caller_without_agent(),
+        AUTOMATION_RUN_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, ProductSurfaceErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_service.mutation_calls().len(), 0);
+}
+
+#[tokio::test]
 async fn resume_automation_rejects_missing_agent_id() {
     let automation_service = Arc::new(RecordingAutomationService::default());
     let services = session_services(
@@ -7935,6 +8070,21 @@ async fn automation_mutations_forward_caller_scope_to_product_service() {
         Resolution::Done(outcome) if outcome.verdict.is_success()
     ));
 
+    let run = invoke_json_product_capability(
+        &services,
+        caller.clone(),
+        AUTOMATION_RUN_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect("run automation");
+    assert!(matches!(
+        run,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+
     let resume = invoke_json_product_capability(
         &services,
         caller.clone(),
@@ -7982,36 +8132,42 @@ async fn automation_mutations_forward_caller_scope_to_product_service() {
     ));
 
     let calls = automation_service.mutation_calls();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 5);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
     assert_eq!(calls[0].automation_id, "trigger-alpha");
     assert_eq!(calls[0].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[0].caller.user_id, caller.user_id);
     assert_eq!(calls[0].caller.agent_id, expected_agent_id);
     assert_eq!(calls[0].caller.project_id, caller.project_id);
-    assert_eq!(calls[1].action, AutomationMutationAction::Resume);
+    assert_eq!(calls[1].action, AutomationMutationAction::Run);
     assert_eq!(calls[1].automation_id, "trigger-alpha");
     assert_eq!(calls[1].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[1].caller.user_id, caller.user_id);
     assert_eq!(calls[1].caller.agent_id, expected_agent_id);
     assert_eq!(calls[1].caller.project_id, caller.project_id);
-    assert_eq!(
-        calls[2].action,
-        AutomationMutationAction::Rename {
-            name: AutomationName::new("Renamed status").expect("valid automation name")
-        }
-    );
+    assert_eq!(calls[2].action, AutomationMutationAction::Resume);
     assert_eq!(calls[2].automation_id, "trigger-alpha");
     assert_eq!(calls[2].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[2].caller.user_id, caller.user_id);
     assert_eq!(calls[2].caller.agent_id, expected_agent_id);
     assert_eq!(calls[2].caller.project_id, caller.project_id);
-    assert_eq!(calls[3].action, AutomationMutationAction::Delete);
+    assert_eq!(
+        calls[3].action,
+        AutomationMutationAction::Rename {
+            name: AutomationName::new("Renamed status").expect("valid automation name")
+        }
+    );
     assert_eq!(calls[3].automation_id, "trigger-alpha");
     assert_eq!(calls[3].caller.tenant_id, caller.tenant_id);
     assert_eq!(calls[3].caller.user_id, caller.user_id);
     assert_eq!(calls[3].caller.agent_id, expected_agent_id);
     assert_eq!(calls[3].caller.project_id, caller.project_id);
+    assert_eq!(calls[4].action, AutomationMutationAction::Delete);
+    assert_eq!(calls[4].automation_id, "trigger-alpha");
+    assert_eq!(calls[4].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[4].caller.user_id, caller.user_id);
+    assert_eq!(calls[4].caller.agent_id, expected_agent_id);
+    assert_eq!(calls[4].caller.project_id, caller.project_id);
 }
 
 #[tokio::test]
@@ -8030,6 +8186,13 @@ async fn automation_mutations_are_available_as_product_capabilities() {
                 automation_id: "trigger-alpha".to_string(),
             })
             .expect("pause input"),
+        ),
+        (
+            AUTOMATION_RUN_CAPABILITY_ID,
+            serde_json::to_value(RebornAutomationRequest {
+                automation_id: "trigger-alpha".to_string(),
+            })
+            .expect("run input"),
         ),
         (
             AUTOMATION_RESUME_CAPABILITY_ID,
@@ -8070,16 +8233,89 @@ async fn automation_mutations_are_available_as_product_capabilities() {
     }
 
     let calls = automation_service.mutation_calls();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 5);
     assert_eq!(calls[0].action, AutomationMutationAction::Pause);
-    assert_eq!(calls[1].action, AutomationMutationAction::Resume);
+    assert_eq!(calls[1].action, AutomationMutationAction::Run);
+    assert_eq!(calls[2].action, AutomationMutationAction::Resume);
     assert_eq!(
-        calls[2].action,
+        calls[3].action,
         AutomationMutationAction::Rename {
             name: AutomationName::new("Renamed status").expect("valid automation name")
         }
     );
-    assert_eq!(calls[3].action, AutomationMutationAction::Delete);
+    assert_eq!(calls[4].action, AutomationMutationAction::Delete);
+}
+
+#[tokio::test]
+async fn automation_run_capability_distinguishes_submitted_from_replayed() {
+    for (status, expected_summary) in [
+        (
+            RebornAutomationRunMutationStatus::Submitted,
+            "automation started",
+        ),
+        (
+            RebornAutomationRunMutationStatus::Replayed,
+            "automation run was already submitted",
+        ),
+    ] {
+        let automation_service = Arc::new(RecordingAutomationService::with_run_result(
+            RebornAutomationRunMutationResult {
+                status,
+                run_id: TurnRunId::new(),
+            },
+        ));
+        let result_invoker = RecordingProductResultInvoker::default();
+        let services = RebornServices::new_with_product_capability_invoker(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::default()),
+            result_invoker.clone(),
+        )
+        .with_session_channel_directory(Arc::new(StaticSessionChannelDirectory {
+            session_channels: vec!["web-app"],
+        }))
+        .with_automation_product_service(automation_service);
+
+        let resolution = invoke_json_product_capability(
+            &services,
+            caller(),
+            AUTOMATION_RUN_CAPABILITY_ID,
+            RebornAutomationRequest {
+                automation_id: "trigger-alpha".to_string(),
+            },
+        )
+        .await
+        .expect("automation run capability");
+
+        let Resolution::Done(outcome) = resolution else {
+            panic!("automation run must return a completed outcome");
+        };
+        assert_eq!(outcome.summary.as_str(), expected_summary);
+        assert!(outcome.refs.byte_len > 0);
+        let outputs = result_invoker.outputs();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["status"], json!(status));
+        assert!(outputs[0]["run_id"].as_str().is_some());
+    }
+
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_service(Arc::new(
+        RecordingAutomationService::with_missing_run_target(),
+    ));
+    let error = invoke_json_product_capability(
+        &services,
+        caller(),
+        AUTOMATION_RUN_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "missing-trigger".to_string(),
+        },
+    )
+    .await
+    .expect_err("a missing automation must not report a successful run");
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+    assert_eq!(error.status_code, 404);
 }
 
 #[tokio::test]
@@ -8634,6 +8870,123 @@ async fn run_artifact_selects_one_owned_run_and_queries_only_its_scoped_logs() {
         Some(run_id.to_string().as_str())
     );
     assert_eq!(requests[0].limit, Some(500));
+
+    // The diagnostic store was never populated for this run: the export must
+    // still succeed, say so honestly, and keep the durable timestamp floor.
+    assert!(!artifact.timings.available);
+    assert_eq!(
+        artifact.timings.unavailable_reason.as_deref(),
+        Some("run_not_resident")
+    );
+    assert!(artifact.timings.iterations.is_empty());
+    assert!(
+        artifact
+            .messages
+            .iter()
+            .any(|message| message.created_at.is_some()),
+        "durable message timestamps must survive an absent diagnostic store"
+    );
+    assert_eq!(artifact.schema, RUN_ARTIFACT_SCHEMA);
+}
+
+/// A diagnostic store whose every method fails, standing in for a backend
+/// outage. The single guarantee under test: a user filing a bug report must
+/// always get a file, so a diagnostic-store failure must never fail the
+/// artifact export.
+#[derive(Default)]
+struct FailingDiagnosticStore;
+
+impl DiagnosticStorePort for FailingDiagnosticStore {
+    fn record_activity(
+        &self,
+        _scope: DiagnosticScope,
+        _event: DiagnosticActivityEvent,
+    ) -> Result<DiagnosticCursor, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn snapshot(
+        &self,
+        _scope: &DiagnosticScope,
+    ) -> Result<Option<DiagnosticSnapshot>, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn prompt(
+        &self,
+        _scope: &DiagnosticScope,
+    ) -> Result<Option<PromptDiagnostic>, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn tool_execution(
+        &self,
+        _scope: &DiagnosticScope,
+        _activity_id: CapabilityActivityId,
+    ) -> Result<Option<ToolExecutionDiagnostic>, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+
+    fn updates_after(
+        &self,
+        _scope: &DiagnosticScope,
+        _after: Option<DiagnosticCursor>,
+    ) -> Result<DiagnosticUpdateBatch, DiagnosticStoreError> {
+        Err(DiagnosticStoreError::StateUnavailable)
+    }
+}
+
+#[tokio::test]
+async fn run_artifact_reports_diagnostic_store_failure_without_failing_the_export() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-artifact-store-failure").expect("thread id");
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &run_id,
+        "diagnostic store is down",
+    )
+    .await;
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_diagnostic_store(Arc::new(FailingDiagnosticStore));
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: RUN_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornRunArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                    run_id: run_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("artifact export must succeed even when the diagnostic store errors");
+    let artifact: RebornRunArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert!(!artifact.timings.available);
+    assert_eq!(
+        artifact.timings.unavailable_reason.as_deref(),
+        Some("diagnostic_store_unavailable")
+    );
 }
 
 #[tokio::test]
@@ -8760,6 +9113,120 @@ async fn thread_artifact_includes_all_owned_runs_and_queries_thread_scoped_logs(
     );
     assert_eq!(requests[0].run_id, None);
     assert_eq!(requests[0].limit, Some(500));
+}
+
+fn diagnostic_model_call(status: InspectorModelCallStatus) -> ModelCallDiagnostic {
+    ModelCallDiagnostic {
+        call_id: DiagnosticModelCallId::new(),
+        iteration: 1,
+        requested_model: BoundedDiagnosticText::label("test-model"),
+        effective_model: None,
+        started_at: Utc::now(),
+        completed_at: Some(Utc::now()),
+        duration_ms: Some(1),
+        status,
+        usage: None,
+        failure_summary: None,
+    }
+}
+
+/// A thread with two runs must expose one timing entry per run. The exact
+/// per-run wall-clock projection is pinned with deterministic timestamps in
+/// the `thread_artifact` unit test; this route test proves both entries survive
+/// the caller-owned export path.
+#[tokio::test]
+async fn thread_artifact_per_run_timings_do_not_reach_into_another_runs_activity() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-multi-run-timings").expect("thread id");
+    let run_a = TurnRunId::parse(&run_id_string()).expect("run id");
+    let run_b = TurnRunId::new();
+    let run_c = TurnRunId::new();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+
+    seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_a, "run a").await;
+    seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_b, "run b").await;
+    seed_submitted_message(&thread_service, &thread_scope, &thread_id, &run_c, "run c").await;
+
+    let diagnostic_store =
+        InMemoryDiagnosticStore::new(DiagnosticStoreLimits::default()).expect("diagnostic store");
+    diagnostic_store
+        .record_model_call(
+            DiagnosticScope::new(
+                owner.tenant_id.clone(),
+                owner.user_id.clone(),
+                thread_id.clone(),
+                run_a,
+            ),
+            diagnostic_model_call(InspectorModelCallStatus::Succeeded),
+        )
+        .expect("run a model call recorded");
+    diagnostic_store
+        .record_model_call(
+            DiagnosticScope::new(
+                owner.tenant_id.clone(),
+                owner.user_id.clone(),
+                thread_id.clone(),
+                run_b,
+            ),
+            diagnostic_model_call(InspectorModelCallStatus::Succeeded),
+        )
+        .expect("run b model call recorded");
+
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_diagnostic_store(Arc::new(diagnostic_store));
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("thread artifact");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert_eq!(artifact.timings_by_run.len(), 3);
+    let run_a_timing = artifact
+        .timings_by_run
+        .iter()
+        .find(|entry| entry.run_id == run_a.to_string())
+        .expect("run a timing entry");
+    assert!(run_a_timing.timings.available);
+    assert!(run_a_timing.timings.totals.wall_clock_ms.is_some());
+    let run_b_timing = artifact
+        .timings_by_run
+        .iter()
+        .find(|entry| entry.run_id == run_b.to_string())
+        .expect("run b timing entry");
+    assert!(run_b_timing.timings.available);
+    let run_c_timing = artifact
+        .timings_by_run
+        .iter()
+        .find(|entry| entry.run_id == run_c.to_string())
+        .expect("run c timing entry");
+    assert!(!run_c_timing.timings.available);
+    assert_eq!(
+        run_c_timing.timings.unavailable_reason.as_deref(),
+        Some("run_not_resident")
+    );
 }
 
 #[tokio::test]
@@ -14054,6 +14521,146 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
         "wire code must be snake_case `unavailable`; got: {json}"
     );
     assert_eq!(json["retryable"], true);
+}
+
+#[tokio::test]
+async fn a_repeated_notification_mutation_reports_that_nothing_changed() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_notifications::{
+        NotificationAction, NotificationId, NotificationInboxStore, NotificationInboxStorePort,
+        NotificationKind, NotificationRecipient, NotificationSeverity, NotificationSource,
+        PublishNotificationRequest,
+    };
+
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/notifications").expect("alias"),
+        VirtualPath::new("/engine/test/mutation-response").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let inbox = Arc::new(NotificationInboxStore::new(
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        )),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    ));
+
+    let actor = caller();
+    let thread_id = ThreadId::new("thread-mutation-response").expect("thread");
+    inbox
+        .publish(PublishNotificationRequest {
+            id: NotificationId::new("notification-settled").expect("id"),
+            recipient: NotificationRecipient {
+                tenant_id: actor.tenant_id.clone(),
+                user_id: actor.user_id.clone(),
+            },
+            kind: NotificationKind::ApprovalRequired,
+            severity: NotificationSeverity::Warning,
+            source: NotificationSource {
+                thread_id: thread_id.clone(),
+                turn_run_id: None,
+                lifecycle_ref: None,
+            },
+            action: NotificationAction::OpenThread { thread_id },
+            occurred_at: Utc::now(),
+        })
+        .await
+        .expect("seed a notification");
+
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_notification_inbox(inbox.clone());
+
+    async fn mark_read(services: &RebornServices) -> ProductNotificationMutationResponse {
+        let response = ProductSurface::invoke(
+            services,
+            caller(),
+            ProductSurfaceInvokeRequest {
+                operation_id: CapabilityId::new(NOTIFICATIONS_MARK_READ_COMMAND_ID)
+                    .expect("mark-read operation"),
+                input: serde_json::to_value(ProductNotificationMutationRequest {
+                    notification_id: "notification-settled".to_string(),
+                })
+                .expect("mutation input"),
+                activity_id: ActivityId::new(),
+            },
+        )
+        .await
+        .expect("mark-read succeeds");
+        serde_json::from_value(response.output).expect("mutation response")
+    }
+
+    // The command must report what the store changed. Answering `true` for the
+    // repeat would hand the client evidence of a durable write that never
+    // happened.
+    assert!(
+        mark_read(&services).await.updated,
+        "the first mark-read changes durable state"
+    );
+    assert!(
+        !mark_read(&services).await.updated,
+        "a notification that is already read reports no change"
+    );
+
+    let all_read = ProductSurface::invoke(
+        &services,
+        caller(),
+        ProductSurfaceInvokeRequest {
+            operation_id: CapabilityId::new(NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID)
+                .expect("mark-all-read operation"),
+            input: serde_json::json!({}),
+            activity_id: ActivityId::new(),
+        },
+    )
+    .await
+    .expect("mark-all-read succeeds");
+    let all_read: ProductNotificationMutationResponse =
+        serde_json::from_value(all_read.output).expect("mark-all-read response");
+    assert!(
+        !all_read.updated,
+        "nothing is unread, so mark-all-read reports no change"
+    );
+}
+
+#[tokio::test]
+#[traced_test]
+async fn notifications_unwired_backend_returns_retryable_service_unavailable() {
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = ProductSurface::query(
+        &services,
+        caller(),
+        ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
+            view_id: NOTIFICATIONS_VIEW.id.to_string(),
+            input: json!({}),
+            cursor: None,
+            limit: None,
+        },
+    )
+    .await
+    .expect_err("an unwired notification backend must fail visibly");
+
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+    assert!(
+        logs_contain("notification inbox backend unavailable at the product boundary"),
+        "the product boundary must log a fixed diagnostic category for inbox backend failures"
+    );
+    assert!(
+        !logs_contain("notification inbox store is not configured"),
+        "the bound backend reason carries filesystem, CAS, and serde text, so it must never \
+         reach the logs; log the fixed category instead"
+    );
 }
 
 #[tokio::test]

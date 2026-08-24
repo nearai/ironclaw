@@ -1340,7 +1340,7 @@ impl ProviderStreamSink {
 #[async_trait]
 impl CompletionStreamSink for ProviderStreamSink {
     async fn text_delta(&self, delta: String) {
-        if delta.is_empty() {
+        if delta.is_empty() || !self.inner.accepts_safe_text_updates() {
             return;
         }
         let safe_text = {
@@ -1357,15 +1357,24 @@ impl CompletionStreamSink for ProviderStreamSink {
         self.inner.safe_text_update(safe_text).await;
     }
 
+    fn text_is_visible(&self) -> bool {
+        self.inner.accepts_safe_text_updates()
+    }
+
     fn supports_text_replacement(&self) -> bool {
         true
     }
 
     async fn replace_on_next_text_delta(&self) {
-        self.replace_on_next_delta.store(true, Ordering::SeqCst);
+        if self.inner.accepts_safe_text_updates() {
+            self.replace_on_next_delta.store(true, Ordering::SeqCst);
+        }
     }
 
     async fn finish_text_replacement(&self) {
+        if !self.inner.accepts_safe_text_updates() {
+            return;
+        }
         if !self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
             return;
         }
@@ -1929,7 +1938,8 @@ async fn tool_response_to_host(
     match response.finish_reason {
         FinishReason::Stop => {
             let content = clean_response(&response.content.unwrap_or_default());
-            if content.trim().is_empty() {
+            let reasoning = response.reasoning.filter(|value| !value.trim().is_empty());
+            if content.trim().is_empty() && reasoning.is_none() {
                 return Err(HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidOutput,
                     InvalidOutputReason::EmptyAssistantResponse.safe_summary(),
@@ -1939,16 +1949,15 @@ async fn tool_response_to_host(
                 content_bytes = content.len(),
                 "reborn model gateway classified tool-capable provider response as assistant reply"
             );
-            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
-                content,
-                response.reasoning,
+            Ok(
+                HostManagedModelResponse::assistant_reply_with_reasoning(content, reasoning)
+                    .with_usage(LoopModelUsage {
+                        input_tokens: response.input_tokens,
+                        output_tokens: response.output_tokens,
+                        cache_read_input_tokens: response.cache_read_input_tokens,
+                        cache_creation_input_tokens: response.cache_creation_input_tokens,
+                    }),
             )
-            .with_usage(LoopModelUsage {
-                input_tokens: response.input_tokens,
-                output_tokens: response.output_tokens,
-                cache_read_input_tokens: response.cache_read_input_tokens,
-                cache_creation_input_tokens: response.cache_creation_input_tokens,
-            }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::OutputTruncated,
@@ -2877,6 +2886,36 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(safe_text);
         }
+    }
+
+    struct DiscardingSafeTextSink;
+
+    #[async_trait]
+    impl HostManagedModelStreamSink for DiscardingSafeTextSink {
+        fn accepts_safe_text_updates(&self) -> bool {
+            false
+        }
+
+        async fn safe_text_update(&self, _safe_text: String) {
+            panic!("discarding sink must not receive safe text updates");
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_does_not_accumulate_discarded_updates() {
+        let sink = ProviderStreamSink::new(Arc::new(DiscardingSafeTextSink));
+
+        sink.text_delta("partial".to_string()).await;
+        sink.replace_on_next_text_delta().await;
+        sink.finish_text_replacement().await;
+
+        assert!(
+            sink.accumulated_text
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+        assert!(!sink.replace_on_next_delta.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

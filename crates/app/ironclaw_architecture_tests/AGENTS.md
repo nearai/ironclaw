@@ -5,8 +5,9 @@ family rules in `crates/app/AGENTS.md`.
 
 ## Start Here
 
-- Read `README.md`, then `Cargo.toml` (zero production dependencies — one
-  dev-only vocabulary import).
+- Read `README.md`, then `Cargo.toml` (zero production dependencies — two
+  dev-only vocabulary imports, `ironclaw_host_api` and
+  `ironclaw_product_contracts`, each with its own comment explaining why).
 - Use these Reborn contracts as the source of truth before changing behavior:
   - `docs/internal/reborn/contracts/_contract-freeze-index.md`
   - `docs/internal/reborn/contracts/kernel-boundary.md`

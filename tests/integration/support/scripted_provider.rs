@@ -97,10 +97,24 @@ struct ParkingState {
     parked_rx: Mutex<Option<oneshot::Receiver<()>>>,
     release_tx: Mutex<Option<oneshot::Sender<()>>>,
     release_rx: Mutex<Option<oneshot::Receiver<()>>>,
+    /// Zero-based index of the model call to park. Every other call passes
+    /// straight through to the inner trace.
+    park_at_call: usize,
+    calls: AtomicUsize,
 }
 
 impl ParkingModelGate {
     pub fn new() -> Self {
+        Self::parking_call(0)
+    }
+
+    /// Parks the model call at zero-based index `park_at_call` and lets every
+    /// other call through.
+    ///
+    /// Lets a test choose WHICH loop iteration is interrupted, rather than
+    /// always the first — needed to stop a run mid-flight at an iteration
+    /// whose `BeforeModel` checkpoint was batched away (#7603).
+    pub fn parking_call(park_at_call: usize) -> Self {
         let (parked_tx, parked_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         Self(Arc::new(ParkingState {
@@ -108,6 +122,8 @@ impl ParkingModelGate {
             parked_rx: Mutex::new(Some(parked_rx)),
             release_tx: Mutex::new(Some(release_tx)),
             release_rx: Mutex::new(Some(release_rx)),
+            park_at_call,
+            calls: AtomicUsize::new(0),
         }))
     }
 
@@ -115,6 +131,10 @@ impl ParkingModelGate {
     /// been released. This keeps restart/replacement integration scenarios on
     /// the same provider seam without creating a second provider.
     pub fn rearm(&self) {
+        // Restart the call count with the channels. `park()` only parks the
+        // call at `park_at_call`, so leaving the counter past that index would
+        // let every later call through and the re-armed gate would never park.
+        self.0.calls.store(0, Ordering::SeqCst);
         let (parked_tx, parked_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
         *lock(&self.0.parked_tx) = Some(parked_tx);
@@ -141,7 +161,14 @@ impl ParkingModelGate {
     }
 
     /// Provider side: signal parked, then block until `release()` fires.
+    ///
+    /// Only the call at `park_at_call` parks; the rest return immediately so
+    /// the run reaches the chosen iteration first, and so the worker that
+    /// resumes after recovery is never parked a second time.
     async fn park(&self) {
+        if self.0.calls.fetch_add(1, Ordering::SeqCst) != self.0.park_at_call {
+            return;
+        }
         if let Some(tx) = lock(&self.0.parked_tx).take() {
             let _ = tx.send(());
         }

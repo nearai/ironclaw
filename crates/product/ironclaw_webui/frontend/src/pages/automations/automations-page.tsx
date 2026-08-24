@@ -124,9 +124,11 @@ export function AutomationsPage() {
                         isRefreshing={isRefreshing}
                         isFilterTransition={automationsState.isFilterTransition}
                         isMutating={automationsState.isMutating}
+                        schedulerEnabled={automationsState.schedulerEnabled}
                         selectedAutomationId={selectedAutomationId}
                         onSelectAutomation={setSelectedAutomationId}
                         onPauseAutomation={automationsState.pauseAutomation}
+                        onRunAutomation={automationsState.runAutomation}
                         onResumeAutomation={automationsState.resumeAutomation}
                         onRenameAutomation={automationsState.renameAutomation}
                         onDeleteAutomation={automationsState.deleteAutomation}

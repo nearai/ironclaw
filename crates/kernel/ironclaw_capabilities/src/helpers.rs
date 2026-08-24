@@ -10,7 +10,7 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_processes::{ProcessInvocationError, ProcessInvocationStatePort};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::{CapabilityInvocationError, ResumeContextMismatchKind};
 
@@ -227,15 +227,8 @@ pub(crate) async fn apply_invocation_state_transition_if_configured(
     };
     let Some(transition) = error.invocation_state_transition() else {
         // PR #4236 disposition policy handles dispatch failures on the outcome
-        // path, so remove only fresh worker-local state without materializing a
-        // durable terminal transition.
-        if let Err(error) = invocation_state.discard_pending(scope, invocation_id).await {
-            debug!(
-                invocation_id = %invocation_id,
-                transition_error_kind = invocation_state_error_kind(&error),
-                "process-invocation pending cleanup failed; original business error is being returned to caller",
-            );
-        }
+        // path. Retain fresh worker-local state so that outcome path can
+        // materialize the required durable terminal transition.
         return;
     };
     match transition {
@@ -354,7 +347,7 @@ mod tests {
     use super::*;
     use crate::CapabilityInvocationError;
     use ironclaw_host_api::{
-        dispatch::{DispatchFailureKind, RuntimeDispatchErrorKind},
+        dispatch::{DispatchAuthRequirement, DispatchFailureKind, RuntimeDispatchErrorKind},
         ids::CapabilityId,
     };
 
@@ -373,6 +366,7 @@ mod tests {
     fn dispatch_input_encode_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            provider_diagnostic: None,
             safe_summary: None,
             detail: None,
         };
@@ -383,6 +377,7 @@ mod tests {
     fn dispatch_backend_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            provider_diagnostic: None,
             safe_summary: None,
             detail: None,
         };
@@ -393,6 +388,7 @@ mod tests {
     fn dispatch_unknown_capability_returns_no_invocation_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::UnknownCapability,
+            provider_diagnostic: None,
             safe_summary: None,
             detail: None,
         };
@@ -417,8 +413,11 @@ mod tests {
     fn authorization_requires_auth_still_blocks_auth() {
         let error = CapabilityInvocationError::AuthorizationRequiresAuth {
             capability: capability(),
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
+            requirement: Box::new(DispatchAuthRequirement {
+                required_secrets: Vec::new(),
+                credential_requirements: Vec::new(),
+                model_visible_cause: None,
+            }),
         };
         let transition = error
             .invocation_state_transition()

@@ -20,7 +20,9 @@ use ironclaw_host_api::{
     action::{NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern},
     capability::{CapabilityDescriptor, CapabilitySet, EffectKind, PermissionMode},
     decision::Obligation,
-    dispatch::{CapabilityDispatchResult, DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{
+        CapabilityDispatchResult, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
+    },
     host_port::HostPortCatalog,
     http::{
         RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
@@ -986,8 +988,8 @@ async fn service_guard_releases_reservation_on_planner_denial() {
 
     assert!(matches!(
         result,
-        Err(DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::UnsupportedRunner,
+        Err(DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner),
             ..
         })
     ));
@@ -1044,8 +1046,8 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
 
     assert!(matches!(
         result,
-        Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::NetworkDenied,
+        Err(DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
             ..
         })
     ));
@@ -1107,8 +1109,8 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
 
     assert!(matches!(
         result,
-        Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::NetworkDenied,
+        Err(DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
             ..
         })
     ));
@@ -1165,8 +1167,8 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
 
     assert!(matches!(
         result,
-        Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::SecretDenied,
+        Err(DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::SecretDenied),
             ..
         })
     ));
@@ -1230,8 +1232,8 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
 
     assert!(matches!(
         result,
-        Err(DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::NetworkDenied,
+        Err(DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
             ..
         })
     ));
@@ -1362,8 +1364,8 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
 
     assert!(matches!(
         result,
-        Err(DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::NetworkDenied,
+        Err(DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
             ..
         })
     ));
@@ -1513,7 +1515,8 @@ async fn assert_first_party_denies_before_handler(
     assert!(
         matches!(
             result,
-            Err(DispatchError::FirstParty { kind, .. }) if kind == expected_kind
+            Err(DispatchError::Rejected { kind, .. })
+                if kind == DispatchFailureKind::Runtime(expected_kind)
         ),
         "expected first-party denial {expected_kind:?}, got {result:?}"
     );
@@ -1543,17 +1546,21 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
             None => request
                 .governor
                 .reserve(request.scope, request.estimate)
-                .map_err(|_| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                    model_visible_cause: None,
+                .map_err(|_| DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                    diagnostic: None,
+                    detail: None,
                 })?,
         };
         let receipt: ResourceReceipt = request
             .governor
             .reconcile(reservation.id, usage.clone())
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                diagnostic: None,
+                detail: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: Value::Null,

@@ -192,6 +192,7 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
             output_contract: None,
             scope: scope.clone(),
@@ -824,6 +825,7 @@ async fn submit_and_block_provider_auth_run(
 ) -> TurnRunId {
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
             output_contract: None,
             scope: scope.clone(),
@@ -968,6 +970,7 @@ async fn submit_and_block_auth_run(
 ) -> ironclaw_host_api::turn::TurnRunId {
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            subagent_activation_provenance: None,
             requested_model: None,
             output_contract: None,
             scope: scope.clone(),

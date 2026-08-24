@@ -182,7 +182,8 @@ pub use extension_bundle::{
 pub use extension_credential_requirements::{
     can_merge_lifecycle_credential_setup, lifecycle_credential_setup,
     manifest_runtime_credential_auth_requirements, merge_lifecycle_credential_setup,
-    package_runtime_credential_auth_requirements, product_auth_credential_source,
+    package_activation_credential_auth_requirements, package_runtime_credential_auth_requirements,
+    product_auth_credential_source,
 };
 pub use first_party_package::{
     FirstPartyHandlerRegistrar, FirstPartyPackageAsset, FirstPartyPackageBundle,

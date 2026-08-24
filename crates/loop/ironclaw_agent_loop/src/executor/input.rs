@@ -186,9 +186,17 @@ pub(super) fn consume_drainable_inputs(
                 break;
             }
             LoopInput::GateResolved { .. } | LoopInput::CapabilitySurfaceChanged { .. } => break,
+            // UserMessage, Steering, and SubagentSettled are drained by BOTH
+            // mode arms above and never reach here. FollowUp is drained only
+            // by the FollowUp arm, so a FollowUp-variant input still reaches
+            // this branch (and breaks, left unconsumed) when draining in
+            // Steering mode. This arm exists both for that live FollowUp
+            // case and to keep the match exhaustive over every `LoopInput`
+            // variant.
             LoopInput::UserMessage { .. }
             | LoopInput::FollowUp { .. }
-            | LoopInput::Steering { .. } => {
+            | LoopInput::Steering { .. }
+            | LoopInput::SubagentSettled { .. } => {
                 break;
             }
         }
@@ -217,20 +225,26 @@ fn user_facing_input_matches_drain_mode(input: &LoopInput, mode: UserFacingInput
         UserFacingInputDrainMode::Steering => {
             matches!(
                 input,
-                LoopInput::UserMessage { .. } | LoopInput::Steering { .. }
+                LoopInput::UserMessage { .. }
+                    | LoopInput::Steering { .. }
+                    | LoopInput::SubagentSettled { .. }
             )
         }
         // Steering inputs are drainable at the reply-only exit boundary too: a
         // steering message that arrives during the run's FINAL model call is
         // never seen by the steering drain (which runs at iteration start), so
         // the follow-up drain must consume it and force one more iteration —
-        // otherwise the input strands unconsumed while the run completes.
+        // otherwise the input strands unconsumed while the run completes. A
+        // settled subagent result is the same shape: it can land during the
+        // final model call and must force one more iteration rather than
+        // stranding unconsumed while the run completes.
         UserFacingInputDrainMode::FollowUp => {
             matches!(
                 input,
                 LoopInput::FollowUp { .. }
                     | LoopInput::UserMessage { .. }
                     | LoopInput::Steering { .. }
+                    | LoopInput::SubagentSettled { .. }
             )
         }
     }

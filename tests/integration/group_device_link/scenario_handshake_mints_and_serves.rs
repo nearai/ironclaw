@@ -47,23 +47,19 @@ pub async fn run(
     let channel_connection = group
         .channel_connection()
         .ok_or("device-link group has no production channel-connection service")?;
-    if !channel_connection
+    if channel_connection
         .has_any_active_identity_binding(LINKED_VENDOR_ID, &actor)
         .await?
     {
         return Err(
-            "device-link completion minted credentials but did not persist a channel identity"
-                .into(),
+            "personal device-link completion persisted a workspace-bot channel identity".into(),
         );
     }
-    if !channel_connection
+    if channel_connection
         .caller_channel_connected(LINKED_EXTENSION_ID, &actor)
         .await?
     {
-        return Err(
-            "device-link completion minted credentials but did not connect the Telegram channel"
-                .into(),
-        );
+        return Err("personal device-link completion connected the Telegram bot channel".into());
     }
 
     // PROPOSAL §4.5's ownership pin, asserted on the account the production
@@ -115,6 +111,17 @@ pub async fn run(
     installer
         .assert_tool_invoked("builtin.extension_install")
         .await?;
+    if channel_connection
+        .has_any_active_identity_binding(LINKED_VENDOR_ID, &actor)
+        .await?
+        || channel_connection
+            .caller_channel_connected(LINKED_EXTENSION_ID, &actor)
+            .await?
+    {
+        return Err(
+            "installing personal-account tools created a workspace-bot channel binding".into(),
+        );
+    }
 
     //
     // A tool call now resolves the caller to the account the handshake minted,

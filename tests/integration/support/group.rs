@@ -284,6 +284,13 @@ pub(crate) struct GroupSharedStorage {
     /// Read by `RebornThreadBuilder::build()` to decide whether to wire the
     /// real approval/auth interaction services into the thread's workflow.
     pub(crate) real_gate_dispatch_services: bool,
+    /// Task 5 (run-artifact-timings): the ONE `InMemoryDiagnosticStore` wired
+    /// into the group's ONE planned runtime as `prompt_diagnostic_sink`,
+    /// mirroring production's single-store shape (`runtime.rs:3455`,
+    /// `product_surface.rs:98`). Retained so `RebornIntegrationHarness::
+    /// diagnostic_store()` reads exactly what the loop actually recorded,
+    /// instead of a second throwaway instance nothing observes.
+    pub(crate) diagnostic_store: Arc<ironclaw_assistant::inspector_store::InMemoryDiagnosticStore>,
 }
 
 impl GroupSharedStorage {
@@ -1252,6 +1259,12 @@ impl RebornIntegrationGroupBuilder {
                 None => Arc::clone(&user_profile_source),
             };
         let reply_attachment_intent_port = capability.reply_attachment_intent_port();
+        // Production parity: ONE store, connected to the loop's diagnostic
+        // sinks and readable by product services — see runtime.rs:3455 and
+        // product_surface.rs:98. The previous inline `default()` was write-only,
+        // so nothing could observe what the loop recorded.
+        let diagnostic_store =
+            Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
         let parts = DefaultPlannedRuntimeParts {
             process_system: process_system.clone(),
             thread_service: runtime_thread_service,
@@ -1362,9 +1375,8 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
-            prompt_diagnostic_sink: Some(Arc::new(
-                ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default(),
-            )),
+            prompt_diagnostic_sink: Some(Arc::clone(&diagnostic_store)
+                as Arc<dyn ironclaw_loop_host::HostManagedPromptDiagnosticSink>),
             reply_attachment_intent_port: Some(reply_attachment_intent_port),
             // §5.2.9 render-from-record: the SAME durable gate-record store this
             // group's capability port persists `GateRecord::Auth` into, so the
@@ -1413,6 +1425,7 @@ impl RebornIntegrationGroupBuilder {
                 planned_runtime_parts_shape,
                 real_gate_dispatch_services: self.real_gate_dispatch_services,
                 channel_connection: self.channel_connection,
+                diagnostic_store,
             }),
         })
     }

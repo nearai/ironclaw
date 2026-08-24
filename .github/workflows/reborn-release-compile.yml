@@ -85,9 +85,7 @@ jobs:
       - name: Install musl toolchain
         if: matrix.musl
         shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes musl-tools binutils file
+        run: scripts/ci/install-ci-apt-packages.sh musl-tools binutils file
 
       - name: Configure musl C compiler
         if: matrix.musl

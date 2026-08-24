@@ -65,6 +65,8 @@ pub enum SessionThreadError {
     },
     #[error("invalid prepared context: {reason}")]
     InvalidPreparedContext { reason: String },
+    #[error("invalid subagent result: {reason}")]
+    InvalidSubagentResult { reason: String },
     #[error("prepared context replay key mismatch for thread {thread_id}")]
     PreparedContextKeyMismatch { thread_id: ThreadId },
     #[error("structured finalization record conflicts for run {turn_run_id}")]
@@ -102,6 +104,7 @@ impl SessionThreadError {
             Self::InvalidAttachment(_) => "invalid_attachment",
             Self::InvalidMessageTimestamp { .. } => "invalid_message_timestamp",
             Self::InvalidPreparedContext { .. } => "invalid_prepared_context",
+            Self::InvalidSubagentResult { .. } => "invalid_subagent_result",
             Self::PreparedContextKeyMismatch { .. } => "prepared_context_key_mismatch",
             Self::StructuredFinalizationConflict { .. } => "structured_finalization_conflict",
             Self::InvalidStructuredFinalization { .. } => "invalid_structured_finalization",

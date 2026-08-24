@@ -27,7 +27,7 @@ alone constructs authenticated-caller evidence.
   the fixed middleware order: ws-origin → body limit → bearer/session/OIDC
   auth → rate limit → handler.
 - `webui_v2_router(state)` / `webui_v2_routes()` — the route builder and the
-  frozen descriptor table (97 routes, contract-locked; re-derive:
+  frozen descriptor table (114 routes, contract-locked; re-derive:
   `rg -c 'pub const WEBUI_V2_ROUTE_' src/webui_v2/descriptors.rs`).
 - Handlers dispatch to `ironclaw_product_contracts::surface::ProductSurface`
   and render redacted responses through `WebUiV2HttpError`.
@@ -49,8 +49,8 @@ alone constructs authenticated-caller evidence.
   attachment ceilings — one home for size limits, PROPOSAL §6.4.9),
   `ironclaw_common`, `ironclaw_extension_host` (**bounded**: the pairing
   service core only, never lifecycle authority or installation stores —
-  §6.9.4's pairing amendment), and `ironclaw_assistant` (**frozen**: 100
-  symbols — 91 command/view/capability constants + 9 wire DTOs — exact-match
+  §6.9.4's pairing amendment), and `ironclaw_assistant` (**frozen**: 104
+  symbols — 95 command/view/capability constants + 9 wire DTOs — exact-match
   and shrink-only; §12.11 D-B rules this edge charter-sanctioned and
   permanent).
 - **Consumed by (1):** the `ironclaw` binary (`crates/app/ironclaw_cli`),
@@ -62,7 +62,7 @@ alone constructs authenticated-caller evidence.
 
 - **The route table is a contract** — add a route only as handler +
   `webui_v2_routes()` entry (`tests/webui_v2_descriptors_contract.rs`).
-- **The product residue is pinned** at 100 symbols, exact-match/shrink-only:
+- **The product residue is pinned** at 104 symbols, exact-match/shrink-only:
   `reborn_transport_product_boundary.rs` (`WEBUI_PRODUCT_SYMBOL_BASELINE`).
 - **`CONTRACT.md` here is the module spec and is gate-pinned** — the 19-owner
   `handlers.rs` charter map is enforced by

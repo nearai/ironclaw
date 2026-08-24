@@ -21,9 +21,8 @@ use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
     RuntimeAuthGate, RuntimeAuthResume, RuntimeBlockedReason, RuntimeCapabilityCompleted,
-    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityUnknown, RuntimeGateId,
-    RuntimeInvocation, RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest,
-    VisibleCapabilitySurface,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeGateId, RuntimeInvocation,
+    RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest, VisibleCapabilitySurface,
 };
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
@@ -402,72 +401,54 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
 }
 
 #[tokio::test]
-async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones() {
-    let cases = [
-        (
-            RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
-                CapabilityId::new("demo.echo").expect("valid capability id"),
-                FailureKind::InputEncode,
-                Some("invalid input".to_string()),
-            )),
-            FailureKind::InputEncode,
-        ),
-        (
-            RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
-                capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
-                kind: "custom_failure".to_string(),
-                message: Some("custom failure".to_string()),
-            }),
-            // Unrecognized legacy open-set tag: the closed vocabulary's total
-            // `from_tag` fallback lands on the non-retryable `Unclassified`
-            // sink.
-            FailureKind::Unclassified,
-        ),
-    ];
-
-    for (outcome, expected_kind) in cases {
-        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
-        let provider_id = ExtensionId::new("demo").expect("valid provider id");
-        let milestone_sink =
-            Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
-        let port = runtime_capability_port(
-            &capability_id,
-            &provider_id,
-            Arc::new(QueuedHostRuntime::new(
-                vec![visible_capability(
+async fn runtime_capability_failed_outcome_emits_failure_milestone() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let milestone_sink =
+        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Ok(RuntimeCapabilityOutcome::Failed(
+                RuntimeCapabilityFailure::new(
                     capability_id.clone(),
-                    provider_id.clone(),
-                )],
-                vec![Ok(outcome)],
-            )),
-            Arc::new(RecordingResultWriter::default()),
-            milestone_sink.clone(),
-            "thread-runtime-capability-failure-milestone",
-        )
-        .await;
+                    FailureKind::InputEncode,
+                    Some("invalid input".to_string()),
+                ),
+            ))],
+        )),
+        Arc::new(RecordingResultWriter::default()),
+        milestone_sink.clone(),
+        "thread-runtime-capability-failure-milestone",
+    )
+    .await;
 
-        let outcome = invoke_visible_runtime_capability(&port)
-            .await
-            .expect("runtime failure outcome maps to loop outcome");
+    let outcome = invoke_visible_runtime_capability(&port)
+        .await
+        .expect("runtime failure outcome maps to loop outcome");
 
-        assert!(matches!(
-            &outcome,
-            Resolution::Done(o) if o.verdict.error_kind().is_some()
-        ));
-        let milestones = milestone_sink.milestones();
-        assert_eq!(milestones.len(), 2);
-        assert!(matches!(
-            &milestones[1].kind,
-            ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
-                activity_id: _,
-                capability_id: actual,
-                provider: Some(provider),
-                runtime: Some(RuntimeKind::FirstParty),
-                reason_kind,
-                ..
-            } if actual == &capability_id && provider == &provider_id && reason_kind == &expected_kind
-        ));
-    }
+    assert!(matches!(
+        &outcome,
+        Resolution::Done(o) if o.verdict.error_kind().is_some()
+    ));
+    let milestones = milestone_sink.milestones();
+    assert_eq!(milestones.len(), 2);
+    assert!(matches!(
+        &milestones[1].kind,
+        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
+            activity_id: _,
+            capability_id: actual,
+            provider: Some(provider),
+            runtime: Some(RuntimeKind::FirstParty),
+            reason_kind: FailureKind::InputEncode,
+            ..
+        } if actual == &capability_id && provider == &provider_id
+    ));
 }
 
 #[tokio::test]
@@ -525,13 +506,13 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
             capability_id: capability_id.clone(),
             reason: RuntimeBlockedReason::ApprovalRequired,
         }),
-        RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
-            gate_id: RuntimeGateId::new(),
-            capability_id: capability_id.clone(),
-            reason: RuntimeBlockedReason::AuthRequired,
-            required_secrets: Vec::new(),
-            credential_requirements: Vec::new(),
-        }),
+        RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate::new(
+            RuntimeGateId::new(),
+            capability_id.clone(),
+            RuntimeBlockedReason::AuthRequired,
+            Vec::new(),
+            Vec::new(),
+        )),
         RuntimeCapabilityOutcome::ResourceBlocked(RuntimeResourceGate {
             gate_id: RuntimeGateId::new(),
             capability_id: capability_id.clone(),
@@ -599,13 +580,13 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
                 provider_id.clone(),
             )],
             vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
-                RuntimeAuthGate {
-                    gate_id: RuntimeGateId::new(),
-                    capability_id: capability_id.clone(),
-                    reason: RuntimeBlockedReason::AuthRequired,
-                    required_secrets: Vec::new(),
-                    credential_requirements: vec![requirement.clone()],
-                },
+                RuntimeAuthGate::new(
+                    RuntimeGateId::new(),
+                    capability_id.clone(),
+                    RuntimeBlockedReason::AuthRequired,
+                    Vec::new(),
+                    vec![requirement.clone()],
+                ),
             ))],
         )),
         Arc::new(RecordingResultWriter::default()),
@@ -646,13 +627,13 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
                 provider_id.clone(),
             )],
             vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
-                RuntimeAuthGate {
-                    gate_id: RuntimeGateId::new(),
-                    capability_id: capability_id.clone(),
-                    reason: RuntimeBlockedReason::AuthRequired,
-                    required_secrets: Vec::new(),
-                    credential_requirements: Vec::new(),
-                },
+                RuntimeAuthGate::new(
+                    RuntimeGateId::new(),
+                    capability_id.clone(),
+                    RuntimeBlockedReason::AuthRequired,
+                    Vec::new(),
+                    Vec::new(),
+                ),
             ))],
         )
         .with_auth_resume_outcomes(vec![Ok(RuntimeCapabilityOutcome::Completed(
@@ -718,6 +699,7 @@ async fn auth_resume_uses_replay_input_without_resolving_stale_input_ref() {
         panic!("auth gate must carry replay metadata, got {auth_blocked:?}");
     };
     let auth_resume = CapabilityAuthResume {
+        gate_ref: LoopGateRef::new("gate:auth-runtime-lifecycle").expect("valid auth gate ref"),
         resume_token: Some(
             CapabilityResumeToken::new(
                 blocked
@@ -808,7 +790,9 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
         input_ref: CapabilityInputRef::new("input:removed-capability-denial")
             .expect("valid input ref"),
         approval_resume: None,
-        auth_resume: Some(CapabilityAuthResume::denied()),
+        auth_resume: Some(CapabilityAuthResume::denied(
+            LoopGateRef::new("gate:auth-runtime-decline").expect("valid auth gate ref"),
+        )),
     };
 
     let unavailable = port
@@ -876,7 +860,9 @@ async fn denied_auth_resume_terminalizes_through_runtime_without_dispatch() {
         capability_id: capability_id.clone(),
         input_ref: CapabilityInputRef::new("input:changed-after-removal").expect("valid input ref"),
         approval_resume: None,
-        auth_resume: Some(CapabilityAuthResume::denied()),
+        auth_resume: Some(CapabilityAuthResume::denied(
+            LoopGateRef::new("gate:auth-runtime-decline").expect("valid auth gate ref"),
+        )),
     };
     let replay_outcome = port
         .invoke_capability(replay)
@@ -927,6 +913,8 @@ async fn denied_auth_resume_rejects_mismatched_optional_token_before_runtime() {
                 .expect("valid input ref"),
             approval_resume: None,
             auth_resume: Some(CapabilityAuthResume {
+                gate_ref: LoopGateRef::new("gate:auth-malformed-denial")
+                    .expect("valid auth gate ref"),
                 resume_token: Some(resume_token_for_different_activity(activity_id)),
                 disposition: Some(ironclaw_turns::GateResumeDisposition::Denied),
                 prior_approval: None,
@@ -957,65 +945,6 @@ async fn host_runtime_default_auth_decline_fails_closed_as_unavailable() {
         .expect_err("runtime without durable decline support must fail closed");
 
     assert!(matches!(error, HostRuntimeError::Unavailable { .. }));
-}
-
-/// The unified `FailureKind` vocabulary is closed and `from_tag` is total, so
-/// a wild/unsafe unknown-outcome tag no longer aborts the run with an internal
-/// "could not be represented" host error — it lands in the non-retryable
-/// `Unclassified` sink, emits the failure milestone, and returns a
-/// model-visible failed resolution.
-#[tokio::test]
-async fn runtime_capability_unknown_outcome_with_wild_kind_maps_to_unclassified_failure() {
-    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
-    let provider_id = ExtensionId::new("demo").expect("valid provider id");
-    let milestone_sink =
-        Arc::new(ironclaw_loop_contracts::InMemoryLoopHostMilestoneSink::default());
-    let port = runtime_capability_port(
-        &capability_id,
-        &provider_id,
-        Arc::new(QueuedHostRuntime::new(
-            vec![visible_capability(
-                capability_id.clone(),
-                provider_id.clone(),
-            )],
-            vec![Ok(RuntimeCapabilityOutcome::Unknown(
-                RuntimeCapabilityUnknown {
-                    capability_id: capability_id.clone(),
-                    kind: "invalid kind with spaces".to_string(),
-                    message: Some("bad kind".to_string()),
-                },
-            ))],
-        )),
-        Arc::new(RecordingResultWriter::default()),
-        milestone_sink.clone(),
-        "thread-runtime-capability-invalid-unknown-kind",
-    )
-    .await;
-
-    let outcome = invoke_visible_runtime_capability(&port)
-        .await
-        .expect("wild unknown-outcome kind becomes a model-visible failure");
-
-    assert!(matches!(
-        &outcome,
-        Resolution::Done(o)
-            if o.verdict.error_kind() == Some(&FailureKind::Unclassified)
-    ));
-    let milestones = milestone_sink.milestones();
-    assert_eq!(milestones.len(), 2);
-    assert!(matches!(
-        &milestones[1].kind,
-        ironclaw_loop_contracts::LoopHostMilestoneKind::CapabilityFailed {
-            activity_id: _,
-            capability_id: actual,
-            provider: Some(provider),
-            runtime: Some(RuntimeKind::FirstParty),
-            reason_kind,
-            ..
-        } if actual == &capability_id
-            && provider == &provider_id
-            && reason_kind == &FailureKind::Unclassified
-    ));
 }
 
 #[tokio::test]
@@ -1289,13 +1218,13 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
         visible_capability(capability_id.clone(), provider_id.clone()),
         approval_request_id,
         vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
-            RuntimeAuthGate {
-                gate_id: RuntimeGateId::new(),
-                capability_id: capability_id.clone(),
-                reason: RuntimeBlockedReason::AuthRequired,
-                required_secrets: Vec::new(),
-                credential_requirements: Vec::new(),
-            },
+            RuntimeAuthGate::new(
+                RuntimeGateId::new(),
+                capability_id.clone(),
+                RuntimeBlockedReason::AuthRequired,
+                Vec::new(),
+                Vec::new(),
+            ),
         ))],
     ));
     let mut context = execution_context("thread-auth-resume-identity");
@@ -1385,6 +1314,8 @@ async fn auth_resume_after_approval_reuses_original_invocation_identity() {
             input_ref: first_invocation.input_ref.clone(),
             approval_resume: None,
             auth_resume: Some(CapabilityAuthResume {
+                gate_ref: LoopGateRef::new("gate:auth-approved-resume")
+                    .expect("valid auth gate ref"),
                 resume_token: Some(resume.resume_token.clone()),
                 disposition: None,
                 // Carry the prior approval so the port restores the original

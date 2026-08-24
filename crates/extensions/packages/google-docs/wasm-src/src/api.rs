@@ -4,14 +4,89 @@
 //! credential injection and rate limiting. The WASM tool never sees
 //! the actual OAuth token.
 
+use crate::exports::near::agent::tool::{ErrorKind, GuestFailure};
 use crate::near::agent::host;
 use crate::types::*;
 
 const DOCS_API_BASE: &str = "https://docs.googleapis.com/v1/documents";
 const GOOGLE_API_AUTH_REQUIRED_ERROR: &str = "google_api_error_status_401";
 
+/// Bound a free-text message to a sane length before it rides in a
+/// `guest-failure`; the host re-bounds and scrubs downstream, but the guest
+/// should never hand over an unbounded string in the first place.
+pub(crate) fn bounded_message(message: &str) -> String {
+    const MAX_MESSAGE_CHARS: usize = 512;
+    message.chars().take(MAX_MESSAGE_CHARS).collect()
+}
+
+// ponytail: duplicated across isolated WASM guest packages; consolidate only
+// when guests share a supported contracts crate.
+fn transport_failure(failure: &host::HttpFailure) -> GuestFailure {
+    let kind = match failure.kind {
+        host::HttpErrorKind::AuthRequired => ErrorKind::AuthRequired,
+        host::HttpErrorKind::Input => ErrorKind::Input,
+        host::HttpErrorKind::OutputTooLarge => ErrorKind::OutputTooLarge,
+        host::HttpErrorKind::Executor => ErrorKind::Executor,
+        host::HttpErrorKind::NetworkDenied => ErrorKind::NetworkDenied,
+        host::HttpErrorKind::Client => ErrorKind::Client,
+        host::HttpErrorKind::OperationFailed => ErrorKind::OperationFailed,
+    };
+    GuestFailure {
+        kind,
+        code: failure
+            .code
+            .clone()
+            .or_else(|| Some("google_api_transport_error".into())),
+        message: failure.message.as_deref().map(bounded_message),
+    }
+}
+
+/// A guest-side JSON encode/decode of an already-well-formed payload failed
+/// — a tool-side processing failure, not anything the caller did wrong.
+pub(crate) fn serialization_failure(error: &serde_json::Error) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Executor,
+        code: Some("serialization_failed".to_string()),
+        message: Some(bounded_message(&error.to_string())),
+    }
+}
+
+/// Build an `input`-kind guest failure for a caller-supplied argument that
+/// fails local validation before any egress.
+fn input_failure(code: &'static str, message: impl Into<String>) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Input,
+        code: Some(code.to_string()),
+        message: Some(bounded_message(&message.into())),
+    }
+}
+
+fn operation_failure(code: &'static str, message: impl Into<String>) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::OperationFailed,
+        code: Some(code.to_string()),
+        message: Some(bounded_message(&message.into())),
+    }
+}
+
+fn failure_reason(failure: &GuestFailure) -> String {
+    failure
+        .message
+        .clone()
+        .or_else(|| failure.code.clone())
+        .unwrap_or_else(|| "google_docs_operation_failed".to_string())
+}
+
+fn utf8_decode_failure(error: &std::string::FromUtf8Error) -> GuestFailure {
+    GuestFailure {
+        kind: ErrorKind::Executor,
+        code: Some("invalid_utf8_response".to_string()),
+        message: Some(bounded_message(&error.to_string())),
+    }
+}
+
 /// Make a Google Docs API call.
-fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
+fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, GuestFailure> {
     let url = if path.is_empty() {
         DOCS_API_BASE.to_string()
     } else {
@@ -31,7 +106,8 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
         &format!("Google Docs API: {} {}", method, url),
     );
 
-    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
+    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)
+        .map_err(|e| transport_failure(&e))?;
 
     if response.status < 200 || response.status >= 300 {
         return Err(api_status_error(
@@ -45,26 +121,32 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
         return Ok(String::new());
     }
 
-    String::from_utf8(response.body).map_err(|e| format!("Invalid UTF-8 in response: {}", e))
+    String::from_utf8(response.body).map_err(|e| utf8_decode_failure(&e))
 }
 
-fn api_status_error(service: &str, status: u16, body: &[u8]) -> String {
+fn api_status_error(service: &str, status: u16, body: &[u8]) -> GuestFailure {
     if status == 401 {
-        return serde_json::json!({
-            "code": GOOGLE_API_AUTH_REQUIRED_ERROR,
-            "kind": "auth_required",
-        })
-        .to_string();
+        return GuestFailure {
+            kind: ErrorKind::AuthRequired,
+            code: Some(GOOGLE_API_AUTH_REQUIRED_ERROR.to_string()),
+            message: None,
+        };
     }
     let body_text = String::from_utf8_lossy(body);
-    format!("{service} API returned status {status}: {body_text}")
+    GuestFailure {
+        kind: ErrorKind::Client,
+        code: Some(format!("api_status_{status}")),
+        message: Some(bounded_message(&format!(
+            "{service} API returned status {status}: {body_text}"
+        ))),
+    }
 }
 
 /// Send a batchUpdate to the document and return the parsed response.
 fn batch_update_raw(
     document_id: &str,
     requests: Vec<serde_json::Value>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GuestFailure> {
     batch_update_raw_with_revision(document_id, requests, None)
 }
 
@@ -72,14 +154,14 @@ fn batch_update_raw_with_revision(
     document_id: &str,
     requests: Vec<serde_json::Value>,
     required_revision_id: Option<&str>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, GuestFailure> {
     let path = format!("{}:batchUpdate", url_encode(document_id));
 
     let body = batch_update_body(requests, required_revision_id);
-    let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let body_str = serde_json::to_string(&body).map_err(|e| serialization_failure(&e))?;
 
     let response = api_call("POST", &path, Some(&body_str))?;
-    serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))
+    serde_json::from_str(&response).map_err(|e| serialization_failure(&e))
 }
 
 fn batch_update_body(
@@ -117,11 +199,11 @@ fn extract_revision_id(parsed: &serde_json::Value) -> String {
         .to_string()
 }
 
-fn fetch_document(document_id: &str) -> Result<serde_json::Value, String> {
+fn fetch_document(document_id: &str) -> Result<serde_json::Value, GuestFailure> {
     let path = format!("{}?includeTabsContent=true", url_encode(document_id));
     let response = api_call("GET", &path, None)?;
     let mut document: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {e}"))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
     normalize_first_tab(&mut document);
     Ok(document)
 }
@@ -148,13 +230,13 @@ fn first_tab_id(document: &serde_json::Value) -> Option<&str> {
 }
 
 /// Create a new document.
-pub fn create_document(title: &str) -> Result<CreateDocumentResult, String> {
+pub fn create_document(title: &str) -> Result<CreateDocumentResult, GuestFailure> {
     let body = serde_json::json!({ "title": title });
-    let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let body_str = serde_json::to_string(&body).map_err(|e| serialization_failure(&e))?;
 
     let response = api_call("POST", "", Some(&body_str))?;
     let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+        serde_json::from_str(&response).map_err(|e| serialization_failure(&e))?;
 
     Ok(CreateDocumentResult {
         document_id: parsed["documentId"].as_str().unwrap_or("").to_string(),
@@ -163,7 +245,7 @@ pub fn create_document(title: &str) -> Result<CreateDocumentResult, String> {
 }
 
 /// Get document metadata.
-pub fn get_document(document_id: &str) -> Result<DocumentMetadata, String> {
+pub fn get_document(document_id: &str) -> Result<DocumentMetadata, GuestFailure> {
     let parsed = fetch_document(document_id)?;
 
     // Calculate body length from the last element's endIndex
@@ -206,7 +288,7 @@ pub fn get_document(document_id: &str) -> Result<DocumentMetadata, String> {
 }
 
 /// Read the document body as plain text by walking the structural elements.
-pub fn read_content(document_id: &str) -> Result<ReadContentResult, String> {
+pub fn read_content(document_id: &str) -> Result<ReadContentResult, GuestFailure> {
     let parsed = fetch_document(document_id)?;
 
     let mut text = String::new();
@@ -222,7 +304,7 @@ pub fn read_content(document_id: &str) -> Result<ReadContentResult, String> {
 }
 
 /// Inspect the document without flattening structural elements.
-pub fn inspect_document(document_id: &str) -> Result<InspectDocumentResult, String> {
+pub fn inspect_document(document_id: &str) -> Result<InspectDocumentResult, GuestFailure> {
     let parsed = fetch_document(document_id)?;
     Ok(parse_inspection(&parsed))
 }
@@ -307,19 +389,27 @@ fn parse_structural_elements(elements: &[serde_json::Value]) -> Vec<DocumentElem
 pub fn apply_text_edits(
     document_id: &str,
     edits: &[AnchoredTextEdit],
-) -> Result<ApplyTextEditsResult, String> {
+) -> Result<ApplyTextEditsResult, GuestFailure> {
     if edits.is_empty() {
-        return Err("edits must contain at least one replacement".to_string());
+        return Err(input_failure(
+            "invalid_parameters",
+            "edits must contain at least one replacement",
+        ));
     }
     if edits.len() > 100 {
-        return Err("edits may contain at most 100 replacements".to_string());
+        return Err(input_failure(
+            "invalid_parameters",
+            "edits may contain at most 100 replacements",
+        ));
     }
 
     let before = fetch_document(document_id)?;
-    let before_revision = required_revision(&before, "apply_text_edits")?;
+    let before_revision = required_revision(&before, "apply_text_edits")
+        .map_err(|reason| operation_failure("missing_revision", reason))?;
     let before_text = document_text(&before);
     let (requests, expected_text) =
-        build_anchored_edit_requests(&before_text, first_tab_id(&before), edits)?;
+        build_anchored_edit_requests(&before_text, first_tab_id(&before), edits)
+            .map_err(|reason| input_failure("invalid_parameters", reason))?;
     let updated = batch_update_raw_with_revision(document_id, requests, Some(before_revision))?;
     let occurrences_changed = updated["replies"]
         .as_array()
@@ -485,7 +575,7 @@ pub fn insert_text(
     text: &str,
     index: i64,
     segment_id: &str,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let request = if index == -1 {
         // Append at end of segment
         let mut loc = serde_json::json!({});
@@ -499,8 +589,9 @@ pub fn insert_text(
             }
         })
     } else if index < 0 {
-        return Err(format!(
-            "invalid index {index}: only -1 (append) or non-negative indexes are accepted"
+        return Err(input_failure(
+            "invalid_index",
+            format!("invalid index {index}: only -1 (append) or non-negative indexes are accepted"),
         ));
     } else {
         let mut loc = serde_json::json!({ "index": index });
@@ -529,7 +620,7 @@ pub fn delete_content(
     start_index: i64,
     end_index: i64,
     segment_id: &str,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let mut range = serde_json::json!({
         "startIndex": start_index,
         "endIndex": end_index,
@@ -556,7 +647,7 @@ pub fn replace_text(
     find: &str,
     replace: &str,
     match_case: bool,
-) -> Result<ReplaceResult, String> {
+) -> Result<ReplaceResult, GuestFailure> {
     let request = serde_json::json!({
         "replaceAllText": {
             "containsText": {
@@ -621,7 +712,7 @@ pub struct FormatTextOptions<'a> {
 }
 
 /// Format text in a range.
-pub fn format_text(opts: FormatTextOptions<'_>) -> Result<UpdateResult, String> {
+pub fn format_text(opts: FormatTextOptions<'_>) -> Result<UpdateResult, GuestFailure> {
     let mut style = serde_json::json!({});
     let mut fields = Vec::new();
 
@@ -651,21 +742,30 @@ pub fn format_text(opts: FormatTextOptions<'_>) -> Result<UpdateResult, String> 
     }
     if let Some(color) = opts.foreground_color {
         let Some(c) = parse_hex_color(color) else {
-            return Err(format!("invalid foreground_color hex: {color}"));
+            return Err(input_failure(
+                "invalid_color",
+                format!("invalid foreground_color hex: {color}"),
+            ));
         };
         style["foregroundColor"] = c;
         fields.push("foregroundColor");
     }
     if let Some(color) = opts.background_color {
         let Some(c) = parse_hex_color(color) else {
-            return Err(format!("invalid background_color hex: {color}"));
+            return Err(input_failure(
+                "invalid_color",
+                format!("invalid background_color hex: {color}"),
+            ));
         };
         style["backgroundColor"] = c;
         fields.push("backgroundColor");
     }
 
     if fields.is_empty() {
-        return Err("No formatting options specified".to_string());
+        return Err(input_failure(
+            "no_formatting_options",
+            "No formatting options specified",
+        ));
     }
 
     let request = serde_json::json!({
@@ -695,7 +795,7 @@ pub fn format_paragraph(
     named_style: Option<&str>,
     alignment: Option<&str>,
     line_spacing: Option<f64>,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let mut para_style = serde_json::json!({});
     let mut fields = Vec::new();
 
@@ -713,7 +813,10 @@ pub fn format_paragraph(
     }
 
     if fields.is_empty() {
-        return Err("No paragraph style options specified".to_string());
+        return Err(input_failure(
+            "no_paragraph_style_options",
+            "No paragraph style options specified",
+        ));
     }
 
     let request = serde_json::json!({
@@ -741,7 +844,7 @@ pub fn insert_table(
     rows: i64,
     columns: i64,
     index: i64,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let request = serde_json::json!({
         "insertTable": {
             "rows": rows,
@@ -764,20 +867,26 @@ pub fn create_table_with_data(
     index: i64,
     table_data: &[Vec<String>],
     bold_header: bool,
-) -> Result<CreateTableWithDataResult, String> {
+) -> Result<CreateTableWithDataResult, GuestFailure> {
     if index < 1 {
-        return Err("table insertion index must be at least 1".to_string());
+        return Err(input_failure(
+            "invalid_parameters",
+            "table insertion index must be at least 1",
+        ));
     }
-    let columns = validate_table_data(table_data)?;
+    let columns = validate_table_data(table_data)
+        .map_err(|reason| input_failure("invalid_parameters", reason))?;
     let rows = table_data.len();
-    let preferred_table_index = preferred_inserted_table_index(index)?;
+    let preferred_table_index = preferred_inserted_table_index(index)
+        .map_err(|reason| input_failure("invalid_parameters", reason))?;
     let populated_cells = table_data
         .iter()
         .flatten()
         .filter(|cell| !cell.is_empty())
         .count();
     let before = fetch_document(document_id)?;
-    let before_revision = required_revision(&before, "create_table_with_data")?;
+    let before_revision = required_revision(&before, "create_table_with_data")
+        .map_err(|reason| operation_failure("missing_revision", reason))?;
     let insert_response = batch_update_raw_with_revision(
         document_id,
         vec![serde_json::json!({
@@ -806,7 +915,7 @@ pub fn create_table_with_data(
                 columns,
                 0,
                 CreateTableStage::TableInserted,
-                reason,
+                failure_reason(&reason),
             ));
         }
     };
@@ -855,7 +964,7 @@ pub fn create_table_with_data(
                     columns,
                     0,
                     CreateTableStage::TableInserted,
-                    reason,
+                    failure_reason(&reason),
                 ));
             }
         };
@@ -874,7 +983,7 @@ pub fn create_table_with_data(
                     columns,
                     populated_cells,
                     completed_stage,
-                    reason,
+                    failure_reason(&reason),
                 ));
             }
         };
@@ -924,7 +1033,7 @@ pub fn create_table_with_data(
                         columns,
                         populated_cells,
                         completed_stage,
-                        reason,
+                        failure_reason(&reason),
                     ));
                 }
             };
@@ -943,7 +1052,7 @@ pub fn create_table_with_data(
                 columns,
                 populated_cells,
                 completed_stage,
-                reason,
+                failure_reason(&reason),
             ));
         }
     };
@@ -1199,9 +1308,10 @@ pub fn verify_document(
     document_id: &str,
     expected_text: &[String],
     expected_tables: &[TableExpectation],
-) -> Result<VerifyDocumentResult, String> {
+) -> Result<VerifyDocumentResult, GuestFailure> {
     let document = fetch_document(document_id)?;
     verify_parsed_document(&document, expected_text, expected_tables)
+        .map_err(|reason| input_failure("invalid_parameters", reason))
 }
 
 fn verify_parsed_document(
@@ -1252,7 +1362,7 @@ pub fn create_list(
     start_index: i64,
     end_index: i64,
     bullet_preset: &str,
-) -> Result<UpdateResult, String> {
+) -> Result<UpdateResult, GuestFailure> {
     let request = serde_json::json!({
         "createParagraphBullets": {
             "range": {
@@ -1275,7 +1385,7 @@ pub fn create_list(
 pub fn batch_update(
     document_id: &str,
     requests: Vec<serde_json::Value>,
-) -> Result<BatchUpdateResult, String> {
+) -> Result<BatchUpdateResult, GuestFailure> {
     let parsed = batch_update_raw(document_id, requests)?;
 
     let replies = parsed["replies"]
@@ -1321,10 +1431,39 @@ mod tests {
     }
 
     #[test]
+    fn api_status_error_401_maps_to_auth_required() {
+        let err = api_status_error("Google Docs", 401, b"{\"error\":\"invalid_token\"}");
+
+        assert_eq!(err.kind, ErrorKind::AuthRequired);
+        assert_eq!(err.code.as_deref(), Some(GOOGLE_API_AUTH_REQUIRED_ERROR));
+    }
+
+    #[test]
+    fn api_status_error_non_401_maps_to_client() {
+        let err = api_status_error("Google Docs", 429, b"rate limited");
+
+        assert_eq!(err.kind, ErrorKind::Client);
+        assert_eq!(err.code.as_deref(), Some("api_status_429"));
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("rate limited")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn insert_text_rejects_negative_indexes_other_than_append() {
         let err = insert_text("doc-1", "text", -2, "").unwrap_err();
 
-        assert!(err.contains("invalid index -2"), "{err}");
+        assert_eq!(err.kind, ErrorKind::Input);
+        assert_eq!(err.code.as_deref(), Some("invalid_index"));
+        assert!(
+            err.message
+                .as_deref()
+                .is_some_and(|message| message.contains("invalid index -2")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -1344,7 +1483,12 @@ mod tests {
         })
         .unwrap_err();
 
-        assert_eq!(err, "invalid foreground_color hex: #GG0000");
+        assert_eq!(err.kind, ErrorKind::Input);
+        assert_eq!(err.code.as_deref(), Some("invalid_color"));
+        assert_eq!(
+            err.message.as_deref(),
+            Some("invalid foreground_color hex: #GG0000")
+        );
     }
 
     #[test]

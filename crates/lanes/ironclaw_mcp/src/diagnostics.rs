@@ -5,6 +5,8 @@
 //! that names it. That is what keeps the model-visible token set enumerable in
 //! one file and every untrusted fragment bounded.
 
+use ironclaw_host_api::dispatch::ProviderErrorCode;
+
 /// Maximum byte length for a diagnostic reason string surfaced to the
 /// runtime/model. These tokens carry protocol codes, HTTP statuses, and
 /// bounded JSON-RPC messages through a private cause channel. They are still
@@ -47,6 +49,8 @@ pub(crate) enum McpRequestDeniedCause {
     DeniedCredentialSource,
     /// The in-memory session map lock was poisoned.
     SessionStatePoisoned,
+    /// A completed provider response reached a pre-transport failure branch.
+    AccountingInvariant,
 }
 
 impl McpRequestDeniedCause {
@@ -62,6 +66,7 @@ impl McpRequestDeniedCause {
             Self::UnsupportedTransport => "mcp_unsupported_transport".to_string(),
             Self::DeniedCredentialSource => "mcp_denied_credential_source".to_string(),
             Self::SessionStatePoisoned => "mcp_session_state_poisoned".to_string(),
+            Self::AccountingInvariant => "mcp_accounting_invariant".to_string(),
         }
     }
 }
@@ -71,8 +76,6 @@ impl McpRequestDeniedCause {
 /// parse-failure cause) for the private model-visible cause channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum McpResponseErrorCause {
-    /// Non-2xx HTTP status from the MCP endpoint.
-    HttpStatus(u16),
     /// JSON-RPC `error` object with code and bounded message.
     JsonRpcError {
         code: Option<i64>,
@@ -93,6 +96,24 @@ pub(crate) enum McpResponseErrorCause {
     NoPayload,
     /// Discovered `tools/list` result was malformed (shape/limits violation).
     InvalidToolList(McpInvalidToolListCause),
+}
+
+/// Stable provider-rejection codes carried separately from the lane's private
+/// failure reasons. Protocol modules classify the rejection; this module owns
+/// the model-visible code vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpProviderRejectionCause {
+    HttpStatus(u16),
+    JsonRpcError(i64),
+    ToolRejected,
+}
+
+pub(crate) fn provider_error_code(cause: McpProviderRejectionCause) -> ProviderErrorCode {
+    ProviderErrorCode::new(match cause {
+        McpProviderRejectionCause::HttpStatus(status) => format!("mcp_http_status_{status}"),
+        McpProviderRejectionCause::JsonRpcError(code) => format!("mcp_jsonrpc_error_{code}"),
+        McpProviderRejectionCause::ToolRejected => "mcp_tool_rejected".to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,7 +150,6 @@ impl McpInvalidToolListCause {
 impl McpResponseErrorCause {
     fn into_reason(self) -> String {
         match self {
-            Self::HttpStatus(status) => format!("mcp_http_status_{status}"),
             Self::JsonRpcError { code, message } => {
                 let mut reason = String::from("mcp_jsonrpc_error");
                 if let Some(code) = code {
@@ -242,5 +262,21 @@ mod tests {
         let with_control = bound_mcp_reason_detail("line\nbreak\u{0000}null");
         assert!(!with_control.contains('\n'));
         assert!(!with_control.contains('\u{0000}'));
+    }
+
+    #[test]
+    fn provider_rejection_causes_map_to_stable_codes() {
+        assert_eq!(
+            provider_error_code(McpProviderRejectionCause::HttpStatus(429)).as_str(),
+            "mcp_http_status_429"
+        );
+        assert_eq!(
+            provider_error_code(McpProviderRejectionCause::JsonRpcError(-32_001)).as_str(),
+            "mcp_jsonrpc_error_-32001"
+        );
+        assert_eq!(
+            provider_error_code(McpProviderRejectionCause::ToolRejected).as_str(),
+            "mcp_tool_rejected"
+        );
     }
 }
