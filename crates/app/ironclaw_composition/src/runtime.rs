@@ -3822,10 +3822,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         dyn ironclaw_loop_host::HostInputQueueReconcile,
     > = host_input_queue.clone();
     let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
-    // Deferred bind (same ordering note as `bind_result_writer` above): the
-    // background-mode delivery tail (Task 5, 2b) enqueues a settled child's
-    // result as steering input for the parent's live run through this same
-    // queue.
+    // Deferred bind: background delivery enqueues a settled child's result as
+    // steering input for the parent's live run through this queue.
     subagent_await_edge_settler
         .bind_input_enqueue(Arc::clone(&host_input_enqueue))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
