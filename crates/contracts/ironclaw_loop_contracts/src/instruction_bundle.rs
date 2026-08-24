@@ -1210,7 +1210,6 @@ mod tests {
                 safe_name: "extension_register_hosted_mcp".to_string(),
                 safe_description: "Choose oauth for a browser authorization-code flow.".to_string(),
                 description_trust: trust,
-                concurrency_hint: crate::ConcurrencyHint::Exclusive,
                 parameters_schema: serde_json::json!({"type": "object"}),
             }],
             callable_capability_ids: None,

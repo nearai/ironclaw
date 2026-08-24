@@ -1266,7 +1266,10 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                             text.push_str(&msg.content);
                         }
                         AnthropicContent::Blocks(blocks) => {
-                            blocks.push(AnthropicContentBlock::Text { text: msg.content });
+                            blocks.push(AnthropicContentBlock::Text {
+                                text: msg.content,
+                                cache_control: None,
+                            });
                         }
                     },
                     _ => anthropic_msgs.push(AnthropicMessage {
