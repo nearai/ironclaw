@@ -1401,7 +1401,7 @@ impl From<ChatMessage> for ChatCompletionMessage {
     fn from(msg: ChatMessage) -> Self {
         let role = match msg.role {
             Role::System => "system",
-            Role::User => "user",
+            Role::User | Role::HostReminder => "user",
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };

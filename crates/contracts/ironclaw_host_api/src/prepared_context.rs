@@ -57,13 +57,30 @@ impl TurnLimits {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedTurnDeclarations {
     /// Visible-surface selection, validated as a subset of the profile
-    /// surface. Empty means "no tools".
+    /// surface. Empty means "keep the resolved profile's surface" — a
+    /// non-empty value intersects it. (It does NOT mean "no tools": the
+    /// runner only applies the intersection when this is non-empty.)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<CapabilityId>,
     #[serde(default)]
     pub output: OutputContract,
     #[serde(default, skip_serializing_if = "TurnLimits::is_unlimited")]
     pub limits: TurnLimits,
+    /// No human is present for this run: drop capabilities whose
+    /// authorization resolves to `RequireApproval`, because an approval gate
+    /// with nobody to answer it is a run that parks rather than one that asks.
+    ///
+    /// Narrowing-only, like [`TurnLimits`]: `false` (the default) changes
+    /// nothing, so persisted declarations and other unbound callers are
+    /// unaffected.
+    ///
+    /// This flag does NOT restrict effects. A run that must not cause side
+    /// effects is governed by its prompt, not by this field — note that the
+    /// approval hard floor is only `Financial`/`ModifyApproval`/`ModifyBudget`
+    /// and global auto-approve defaults on, so "needs no approval" admits
+    /// write-effect capabilities including shell and outbound delivery.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_no_approval: bool,
 }
 
 /// Read-side failure for the declarations probe. Unbound admission fails
@@ -143,9 +160,39 @@ mod tests {
                 max_capability_invocations: Some(12),
                 max_wall_clock_seconds: Some(120),
             },
+            require_no_approval: true,
         };
         let json = serde_json::to_value(&declarations).expect("serialize");
         let back: PreparedTurnDeclarations = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, declarations);
+    }
+
+    /// Declarations persisted before `require_no_approval` existed must still load,
+    /// and must load as permissive — the field is narrowing-only, so an absent
+    /// value cannot silently restrict an already-running caller's surface.
+    #[test]
+    fn declarations_without_require_no_approval_load_as_permissive() {
+        let legacy = serde_json::json!({
+            "tools": ["builtin.memory_search"],
+            "output": serde_json::Value::Null,
+        });
+        let mut legacy = legacy;
+        legacy["output"] = serde_json::to_value(OutputContract::default()).expect("output");
+
+        let decoded: PreparedTurnDeclarations =
+            serde_json::from_value(legacy).expect("legacy declarations deserialize");
+
+        assert!(!decoded.require_no_approval);
+    }
+
+    /// The permissive default is omitted from the wire form, so adding the
+    /// field does not rewrite every existing record's serialization.
+    #[test]
+    fn permissive_require_no_approval_is_omitted_from_the_wire_form() {
+        let declarations = PreparedTurnDeclarations::default();
+
+        let json = serde_json::to_value(&declarations).expect("serialize");
+
+        assert!(json.get("require_no_approval").is_none());
     }
 }

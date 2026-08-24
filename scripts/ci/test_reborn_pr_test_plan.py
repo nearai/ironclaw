@@ -1923,6 +1923,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
 
+        trace_plan = self.plan("pull_request", ["tests/support/trace_llm.rs"])
+        self.assertEqual(trace_plan["integration_lanes"], [0])
+        self.assertEqual(trace_plan["root_partitions"], [0])
+
     def test_direct_root_support_runs_both_representative_tiers(self) -> None:
         # tests/support/mod.rs is compiled into the root suites AND the
         # integration group targets (via `#[path = "../../support/mod.rs"]`),
@@ -1930,6 +1934,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         plan = self.plan("pull_request", ["tests/support/mod.rs"])
         self.assertEqual(plan["root_partitions"], [0])
         self.assertEqual(plan["integration_lanes"], [0])
+
 
     def test_owned_integration_support_selects_its_exact_lane(self) -> None:
         for path, owner in planner.INTEGRATION_SUPPORT_OWNERS.items():

@@ -50,7 +50,10 @@ function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}
   function ConfigureModal() {}
   function CustomMcpRegistrationModal() {}
   function InlineNotice() {}
+  function PageScroll() {}
+  function PageStack() {}
   function RegistryTab() {}
+  function Skeleton() {}
   const translations = {
     "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
     "ext.catalog.loadErrorDesc": "The extension catalog could not be loaded.",
@@ -81,6 +84,8 @@ function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}
     InlineNotice,
     ToolsTab() {},
     Navigate() {},
+    PageScroll,
+    PageStack,
     React: {
       useCallback: (fn) => fn,
       useEffect: (effect) => effect(),
@@ -104,6 +109,7 @@ function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}
       },
     },
     RegistryTab,
+    Skeleton,
     globalThis: {},
     html(strings, ...values) {
       return { strings: Array.from(strings), values };

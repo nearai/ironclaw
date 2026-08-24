@@ -142,4 +142,23 @@ mod tests {
             "a complete search signature must remove the describe round trip"
         );
     }
+
+    #[test]
+    fn scheduled_trigger_protocol_bounds_investigation_without_weakening_explicit_completeness() {
+        assert!(
+            SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT
+                .contains("Unless the stored request explicitly requires exhaustive coverage")
+        );
+        assert!(
+            SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT
+                .contains("do not enumerate an entire large collection")
+        );
+        assert!(
+            SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT
+                .contains("perform the requested action before further investigation")
+        );
+        assert!(
+            SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT.contains("never claim the side effect happened")
+        );
+    }
 }

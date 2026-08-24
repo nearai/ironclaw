@@ -1,8 +1,11 @@
+/// <reference types="vitest/config" />
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { storybookTest } from "@storybook/addon-vitest/vitest-plugin";
+import { playwright } from "@vitest/browser-playwright";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rustStaticDir = resolve(here, "..", "static");
@@ -51,12 +54,73 @@ export default defineConfig({
       },
     },
   },
+  // Two Vitest projects: the existing Node unit suite, plus the Storybook
+  // story suite run in a headless Chromium via @storybook/addon-vitest.
+  // See: https://storybook.js.org/docs/writing-tests/integrations/vitest-addon
   test: {
-    environment: "node",
-    include: [
-      "src/**/*.{test,spec}.{ts,tsx}",
-      "src/pages/extensions/hooks/useExtensions-oauth.test.mjs",
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          environment: "node",
+          include: [
+            "src/**/*.{test,spec}.{ts,tsx}",
+            "src/pages/extensions/hooks/useExtensions-oauth.test.mjs",
+          ],
+          setupFiles: ["src/test/vm-tsx-setup.ts"],
+        },
+      },
+      {
+        extends: true,
+        // `extends: true` inherits the top-level `server.proxy`, which forwards
+        // `/assets` to the dev backend on :3000. In the story suite there is no
+        // backend, so a Sidebar/GatewayLayout render requesting
+        // `/assets/logo.png` would hit ECONNREFUSED and paint a broken logo even
+        // while tests pass. A project-level `proxy: {}` cannot clear it (Vite
+        // *merges* proxy records, so an empty object is a no-op), so override
+        // the `/assets` entry with a `bypass` that always returns the request
+        // URL — never proxied, served straight from `public/` (the real logo
+        // ships at public/assets/logo.png). Stories must never reach a backend.
+        server: {
+          proxy: {
+            "/assets": {
+              target: "http://127.0.0.1:3000",
+              bypass: (req) => req.url,
+            },
+          },
+        },
+        // Pre-bundle the deps the stories pull in so Vitest's browser Vite
+        // server does not discover them mid-run, re-optimize, and reload —
+        // that reload fails in-flight story modules and stalls the suite.
+        optimizeDeps: {
+          include: [
+            "react",
+            "react-dom",
+            "react-dom/client",
+            "react/jsx-runtime",
+            "react/jsx-dev-runtime",
+            "react-router",
+            "@tanstack/react-query",
+            "react-hot-toast",
+            "qrcode",
+          ],
+        },
+        plugins: [
+          storybookTest({
+            configDir: resolve(here, ".storybook"),
+          }),
+        ],
+        test: {
+          name: "storybook",
+          browser: {
+            enabled: true,
+            headless: true,
+            provider: playwright({}),
+            instances: [{ browser: "chromium" }],
+          },
+        },
+      },
     ],
-    setupFiles: ["src/test/vm-tsx-setup.ts"],
   },
 });

@@ -2,6 +2,7 @@ import React from "react";
 import { useI18n, useT } from "../../../lib/i18n";
 import { Button } from "../../../design-system/button";
 import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Skeleton } from "../../../design-system/skeleton";
 import { fetchAttachmentBlob } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
 import { toast } from "../../../lib/toast";
@@ -72,8 +73,8 @@ export function WorkspaceViewer({ path, file, isLoading, onNavigate }) {
   if (isLoading) {
     return (
       <div className="space-y-4">
-        <div className="v2-skeleton h-16 rounded-xl" />
-        <div className="v2-skeleton h-[460px] rounded-xl" />
+        <Skeleton className="h-16 rounded-xl" />
+        <Skeleton className="h-[460px] rounded-xl" />
       </div>
     );
   }

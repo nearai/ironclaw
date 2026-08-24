@@ -708,6 +708,12 @@ async fn builtin_trigger_create_input_schema_declares_schedule_one_of() {
         json!(["result_delivery"])
     );
     assert!(
+        schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]
+            .get("allowed_capability_ids")
+            .is_none(),
+        "the production-visible creation schema must leave future capability discovery dynamic"
+    );
+    assert!(
         !required_names.contains(&"completion_policy"),
         "completion_policy must NOT be in required; got {required_names:?}"
     );
@@ -941,6 +947,13 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(trigger["is_enabled"], json!(true));
     assert_eq!(trigger["is_active"], json!(true));
     assert_eq!(trigger["has_active_fire"], json!(false));
+    assert_eq!(output["authoring_status"], json!("complete"));
+    assert!(
+        output["next_action"]
+            .as_str()
+            .is_some_and(|guidance| guidance.contains("Do not call trigger_create again")),
+        "model-visible success must terminate authoring: {output}"
+    );
     assert!(trigger.get("last_fired_slot").is_none());
     assert!(trigger.get("active_fire_slot").is_none());
     assert!(trigger.get("active_run_ref").is_none());

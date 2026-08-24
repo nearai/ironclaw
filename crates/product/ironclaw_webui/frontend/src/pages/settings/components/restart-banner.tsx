@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
 import { useT } from "../../../lib/i18n";
 import { useGatewayRestart } from "../hooks/useGatewayRestart";
@@ -14,57 +15,50 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
   return (
     <>
     <div className="space-y-3">
-      <div
+      <InlineNotice
+        tone="warning"
         role="alert"
-        className="flex flex-col gap-3 rounded-xl border border-copper/30 bg-copper/10 px-4 py-3 sm:flex-row sm:items-center"
+        action={(
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={!restart.restartEnabled || restart.isRestarting}
+            onClick={restart.openConfirm}
+            title={!restart.restartEnabled ? restart.unavailableReason : undefined}
+          >
+            <Icon name={restart.isRestarting ? "pulse" : "bolt"} className="h-4 w-4" />
+            {restart.isRestarting ? t("settings.restartStarting") : t("settings.restartNow")}
+          </Button>
+        )}
       >
-        <div className="flex min-w-0 flex-1 items-start gap-3">
-          <Icon name="bolt" className="mt-0.5 h-4 w-4 shrink-0 text-copper" />
-          <div className="min-w-0">
-            <p className="text-sm text-copper">
-              {t("settings.restartRequired")}
-            </p>
-            {!restart.restartEnabled &&
-            (
-              <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
-                {restart.unavailableReason}
-              </p>
-            )}
-            {restart.isRestarting &&
-            (
-              <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
-                {restart.progressLabel}
-              </p>
-            )}
-          </div>
-        </div>
-
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          disabled={!restart.restartEnabled || restart.isRestarting}
-          onClick={restart.openConfirm}
-          title={!restart.restartEnabled ? restart.unavailableReason : undefined}
-          className="w-full sm:w-auto"
-        >
-          <Icon name={restart.isRestarting ? "pulse" : "bolt"} className="h-4 w-4" />
-          {restart.isRestarting ? t("settings.restartStarting") : t("settings.restartNow")}
-        </Button>
-      </div>
+        <p>{t("settings.restartRequired")}</p>
+        {!restart.restartEnabled &&
+        (
+          <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
+            {restart.unavailableReason}
+          </p>
+        )}
+        {restart.isRestarting &&
+        (
+          <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
+            {restart.progressLabel}
+          </p>
+        )}
+      </InlineNotice>
 
       {restart.error &&
       (
-        <div className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+        <InlineNotice tone="danger" role="alert">
           {restart.error}
-        </div>
+        </InlineNotice>
       )}
 
       {restart.message &&
       (
-        <div className="rounded-xl border border-[color-mix(in_srgb,var(--v2-positive-text)_35%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] px-4 py-3 text-sm text-[var(--v2-positive-text)]">
+        <InlineNotice tone="success" role="status">
           {restart.message}
-        </div>
+        </InlineNotice>
       )}
     </div>
 

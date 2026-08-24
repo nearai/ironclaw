@@ -92,11 +92,20 @@ to execute their frozen prompt without interpretation or backfill.
 The v1 contract contains a goal, one or more success criteria, output
 instructions, no-result text, an optional capability allowlist, and required
 skill names. The trigger domain validates and renders this contract before
-persistence. Production creation also resolves capability references against
-the current model-visible catalog and required skills through the normal skill
-selector before writing the trigger. The scheduler continues to submit the
-frozen prompt; only the neutral execution policy crosses the trusted-trigger
-turn boundary.
+persistence. The model-facing creation schema does not advertise the
+capability allowlist: an authoring model cannot reliably predict which
+capabilities a future run will discover. Existing persisted policies and
+compatible direct-wire clients may still carry an allowlist, which production
+creation validates against the current model-visible catalog. Required skills
+resolve through the normal skill selector before writing the trigger. The
+scheduler continues to submit the frozen prompt; only the neutral execution
+policy crosses the trusted-trigger turn boundary.
+
+A successful `trigger_create` response is a terminal authoring outcome. It
+returns `authoring_status = complete`, the persisted trigger record, and
+model-facing guidance to report that exact state and stop. The authoring model
+must not retry creation or pause, remove, or replace the new routine unless the
+user explicitly requested that lifecycle mutation.
 
 New `trigger_create` calls must explicitly select
 `execution_contract.policy.result_delivery`; omission is a model-visible input

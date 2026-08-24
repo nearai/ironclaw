@@ -704,6 +704,54 @@ mod tests {
     }
 
     #[test]
+    fn settings_and_extensions_navigation_has_one_source_of_truth() {
+        // Settings and Extensions sub-navigation is declared once, in
+        // `app/routes.ts`; the sidebar and the page header read it from there.
+        // The per-page tab components kept a second copy of the same lists with
+        // no production consumer, and the Settings copy had already drifted —
+        // it still advertised agent/channels/networking/users entries that are
+        // not routed.
+        for deleted in [
+            "pages/settings/components/settings-tabs.tsx",
+            "pages/settings/components/settings-tabs.test.ts",
+            "pages/extensions/components/extensions-tabs.tsx",
+        ] {
+            let full = format!("{}/frontend/src/{deleted}", env!("CARGO_MANIFEST_DIR"));
+            assert!(
+                !std::path::Path::new(&full).exists(),
+                "{deleted} duplicated app/routes.ts navigation and must not return"
+            );
+        }
+
+        let settings_schema = source_text("pages/settings/lib/settings-schema.ts");
+        let extensions_schema = source_text("pages/extensions/lib/extensions-schema.ts");
+        assert!(
+            !settings_schema.contains("SETTINGS_TABS"),
+            "Settings navigation belongs to app/routes.ts, not the field schema"
+        );
+        assert!(
+            !extensions_schema.contains("EXTENSIONS_TABS"),
+            "Extensions navigation belongs to app/routes.ts, not the surface schema"
+        );
+
+        // Unrelated field schemas and extension presentation metadata stay put.
+        assert!(settings_schema.contains("export const AGENT_FIELDS"));
+        assert!(settings_schema.contains("export const NETWORKING_FIELDS"));
+        assert!(settings_schema.contains("export const RESTART_REQUIRED_KEYS"));
+        assert!(extensions_schema.contains("export const RUNTIME_LABELS"));
+        assert!(extensions_schema.contains("export function hasChannelSurface"));
+
+        // The remaining source of truth still feeds both live consumers.
+        let routes = source_text("app/routes.ts");
+        assert!(routes.contains("export const SETTINGS_SUB_ROUTES"));
+        assert!(routes.contains("export const EXTENSIONS_SUB_ROUTES"));
+        assert!(routes.contains("settings: SETTINGS_SUB_ROUTES"));
+        assert!(routes.contains("extensions: EXTENSIONS_SUB_ROUTES"));
+        assert!(source_text("components/sidebar-nav.tsx").contains("EXPANDABLE_SUB_ROUTES"));
+        assert!(source_text("components/page-header.tsx").contains("EXPANDABLE_SUB_ROUTES"));
+    }
+
+    #[test]
     fn auth_session_assets_use_server_capabilities_for_admin_status() {
         let api = source_text("lib/api.ts");
         assert!(api.contains("fetchSession"));
@@ -745,12 +793,6 @@ mod tests {
         assert!(settings_page.contains("const defaultTabIsVisible = tabContentHas(defaultTab)"));
         assert!(settings_page.contains("const redirectTab = defaultTabIsVisible"));
         assert!(!settings_page.contains("isOperatorTab(tab)"));
-
-        let settings_tabs = source_text("pages/settings/components/settings-tabs.tsx");
-        assert!(settings_tabs.contains("isAdmin = false"));
-        assert!(!settings_tabs.contains("isAdmin = true"));
-        assert!(settings_tabs.contains("tab.id !== \"users\""));
-        assert!(!settings_tabs.contains("tab.id !== \"inference\""));
 
         let layout = source_text("layout/gateway-layout.tsx");
         assert!(layout.contains("enabled: isAdmin"));

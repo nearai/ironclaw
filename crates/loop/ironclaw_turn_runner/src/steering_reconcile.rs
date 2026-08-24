@@ -1085,6 +1085,7 @@ mod observer_tests {
                 metadata: serde_json::Value::Null,
             },
             kind,
+            occurred_at: None,
             sanitized_reason: None,
         };
 
@@ -1150,6 +1151,7 @@ mod observer_tests {
                 metadata: serde_json::Value::Null,
             },
             kind: ProcessJournalKind::Failed,
+            occurred_at: None,
             sanitized_reason: None,
         };
 

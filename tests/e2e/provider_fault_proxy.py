@@ -17,6 +17,7 @@ from typing import Literal
 from aiohttp import ClientSession, ClientTimeout, web
 
 FaultAction = Literal[
+    "forward",
     "respond",
     "disconnect_before_forward",
     "disconnect_after_forward",
@@ -349,7 +350,9 @@ class ProviderFaultProxy:
 
         if rule is not None:
             action = rule["action"]
-            if action == "delay_before_disconnect":
+            if action == "forward":
+                pass
+            elif action == "delay_before_disconnect":
                 await self._delay_then_disconnect(
                     request,
                     float(rule["delay_seconds"]),

@@ -1,5 +1,11 @@
+// @ts-nocheck
 // @vitest-environment happy-dom
-
+//
+// Two harnesses here on purpose. The sidebar test only needs to see which
+// query keys a mutation option invalidates, so the light vm-module harness
+// is enough. The conflict test asserts what the cache actually converges to
+// after a rejected generation, which needs a real QueryClient driving real
+// re-renders.
 import assert from "node:assert/strict";
 import React, { act } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -17,6 +23,7 @@ const suggestionsApi = vi.hoisted(() => ({
 vi.mock("../lib/suggestions-api", () => suggestionsApi);
 
 import { useSuggestions } from "./useSuggestions";
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -156,4 +163,47 @@ test("an accepted generation seeds the 202 body without an extra read", async ()
   } finally {
     rendered.cleanup();
   }
+});
+
+
+test("starting a suggestion refreshes its thread in the conversations sidebar", () => {
+  const invalidations = [];
+  const mutations = [];
+  const context = {
+    fetchSuggestions: async () => ({}),
+    generateSuggestions: async () => ({}),
+    pollDelayMs: () => false,
+    startSuggestion: async () => ({}),
+    dismissSuggestion: async () => ({}),
+    useQuery: () => ({ data: null, isLoading: false, error: null }),
+    useQueryClient: () => ({
+      invalidateQueries: (request) => invalidations.push(request),
+      setQueryData: () => {},
+    }),
+    useMutation: (options) => {
+      mutations.push(options);
+      return {
+        mutate: () => {},
+        isPending: false,
+        variables: null,
+        error: null,
+      };
+    },
+  };
+
+  const { useSuggestions } = runVmModuleForTest(
+    "./useSuggestions.ts",
+    ["useSuggestions"],
+    context,
+    import.meta.url,
+  );
+  useSuggestions();
+  mutations[1].onSuccess();
+
+  assert.deepEqual(
+    invalidations
+      .map((request) => [...request.queryKey])
+      .sort(([left], [right]) => left.localeCompare(right)),
+    [["suggestions"], ["threads"]],
+  );
 });

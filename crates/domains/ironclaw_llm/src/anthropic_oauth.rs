@@ -1251,6 +1251,33 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                     system_parts.push(msg.content);
                 }
             }
+            Role::HostReminder => {
+                // Host guidance rides the conversation tail, so it lands right
+                // after the tool results of the iteration that produced it
+                // (#6985). Anthropic rejects consecutive user messages — the
+                // same constraint the tool-result arm below merges for — so
+                // fold the reminder into the trailing user message. Appending
+                // keeps any tool_result blocks first in that message, which
+                // Anthropic also requires.
+                match anthropic_msgs.last_mut() {
+                    Some(last) if last.role == "user" => match &mut last.content {
+                        AnthropicContent::Text(text) => {
+                            text.push_str("\n\n");
+                            text.push_str(&msg.content);
+                        }
+                        AnthropicContent::Blocks(blocks) => {
+                            blocks.push(AnthropicContentBlock::Text {
+                                text: msg.content,
+                                cache_control: None,
+                            });
+                        }
+                    },
+                    _ => anthropic_msgs.push(AnthropicMessage {
+                        role: "user".to_string(),
+                        content: AnthropicContent::Text(msg.content),
+                    }),
+                }
+            }
             Role::User => {
                 let content = match user_image_blocks(&msg.content_parts) {
                     // Text-only (or no inline images): keep the compact string form.

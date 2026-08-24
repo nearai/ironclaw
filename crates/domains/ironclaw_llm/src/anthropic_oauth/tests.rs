@@ -6,6 +6,75 @@
 //! `apply_cache_breakpoints`.
 
 use super::*;
+/// The tail host reminder must not create a second consecutive user
+/// message after a tool result — Anthropic rejects consecutive user
+/// messages, and #6985 put a reminder at the tail of every loop iteration,
+/// which lands directly after that iteration's tool results.
+#[test]
+fn host_reminder_merges_into_the_trailing_tool_result_message() {
+    let messages = vec![
+        ChatMessage::system("cached prefix"),
+        ChatMessage::user("fetch the page"),
+        ChatMessage::assistant_with_tool_calls(
+            Some("calling".to_string()),
+            vec![ToolCall {
+                id: "call-1".to_string(),
+                name: "http".to_string(),
+                arguments: serde_json::json!({}),
+                arguments_parse_error: None,
+                reasoning: None,
+                signature: None,
+            }],
+        ),
+        ChatMessage::tool_result("call-1", "http", "200 OK"),
+        ChatMessage::host_reminder("Current date/time at loop start: 10:00"),
+    ];
+
+    let (system, converted) = convert_messages(messages);
+
+    assert_eq!(system.as_deref(), Some("cached prefix"));
+    for pair in converted.windows(2) {
+        assert_ne!(
+            pair[0].role, pair[1].role,
+            "consecutive {:?} messages: {converted:#?}",
+            pair[0].role
+        );
+    }
+    let last = converted.last().expect("a trailing user message");
+    assert_eq!(last.role, "user");
+    let AnthropicContent::Blocks(blocks) = &last.content else {
+        panic!("expected block content, got {:?}", last.content);
+    };
+    assert!(matches!(
+        blocks[0],
+        AnthropicContentBlock::ToolResult { .. }
+    ));
+    let AnthropicContentBlock::Text { text, .. } = &blocks[1] else {
+        panic!("expected the reminder appended as a text block");
+    };
+    assert!(text.contains("Current date/time at loop start"));
+}
+
+/// A reminder following a plain text user turn merges too — the no-tool
+/// case, where the previous user message is `Text` rather than `Blocks`.
+#[test]
+fn host_reminder_merges_into_a_trailing_text_user_message() {
+    let messages = vec![
+        ChatMessage::system("cached prefix"),
+        ChatMessage::user("what time is it"),
+        ChatMessage::host_reminder("Current date/time at loop start: 10:00"),
+    ];
+
+    let (_, converted) = convert_messages(messages);
+
+    assert_eq!(converted.len(), 1, "expected one merged user message");
+    let AnthropicContent::Text(text) = &converted[0].content else {
+        panic!("expected text content, got {:?}", converted[0].content);
+    };
+    assert!(text.starts_with("what time is it"));
+    assert!(text.contains("Current date/time at loop start"));
+}
+
 use crate::config::CacheRetention;
 use crate::provider::ToolDefinition;
 

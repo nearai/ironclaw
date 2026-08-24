@@ -28,6 +28,10 @@ shares this one implementation instead of reimplementing it.
   `IdempotencyLedger`/`ProductInboundAction`, `ProductCommandAdmissionService`.
 - `DeliveryCoordinator` + run-delivery drivers (delivery *semantics*; the
   at-most-once reservation itself is `ironclaw_outbound`'s).
+- `RunOutcomeProcessCommitObserver` — materializes selected scheduled-run
+  completion/failure facts from the authoritative process journal; completion
+  requires the exact finalized assistant reply, while delivery failure remains
+  a separate Inbox fact from the external-delivery caller.
 - `ApprovalInteractionService` / `AuthInteractionService` and their redacted
   read models.
 - The frozen command/view/capability descriptor constants (`*_COMMAND`,
