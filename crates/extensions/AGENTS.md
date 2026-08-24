@@ -91,7 +91,7 @@ Editing `wasm-src/` without rebuilding and re-recording fails CI.
 | `github/` | `github` | 49 tools | `github` | wasm | data-only |
 | `gmail/` | `gmail` | 6 tools | `google` | first_party | data-only (executor: `extension_support::gsuite`) |
 | `google-calendar/` | `google-calendar` | 9 tools | `google` | first_party | data-only (executor: `extension_support::gsuite`) |
-| `google-docs/` | `google-docs` | 11 tools | `google` | wasm | data-only |
+| `google-docs/` | `google-docs` | 15 tools | `google` | wasm | data-only |
 | `google-drive/` | `google-drive` | 12 tools | `google` | wasm | data-only |
 | `google-sheets/` | `google-sheets` | 11 tools | `google` | wasm | data-only |
 | `google-slides/` | `google-slides` | 14 tools | `google` | wasm | data-only |
