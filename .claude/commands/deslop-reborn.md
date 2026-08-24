@@ -12,7 +12,7 @@ simplifications, refactors, contract/README/invariant corrections, and any **mis
 tests** needed to keep the component correct forever. Then **STOP** — a human merges. Do not merge
 anything.
 
-Unlike `/review-crate` (a read-only audit) and `/review-pr` (which reviews an open PR's diff), this
+Unlike a read-only audit or a PR-diff review (`/pr-shepherd`), this
 loop reviews a **whole crate as it stands on the integration branch** and improves it. The unit of
 work is a **Reborn crate**, not a diff.
 
@@ -78,7 +78,7 @@ If **every** Reborn crate is ledger-recorded or PR-held, this is a **no-de-slop 
   findings") and STOP — don't silently rewrite it into something else. When a change would add a trait, a
   crate, a dependency edge, or a re-export, apply the `ironclaw-reborn-architecture-review` skill first.
 - **Respect the Reborn layering.** Product/runtime composition flows **downward** through typed
-  contracts (`crates/AGENTS.md` → "Dependency Mental Model"). Never introduce an upstream dependency in
+  contracts (`crates/AGENTS.md` → "The layer matrix — who may depend on whom"). Never introduce an upstream dependency in
   a lower-level crate to make a fix convenient — `cargo test -p ironclaw_architecture_tests` enforces the
   boundaries and will fail. A de-slop that needs a new upward edge is out of scope; record it (§9).
 - **Scope = ONE coherent, single-crate PR.** If the crate is huge and the findings sprawl, do the
@@ -286,8 +286,9 @@ after your fixes**.
    loop back to §6.
 2. **Commit:** `refactor(<crate>): de-slop — <one-line summary>` (use `refactor` for structural
    changes, `test` if the PR is mostly added coverage, `docs` if mostly guidance, `fix` if you
-   corrected a real bug a finding exposed). End the message with:
-   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
+   corrected a real bug a finding exposed). End the message with a `Co-Authored-By:` trailer naming
+   the model actually running this session (not a hardcoded one — it goes stale the moment a
+   different model runs the loop), e.g. `Co-Authored-By: <running model's own identity> <its provider's noreply address>`.
    (The commit-msg hook requires a regression test with every `fix` — write it test-first, §Testing
    Discipline in CLAUDE.md.)
 3. **Push and open the PR** with `gh pr create --base main`. PR body states: the **crate**, the

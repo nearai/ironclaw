@@ -23,6 +23,10 @@ because nothing was watching.
   - `llm_admin/nearai_login_serve.rs` — the one Axum route this crate owns
     (the public NEAR AI login callback).
   - `llm_admin/nearai_mcp.rs` — NEAR AI MCP endpoint/bootstrap config.
+  - `llm_admin/model_selection_policy_store.rs` — tenant-scoped filesystem
+    persistence for the operator-owned user model policy.
+  - `llm_admin/user_model_preference_store.rs` — caller-scoped filesystem
+    persistence for user model preferences.
   - `llm_admin/mod.rs` — the `llm_admin` re-export surface `lib.rs` lifts to
     the crate root.
   - `operator_logs.rs` — the operator log ring (`OperatorLogBuffer`) and its

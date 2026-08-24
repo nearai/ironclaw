@@ -153,8 +153,16 @@ IGNORED_PREFIXES = (
     ".codebase-memory/",
 )
 IGNORED_GUIDANCE_PATHS = {
+    "tests/AGENTS.md",
     "tests/CLAUDE.md",
+    "tests/integration/AGENTS.md",
     "tests/integration/CLAUDE.md",
+    # `check-guidance.py`'s alias rule also requires this pair (`crates/` or
+    # `TESTS_PREFIX`); without an explicit entry here it falls into the
+    # `tests/support/reborn_parity_qa/` arm below and over-selects the root
+    # partition for a pure guidance edit.
+    "tests/support/reborn_parity_qa/AGENTS.md",
+    "tests/support/reborn_parity_qa/CLAUDE.md",
 }
 # Repo-root prose/example files with no build or test surface. Root `*.md` is
 # already handled inline below; this covers the non-`.md` siblings.
@@ -450,10 +458,27 @@ PR_STATIC_CONTROL_PATHS = {
     #     exercise a change to it. Surfaced 2026-08-05 (#7259) when the docs
     #     path sweep touched its docstring.
     "scripts/check-type-duplicates.py",
+    #   * Its self-test, `python3 scripts/test-check-type-duplicates.py`, runs
+    #     under Code Style's "Static-check self-tests" step
+    #     (`.github/workflows/code_style.yml`) — the same lane that runs
+    #     `scripts/ci/test-check-guidance.py` and the other `scripts/ci/`
+    #     self-tests covered by the `PR_STATIC_CONTROL_PREFIXES` rule below.
+    #     Neither this file nor `scripts/check-type-duplicates.py` sits under
+    #     `scripts/ci/`, so unlike its sibling neither tripped the workflow's
+    #     `has_code` path filter on its own — a PR touching only this file had
+    #     `fast-checks` (and thus the self-test step) skipped entirely (review
+    #     on #7797). `has_code`'s scope list now names both scripts
+    #     explicitly, pinned by the `has_code` filter's `in_scope` probes in
+    #     `scripts/ci/ws12_workflow_contracts.py`. Static control here means
+    #     "no Tests (Reborn) lane reads it", not "no workflow runs it": Code
+    #     Style owns this self-test, not a Reborn Rust test lane, so it stays
+    #     classified as static control.
+    "scripts/test-check-type-duplicates.py",
     #   * `render-architecture-video.sh` is a local one-command Remotion
-    #     render for docs/internal/architecture-video; referenced only by the
-    #     `architecture-video` Claude skill, never by a workflow. Same PR,
-    #     same reason: the sweep rewrote its VIDEO_DIR path.
+    #     render for docs/internal/architecture-video; never invoked by a
+    #     workflow (the `architecture-video` Claude skill that used to
+    #     reference it was deleted as stale v1-architecture content — see
+    #     `.claude/skills/`). No lane can exercise a change to it.
     "scripts/render-architecture-video.sh",
     #   * `pre-commit-safety.sh` is a local git hook, not a CI lane.
     "scripts/pre-commit-safety.sh",

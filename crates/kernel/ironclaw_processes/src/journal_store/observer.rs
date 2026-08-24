@@ -16,6 +16,8 @@ use crate::{
     ProcessJournalObserverRegistry,
 };
 
+const MAX_OBSERVER_REPLAY_ATTEMPTS: u32 = 8;
+
 #[derive(Clone)]
 pub(super) struct RegisteredProcessObserver {
     pub(super) id: String,
@@ -266,6 +268,7 @@ where
                     commits.push(ProcessJournalCommit {
                         state: state.clone(),
                         kind: entry.kind,
+                        occurred_at: entry.occurred_at,
                         sanitized_reason: entry.sanitized_reason.clone(),
                     });
                 }
@@ -340,12 +343,25 @@ where
         tokio::spawn(async move {
             let _replay_guard = ObserverReplayGuard(Arc::clone(&observer.replay_running));
             let mut delay = Duration::from_millis(250);
+            let mut attempt = 0_u32;
             loop {
+                attempt += 1;
                 match store.replay_durable_observer_once(&observer, None).await {
                     Ok(()) => break,
+                    Err(error) if attempt >= MAX_OBSERVER_REPLAY_ATTEMPTS => {
+                        tracing::error!(
+                            observer_id = %observer.id,
+                            attempts = attempt,
+                            %error,
+                            "durable process observer replay exhausted its retry budget; \
+                             cursor remains unacknowledged"
+                        );
+                        break;
+                    }
                     Err(error) => {
                         tracing::debug!(
                             observer_id = %observer.id,
+                            attempt,
                             %error,
                             "durable process observer delivery will retry"
                         );

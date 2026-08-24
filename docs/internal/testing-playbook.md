@@ -6,7 +6,7 @@ develop a feature or bug fix test-first without adding unnecessary process.
 It is written for engineers who are new to Ironclaw. Repository and crate-local
 guidance remains authoritative when it is more specific. Start with
 `.claude/rules/testing.md`; for cross-layer Reborn tests, also read
-`tests/integration/CLAUDE.md`.
+`tests/integration/AGENTS.md`.
 
 ## Core rule
 
@@ -506,7 +506,7 @@ layer is omitted, explain why in one sentence.
 - Search for an existing test that already drives the same caller or workflow.
 - Read the owning crate's `AGENTS.md`, `CLAUDE.md`, `CONTRACT.md`, or
   `README.md`.
-- Read `tests/integration/CLAUDE.md` before changing the Reborn integration
+- Read `tests/integration/AGENTS.md` before changing the Reborn integration
   harness.
 - Write or update the test first and confirm it fails for the expected reason.
 - Assert an observable outcome, not only `Completed` status or a mock call

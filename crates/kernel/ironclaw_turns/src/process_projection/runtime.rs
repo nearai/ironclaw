@@ -91,7 +91,7 @@ impl ProcessJournalCommitObserver for AgentTurnProcessCommitObserver {
             process_id: commit.state.process_id,
             process_kind: commit.state.process_kind,
             scope: commit.state.scope,
-            occurred_at: Some(Utc::now()),
+            occurred_at: commit.occurred_at,
             owner_user_id: commit.state.owner_user_id,
             status: commit.state.status,
             kind: commit.kind,

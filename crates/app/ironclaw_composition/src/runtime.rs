@@ -37,7 +37,8 @@ use ironclaw_assistant::{
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     DefaultApprovalInteractionService, DefaultAuthInteractionService,
     OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
-    RunStateApprovalInteractionReadModel, SuggestionsProcessCommitObserver,
+    RunOutcomeProcessCommitObserver, RunStateApprovalInteractionReadModel,
+    SuggestionsProcessCommitObserver,
 };
 use ironclaw_event_log::{
     DurableAuditLog, DurableEventLog, EventError, NonBlockingEventSink, RuntimeEvent,
@@ -1183,6 +1184,7 @@ impl RebornRuntime {
             outbound_state: Arc::clone(&self.outbound_state.state),
             delivered_gate_routes: Arc::clone(&self.delivered_gate_routes),
             outbound_preferences: Arc::clone(&self.outbound_preferences),
+            notification_inbox: Arc::clone(&self.notification_inbox),
             triggered_delivery_store: Arc::clone(&self.triggered_run_delivery),
             outbound_delivery_targets: Arc::clone(self.outbound_delivery_target_registry.as_ref()?)
                 as Arc<dyn ironclaw_outbound::OutboundDeliveryTargetProvider>,
@@ -3239,6 +3241,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
         )))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("suggestion generation observer wiring failed: {error}"),
+        })?;
+    processes
+        .subscribe_process_observer(Arc::new(RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&services.notification_inbox),
+            Arc::clone(&thread_service),
+        )))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("run outcome notification observer wiring failed: {error}"),
         })?;
     let filesystem_skill_context_runtime = filesystem_skill_context_runtime(&services);
     let (skill_context_source, skill_activation_source, skill_execution_adapter) = match (

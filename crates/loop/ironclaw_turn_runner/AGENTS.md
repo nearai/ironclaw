@@ -15,9 +15,19 @@ Working rules for the claimed-work control plane. Orientation lives in
 
 ## What This Crate Owns
 
-- The agent-turn execution adapter (`turn_run_executor.rs`,
-  `RebornTurnRunExecutor`), registered as the `ProcessKind::AgentTurn`
-  executor with the kernel's process supervisor.
+The claimed-work control plane: the agent-turn executor, driver registry, and
+loop-host factory. `src/` has more files (24+) than a hand-maintained list
+tracks cleanly; re-derive the current one with
+`ls crates/loop/ironclaw_turn_runner/src/` (and
+`ls crates/loop/ironclaw_turn_runner/src/subagent/` for the subagent-port
+files, including the `subagent/directions/*.md` role prompts). Stable
+anchors, by category:
+
+- `turn_runner.rs` — host-factory abstraction and shared failure helpers for
+  the Reborn turn runner.
+- `turn_run_executor.rs` (`RebornTurnRunExecutor`) — the agent-turn execution
+  adapter, registered as the `ProcessKind::AgentTurn` executor with the
+  kernel's process supervisor.
 - `turn_scheduler.rs` — an **agent-turn projection over the generic process
   supervisor** (`ironclaw_processes::ProcessSupervisor`, since #6696): the
   claiming/heartbeat/lease mechanics live in the kernel; this file adapts them
@@ -34,11 +44,19 @@ Working rules for the claimed-work control plane. Orientation lives in
 - `subagent/` incl. `subagent/await_edge/` — spawn admission and the
   await-edge machinery: store = journal-edge projection, resolver = loop-tier
   responsibility (PROPOSAL §12.13 D-S; see `README.md`).
-- `trace_capture.rs` — the observer seam of the WS6 trace-capture split.
-- `app_loop_family.rs` app loop-family composition and `milestone_events.rs`
-  milestone event surfacing.
 - `production_readiness.rs` — **no production caller**; a pure reporting slice
-  awaiting either a startup gate or deletion (CHECKLIST WS4/WS8).
+  awaiting either a startup gate or deletion — tracked by
+  `docs/internal/reborn/target-architecture/CHECKLIST.md`'s WS4 row (line
+  ~310, "delete `production_readiness` (no production caller) or wire it")
+  and its WS8 "Modules" row (line ~515, deletion cascade into
+  `driver_registry.rs` measured), not yet closed.
+
+Also present but not detailed above (`ls src/` has the current set):
+`after_turn_memory.rs`, `failure_categories.rs`, `failure_summary.rs`,
+`hook_gate_refs.rs`, `steering_reconcile.rs`, `structured_finalization` (+
+dir), `trace_capture.rs` (the observer seam of the WS6 trace-capture split),
+`app_loop_family.rs` (app loop-family composition), and `milestone_events.rs`
+(milestone event surfacing).
 
 ## Do Not Move In Here
 

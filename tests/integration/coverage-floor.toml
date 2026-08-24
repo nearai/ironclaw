@@ -137,12 +137,16 @@ name = "ironclaw_loop_host"
 # absorbed code 5.34pp of unratcheted slack on arrival, i.e. room to lose ~1.4k
 # covered lines silently. The destination is floored at what it actually
 # measures, on arrival, in the same PR.
-floor_percent = 90.89
-floor_covered_lines = 24598
+# RECAPTURED 2026-08-24 from the enforcing main-probe artifact after #7734
+# split the existing in-crate tests into separately mapped modules and #7709
+# expanded the lease-fence path: 27,897 / 30,921 = 90.22%. Covered lines rose
+# by 3,299, so this preserves rather than weakens the absolute ratchet.
+floor_percent = 90.22
+floor_covered_lines = 27897
 tolerance_percent = 0.5
-captured_total_lines = 27063
-captured_date = "2026-08-03"
-rationale = "Protects the model-gateway adapter, model-route policy, driver-host port adapters, and the progressive tool-disclosure decorator this crate absorbed in WS3."
+captured_total_lines = 30921
+captured_date = "2026-08-24"
+rationale = "Protects the model-gateway adapter, model-route policy, driver-host port adapters, and progressive tool disclosure; recaptured after #7734 and #7709 expanded LLVM-mapped test and lease-fence regions while covered lines increased."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -415,11 +419,15 @@ issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_sandbox"
-floor_percent = 87.09
-floor_covered_lines = 3185
-captured_total_lines = 3657
-captured_date = "2026-08-03"
-rationale = "The sandboxed-process lane created by the WS3 merge (#7065) of ironclaw_process_sandbox + host_runtime::sandbox_process + ironclaw_scripts. Floored on arrival so the merge is not a net loss of ratchet coverage: neither merged crate was floored before, and the sandbox_process half was only protected as part of host_runtime's floor, which this PR necessarily lowers in line count. Guards plan validation, the credential firewall, the network allowlist, and the sandbox CA."
+# RECAPTURED 2026-08-24 from the enforcing main-probe artifact after #7764
+# and #7779 added persistent user containers and managed egress:
+# 5,279 / 7,351 = 71.81%. Covered lines rose by 2,094; the percentage moved
+# because the production surface more than doubled, including Docker/live paths.
+floor_percent = 71.81
+floor_covered_lines = 5279
+captured_total_lines = 7351
+captured_date = "2026-08-24"
+rationale = "Guards sandbox plan validation, credential isolation, network policy, and audit paths; recaptured after #7764 and #7779 more than doubled the lane with persistent-container and managed-egress behavior while covered lines increased."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -578,11 +586,15 @@ issue = "https://github.com/nearai/ironclaw/issues/7083"
 
 [[crate]]
 name = "telegram"
-floor_percent = 90.31
-floor_covered_lines = 1435
-captured_total_lines = 1589
-captured_date = "2026-08-04"
-rationale = "Channel adapter on the ingress trust membrane: payload parsing and normalization of untrusted vendor input."
+# RECAPTURED 2026-08-24 from the enforcing main-probe artifact after #7464
+# added linked-device Telegram capabilities and subsequent channel work brought
+# them into this package's instrumentation: 2,435 / 4,283 = 56.85%. Covered
+# lines rose by 1,000, preserving a stronger absolute floor than the old entry.
+floor_percent = 56.85
+floor_covered_lines = 2435
+captured_total_lines = 4283
+captured_date = "2026-08-24"
+rationale = "Protects Telegram channel normalization and linked-device operations; recaptured after #7464 and follow-up channel work expanded package instrumentation while covered lines increased."
 issue = "https://github.com/nearai/ironclaw/issues/7083"
 
 [[crate]]

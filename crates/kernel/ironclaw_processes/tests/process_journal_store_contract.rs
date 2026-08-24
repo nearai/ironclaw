@@ -122,6 +122,22 @@ impl ProcessJournalCommitObserver for FailingProcessObserver {
     }
 }
 
+struct CountingFailingProcessObserver {
+    attempts: AtomicUsize,
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for CountingFailingProcessObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "counting-failing-process-observer"
+    }
+
+    async fn observe_process_commit(&self, _commit: ProcessJournalCommit) -> Result<(), String> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        Err("permanent observer failure".to_string())
+    }
+}
+
 struct FailOnceProcessObserver {
     attempts: AtomicUsize,
 }
@@ -1797,6 +1813,7 @@ async fn process_observer_receives_commits_once_not_idempotency_replays() {
         created_at: Utc::now(),
         metadata: serde_json::Value::Null,
     };
+    let process_id = request.process_id;
 
     store
         .submit_process(request.clone())
@@ -1807,11 +1824,27 @@ async fn process_observer_receives_commits_once_not_idempotency_replays() {
         .await
         .expect("replay process submission");
 
+    let journal = store
+        .read_process_journal_log_after(None, 16)
+        .await
+        .expect("read source journal entry");
+    let expected_occurred_at = journal
+        .entries
+        .iter()
+        .find(|entry| entry.process_id == process_id)
+        .and_then(|entry| entry.occurred_at)
+        .expect("source journal entry carries its timestamp");
+
     let commits = observer.commits.lock().expect("observer commits");
     assert_eq!(commits.len(), 1);
     assert_eq!(
         commits[0].kind,
         ironclaw_processes::ProcessJournalKind::Submitted
+    );
+    assert_eq!(
+        commits[0].occurred_at,
+        Some(expected_occurred_at),
+        "live observer delivery preserves the source journal timestamp"
     );
 }
 
@@ -1874,6 +1907,15 @@ async fn observer_registration_replays_commits_durably_after_restart() {
         })
         .await
         .expect("submit before observer registration");
+    let expected_occurred_at = store
+        .read_process_journal_log_after(None, 16)
+        .await
+        .expect("read source journal entry")
+        .entries
+        .into_iter()
+        .find(|entry| entry.process_id == process_id)
+        .and_then(|entry| entry.occurred_at)
+        .expect("source journal entry carries its timestamp");
 
     let reopened = ProcessJournalStore::new(filesystem);
     let observer = Arc::new(RecordingProcessObserver::default());
@@ -1897,6 +1939,15 @@ async fn observer_registration_replays_commits_durably_after_restart() {
     })
     .await
     .expect("durable observer replay");
+    let commits = observer.commits.lock().expect("observer commits");
+    assert_eq!(
+        commits
+            .iter()
+            .find(|commit| commit.state.process_id == process_id)
+            .and_then(|commit| commit.occurred_at),
+        Some(expected_occurred_at),
+        "replayed observer delivery preserves the source journal timestamp"
+    );
 }
 
 /// Two store instances can share one observer id across a rolling restart, and
@@ -2232,7 +2283,11 @@ async fn observer_replays_when_a_second_writer_leaves_a_cursor_gap() {
 }
 
 fn observer_cursor_path() -> ScopedPath {
-    let digest = blake3::hash(b"recording-process-observer").to_hex();
+    observer_cursor_path_for("recording-process-observer")
+}
+
+fn observer_cursor_path_for(observer_id: &str) -> ScopedPath {
+    let digest = blake3::hash(observer_id.as_bytes()).to_hex();
     ScopedPath::new(format!("/processes/materialized/observer-cursor/{digest}"))
         .expect("cursor path")
 }
@@ -2315,6 +2370,62 @@ async fn observer_failure_retries_until_durable_cursor_is_acknowledged() {
         .expect("subscribe after acknowledged replay");
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(after_restart.attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn permanent_observer_failure_exhausts_replay_without_acknowledging_cursor() {
+    let filesystem = in_memory_backed_processes_filesystem();
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    store
+        .submit_process(SubmitProcessRequest {
+            process_id: ProcessId::new(),
+            process_kind: ProcessKind::Internal,
+            scope: scope(),
+            exclusive_within_scope: false,
+            operation_id: None,
+            owner_user_id: None,
+            concurrency_class: None,
+            parent_process_id: None,
+            root_process_id: None,
+            spawn_tree_descendant_cap: None,
+            dependency: None,
+            checkpoint_ref: None,
+            input: None,
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("submit before observer registration");
+
+    let observer = Arc::new(CountingFailingProcessObserver {
+        attempts: AtomicUsize::new(0),
+    });
+    store
+        .subscribe_process_observer(observer.clone())
+        .expect("subscribe permanently failing observer");
+
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let exhausted_attempts = observer.attempts.load(Ordering::SeqCst);
+    assert_eq!(
+        exhausted_attempts, 9,
+        "the initial registration delivery plus eight replay attempts must exhaust the budget"
+    );
+    assert_eq!(
+        read_observer_cursor(
+            &filesystem,
+            &observer_cursor_path_for(observer.process_observer_id()),
+        )
+        .await,
+        None,
+        "exhausting retries must preserve the unacknowledged durable cursor"
+    );
+
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert_eq!(
+        observer.attempts.load(Ordering::SeqCst),
+        exhausted_attempts,
+        "a permanently failing observer must not keep retrying forever"
+    );
 }
 
 #[tokio::test]

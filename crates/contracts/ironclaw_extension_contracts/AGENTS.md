@@ -14,9 +14,11 @@ it is neutral across vendor, runtime, storage, and deployment; two or more
 consumers need it without importing an owner; it carries no execution,
 persistence, policy engine, or workflow.
 
-Today that is **eighteen shipped modules** plus the feature-gated
-`test_support` (the number is checked against `src/lib.rs`, not incremented by
-hand):
+Re-derive the shipped-module count with
+`rg -n "^pub mod " crates/contracts/ironclaw_extension_contracts/src/lib.rs | wc -l`,
+minus one for the feature-gated `test_support` module (no architecture test
+currently pins this count against the table below — treat the table as a
+map, not an enforced inventory, until one exists):
 
 | Module | Owns |
 | --- | --- |
@@ -24,11 +26,13 @@ hand):
 | `channel` | Channel manifest-surface descriptors: `ChannelDescriptor`, `ChannelIngressDescriptor`, `ChannelEgressDescriptor`, `ChannelPresentation`, connection strategy/notices, and their validators. |
 | `channel_adapter` | The three optional channel capability traits — `ChannelIngress`, `ChannelReply`, and `ChannelDelivery` — plus `ChannelSurfaces` and their DTO family (`VerifiedInbound`, `InboundOutcome`, `NormalizedInboundMessage`/`InboundAttachment`, `OutboundEnvelope`/`Part`/`Target`, `DeliveryReport`, `DirectTargetProvisionRequest`, `ChannelError`, `ProductTriggerReason`). `ChannelAttachmentRef` is package-internal parse→fetch state, never host ingress vocabulary. The traits pair with vendor `[channel.ingress]`, message `[channel.reply]`, and `[channel.delivery]`; authenticated-session ingress and stream replies are host-owned and intentionally bind no adapter half. Direct-target provisioning is an optional typed operation on `ChannelDelivery`, not a target-search grammar. |
 | `channel_identity` | The channel-identity hooks a host runs around binding: `ChannelConnectionScopeSource`, `ChannelIdentityPostBind(Factory)`, `ChannelIdentityOverride`. |
+| `device_link` | The device-link auth hook: `DeviceLinkAdapter`, `DeviceLinkStep`, `DeviceLinkInput`, `DeviceLinkError`. The one auth method whose mechanics an extension implements instead of declaring; `DeviceLinkInput` deliberately does not implement `Serialize` so a step or event physically cannot carry a secret. |
 | `egress` | Channel egress transport vocabulary: `ProtocolHttpEgress`, the `Egress*` request/response types, `DeliveryStatus`/`OutboundDeliverySink`, `DeclaredEgressHost`/`Target` — arrived with WS1.4. |
 | `extension` | `Extension`, `ExtensionContract`, `ExtensionRuntimeIdentity`, `ExtensionInstanceId`, `ExtensionHostAssemblyConfig`. |
 | `external` | Vendor-side refs the adapter cone names: `ExternalActorRef`, `ExternalActorBindingEpoch`, `ExternalConversationRef`, `ExternalEventId`, `ProductAttachmentDescriptor`/`Kind` — arrived with WS1.4; `ExternalActorBindingEpoch` joined with WS2.5's binding-epoch move. |
 | `hosted_mcp` | Untrusted registration input for user-registered hosted MCP servers: `RegisterHostedMcpRequest`, `HostedMcpEndpoint`, `HostedMcpAuthSelection`, `McpAuthChallenge`, the auth-metadata extraction helper, and the WS3 discovery pair (`HostedMcpDiscoveredTool*`). |
 | `lifecycle_id` | The bounded package-identity newtypes both tiers need: `LifecyclePackageId` (which `hosted_mcp` names structurally) and `LifecycleBlockerRef`. |
+| `linked_session` | Linked-account session custody port: the extension-package-facing trait to load and compare-and-swap the one opaque credential blob a linked device session persists. Implemented only by the extension host; the package never names the auth domain directly. |
 | `memory` | The `[memory]` manifest surface: `MemoryDescriptor`, `MemoryLifecycleHook`. |
 | `preference_target` | `PreferenceTargetCodec` + `PreferenceTargetEncodeRequest` — the one vendor-implemented port here. |
 | `product_adapter_section` | The `[product_adapter.*]` manifest surface: `PRODUCT_ADAPTER_HOST_API_ID`/`PRODUCT_ADAPTER_SECTION_PREFIX`, `ProductAdapterSectionDeclaration` (the `Deserialize` wire shape), `ProductAdapterSection` (resolved + validated), `HostIngressRoute`, `ProductAdapterSectionError`. Arrived with WS5 from `ironclaw_assistant::adapter_registry`. Same split as `channel`: the schema and its cross-field invariants are here; the *manifest parsing* — the `HostApiManifestContract`, the raw-TOML inline-secret guard, and pairing a resolved section with its `ManifestSectionPath` — is `ironclaw_extension_registry::host_api::product_adapter` (§6.8.1), because this crate parses no manifests. |

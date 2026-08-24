@@ -1,6 +1,6 @@
 ---
 name: reborn-feature
-description: Build a user-facing feature in the Reborn stack with the smallest existing contract surface.
+description: Use when building or extending a user-facing WebUI feature, endpoint, ProductSurface command/capability, or product-level API surface in the Reborn stack, or when adding/changing trigger and automation domain behavior (schedules, run-now, trigger history).
 ---
 
 # Building a Reborn feature
@@ -67,6 +67,34 @@ or adapter by default. Add one only when it provides dependency inversion,
 two production implementations, a real test seam, a required `dyn` injection
 point, or an enforced security/ownership boundary. Record the reason in the
 PR description and run the architecture test for dependency changes.
+
+## Automations/triggers work
+
+Trigger/automation domain work (cron/once schedules, run-now, trigger history
+and settlement) crosses `crates/domains/ironclaw_triggers`, its trusted-submit
+wiring in `crates/app/ironclaw_composition/src/automation/`, and the WebUI
+automations surface (`crates/product/ironclaw_webui/frontend/src/pages/automations/`).
+Two things to get right before touching this path:
+
+- **Sealed ingress is a hard invariant, not a convention.** Read root
+  `AGENTS.md` → "Host-trusted trigger ingress is sealed by..." before writing
+  any code here. Product adapters, product workflow, first-party
+  capabilities, and host-runtime handlers use untrusted inbound requests and
+  must never mint `TrustedInboundTurnRequest` or call trusted trigger
+  submitter factories — only trigger-worker-owned minting and private
+  conversation-owned trusted construction may. Verify with
+  `rg -n "TrustedInboundTurnRequest|ConversationTrustedTriggerSubmitter" crates/` (today
+  the only hits are the allowed owner, `crates/domains/ironclaw_conversations`, plus the
+  architecture test itself — any hit outside that crate is a prohibited caller); the
+  boundary is enforced by
+  `untrusted_ingress_paths_cannot_submit_host_trusted_inbound` in
+  `crates/app/ironclaw_architecture_tests/tests/reborn_dependency_boundaries.rs`.
+- **Settlement, fire identity, and run-history ordering are specified, not
+  improvised.** `crates/domains/ironclaw_triggers/AGENTS.md` and
+  `docs/internal/reborn/contracts/triggers.md` are the source of truth — read
+  both before changing schedule, claim, settlement, or history behavior;
+  this class of invariant has a history of needing multiple follow-up fixes
+  to get right, so treat first-pass changes here as review-heavy.
 
 ## Boundary rules
 

@@ -1,11 +1,3 @@
-// Tabs are product-taxonomy views over surfaces. Runtime (wasm/mcp/...) is
-// an implementation badge on cards, never a grouping axis.
-export const EXTENSIONS_TABS = [
-  { id: "registry", labelKey: "extensions.registry", icon: "plus" },
-  { id: "channels", labelKey: "extensions.channels", icon: "send" },
-  { id: "tools", labelKey: "extensions.tools", icon: "pulse" },
-];
-
 // Runtime implementation labels — the wire's `runtime` field is an honest
 // implementation name; product taxonomy travels in `surfaces`.
 export const RUNTIME_LABELS = {

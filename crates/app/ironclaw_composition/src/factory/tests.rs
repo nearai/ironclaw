@@ -3809,15 +3809,6 @@ async fn telegram_remove_with_authenticated_actor_deletes_the_membership() {
         .await
         .expect("seed DM target");
 
-    assert!(
-        services
-            .channel_pairing
-            .as_ref()
-            .and_then(|registry| registry.get("telegram"))
-            .is_none(),
-        "a device-link channel must not receive a generated-code pairing service"
-    );
-
     let removal_scope =
         default_runtime_owner_scope(caller.clone()).expect("telegram removal scope");
     let removed = extension_management

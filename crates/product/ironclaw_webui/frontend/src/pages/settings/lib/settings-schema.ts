@@ -1,16 +1,3 @@
-export const SETTINGS_TABS = [
-  { id: "inference", labelKey: "settings.inference", icon: "spark" },
-  { id: "appearance", labelKey: "settings.appearance", icon: "sun" },
-  { id: "agent", labelKey: "settings.agent", icon: "bolt" },
-  { id: "channels", labelKey: "settings.channels", icon: "send" },
-  { id: "networking", labelKey: "settings.networking", icon: "pulse" },
-  { id: "tools", labelKey: "settings.tools", icon: "tool" },
-  { id: "skills", labelKey: "settings.skills", icon: "file" },
-  { id: "traces", labelKey: "settings.traceCommons", icon: "layers" },
-  { id: "users", labelKey: "settings.users", icon: "lock" },
-  { id: "language", labelKey: "settings.language", icon: "globe" },
-];
-
 // Inference settings use dedicated LLM endpoints. Keep this schema empty until
 // any operator-config-backed keys are accepted by the Reborn config API.
 export const INFERENCE_FIELDS = [];

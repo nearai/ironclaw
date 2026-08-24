@@ -77,7 +77,13 @@ export function replaceAssistantReplyForRun(messages, replyMessage, runId) {
     currentMessages[replacementIndex],
     replyMessage,
   );
-  return next;
+  return next.filter(
+    (message, index) =>
+      index === replacementIndex ||
+      message?.role !== "assistant" ||
+      message.turnRunId !== runId ||
+      message.isFinalReply !== false,
+  );
 }
 
 function finalReplyReplacement(current, replyMessage) {

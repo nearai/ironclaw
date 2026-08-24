@@ -386,6 +386,11 @@ async fn scheduled_trigger_origin_appends_unattended_protocol_only_to_triggered_
     assert!(scheduled_content.contains("Unattended Scheduled Run"));
     assert!(scheduled_content.contains("There is no human present"));
     assert!(scheduled_content.contains("Never end the run with a question"));
+    assert!(scheduled_content.contains("do not enumerate an entire large collection"));
+    assert!(
+        scheduled_content.contains("perform the requested action before further investigation")
+    );
+    assert!(scheduled_content.contains("never claim the side effect happened"));
     assert!(scheduled_content.contains("final reply is the run's recorded output"));
 }
 

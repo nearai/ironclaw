@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Card } from "../../../design-system/card";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import { Skeleton } from "../../../design-system/skeleton";
 import { useT } from "../../../lib/i18n";
 import { useTraceCredits } from "../hooks/useTraceCredits";
@@ -160,11 +161,9 @@ export function TraceCommonsTab({ searchQuery = "" }) {
     );
   } else if (query.isError) {
     body = (
-      <div
-        className="mt-4 rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-      >
+      <InlineNotice className="mt-4" tone="danger" role="alert">
         {t("traceCommons.loadFailed")}
-      </div>
+      </InlineNotice>
     );
   } else if (!credits || (!credits.enrolled && !(credits.submissions_total > 0))) {
     body = (
@@ -293,11 +292,9 @@ export function TraceCommonsTab({ searchQuery = "" }) {
           {t("traceCommons.submittedTracesTitle")}
         </h4>
         {tracesMode === "error" ? (
-          <div
-            className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-          >
+          <InlineNotice tone="danger" role="alert">
             {t("traceCommons.tracesLoadFailed")}
-          </div>
+          </InlineNotice>
         ) : (
         <ul className="space-y-2">
           {traces.map(
@@ -372,9 +369,9 @@ export function TraceCommonsTab({ searchQuery = "" }) {
               : t("traceCommons.openAccount")}
           </button>
           {openState === "failed" && (
-            <span className="ml-3 text-xs text-red-300">
+            <InlineNotice className="mt-3" tone="danger" role="alert">
               {t("traceCommons.openAccountFailed")}
-            </span>
+            </InlineNotice>
           )}
         </div>
       )}
