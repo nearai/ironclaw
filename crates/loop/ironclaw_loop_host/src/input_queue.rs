@@ -813,8 +813,14 @@ impl InMemoryHostInputQueue {
     ) -> Result<(), HostInputQueueError> {
         self.ack_effect_handler
             .set(handler)
-            .map_err(|_| HostInputQueueError::Unavailable {
-                reason: "input queue ack effect handler already bound".to_string(),
+            .map_err(|rejected_handler| {
+                tracing::debug!(
+                    handler_type = std::any::type_name_of_val(rejected_handler.as_ref()),
+                    "input queue ack effect handler already bound"
+                );
+                HostInputQueueError::Unavailable {
+                    reason: "input queue ack effect handler already bound".to_string(),
+                }
             })
     }
 
