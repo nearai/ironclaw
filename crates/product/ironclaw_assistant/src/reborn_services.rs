@@ -2522,7 +2522,7 @@ pub struct RebornServices<
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
     notification_inbox: Arc<dyn NotificationInboxStorePort>,
-    legacy_approval_backfill_completed: Arc<StdMutex<HashSet<LegacyApprovalBackfillKey>>>,
+    legacy_approval_backfill_attempted: Arc<StdMutex<HashSet<LegacyApprovalBackfillKey>>>,
     session_inbound_ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
     /// The session lane's product surface, built once. Every input is an
     /// immutable builder-wired `Arc`, so rebuilding it per `submit_turn`
@@ -2625,7 +2625,7 @@ where
             ),
             notification_setup_service: Arc::new(UnsupportedChannelNotificationSetupService),
             notification_inbox: Arc::new(NoopNotificationInboxStore),
-            legacy_approval_backfill_completed: Arc::new(StdMutex::new(HashSet::new())),
+            legacy_approval_backfill_attempted: Arc::new(StdMutex::new(HashSet::new())),
             session_inbound_ledger: Arc::new(
                 crate::in_memory_ledger::InMemoryIdempotencyLedger::new(),
             ),
@@ -3033,7 +3033,13 @@ where
             ));
         }
         if cursor.is_none() {
-            self.backfill_legacy_approval_notifications(&caller).await?;
+            // best-effort-ok: one-release legacy approval discovery must never
+            // gate the authoritative durable Inbox read. The attempt guard
+            // prevents a failing compatibility backend from being hammered on
+            // every browser poll; a process restart creates a fresh retry.
+            if let Err(error) = self.backfill_legacy_approval_notifications(&caller).await {
+                tracing::warn!(?error, "legacy approval notification backfill failed");
+            }
         }
         let page = self
             .notification_inbox
@@ -5981,11 +5987,11 @@ where
                 .as_ref()
                 .map(|project_id| project_id.as_str().to_string()),
         };
-        if self
-            .legacy_approval_backfill_completed
+        if !self
+            .legacy_approval_backfill_attempted
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains(&migration_key)
+            .insert(migration_key)
         {
             return Ok(());
         }
@@ -6050,10 +6056,6 @@ where
                 tracing::warn!(%error, "legacy approval notification backfill timed out");
                 ProductSurfaceError::service_unavailable(true)
             })??;
-        self.legacy_approval_backfill_completed
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(migration_key);
         Ok(())
     }
 
