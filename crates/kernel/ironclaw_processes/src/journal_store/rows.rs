@@ -1056,6 +1056,7 @@ where
     let mut records = Vec::new();
 
     for state in query.allowed_states.iter().copied() {
+        let mut state_records = 0usize;
         let state_filter = eq_value(
             "dependency_state",
             IndexValue::Text(dependency_state_key(state)?),
@@ -1102,6 +1103,7 @@ where
                 if !query.include_closed && record.state.is_closed() {
                     continue;
                 }
+                state_records += 1;
                 records.push(record);
             }
             if exhausted {
@@ -1114,7 +1116,7 @@ where
             }
             // The outer merge only needs enough rows to produce `limit`; a
             // state stream can stop once it has supplied that many candidates.
-            if records.len() >= limit as usize {
+            if state_records >= limit as usize {
                 break;
             }
         }
