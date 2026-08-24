@@ -110,14 +110,19 @@ sequenceDiagram
 ### 2.1 Spawn path
 
 `crates/loop/ironclaw_loop_host/src/subagent_spawn_port.rs` owns the
-capability surface: `SpawnSubagentArgs { subagent_kind, task, handoff? }`,
-argument codec, per-kind descriptors, spawn admission, and
-`SubagentSpawnDeps` (which carries `Arc<dyn AwaitEdgeWriter>`). Today the
-codec **rejects** `mode: "background"` (`background_subagents_disabled()`),
-the parameters schema does not advertise `mode`, and `finish_spawn`
-hard-codes `Blocking`. Child creation reserves spawn-tree capacity against
-`spawn_tree_descendant_cap` (from `limits.max_tree_descendants`, journaled on
-the run record).
+capability surface: `SpawnSubagentArgs { subagent_kind, task, handoff?,
+mode }`, argument codec, per-kind descriptors, spawn admission, and
+`SubagentSpawnDeps` (which carries `Arc<dyn AwaitEdgeWriter>`). The
+parameters schema now advertises `mode` (enum `["blocking", "background"]`,
+default `"blocking"`); the codec also accepts the legacy
+`run_in_background: true` alias and **rejects** the contradictory
+combination `mode: "blocking"` + `run_in_background: true`.
+`finish_spawn` is mode-driven — it threads `args.mode` through instead of
+hard-coding `Blocking` (§4.3's "what changes where" table). None of this is
+model-reachable yet: `builtin.spawn_subagent` stays in
+`disabled_capability_ids` until R9 (§7's first invariant). Child creation
+reserves spawn-tree capacity against `spawn_tree_descendant_cap` (from
+`limits.max_tree_descendants`, journaled on the run record).
 
 ### 2.2 The await edge
 
@@ -367,7 +372,7 @@ intentionally suppressed.
 | `ironclaw_loop_contracts` (`host/input.rs`) | new variant `LoopInput::SubagentSettled { … }` carrying **references only** (child run id + result/message refs — never content; kernel guardrail). Serde round-trip pinned. **Rolling-upgrade hazard, not absent** (correction, 2026-08-21 — this row previously claimed the queue was in-memory and therefore compat-free; it is not, see §4.1 and D13): production composes `FilesystemHostInputQueue` (`crates/app/ironclaw_composition/src/runtime.rs`), and the queue document is deserialized whole (`load`, `crates/loop/ironclaw_loop_host/src/durable_input_queue.rs`) — an old binary meeting a persisted `subagent_settled` entry fails the **entire run's queue** with "durable input queue is corrupt", not just that one entry. Mitigated by sequencing, not a tolerant reader: this slice (2a) lands the variant with zero producers, so no old binary can ever meet a persisted instance of it; producers land in slice 2b only once every reader in the fleet understands the variant. |
 | `ironclaw_agent_loop` (`executor/input.rs`) | the variant drains **steering-like**: prompt-visible content input, not a control barrier. The `PostCapabilityStage::drain_settled` stub and its stale `LoopBackgroundChildPort` comment are **deleted** — the input path is the drain. |
 | `ironclaw_turn_runner` (resolver) | background tail: settle → idempotent append (`ResultAppended{message_ref}` on the edge) → schedule attention (enqueue or activate) → `AttentionScheduled` → close. Reuses `child_terminal_output` / summary framing from the blocking tail. Writes are per-edge (append, transition, enqueue are separate operations on existing interfaces); coalescing attention across simultaneous settles is an optional later optimization, not a normative claim. One typed input per child either way (D6). |
-| `ironclaw_loop_host` (spawn port) | delete both codec rejections and `background_subagents_disabled()`; advertise `mode` in the parameters schema (enum `["blocking","background"]`, default `blocking`); thread `args.mode` through `finish_spawn`; background spawns return the immediate receipt payload instead of `await_dependent_run`, and write their edge with `group_ref = "bg:{parent_thread_id}"` (the thread-indexed recovery key, §4.2). |
+| `ironclaw_loop_host` (spawn port) | delete both codec rejections and `background_subagents_disabled()`; advertise `mode` in the parameters schema (enum `["blocking","background"]`, default `blocking`); thread `args.mode` through `finish_spawn`; background spawns return the immediate receipt payload instead of `await_dependent_run`, and write their edge with `group_ref = "bg:{parent_thread_id}"` (the thread-indexed recovery key, §4.2) — shipped, slice 2b (§2.1). |
 | `ironclaw_processes` (dependency journal) | expected-state/metadata CAS transition on the dependency port, carrying the `ResultAppended`/`AttentionDeferred` substates and payloads; every journal implementation, decorator, and test double enumerated in the same change. |
 | `ironclaw_threads` | typed, idempotent subagent-result acceptance (system-class row, dedupe on the acceptance identity tuple — §4.1) — shipped, slice 2a. Plus, in 2b: `mark_message_submitted` returns an already-`Finalized` row unchanged in **both** backends (`filesystem_service.rs`, `in_memory.rs`), beside the existing idempotent-resubmit early return. **The result row is never marked `Queued`** (correction, 2026-08-21 — this row previously inherited §4.1's steering-ladder claim; `ensure_user_accepted` refuses it and `Queued` is not model-visible, see D14). `ensure_user_accepted` is **not** widened. Refusal pinned today by `crates/domains/ironclaw_threads/tests/subagent_result_acceptance.rs`. |
 | model-facing description | the spawn descriptor text in `subagent_spawn_port.rs` gains background wording (moves to a `prompts/*.md` file if it goes multi-line, per the repo prompt rule). |
@@ -735,8 +740,11 @@ change.
 ## 9. Part II — pending work: R3 gate escalation walk
 
 **R2 (background core) shipped as three slices (D13): the inert surface in
-PR #7788 (slice 2a), the producers in the slices-2b/2c PR that landed this
-paragraph.** Its implementation plan —
+PR #7788 (slice 2a); slice 2b, which makes background spawn return a receipt
+and deliver to a live parent; and slice 2c, which adds parked-parent
+activation, streak-cap deferral, the healing sweeps, and the
+failure-injection matrix — 2b and 2c both land in the slices-2b/2c PR that
+landed this paragraph.** Its implementation plan —
 receipt semantics, the durable delivery-chain state machine, the resolver's
 background tail, the run-start sweep, and the five integration scenarios
 pinning them (`tests/integration/subagent_await_edge.rs`) — is retired from
