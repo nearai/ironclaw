@@ -563,9 +563,9 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             first.messages[5].content_ref.as_str().to_string(),
             first.messages[6].content_ref.as_str().to_string(),
             first.messages[7].content_ref.as_str().to_string(),
-            first.messages[8].content_ref.as_str().to_string(),
-            first.messages[9].content_ref.as_str().to_string(),
             "msg:user-message".to_string(),
+            first.messages[9].content_ref.as_str().to_string(),
+            first.messages[10].content_ref.as_str().to_string(),
         ]
     );
     assert!(
@@ -598,31 +598,32 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             .as_str()
             .starts_with("msg:snippet.skill.alpha.")
     );
-    // The memory section opens with the recall-framing guidance (#7294),
-    // ahead of the memory snippets it frames.
     assert!(
         first.messages[6]
-            .content_ref
-            .as_str()
-            .starts_with("msg:memory-guidance.memory-recall-framing.")
-    );
-    assert!(
-        first.messages[7]
-            .content_ref
-            .as_str()
-            .starts_with("msg:memory.memory.project-summary.")
-    );
-    assert!(
-        first.messages[8]
             .content_ref
             .as_str()
             .starts_with("msg:safety.safety.prompt-write.")
     );
     assert!(
-        first.messages[9]
+        first.messages[7]
             .content_ref
             .as_str()
             .starts_with("msg:surface.surface-v1.")
+    );
+    assert_eq!(first.messages[8].content_ref.as_str(), "msg:user-message");
+    // Turn-dependent recalled memory follows the persisted transcript. Its
+    // section still opens with the recall framing (#7294) before the snippets.
+    assert!(
+        first.messages[9]
+            .content_ref
+            .as_str()
+            .starts_with("msg:memory-guidance.memory-recall-framing.")
+    );
+    assert!(
+        first.messages[10]
+            .content_ref
+            .as_str()
+            .starts_with("msg:memory.memory.project-summary.")
     );
     assert_eq!(first.skill_context.len(), 1);
     assert_eq!(first.skill_context[0].source_name, "alpha");

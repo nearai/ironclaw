@@ -682,6 +682,29 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert no captured model request contains `needle` anywhere in its
+    /// serialized messages. Fails rather than passing vacuously when no model
+    /// requests were captured.
+    pub async fn assert_model_request_excludes(&self, needle: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        if requests.is_empty() {
+            return Err(format!(
+                "vacuous exclusion: no model requests were captured; cannot prove {needle:?} was omitted"
+            )
+            .into());
+        }
+        for messages in &requests {
+            let rendered = serde_json::to_string(messages)
+                .map_err(|e| format!("serialize captured model request: {e}"))?;
+            if rendered.contains(needle) {
+                return Err(
+                    format!("captured model request unexpectedly contained {needle:?}").into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Assert that the textual `content` of some message sent to the model
     /// contains `needle`. Unlike [`assert_model_request_contains`], this does
     /// not serialize the request a second time, so JSON embedded in a tool
