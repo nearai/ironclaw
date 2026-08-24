@@ -629,17 +629,19 @@ async def test_reborn_v2_scheduled_approval_notification_resolves_with_gate(
             )
             assert settled["id"] == notification["id"]
         finally:
-            await delete_notification_automation(
-                client,
-                reborn_v2_server,
-                automation_id,
-            )
-            await _set_tool_permission(
-                client,
-                reborn_v2_server,
-                "builtin.echo",
-                restore_state,
-            )
+            try:
+                await _set_tool_permission(
+                    client,
+                    reborn_v2_server,
+                    "builtin.echo",
+                    restore_state,
+                )
+            finally:
+                await delete_notification_automation(
+                    client,
+                    reborn_v2_server,
+                    automation_id,
+                )
 
 
 async def test_reborn_v2_scheduled_auth_notification_resolves_with_manual_token(

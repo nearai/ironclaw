@@ -7,6 +7,18 @@ import httpx
 from reborn_webui_harness import create_thread, send_message, wait_for_assistant_message
 
 
+async def retry_after_rate_limit(response: httpx.Response) -> bool:
+    """Sleep for a bounded Retry-After delay when the API throttles polling."""
+    if response.status_code != 429:
+        return False
+    try:
+        retry_after = float(response.headers.get("retry-after", "1"))
+    except (TypeError, ValueError):
+        retry_after = 1.0
+    await asyncio.sleep(max(retry_after, 0.5))
+    return True
+
+
 def notification_automation_name(kind: str, label: str) -> str:
     return f"E2E notification {kind} {label}"
 
@@ -37,6 +49,8 @@ async def create_notification_automation(
             params={"include_completed": "true", "limit": 100, "run_limit": 0},
             timeout=10,
         )
+        if await retry_after_rate_limit(response):
+            continue
         response.raise_for_status()
         last_body = response.json()
         match = next(
@@ -80,6 +94,8 @@ async def run_notification_automation(
             params={"include_completed": "true", "limit": 100, "run_limit": 10},
             timeout=10,
         )
+        if await retry_after_rate_limit(listed):
+            continue
         listed.raise_for_status()
         last_body = listed.json()
         automation = next(
@@ -124,9 +140,7 @@ async def wait_for_notification(
             params={"limit": 100},
             timeout=10,
         )
-        if response.status_code == 429:
-            retry_after = float(response.headers.get("retry-after", "1"))
-            await asyncio.sleep(max(retry_after, 0.5))
+        if await retry_after_rate_limit(response):
             continue
         response.raise_for_status()
         last_body = response.json()
