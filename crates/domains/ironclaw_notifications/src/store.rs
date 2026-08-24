@@ -141,7 +141,9 @@ where
                         created_at: request.occurred_at,
                         updated_at: request.occurred_at,
                         read_at: None,
-                        resolved_at: None,
+                        resolved_at: (request.initial_state
+                            == crate::NotificationInitialState::Resolved)
+                            .then_some(request.occurred_at),
                         archived_at: None,
                     };
                     snapshot.notifications.push(record.clone());

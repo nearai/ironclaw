@@ -14530,8 +14530,8 @@ async fn a_repeated_notification_mutation_reports_that_nothing_changed() {
     use ironclaw_host_api::path::{MountAlias, VirtualPath};
     use ironclaw_notifications::{
         NotificationAction, NotificationId, NotificationInboxStore, NotificationInboxStorePort,
-        NotificationKind, NotificationRecipient, NotificationSeverity, NotificationSource,
-        PublishNotificationRequest,
+        NotificationInitialState, NotificationKind, NotificationRecipient, NotificationSeverity,
+        NotificationSource, PublishNotificationRequest,
     };
 
     let mounts = MountView::new(vec![MountGrant::new(
@@ -14565,6 +14565,7 @@ async fn a_repeated_notification_mutation_reports_that_nothing_changed() {
                 lifecycle_ref: None,
             },
             action: NotificationAction::OpenThread { thread_id },
+            initial_state: NotificationInitialState::Open,
             occurred_at: Utc::now(),
         })
         .await

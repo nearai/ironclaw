@@ -19,9 +19,9 @@ use ironclaw_notifications::{
     LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
     NOTIFICATION_INBOX_MAX_RECORDS, NOTIFICATION_PAGE_LIMIT_MAX, NoopNotificationInboxStore,
     NotificationAction, NotificationId, NotificationInboxError, NotificationInboxStore,
-    NotificationInboxStorePort, NotificationKind, NotificationMutationOutcome,
-    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
-    PublishNotificationRequest,
+    NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+    NotificationMutationOutcome, NotificationMutationRequest, NotificationRecipient,
+    NotificationSeverity, NotificationSource, PublishNotificationRequest,
 };
 use tokio::sync::Mutex;
 
@@ -63,6 +63,7 @@ fn request(id: &str, timestamp: i64) -> PublishNotificationRequest {
             lifecycle_ref: Some(LifecycleRef::new(format!("gate-{id}")).expect("lifecycle ref")),
         },
         action: NotificationAction::OpenThread { thread_id },
+        initial_state: NotificationInitialState::Open,
         occurred_at: Utc.timestamp_opt(timestamp, 0).single().expect("time"),
     }
 }
@@ -534,12 +535,16 @@ async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
     let backend = Arc::new(InMemoryBackend::new());
     let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)), TEST_CAPACITY);
 
-    // Fill to capacity, then close every record the way a user who worked
-    // through the inbox would: resolved by the producer, archived by the user.
+    // Terminal outcomes are resolved when published. Archiving them must make
+    // them reclaimable without requiring a second producer lifecycle event.
     for index in 0..TEST_CAPACITY {
         let id = format!("closed-{index}");
+        let mut terminal = request(&id, 1_700_000_000 + index as i64);
+        terminal.kind = NotificationKind::RunCompleted;
+        terminal.severity = NotificationSeverity::Success;
+        terminal.initial_state = NotificationInitialState::Resolved;
         store
-            .publish(request(&id, 1_700_000_000 + index as i64))
+            .publish(terminal)
             .await
             .expect("publish within capacity");
         let mutation = NotificationMutationRequest {
@@ -550,7 +555,6 @@ async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
                 .single()
                 .expect("time"),
         };
-        store.resolve(mutation.clone()).await.expect("resolve");
         store.archive(mutation).await.expect("archive");
     }
 
