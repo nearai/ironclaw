@@ -19,11 +19,7 @@ function sourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useNotifications };`
-    .replaceAll(
-      'import("../lib/notification-approval-compat")',
-      "loadApprovalNotificationCompat()",
-    );
+  return `${lines.join("\n")}\nglobalThis.__testExports = { useNotifications };`;
 }
 
 function depsEqual(left, right) {
@@ -86,7 +82,6 @@ function instantiate({
   profile = { tenant_id: "tenant", user_id: "user" },
   activeThreadId = null,
   inboxError = null,
-  approvalError = null,
   mutationsPending = false,
   archiveError = null,
 } = {}) {
@@ -94,8 +89,6 @@ function instantiate({
   const readCalls = [];
   const allReadCalls = [];
   const inboxCalls = [];
-  const threadCalls = [];
-  const seenCalls = [];
   const archiveCalls = [];
   const optimisticWrites = [];
   const queryKeys = [];
@@ -104,7 +97,6 @@ function instantiate({
   const refetch = () => {
     refetchCalls.push(true);
   };
-  let storedState = { initialized: true, seenIds: new Set() };
   const react = createReactStub();
   /* A real query cache composes: the second optimistic write starts from the
    * first one's result. Reading the pristine fixture back every time would let
@@ -180,11 +172,6 @@ function instantiate({
       }
       return data?.inbox || { notifications: [], unread_count: 0 };
     },
-    listThreads: async (request) => {
-      threadCalls.push(request);
-      if (approvalError) throw approvalError;
-      return data?.approvalThreads || { threads: [] };
-    },
     markNotificationRead: async (id) => readCalls.push(id),
     markAllNotificationsRead: async () => allReadCalls.push(true),
     archiveNotification: async (id) => {
@@ -200,25 +187,6 @@ function instantiate({
       timestamp: notification.timestamp || 2,
       read: Boolean(notification.read_at),
     })),
-    loadApprovalNotificationCompat: async () => ({
-      approvalThreadNotifications: (threads) => threads.map((thread) => ({
-        id: `approval:${thread.id}`,
-        type: "approval",
-        href: `/chat/${thread.id}`,
-        threadId: thread.id,
-        timestamp: 1,
-        read: false,
-      })),
-      getNotificationState: () => storedState,
-      markNotificationIdsSeen: (ids, scope) => {
-        seenCalls.push({ ids, scope });
-        storedState = {
-          initialized: true,
-          seenIds: new Set([...storedState.seenIds, ...ids]),
-        };
-        return storedState;
-      },
-    }),
     globalThis: {},
   };
   vm.runInNewContext(sourceForTest(), context);
@@ -249,8 +217,6 @@ function instantiate({
     queryKeys,
     refetchCalls,
     mutationFailures,
-    threadCalls,
-    seenCalls,
     archiveCalls,
     optimisticWrites,
     setProfile(next) { profile = next; },
@@ -278,11 +244,10 @@ function flushAsyncWork() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-test("reads legacy approvals alongside the inbox during the producer rollout", async () => {
+test("reads only the durable inbox for an authenticated recipient", async () => {
   const harness = instantiate({
     data: {
-      inbox: { notifications: [], unread_count: 0 },
-      approvalThreads: { threads: [{ id: "thread-transition" }] },
+      inbox: { notifications: [notification()], unread_count: 1 },
     },
   });
   assert.equal(harness.queryOptions.enabled, true);
@@ -290,153 +255,33 @@ test("reads legacy approvals alongside the inbox during the producer rollout", a
   assert.deepEqual(JSON.parse(JSON.stringify(harness.inboxCalls)), [
     { limit: 30, signal: {} },
   ], "every page carries the query's abort signal");
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
-    { limit: 20, needsApproval: true, signal: {} },
-  ]);
-  assert.equal(result.compatibility[0].id, "approval:thread-transition");
-  assert.equal(result.inboxSupported, true);
+  assert.equal(result.inbox.notifications[0].id, "notification-1");
+  assert.deepEqual(Object.keys(result), ["inbox"]);
 
   const pending = instantiate({ data: {}, profile: null });
   assert.equal(pending.queryOptions.enabled, false);
 });
 
-test("uses the compatibility fallback when the server does not support the inbox", async () => {
-  const harness = instantiate({
-    data: { approvalThreads: { threads: [{ id: "thread-fallback" }] } },
-    inboxError: Object.assign(new Error("inbox unavailable"), { status: 404 }),
-  });
-  const result = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
-  assert.deepEqual(JSON.parse(JSON.stringify(result.inbox)), {
-    notifications: [],
-    unread_count: 0,
-  });
-  assert.equal(result.compatibility[0].id, "approval:thread-fallback");
-  assert.equal(result.inboxSupported, false);
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.threadCalls)), [
-    { limit: 20, needsApproval: true, signal: {} },
-  ]);
-});
-
-test("surfaces transient inbox failures without activating the compatibility path", async () => {
+test("surfaces inbox failures instead of presenting a false empty state", async () => {
   const inboxError = Object.assign(new Error("inbox unavailable"), { status: 503 });
-  const harness = instantiate({
-    data: { approvalThreads: { threads: [{ id: "thread-fallback" }] } },
-    inboxError,
-  });
+  const harness = instantiate({ inboxError });
   await assert.rejects(harness.queryOptions.queryFn({ signal: new AbortController().signal }), inboxError);
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(harness.threadCalls)),
-    [{ limit: 20, needsApproval: true, signal: {} }],
-    "both rollout sources start together, but the 503 still wins",
+  const unsupported = Object.assign(new Error("inbox route missing"), { status: 404 });
+  const unsupportedHarness = instantiate({ inboxError: unsupported });
+  await assert.rejects(
+    unsupportedHarness.queryOptions.queryFn({ signal: new AbortController().signal }),
+    unsupported,
   );
 });
 
-test("keeps durable notifications when the legacy approval read fails", async () => {
+test("marks durable notifications through the inbox API", () => {
   const harness = instantiate({
     data: {
       inbox: { notifications: [notification()], unread_count: 1 },
     },
-    approvalError: new Error("legacy approvals unavailable"),
   });
-  const result = await harness.queryOptions.queryFn({ signal: new AbortController().signal });
-  assert.equal(result.inboxSupported, true);
-  assert.equal(result.inbox.notifications[0].id, "notification-1");
-  assert.deepEqual(JSON.parse(JSON.stringify(result.compatibility)), []);
-});
-
-test("surfaces the legacy approval failure when no durable inbox is available", async () => {
-  const approvalError = new Error("legacy approvals unavailable");
-  const harness = instantiate({
-    inboxError: Object.assign(new Error("inbox unavailable"), { status: 404 }),
-    approvalError,
-  });
-  await assert.rejects(harness.queryOptions.queryFn({ signal: new AbortController().signal }), approvalError);
-});
-
-test("durable approvals win while unmatched rollout approvals remain visible", () => {
-  const harness = instantiate({
-    data: {
-      inbox: { notifications: [notification()], unread_count: 1 },
-      compatibility: [
-        {
-          // Same thread as the durable record.
-          id: "approval:thread-1",
-          type: "approval",
-          href: "/chat/thread-1",
-          threadId: "thread-1",
-          timestamp: 1,
-          read: false,
-        },
-        {
-          // A thread the durable inbox says nothing about — dropped just the
-          // same, which is what makes this suppression rather than matching.
-          id: "approval:thread-unrelated",
-          type: "approval",
-          href: "/chat/thread-unrelated",
-          threadId: "thread-unrelated",
-          timestamp: 2,
-          read: false,
-        },
-      ],
-    },
-  });
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
-    ["notification-1", "approval:thread-unrelated"],
-  );
-  assert.equal(harness.hook.unreadCount, 2);
-});
-
-test("an empty durable inbox still shows a pending rollout approval", () => {
-  const harness = instantiate({
-    data: {
-      inboxSupported: true,
-      inbox: { notifications: [], unread_count: 0 },
-      compatibility: [{
-        id: "approval:thread-transition",
-        type: "approval",
-        href: "/chat/thread-transition",
-        timestamp: 1,
-        read: false,
-      }],
-    },
-  });
-
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
-    ["approval:thread-transition"],
-  );
-  assert.equal(harness.hook.unreadCount, 1);
-});
-
-test("marks durable and compatibility notifications through their owning state", async () => {
-  const durable = instantiate({
-    data: {
-      inbox: { notifications: [notification()], unread_count: 1 },
-      approvalThreads: { threads: [] },
-    },
-  });
-  durable.hook.dismissMessage("notification-1");
-  assert.deepEqual(durable.readCalls, ["notification-1"]);
-
-  const fallback = instantiate({
-    data: {
-      inboxSupported: false,
-      inbox: { notifications: [], unread_count: 0 },
-      compatibility: [{
-        id: "approval:thread-fallback",
-        type: "approval",
-        href: "/chat/thread-fallback",
-        timestamp: 1,
-        read: false,
-      }],
-    },
-  });
-  fallback.hook.dismissMessage("approval:thread-fallback");
-  await flushAsyncWork();
-  assert.deepEqual(JSON.parse(JSON.stringify(fallback.seenCalls)), [
-    { ids: ["approval:thread-fallback"], scope: "tenant:user" },
-  ]);
+  harness.hook.dismissMessage("notification-1");
+  assert.deepEqual(harness.readCalls, ["notification-1"]);
 });
 
 test("archives a durable notification and drops it from the cached inbox", async () => {
@@ -480,23 +325,6 @@ test("archiving a read record leaves the unread badge alone", async () => {
 
   assert.deepEqual(harness.archiveCalls, ["notification-1"]);
   assert.equal(harness.optimisticWrites.at(-1).inbox.unread_count, 0);
-});
-
-test("a compatibility notification is never archived through the server", () => {
-  const harness = instantiate({
-    data: {
-      inbox: { notifications: [], unread_count: 0 },
-      approvalThreads: { threads: [{ id: "thread-fallback" }] },
-    },
-  });
-
-  harness.hook.archiveMessage("approval:thread-fallback");
-
-  assert.deepEqual(
-    harness.archiveCalls,
-    [],
-    "a legacy approval row has no durable record, so archiving it would 404",
-  );
 });
 
 const PAGED_INBOX = {
@@ -679,94 +507,15 @@ test("acknowledges a rendered completion while an earlier mark-read is in flight
   assert.deepEqual(harness.readCalls, ["notification-completed"]);
 });
 
-test("mark all read settles both rollout sources when the inbox answers", async () => {
+test("mark all read settles the durable inbox", async () => {
   const harness = instantiate({
     data: {
       inbox: { notifications: [notification()], unread_count: 1 },
-      compatibility: [{
-        id: "approval:thread-fallback",
-        type: "approval",
-        href: "/chat/thread-fallback",
-        threadId: "thread-fallback",
-        timestamp: 1,
-        read: false,
-      }],
     },
   });
   harness.hook.markAllRead();
   await flushAsyncWork();
   assert.deepEqual(harness.allReadCalls, [true]);
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(harness.seenCalls)),
-    [{ ids: ["approval:thread-fallback"], scope: "tenant:user" }],
-    "the rollout row is settled alongside the durable inbox",
-  );
-});
-
-test("an archived approval does not return through the compatibility source", async () => {
-  const harness = instantiate({
-    data: {
-      inbox: {
-        notifications: [notification("notification-1", "thread-fallback")],
-        unread_count: 1,
-      },
-      compatibility: [{
-        id: "approval:thread-fallback",
-        type: "approval",
-        href: "/chat/thread-fallback",
-        threadId: "thread-fallback",
-        timestamp: 1,
-        read: false,
-      }],
-    },
-  });
-
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(harness.hook.messages.map((message) => message.id))),
-    ["notification-1"],
-    "the durable record is the only row while the inbox answers",
-  );
-
-  harness.hook.archiveMessage("notification-1");
-  await flushAsyncWork();
-  const afterArchive = harness.render();
-
-  assert.deepEqual(
-    JSON.parse(
-      JSON.stringify(
-        harness.optimisticWrites.at(-1).inbox.notifications.map((record) => record.id),
-      ),
-    ),
-    [],
-    "archiving empties the durable list without resurrecting the pending-thread row",
-  );
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(afterArchive.messages.map((message) => message.id))),
-    [],
-    "the matching compatibility row stays suppressed after the durable archive",
-  );
-});
-
-test("does not call durable mutations when the server lacks the inbox API", async () => {
-  const harness = instantiate({
-    data: {
-      inboxSupported: false,
-      inbox: { notifications: [], unread_count: 0 },
-      compatibility: [{
-        id: "approval:thread-fallback",
-        type: "approval",
-        href: "/chat/thread-fallback",
-        timestamp: 1,
-        read: false,
-      }],
-    },
-  });
-  harness.hook.markAllRead();
-  await flushAsyncWork();
-  assert.deepEqual(harness.allReadCalls, []);
-  assert.deepEqual(JSON.parse(JSON.stringify(harness.seenCalls)), [
-    { ids: ["approval:thread-fallback"], scope: "tenant:user" },
-  ]);
 });
 
 test("an abort mid-walk stops paging instead of draining the inbox", async () => {
