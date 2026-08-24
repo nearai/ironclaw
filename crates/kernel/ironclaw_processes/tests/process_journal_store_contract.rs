@@ -3062,6 +3062,27 @@ async fn query_process_dependencies_bounded_mode_pages_the_filtered_canonical_or
 }
 
 #[tokio::test]
+async fn query_process_dependencies_rejects_cursor_without_finite_limit() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let error = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: scope(),
+            dependent_process_id: None,
+            group_ref: None,
+            include_closed: false,
+            after: Some((ProcessId::new(), ProcessId::new())),
+            limit: None,
+        })
+        .await
+        .expect_err("a cursor query must not fall back to an unbounded canonical scan");
+    assert!(matches!(
+        error,
+        ProcessJournalStoreError::InvalidRequest(message)
+            if message.contains("finite limit")
+    ));
+}
+
+#[tokio::test]
 async fn query_process_dependencies_bounded_mode_holds_on_libsql() {
     let storage = tempfile::tempdir().expect("temporary process journal database");
     let database = Arc::new(

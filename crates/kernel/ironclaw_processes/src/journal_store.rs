@@ -1175,6 +1175,11 @@ where
         request: ProcessDependencyQuery,
     ) -> Result<Vec<ProcessDependencyRecord>, Self::Error> {
         self.ensure_materialized().await?;
+        if request.after.is_some() && request.limit.is_none() {
+            return Err(ProcessJournalStoreError::InvalidRequest(
+                "dependency query with an after cursor requires a finite limit".to_string(),
+            ));
+        }
         // `after`/`limit` both `None` is the pre-existing unbounded query,
         // preserved byte-for-byte: full scope drain, in-memory filter, sort.
         if request.after.is_none() && request.limit.is_none() {
