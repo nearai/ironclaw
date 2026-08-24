@@ -67,6 +67,10 @@ async def _baseline(emulate_url: str) -> None:
     assert _document_text(document) == SEEDED_TEXT, document
 
 
+async def _proxy_only_baseline(_emulate_url: str) -> None:
+    """The scripted provider sequence supplies this case's complete baseline."""
+
+
 async def _get_outcome(emulate_url: str, preview: dict) -> None:
     await _baseline(emulate_url)
     rendered = json.dumps(preview)
@@ -111,6 +115,17 @@ async def _semantic_table_partial_outcome(emulate_url: str, preview: dict) -> No
     assert output["populated_cells"] == 0, output
     document = await _document(emulate_url)
     assert TABLE_DATA not in _document_tables(document), document
+
+
+async def _semantic_table_success_outcome(
+    _emulate_url: str, preview: dict
+) -> None:
+    output = _output(preview)
+    assert output["verified"] is True, output
+    assert output["stage"] == "verified", output
+    assert output["revision_id"] == "4", output
+    assert output["populated_cells"] == 4, output
+    assert "failure" not in output, output
 
 
 async def _semantic_table_revision_drift_outcome(
@@ -238,6 +253,23 @@ def _setup_table_drift_after_population(proxy) -> None:
         ("POST", update_path, _batch_update_response("2")),
         ("GET", document_path, _table_document("2", populated=False)),
         ("POST", update_path, _batch_update_response("3")),
+        ("GET", document_path, _table_document("4", populated=True)),
+    ]
+    for method, path, payload in responses:
+        _arm_json_response(proxy, profile, method, path, payload)
+
+
+def _setup_table_success(proxy) -> None:
+    profile = "table_success"
+    document_path = f"/v1/documents/{DOCUMENT_ID}"
+    update_path = f"{document_path}:batchUpdate"
+    responses = [
+        ("GET", document_path, _empty_document("1")),
+        ("POST", update_path, _batch_update_response("2")),
+        ("GET", document_path, _table_document("2", populated=False)),
+        ("POST", update_path, _batch_update_response("3")),
+        ("GET", document_path, _table_document("3", populated=True)),
+        ("POST", update_path, _batch_update_response("4")),
         ("GET", document_path, _table_document("4", populated=True)),
     ]
     for method, path, payload in responses:
@@ -524,6 +556,23 @@ GOOGLE_DOCS_PROVIDER_OPERATION_CASES = (
         expected_proxy_profile="revision_drift",
         expected_forwarded_request_count=2,
         expected_profile_request_count=2,
+    ),
+    ProviderOperationCase(
+        case_id="google_docs_create_table_with_data_success",
+        provider_service="google",
+        capability_id="google-docs.create_table_with_data",
+        arguments={
+            "document_id": DOCUMENT_ID,
+            "index": 1,
+            "table_data": TABLE_DATA,
+            "bold_header": True,
+        },
+        assert_baseline=_proxy_only_baseline,
+        assert_outcome=_semantic_table_success_outcome,
+        expected_request_count=7,
+        setup_provider_proxy=_setup_table_success,
+        expect_provider_forward=False,
+        expected_proxy_profile="table_success",
     ),
     ProviderOperationCase(
         case_id="google_docs_create_table_with_data_drift_after_population",
