@@ -109,12 +109,6 @@ registerPack("fr", {
   "chat.heroDesc": "Commencez par un objectif, une question sur le depot, une demande de revue ou des fichiers a traiter.",
   "chat.emptyTitle": "Commencez par une tâche opérateur concrète.",
   "chat.emptyDesc": "Envoyez un message, joignez des fichiers ou demandez un check du gateway. L’espace de travail garde visibles validations et activité runtime pendant le tour.",
-  "chat.suggestion1": "Cartographier l’état actuel du gateway",
-  "chat.suggestion1Desc": "Inspecter l'etat du runtime, les canaux, les outils et le travail ouvert.",
-  "chat.suggestion2": "Revoir l’activité récente des threads",
-  "chat.suggestion2Desc": "Rechercher les risques de justesse, les approbations bloquees et les suivis.",
-  "chat.suggestion3": "Rédiger un check de readiness d’extension",
-  "chat.suggestion3Desc": "Verifier la configuration, l'authentification, l'appairage et les capacites disponibles.",
   // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
   "chat.oobe.heading": "Suggested for you",
   "chat.oobe.subtitle": "Approve to run",

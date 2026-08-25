@@ -109,12 +109,6 @@ registerPack("uk", {
   "chat.heroDesc": "Почніть з цілі, питання про репозиторій, запиту на ревʼю або файлів, які потребують роботи.",
   "chat.emptyTitle": "Почніть із конкретного операторського завдання.",
   "chat.emptyDesc": "Надішліть повідомлення, прикріпіть файли або попросіть перевірити шлюз. Робочий простір показує затвердження й runtime-активність у процесі виконання.",
-  "chat.suggestion1": "Зіставити поточний стан шлюзу",
-  "chat.suggestion1Desc": "Перевірити стан runtime, канали, інструменти та відкриту роботу.",
-  "chat.suggestion2": "Переглянути нещодавню активність тредів",
-  "chat.suggestion2Desc": "Знайти ризики коректності, заблоковані погодження та подальші дії.",
-  "chat.suggestion3": "Чернетка перевірки готовності розширень",
-  "chat.suggestion3Desc": "Перевірити налаштування, автентифікацію, спарювання та доступні можливості.",
   // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
   "chat.oobe.heading": "Suggested for you",
   "chat.oobe.subtitle": "Approve to run",

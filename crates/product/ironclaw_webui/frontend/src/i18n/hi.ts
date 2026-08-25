@@ -109,12 +109,6 @@ registerPack("hi", {
   "chat.heroDesc": "किसी लक्ष्य, रेपो प्रश्न, समीक्षा अनुरोध या काम की जरूरत वाली फाइलों से शुरू करें.",
   "chat.emptyTitle": "एक ठोस ऑपरेटर कार्य से शुरू करें।",
   "chat.emptyDesc": "संदेश भेजें, फ़ाइलें जोड़ें, या गेटवे चेक माँगें। वर्कस्पेस टर्न के दौरान approvals और runtime activity दिखाता है।",
-  "chat.suggestion1": "वर्तमान गेटवे स्टेट मैप करें",
-  "chat.suggestion1Desc": "रनटाइम स्थिति, चैनल, टूल और खुले काम की जांच करें.",
-  "chat.suggestion2": "हाल की थ्रेड गतिविधि देखें",
-  "chat.suggestion2Desc": "सहीपन के जोखिम, रुकी हुई स्वीकृतियां और फॉलो-अप देखें.",
-  "chat.suggestion3": "एक्सटेंशन readiness check ड्राफ्ट करें",
-  "chat.suggestion3Desc": "सेटअप, ऑथ, पेयरिंग और उपलब्ध क्षमताओं की पुष्टि करें.",
   // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
   "chat.oobe.heading": "Suggested for you",
   "chat.oobe.subtitle": "Approve to run",

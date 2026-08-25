@@ -109,12 +109,6 @@ registerPack("ar", {
   "chat.heroDesc": "ابدأ بهدف، أو سؤال عن المستودع، أو طلب مراجعة، أو ملفات تحتاج إلى عمل.",
   "chat.emptyTitle": "ابدأ بمهمة تشغيل واضحة.",
   "chat.emptyDesc": "أرسل رسالة أو أرفق ملفات أو اطلب فحص البوابة. تُظهر مساحة العمل الموافقات ونشاط التشغيل أثناء تقدم الدور.",
-  "chat.suggestion1": "تخطيط حالة البوابة الحالية",
-  "chat.suggestion1Desc": "افحص حالة وقت التشغيل والقنوات والأدوات والعمل المفتوح.",
-  "chat.suggestion2": "مراجعة نشاط الخيوط الأخير",
-  "chat.suggestion2Desc": "ابحث عن مخاطر الصحة والموافقات المحظورة والمتابعات.",
-  "chat.suggestion3": "صياغة فحص جاهزية الملحقات",
-  "chat.suggestion3Desc": "تحقق من الإعداد والمصادقة والإقران والقدرات المتاحة.",
   // Chat — OOBE suggestion cards (English placeholder; localized in a later slice)
   "chat.oobe.heading": "Suggested for you",
   "chat.oobe.subtitle": "Approve to run",
