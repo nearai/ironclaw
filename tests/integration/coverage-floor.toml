@@ -78,11 +78,13 @@ enforce = true
 # which this does not do): 336439 / 386885 = 86.96%. The denominator moved
 # +11788 lines (+3.14%) — the restored crates minus the two package `lib.rs`
 # files `coverage-exemptions.toml` already named and can now actually exempt.
-floor_percent = 86.96
+# RECAPTURED 2026-08-24 (#7818) from the full local bucket + five-lane
+# branch-coverage artifact at 32004b3837: 375512 / 430993 = 87.13%.
+floor_percent = 87.13
 tolerance_percent = 0.5
-captured_total_lines = 386885
-captured_date = "2026-08-04"
-captured_from = "4c841a4321dd2d62b695120c60e6fe6bd4ac5ebf"
+captured_total_lines = 430993
+captured_date = "2026-08-24"
+captured_from = "32004b3837fb904f7cdb8279a3b1136b1a86c87e"
 
 [[crate]]
 name = "ironclaw_turn_runner"
@@ -115,12 +117,12 @@ name = "ironclaw_turn_runner"
 # the two crates goes 1,070 -> 1,072 (+2 added, zero names lost). A shed
 # re-captures the SOURCE crate's floor; it does not merely floor the
 # destination. See docs/internal/reborn/target-architecture/ (WS3 landing note).
-floor_percent = 82.53
-floor_covered_lines = 9470
+floor_percent = 85.47
+floor_covered_lines = 11196
 tolerance_percent = 0.5
-captured_total_lines = 11474
-captured_date = "2026-08-03"
-rationale = "Protects generated lifecycle, restart, and double-submit runner orchestration. Recaptured after the WS3 model-gateway/tool-disclosure sheds moved the better-covered half to ironclaw_loop_host."
+captured_total_lines = 13099
+captured_date = "2026-08-24"
+rationale = "Protects generated lifecycle, restart, double-submit, and subagent-result delivery orchestration. Recaptured in #7818 after adding durable background-delivery and production-wiring coverage."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
@@ -137,23 +139,23 @@ name = "ironclaw_loop_host"
 # absorbed code 5.34pp of unratcheted slack on arrival, i.e. room to lose ~1.4k
 # covered lines silently. The destination is floored at what it actually
 # measures, on arrival, in the same PR.
-floor_percent = 90.89
-floor_covered_lines = 24598
+floor_percent = 91.15
+floor_covered_lines = 28088
 tolerance_percent = 0.5
-captured_total_lines = 27063
-captured_date = "2026-08-03"
-rationale = "Protects the model-gateway adapter, model-route policy, driver-host port adapters, and the progressive tool-disclosure decorator this crate absorbed in WS3."
+captured_total_lines = 30814
+captured_date = "2026-08-24"
+rationale = "Protects model-gateway, driver-host, tool-disclosure, and durable input-queue behavior. Recaptured in #7818 after neutralizing and production-wiring background-result acknowledgment effects."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
 name = "ironclaw_processes"
-floor_percent = 88.07
-floor_covered_lines = 5839
+floor_percent = 89.78
+floor_covered_lines = 7442
 tolerance_percent = 0.5
 tolerance_lines = 20
-captured_total_lines = 6630
-captured_date = "2026-07-30"
-rationale = "Protects generated per-transition ownership checks in the process journal state machine."
+captured_total_lines = 8289
+captured_date = "2026-08-24"
+rationale = "Protects generated per-transition ownership checks and bounded dependency queries in the process journal state machine. Recaptured in #7818 after dependency-query parity coverage."
 issue = "https://github.com/nearai/ironclaw/issues/6524"
 
 [[crate]]
