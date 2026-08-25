@@ -33,6 +33,10 @@ use ironclaw_product_contracts::package_lifecycle::{
 };
 use serde::Deserialize;
 
+use crate::install_guidance::{
+    DeviceLinkUserSetup, activate_device_link_notice, active_install_next_step,
+    resolve_device_link_user_setup,
+};
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
@@ -363,15 +367,20 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                         if activation_response.phase == InstallationState::Active =>
                     {
                         connection_preview_source = Some(activation_response.clone());
-                        let user_link_required = self
-                            .extension_management
-                            .package_declares_device_link_user_link(&package_ref)
-                            .map_err(install_activation_readiness_error)?;
+                        let device_link_setup = resolve_device_link_user_setup(
+                            self.extension_management
+                                .device_link_user_setup_requirement(&package_ref)
+                                .await
+                                .map_err(install_activation_readiness_error)?,
+                            Some(&self.credential_accounts),
+                            &request.scope,
+                        )
+                        .await;
                         Ok(install_response_with_activation(
                             install_response,
                             &activation_response,
                             caller_credentials_verified,
-                            user_link_required,
+                            device_link_setup,
                         ))
                     }
                     Ok(activation_response)
@@ -407,7 +416,21 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     started,
                 )
                 .await?;
-                self.extension_management
+                // `LifecycleProductPayload::ExtensionActivate` carries no
+                // `next_step`, so the device-link guidance the install arm
+                // renders would be dropped entirely here (#7853). Route it
+                // through the payload-shape-independent `message` instead.
+                let device_link_setup = resolve_device_link_user_setup(
+                    self.extension_management
+                        .device_link_user_setup_requirement(&package_ref)
+                        .await
+                        .map_err(lifecycle_error)?,
+                    Some(&self.credential_accounts),
+                    &request.scope,
+                )
+                .await;
+                let mut response = self
+                    .extension_management
                     .activate_with_credential_gate(
                         package_ref,
                         request.scope.clone(),
@@ -415,7 +438,16 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                         &request.scope.user_id,
                     )
                     .await
-                    .map_err(lifecycle_error)
+                    .map_err(lifecycle_error)?;
+                if response.phase == InstallationState::Active
+                    && let Some(notice) = activate_device_link_notice(device_link_setup)
+                {
+                    response.message = Some(match response.message.take() {
+                        Some(message) => format!("{message} {notice}"),
+                        None => notice.to_string(),
+                    });
+                }
+                Ok(response)
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
@@ -539,20 +571,11 @@ const CALLER_ALREADY_CONNECTED_CONFIRMATION: &str = "The calling user's account 
      connected during this activation. Do not ask the user to connect, authorize, or complete \
      OAuth again — continue their original request.";
 
-/// `next_step` for an Active install whose channel identity is established
-/// per user by the device-link ceremony. The ceremony renders a scannable
-/// code, so it can only run in the Web UI: the model must send the user
-/// there instead of reporting the connection finished from a chat surface.
-const DEVICE_LINK_USER_SETUP_NEXT_STEP: &str = "Activation completed; model-visible extension tools are ready. Personal capabilities and \
-     chatting as the user still require each user to link their own account from this \
-     extension's card in the Web UI — that ceremony cannot run from chat, so direct the user \
-     there rather than reporting the connection complete.";
-
 fn install_response_with_activation(
     mut install_response: LifecycleProductResponse,
     activation_response: &LifecycleProductResponse,
     caller_credentials_verified: bool,
-    user_link_required: bool,
+    device_link_setup: DeviceLinkUserSetup,
 ) -> LifecycleProductResponse {
     install_response.phase = activation_response.phase;
     install_response.blockers = activation_response.blockers.clone();
@@ -581,11 +604,7 @@ fn install_response_with_activation(
             *visible_capability_ids = activation_visible_capability_ids;
         }
         *next_step = if activation_response.phase == InstallationState::Active {
-            if user_link_required {
-                DEVICE_LINK_USER_SETUP_NEXT_STEP.to_string()
-            } else {
-                "Activation completed; model-visible extension tools are ready.".to_string()
-            }
+            active_install_next_step(device_link_setup).to_string()
         } else {
             "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
         };
@@ -1120,7 +1139,12 @@ mod tests {
             }),
         };
 
-        let response = install_response_with_activation(install, &activation, false, true);
+        let response = install_response_with_activation(
+            install,
+            &activation,
+            false,
+            DeviceLinkUserSetup::Required,
+        );
         match response.payload {
             Some(LifecycleProductPayload::ExtensionInstall { next_step, .. }) => {
                 assert!(
@@ -1165,7 +1189,12 @@ mod tests {
             }),
         };
 
-        let confirmed = install_response_with_activation(install(), &activation, true, false);
+        let confirmed = install_response_with_activation(
+            install(),
+            &activation,
+            true,
+            DeviceLinkUserSetup::NotApplicable,
+        );
         let message = confirmed.message.expect("message");
         assert!(
             message.starts_with("activation guidance"),
@@ -1177,7 +1206,12 @@ mod tests {
             "verified caller credentials must be confirmed to the model: {message}"
         );
 
-        let unverified = install_response_with_activation(install(), &activation, false, false);
+        let unverified = install_response_with_activation(
+            install(),
+            &activation,
+            false,
+            DeviceLinkUserSetup::NotApplicable,
+        );
         assert_eq!(
             unverified.message.as_deref(),
             Some("activation guidance"),

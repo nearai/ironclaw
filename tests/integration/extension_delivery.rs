@@ -1591,6 +1591,28 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         .assert_tool_invoked("builtin.extension_install")
         .await
         .expect("the natural-language install turn invokes extension installation");
+    // #7853 regression: Telegram's workspace-bot install (this turn) reaches
+    // `Active` through the generic per-account credential gate, WITHOUT a
+    // personal device-link ceremony — but Telegram's manifest ALSO declares a
+    // separate personal-account device-link auth requirement (the linked
+    // session `group_device_link/` exercises). The model-visible `next_step`
+    // the install tool result carries must therefore still direct the user to
+    // link their own account from the Web UI (the device-link user-setup guidance
+    // in `extension_lifecycle_capabilities.rs`) instead of reporting a bare
+    // "activation completed" — PR #7766 changed telegram's
+    // `[channel.connection] strategy` from `device_link` to
+    // `web_generated_code`, which silently flips
+    // `device_link_user_setup_requirement`'s predecessor to `false` (it required BOTH
+    // the connection strategy AND the auth setup to read `DeviceLink`) and
+    // drops this guidance.
+    lifecycle
+        .assert_tool_result_contains("cannot run from chat")
+        .await
+        .expect(
+            "an Active Telegram install must direct the user to link their own account from \
+             the Web UI (device-link user-setup guidance) rather than only reporting \
+             activation complete",
+        );
     let installation_store = services
         .extension_installation_store_for_test()
         .expect("extension delivery profile carries the lifecycle store");

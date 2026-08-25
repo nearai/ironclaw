@@ -862,12 +862,41 @@ impl ExtensionLifecycleManager {
     /// the device-link ceremony — the one connection step that can only run
     /// in the Web UI, because the card renders a scannable code that chat
     /// surfaces cannot.
-    pub fn package_declares_device_link_user_link(
+    /// **Both** device-link facets are consulted, because a manifest may declare
+    /// either or both and they vary independently (#7853):
+    ///
+    /// * the channel's own connection ceremony (`[channel.connection] strategy
+    ///   = "device_link"`), and
+    /// * a personal-account tool surface whose credentials resolve to
+    ///   [`RuntimeCredentialAccountSetup::DeviceLink`].
+    ///
+    /// Consulting only the channel facet is what broke #7853: #7766 moved
+    /// Telegram's channel to `web_generated_code` while leaving its
+    /// personal-account tools on device-link, so this went silently false and
+    /// the model stopped telling users where to link. The tool facet alone
+    /// would fail the mirror case, because
+    /// [`manifest_runtime_credential_auth_requirements`] walks
+    /// `manifest.capabilities` and never `manifest.channel`.
+    ///
+    /// Returns the requirement itself so callers can resolve whether *this*
+    /// caller has already satisfied it, rather than telling an already-linked
+    /// user to go link again.
+    pub async fn device_link_user_setup_requirement(
         &self,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<bool, ProductOperationFailure> {
+    ) -> Result<Option<RuntimeCredentialAuthRequirement>, ProductOperationFailure> {
         let (extension_id, _installation_id) = extension_ids_from_package_ref(package_ref)?;
-        Ok(self.device_link_channel_setup(&extension_id).is_some())
+        if let Some(descriptor) = self.device_link_channel_setup(&extension_id) {
+            return Ok(Some(descriptor.auth_requirement));
+        }
+        let package = self.lifecycle_package(&extension_id).await?;
+        Ok(
+            manifest_runtime_credential_auth_requirements(&package.manifest)
+                .into_iter()
+                .find(|requirement| {
+                    matches!(requirement.setup, RuntimeCredentialAccountSetup::DeviceLink)
+                }),
+        )
     }
 
     fn device_link_channel_setup(
@@ -3414,6 +3443,125 @@ mod tests {
             pairing_deep_link_template: None,
             inbound_code_prefixes: Vec::new(),
         }
+    }
+
+    /// A test-only [`ExtensionAccountSetupReader`] that declares exactly one
+    /// extension's descriptor — the CHANNEL facet `device_link_channel_setup`
+    /// reads — and nothing else. `missing_requirement` is unused by
+    /// `device_link_user_setup_requirement` (that resolver only ever calls
+    /// `descriptor`), so it always answers `Ok(None)`.
+    struct SoleExtensionAccountSetupReader(ExtensionAccountSetupDescriptor);
+
+    #[async_trait]
+    impl ExtensionAccountSetupReader for SoleExtensionAccountSetupReader {
+        fn descriptor(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Option<ExtensionAccountSetupDescriptor> {
+            (self.0.extension_id == *extension_id).then(|| self.0.clone())
+        }
+
+        async fn missing_requirement(
+            &self,
+            _extension_id: &ExtensionId,
+            _user_id: &UserId,
+        ) -> Result<Option<RuntimeCredentialAuthRequirement>, ExtensionAccountSetupError> {
+            Ok(None)
+        }
+    }
+
+    /// #7853 GAP 3: Telegram exercises only the TOOL-credential half of
+    /// `device_link_user_setup_requirement` (its manifest declares a
+    /// device-link `[auth.telegram]` runtime credential). The CHANNEL half —
+    /// a package whose `[channel.connection] strategy = "device_link"` but
+    /// which declares NO device-link tool credential at all — is the mirror
+    /// shape #7853 broke and had zero coverage anywhere. The fixture
+    /// package's one capability carries no `requires` section, so
+    /// `manifest_runtime_credential_auth_requirements` is empty for it; the
+    /// account-setup reader below supplies only the channel facet, so a
+    /// `Some` result below can only have come from that branch, not the
+    /// manifest walk.
+    #[tokio::test]
+    async fn device_link_user_setup_requirement_resolves_from_the_channel_facet_alone() {
+        let package = fixture_extension_package();
+        let extension_id = package.package.id.clone();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("device-link-channel-facet-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store: installation_store.clone(),
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let channel_only_setup = device_link_setup_descriptor("fixture", "fixture-vendor");
+        let manager = manager.with_account_setup_registry(Arc::new(
+            SoleExtensionAccountSetupReader(channel_only_setup.clone()),
+        ));
+
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("package ref");
+        manager
+            .install(package_ref.clone(), &owner)
+            .await
+            .expect("install succeeds");
+
+        let installed_package = manager
+            .lifecycle_package(&extension_id)
+            .await
+            .expect("lifecycle package resolves");
+        let tool_requirements =
+            manifest_runtime_credential_auth_requirements(&installed_package.manifest);
+        assert!(
+            tool_requirements
+                .iter()
+                .all(|requirement| requirement.setup != RuntimeCredentialAccountSetup::DeviceLink),
+            "the fixture manifest must declare no device-link TOOL credential, so a Some \
+             result below can only be the CHANNEL facet: {tool_requirements:?}"
+        );
+
+        let requirement = manager
+            .device_link_user_setup_requirement(&package_ref)
+            .await
+            .expect("device link requirement resolves")
+            .expect(
+                "a package whose channel connection strategy is device-link must still report \
+                 a device-link requirement even with no device-link tool credential (#7853 \
+                 mirror case)",
+            );
+        assert_eq!(requirement, channel_only_setup.auth_requirement);
     }
 
     #[test]

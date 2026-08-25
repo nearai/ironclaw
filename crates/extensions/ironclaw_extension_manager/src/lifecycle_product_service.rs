@@ -1,3 +1,5 @@
+// arch-exempt: large_file, action dispatch + skill/extension lifecycle + mapping helpers pending split, plan #7860
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -24,6 +26,10 @@ use ironclaw_skills::{
     SkillManagementErrorKind,
 };
 
+use crate::install_guidance::{
+    DeviceLinkUserSetup, activate_device_link_notice, active_install_next_step,
+    resolve_device_link_user_setup,
+};
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
@@ -205,13 +211,33 @@ impl ExtensionHostLifecycleProductService {
                     return unsupported_projection(Some(package_ref));
                 };
                 let caller = lifecycle_caller(&context)?;
-                self.execute_extension_activation(
-                    &context,
-                    extension_management,
-                    package_ref,
-                    &caller,
-                )
-                .await
+                let mut response = self
+                    .execute_extension_activation(
+                        &context,
+                        extension_management,
+                        package_ref.clone(),
+                        &caller,
+                    )
+                    .await?;
+                // `LifecycleProductPayload::ExtensionActivate` has no
+                // `next_step`, and `activation_success_message` derives its copy
+                // from the channel connection strategy alone — so an extension
+                // whose device link hangs off its TOOL credentials (Telegram
+                // after #7766) reaches Active here with no mention that a
+                // personal link is still owed. That is #7853 through a third
+                // caller; the notice rides `message`, which every payload has.
+                if response.phase == InstallationState::Active {
+                    let setup = self
+                        .device_link_user_setup(&context, extension_management, &package_ref)
+                        .await?;
+                    if let Some(notice) = activate_device_link_notice(setup) {
+                        response.message = Some(match response.message.take() {
+                            Some(message) => format!("{message} {notice}"),
+                            None => notice.to_string(),
+                        });
+                    }
+                }
+                Ok(response)
             }
             LifecycleProductAction::ExtensionSelectHostedMcpAuth {
                 package_ref,
@@ -314,34 +340,63 @@ impl ExtensionHostLifecycleProductService {
         package_ref: LifecyclePackageRef,
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductOperationFailure> {
-        let user_link_required =
-            extension_management.package_declares_device_link_user_link(&package_ref)?;
         let install_response = extension_management
             .install(package_ref.clone(), caller)
             .await?;
         let activation_response = self
-            .execute_extension_activation(&context, extension_management, package_ref, caller)
+            .execute_extension_activation(
+                &context,
+                extension_management,
+                package_ref.clone(),
+                caller,
+            )
             .await;
         match activation_response {
             Ok(activation_response) if activation_response.phase == InstallationState::Active => {
+                let device_link_setup = self
+                    .device_link_user_setup(&context, extension_management, &package_ref)
+                    .await?;
                 Ok(install_response_with_activation(
                     install_response,
                     activation_response,
-                    user_link_required,
+                    device_link_setup,
                 ))
             }
             Ok(activation_response)
                 if activation_response_has_credential_blocker(&activation_response) =>
             {
+                let device_link_setup = self
+                    .device_link_user_setup(&context, extension_management, &package_ref)
+                    .await?;
                 Ok(install_response_with_activation(
                     install_response,
                     activation_response,
-                    user_link_required,
+                    device_link_setup,
                 ))
             }
             Ok(_) => Ok(install_response),
             Err(error) => install_activation_error(error, install_response),
         }
+    }
+
+    /// Whether the calling user still owes this package a device link.
+    ///
+    /// Resolved only after the package is installed: the package-shaped half
+    /// reads the resolved manifest, which does not exist until then.
+    async fn device_link_user_setup(
+        &self,
+        context: &LifecycleProductContext,
+        extension_management: &RebornLocalExtensionManagementPort,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<DeviceLinkUserSetup, ProductOperationFailure> {
+        Ok(resolve_device_link_user_setup(
+            extension_management
+                .device_link_user_setup_requirement(package_ref)
+                .await?,
+            self.credential_accounts.as_ref(),
+            &lifecycle_resource_scope(context)?,
+        )
+        .await)
     }
 
     /// The one post-install and explicit-activation path. Every package uses
@@ -380,19 +435,10 @@ impl ExtensionHostLifecycleProductService {
     }
 }
 
-/// `next_step` for an Active install whose channel identity is established
-/// per user by the device-link ceremony. The ceremony renders a scannable
-/// code, so it can only run in the Web UI: the model must send the user
-/// there instead of reporting the connection finished from a chat surface.
-const DEVICE_LINK_USER_SETUP_NEXT_STEP: &str = "Activation completed; model-visible extension tools are ready. Personal capabilities and \
-     chatting as the user still require each user to link their own account from this \
-     extension's card in the Web UI — that ceremony cannot run from chat, so direct the user \
-     there rather than reporting the connection complete.";
-
 fn install_response_with_activation(
     mut install_response: LifecycleProductResponse,
     activation_response: LifecycleProductResponse,
-    user_link_required: bool,
+    device_link_setup: DeviceLinkUserSetup,
 ) -> LifecycleProductResponse {
     install_response.phase = activation_response.phase;
     install_response.blockers = activation_response.blockers;
@@ -415,11 +461,7 @@ fn install_response_with_activation(
             *visible_capability_ids = activation_visible_capability_ids;
         }
         *next_step = if install_response.phase == InstallationState::Active {
-            if user_link_required {
-                DEVICE_LINK_USER_SETUP_NEXT_STEP.to_string()
-            } else {
-                "Activation completed; model-visible extension tools are ready.".to_string()
-            }
+            active_install_next_step(device_link_setup).to_string()
         } else {
             "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
         };
@@ -771,7 +813,8 @@ mod tests {
             }),
         };
 
-        let response = install_response_with_activation(install, activation, true);
+        let response =
+            install_response_with_activation(install, activation, DeviceLinkUserSetup::Required);
         match response.payload {
             Some(LifecycleProductPayload::ExtensionInstall { next_step, .. }) => {
                 assert!(
