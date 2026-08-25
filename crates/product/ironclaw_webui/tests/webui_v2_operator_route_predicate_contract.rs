@@ -4,9 +4,11 @@ use ironclaw_webui::webui_v2::{
     WEBUI_V2_ROUTE_CREATE_THREAD, WEBUI_V2_ROUTE_IMPORT_EXTENSION, WEBUI_V2_ROUTE_INSPECTOR_PROMPT,
     WEBUI_V2_ROUTE_INSPECTOR_SNAPSHOT, WEBUI_V2_ROUTE_INSPECTOR_TOOL,
     WEBUI_V2_ROUTE_INSPECTOR_UPDATES, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
-    WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS, WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY,
-    WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG, WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION,
-    WEBUI_V2_ROUTE_OPERATOR_LOGS, WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION,
+    WEBUI_V2_ROUTE_IRONHUB_LINK, WEBUI_V2_ROUTE_IRONHUB_LINK_CLEAR_KEY,
+    WEBUI_V2_ROUTE_IRONHUB_LINK_SET_KEY, WEBUI_V2_ROUTE_LIST_SETTINGS_TOOLS,
+    WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY, WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG,
+    WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION, WEBUI_V2_ROUTE_OPERATOR_LOGS,
+    WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION,
     WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY, WEBUI_V2_ROUTE_OPERATOR_STATUS,
     WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION, WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE,
     is_webui_v2_operator_webui_config_route_id,
@@ -49,6 +51,18 @@ fn operator_route_predicate_matches_operator_config_routes_only() {
     // buffering) in deployments that mount no operator surface.
     assert!(is_webui_v2_operator_webui_config_route_id(
         WEBUI_V2_ROUTE_IMPORT_EXTENSION
+    ));
+    // The IronHub link surface carries the deployment's shared key, so it is
+    // stripped from deployments without an operator surface and pre-gated
+    // before the key body is buffered.
+    assert!(is_webui_v2_operator_webui_config_route_id(
+        WEBUI_V2_ROUTE_IRONHUB_LINK
+    ));
+    assert!(is_webui_v2_operator_webui_config_route_id(
+        WEBUI_V2_ROUTE_IRONHUB_LINK_SET_KEY
+    ));
+    assert!(is_webui_v2_operator_webui_config_route_id(
+        WEBUI_V2_ROUTE_IRONHUB_LINK_CLEAR_KEY
     ));
     // Install stays a regular authenticated-user route: it references an
     // already-cataloged package by ref and uploads nothing.

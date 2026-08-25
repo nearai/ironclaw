@@ -599,19 +599,15 @@ pub(crate) fn build_runtime_input_with_options(
         }
     }
 
-    if caller == RuntimeInputCaller::Serve {
-        match std::env::var("IRONHUB_AGENT_SHARED_KEY") {
-            Ok(shared_key) => {
-                runtime_input = runtime_input.with_ironhub_agent_shared_key(
-                    ironclaw_composition::ironhub::IronhubSharedKey::new(shared_key.trim())
-                        .context("IRONHUB_AGENT_SHARED_KEY is invalid")?,
-                );
-            }
-            Err(std::env::VarError::NotPresent) => {}
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("IRONHUB_AGENT_SHARED_KEY is invalid");
-            }
-        }
+    if caller == RuntimeInputCaller::Serve
+        && let Some(shared_key) = ironhub_agent_shared_key()?
+    {
+        runtime_input = runtime_input.with_ironhub_agent_shared_key(shared_key);
+    }
+    if caller == RuntimeInputCaller::Serve
+        && let Some(base_url) = crate::commands::serve_sso::webui_public_base_url_from_env()?
+    {
+        runtime_input = runtime_input.with_ironhub_agent_base_url(base_url);
     }
     if let Some(manifest_url) = ironhub_manifest_url_from_env()? {
         runtime_input = runtime_input.with_ironhub_manifest_url(manifest_url);
@@ -633,6 +629,21 @@ pub(crate) fn ironhub_manifest_url_from_env()
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => {
             anyhow::bail!("IRONHUB_MANIFEST_URL is invalid");
+        }
+    }
+}
+
+/// Env only. A WebUI-stored key is resolved by composition against the store
+/// the profile mounted, which this binary cannot open before the runtime exists.
+fn ironhub_agent_shared_key()
+-> anyhow::Result<Option<ironclaw_composition::ironhub::IronhubSharedKey>> {
+    match std::env::var("IRONHUB_AGENT_SHARED_KEY") {
+        Ok(shared_key) => ironclaw_composition::ironhub::IronhubSharedKey::new(shared_key.trim())
+            .context("IRONHUB_AGENT_SHARED_KEY is invalid")
+            .map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("IRONHUB_AGENT_SHARED_KEY is invalid")
         }
     }
 }

@@ -1,10 +1,38 @@
-use ironclaw_product_contracts::ironhub::IronhubLinkError;
+use async_trait::async_trait;
+use ironclaw_product_contracts::ironhub::{IronhubLinkAdminService, IronhubLinkError};
+use ironclaw_product_contracts::product_wire::RebornIronhubLinkResponse;
 use ironclaw_product_contracts::surface::{
-    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceValidationCode,
+    ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceValidationCode,
 };
+use secrecy::SecretString;
 
 pub(super) fn ironhub_link_unavailable() -> ProductSurfaceError {
     ProductSurfaceError::service_unavailable(false)
+}
+
+pub(super) struct UnsupportedIronhubLinkAdminService;
+
+#[async_trait]
+impl IronhubLinkAdminService for UnsupportedIronhubLinkAdminService {
+    async fn status(&self) -> Result<RebornIronhubLinkResponse, IronhubLinkError> {
+        Err(IronhubLinkError::Unavailable)
+    }
+
+    async fn set_shared_key(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _shared_key: SecretString,
+    ) -> Result<RebornIronhubLinkResponse, IronhubLinkError> {
+        Err(IronhubLinkError::Unavailable)
+    }
+
+    async fn clear_shared_key(
+        &self,
+        _caller: ProductSurfaceCaller,
+    ) -> Result<RebornIronhubLinkResponse, IronhubLinkError> {
+        Err(IronhubLinkError::Unavailable)
+    }
 }
 
 pub(super) fn map_ironhub_link_error(error: IronhubLinkError) -> ProductSurfaceError {

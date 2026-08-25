@@ -256,7 +256,10 @@ observed_date = "2026-08-08"
 # that explanation now has one home and composition points at it, which is why
 # the seed is 42371 rather than 42380. Measured with
 # `bash scripts/ci/check-composition-budget.sh --print`, not padded.
-loc_ceiling = 42371
+#
+# Re-seeded 42371 -> 42495 on 2026-08-25 for #7516: the IronHub agent-link boot
+# resolution and register-route mount, assembly only. Measured with --print.
+loc_ceiling = 42495
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -267,8 +270,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42371
-loc_observed_date = "2026-08-24"
+loc_observed = 42495
+loc_observed_date = "2026-08-25"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

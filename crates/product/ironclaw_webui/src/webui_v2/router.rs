@@ -33,6 +33,7 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_INSPECTOR_SNAPSHOT, WEBUI_V2_PATTERN_INSPECTOR_TOOL,
     WEBUI_V2_PATTERN_INSPECTOR_UPDATES, WEBUI_V2_PATTERN_INSTALL_EXTENSION,
     WEBUI_V2_PATTERN_INSTALL_SKILL, WEBUI_V2_PATTERN_IRONHUB_DELIVER_INSTALL,
+    WEBUI_V2_PATTERN_IRONHUB_LINK, WEBUI_V2_PATTERN_IRONHUB_LINK_SET_KEY,
     WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_COMMANDS,
     WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
     WEBUI_V2_PATTERN_LIST_FS_MOUNTS, WEBUI_V2_PATTERN_LIST_LLM_MODELS,
@@ -581,6 +582,11 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
             .route(
                 WEBUI_V2_PATTERN_IMPORT_EXTENSION,
                 post(handlers::import_extension),
+            )
+            .route(WEBUI_V2_PATTERN_IRONHUB_LINK, get(handlers::ironhub_link))
+            .route(
+                WEBUI_V2_PATTERN_IRONHUB_LINK_SET_KEY,
+                post(handlers::ironhub_link_set_key).delete(handlers::ironhub_link_clear_key),
             )
             .route(
                 WEBUI_V2_PATTERN_OPERATOR_SETUP,

@@ -20,6 +20,8 @@ pub(super) enum ProductCommandHandler {
     FsRead,
     AttachmentRead,
     IronhubDeliverInstall,
+    IronhubLinkSetKey,
+    IronhubLinkClearKey,
     TraceAccountLoginLink,
     TraceHoldAuthorize,
     OperatorConfigSetKey,
@@ -67,6 +69,8 @@ impl ProductCommandHandler {
             FS_READ_COMMAND_ID => Some(Self::FsRead),
             ATTACHMENT_READ_COMMAND_ID => Some(Self::AttachmentRead),
             IRONHUB_DELIVER_INSTALL_COMMAND_ID => Some(Self::IronhubDeliverInstall),
+            IRONHUB_LINK_SET_KEY_COMMAND_ID => Some(Self::IronhubLinkSetKey),
+            IRONHUB_LINK_CLEAR_KEY_COMMAND_ID => Some(Self::IronhubLinkClearKey),
             TRACE_ACCOUNT_LOGIN_LINK_COMMAND_ID => Some(Self::TraceAccountLoginLink),
             TRACE_HOLD_AUTHORIZE_COMMAND_ID => Some(Self::TraceHoldAuthorize),
             OPERATOR_CONFIG_SET_KEY_COMMAND_ID => Some(Self::OperatorConfigSetKey),
@@ -221,6 +225,15 @@ impl ProductCommandHandler {
                     .ironhub_deliver_install(caller, product_command_input(input)?)
                     .await?,
             ),
+            Self::IronhubLinkSetKey => command_output(
+                services
+                    .ironhub_link_set_key(caller, product_command_input(input)?)
+                    .await?,
+            ),
+            Self::IronhubLinkClearKey => {
+                let _: EmptyProductCommandInput = product_command_input(input)?;
+                command_output(services.ironhub_link_clear_key(caller).await?)
+            }
             Self::TraceAccountLoginLink => {
                 let _: EmptyProductCommandInput = product_command_input(input)?;
                 command_output(services.trace_account_login_link(caller).await?)
@@ -884,6 +897,14 @@ mod tests {
             (
                 NOTIFICATIONS_ARCHIVE_COMMAND_ID,
                 ProductCommandHandler::NotificationArchive,
+            ),
+            (
+                IRONHUB_LINK_SET_KEY_COMMAND_ID,
+                ProductCommandHandler::IronhubLinkSetKey,
+            ),
+            (
+                IRONHUB_LINK_CLEAR_KEY_COMMAND_ID,
+                ProductCommandHandler::IronhubLinkClearKey,
             ),
         ] {
             let capability = CapabilityId::new(id).expect("valid capability id");

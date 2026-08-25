@@ -1,7 +1,9 @@
 use async_trait::async_trait;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-use crate::descriptors::ProductSurfaceCommandDescriptor;
+use crate::descriptors::{EmptyProductCommandInput, ProductSurfaceCommandDescriptor, ProductView};
+use crate::product_wire::{RebornIronhubLinkResponse, RebornIronhubLinkSetKeyRequest};
 use crate::surface::ProductSurfaceCaller;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +103,43 @@ pub const IRONHUB_DELIVER_INSTALL_COMMAND: ProductSurfaceCommandDescriptor<
     IronhubInstallDeliveryRequest,
     IronhubInstallDeliveryResult,
 > = ProductSurfaceCommandDescriptor::new(IRONHUB_DELIVER_INSTALL_COMMAND_ID);
+
+/// Implemented by `ironclaw_extension_manager`; read live so a key stored
+/// after startup reports as stored but not active. Mutations take the caller
+/// for audit; the operator gate is the assistant's.
+#[async_trait]
+pub trait IronhubLinkAdminService: Send + Sync {
+    async fn status(&self) -> Result<RebornIronhubLinkResponse, IronhubLinkError>;
+
+    /// The hub mints the key; the agent only accepts it.
+    async fn set_shared_key(
+        &self,
+        caller: ProductSurfaceCaller,
+        shared_key: SecretString,
+    ) -> Result<RebornIronhubLinkResponse, IronhubLinkError>;
+
+    /// Forgets the stored key. The gateway keeps running on the key it booted
+    /// with until the next restart.
+    async fn clear_shared_key(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<RebornIronhubLinkResponse, IronhubLinkError>;
+}
+
+pub const IRONHUB_LINK_VIEW: ProductView<serde_json::Value, RebornIronhubLinkResponse> =
+    ProductView::unpaginated("ironhub_link");
+
+pub const IRONHUB_LINK_SET_KEY_COMMAND_ID: &str = "ironhub.link.set_key";
+pub const IRONHUB_LINK_SET_KEY_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornIronhubLinkSetKeyRequest,
+    RebornIronhubLinkResponse,
+> = ProductSurfaceCommandDescriptor::new(IRONHUB_LINK_SET_KEY_COMMAND_ID);
+
+pub const IRONHUB_LINK_CLEAR_KEY_COMMAND_ID: &str = "ironhub.link.clear_key";
+pub const IRONHUB_LINK_CLEAR_KEY_COMMAND: ProductSurfaceCommandDescriptor<
+    EmptyProductCommandInput,
+    RebornIronhubLinkResponse,
+> = ProductSurfaceCommandDescriptor::new(IRONHUB_LINK_CLEAR_KEY_COMMAND_ID);
 
 #[cfg(test)]
 mod tests {
