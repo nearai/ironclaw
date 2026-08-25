@@ -97,7 +97,11 @@ export function useExtensionSetupLanding({
   return { setupPath, clearSetupPath };
 }
 
+// Accepts either shape. The caller normalizes, but a raw API item reaching
+// here must still resolve rather than silently match nothing: reading only the
+// camelCase field is what made the deep link open nothing against a real
+// deployment while every unit test passed on a hand-built fixture.
 function extensionPackageId(extension) {
-  const packageRef = extension?.packageRef;
+  const packageRef = extension?.packageRef ?? extension?.package_ref;
   return typeof packageRef === "string" ? packageRef : packageRef?.id || "";
 }

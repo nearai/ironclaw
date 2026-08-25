@@ -10,7 +10,7 @@ import { ConfigureModal } from "./components/configure-modal";
 import { CustomMcpRegistrationModal } from "./components/custom-mcp-registration-modal";
 import { ToolsTab } from "./components/tools-tab";
 import { RegistryTab } from "./components/registry-tab";
-import { useExtensions } from "./hooks/useExtensions";
+import { configureRequest, useExtensions } from "./hooks/useExtensions";
 import { useExtensionSetupLanding } from "./hooks/useSetupLanding";
 import type { ConfigureFocusHandler } from "./lib/focus-target";
 import type { FocusTarget } from "./lib/focus-target";
@@ -166,8 +166,13 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   // the same modal the Configure button does. Resolved against the caller's own
   // installed channels and tools, which is where a configurable extension
   // lives — a registry card has nothing to configure yet.
+  // Normalized here, not inside the hook: `channels`/`tools` are raw API items
+  // (`package_ref`), while everything downstream of Configure expects the
+  // `packageRef`/`displayName` shape the card builds. Normalizing at the
+  // boundary means the landing resolves and the modal opens on the same object
+  // the Configure button would have handed it.
   const configurableExtensions = React.useMemo(
-    () => [...(channels || []), ...(tools || [])],
+    () => [...(channels || []), ...(tools || [])].map(configureRequest),
     [channels, tools],
   );
   const { setupPath, clearSetupPath } = useExtensionSetupLanding({

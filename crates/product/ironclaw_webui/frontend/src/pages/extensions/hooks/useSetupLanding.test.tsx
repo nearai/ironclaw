@@ -65,6 +65,26 @@ function renderAt(path, { extensions = [], isLoading = false } = {}) {
   return { configured, seen, root, container };
 }
 
+// The shape the server actually sends (`package_ref`), as opposed to the
+// post-Configure shape. Every test below used the camelCase form, which is why
+// six green tests still let the deep link open nothing against a live
+// deployment: the fixture had been written to match the hook, not the API.
+function rawApiItem(id) {
+  return { package_ref: { kind: "extension", id }, display_name: id };
+}
+
+test("a raw API list item resolves — the shape the server actually sends", async () => {
+  const { configured, seen } = renderAt(
+    "/extensions?configure=telegram&setup=personal_account",
+    { extensions: [rawApiItem("slack"), rawApiItem("telegram")] },
+  );
+  await flush();
+
+  assert.equal(configured.length, 1, "a snake_case package_ref must still resolve");
+  assert.equal(configured[0].package_ref.id, "telegram");
+  assert.equal(seen.setupPath, "personal_account");
+});
+
 test("a setup link opens the named extension on the path it asked for", async () => {
   const { configured, seen } = renderAt(
     "/extensions?configure=telegram&setup=personal_account",
