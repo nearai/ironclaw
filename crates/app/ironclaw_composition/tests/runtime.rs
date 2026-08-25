@@ -27,8 +27,8 @@ use ironclaw_loop_contracts::{
     RunProfileResolutionRequest, RunProfileResolver,
 };
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, ToolDisclosureMode,
+    AwaitEdgeSettler, HostInputQueue, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse, ToolDisclosureMode,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,

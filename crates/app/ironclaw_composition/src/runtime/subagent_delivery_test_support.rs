@@ -8,10 +8,8 @@ pub(crate) async fn parts(
     runtime.turn_scheduler.stop_for_test().await;
     crate::test_support::SubagentDeliveryTestParts {
         turn_tree_store: Arc::clone(&runtime.turn_tree_store),
-        resolver: Arc::clone(&runtime.subagent_delivery.resolver)
-            as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
+        resolver: Arc::clone(&runtime.subagent_delivery.resolver),
         store: Arc::clone(&runtime.subagent_delivery.store),
-        input_queue: Arc::clone(&runtime.subagent_delivery.input_queue)
-            as Arc<dyn ironclaw_loop_host::HostInputQueue>,
+        input_queue: Arc::clone(&runtime.subagent_delivery.input_queue),
     }
 }

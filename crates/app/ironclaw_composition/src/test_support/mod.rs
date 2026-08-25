@@ -90,9 +90,15 @@ pub async fn build_runtime_with_resource_governor_for_test(
 /// test-only field or method surface.
 pub struct SubagentDeliveryTestParts {
     pub turn_tree_store: std::sync::Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
-    pub resolver: std::sync::Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
+    pub resolver: std::sync::Arc<
+        ironclaw_turn_runner::subagent::await_edge::resolver::AwaitEdgeResolver<
+            dyn ironclaw_threads::SessionThreadService,
+        >,
+    >,
     pub store: std::sync::Arc<ironclaw_turn_runner::subagent::await_edge::store::AwaitEdgeStore>,
-    pub input_queue: std::sync::Arc<dyn ironclaw_loop_host::HostInputQueue>,
+    pub input_queue: std::sync::Arc<
+        ironclaw_loop_host::FilesystemHostInputQueue<ironclaw_filesystem::CompositeRootFilesystem>,
+    >,
 }
 
 pub async fn subagent_delivery_test_parts(
