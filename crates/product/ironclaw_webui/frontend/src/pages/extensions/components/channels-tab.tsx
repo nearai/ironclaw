@@ -1,3 +1,4 @@
+import { Panel } from "../../../design-system/primitives";
 import { useT } from "../../../lib/i18n";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import type {
@@ -34,7 +35,7 @@ export function ChannelsTab({
     <div className="space-y-5">
       {installedChannels.length > 0 &&
       (
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
+        <Panel className="p-5 sm:p-6">
           <h3
             className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
           >
@@ -53,11 +54,11 @@ export function ChannelsTab({
               )
             )}
           </div>
-        </div>
+        </Panel>
       )}
       {channelRegistry.length > 0 &&
       (
-        <div className="v2-panel rounded-[18px] p-5 sm:p-6">
+        <Panel className="p-5 sm:p-6">
           <h3
             className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
           >
@@ -75,7 +76,7 @@ export function ChannelsTab({
               )
             )}
           </div>
-        </div>
+        </Panel>
       )}
     </div>
   );

@@ -4,6 +4,39 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
+const sharedPanelTabs = [
+  ["./components/registry-tab.tsx", 2],
+  ["./components/channels-tab.tsx", 2],
+  ["./components/tools-tab.tsx", 3],
+] as const;
+
+test("standard extension tab containers use the shared Panel component", () => {
+  for (const [relativePath, expectedPanelCount] of sharedPanelTabs) {
+    const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
+
+    assert.doesNotMatch(
+      source,
+      /\bv2-panel\b/,
+      `${relativePath} must not use the legacy panel styling shim`,
+    );
+    assert.match(
+      source,
+      /import \{ Panel \} from "\.\.\/\.\.\/\.\.\/design-system\/primitives";/,
+      `${relativePath} must import the shared Panel component`,
+    );
+    assert.match(
+      source,
+      /<Panel(?:\s|>)/,
+      `${relativePath} must render the shared Panel component`,
+    );
+    assert.equal(
+      source.match(/<Panel(?:\s|>)/g)?.length,
+      expectedPanelCount,
+      `${relativePath} must use Panel for every standard container`,
+    );
+  }
+});
+
 function extensionsPageSourceForTest() {
   const source = readFileSync(new URL("./extensions-page.tsx", import.meta.url), "utf8");
   const lines = [];
