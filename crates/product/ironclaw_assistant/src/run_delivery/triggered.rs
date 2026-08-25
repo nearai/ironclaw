@@ -16,7 +16,10 @@ use ironclaw_extension_contracts::channel_adapter::OutboundPart;
 use ironclaw_host_api::execution_policy::ResultDeliveryPolicy;
 use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
-use ironclaw_notifications::NotificationKind;
+use ironclaw_notifications::{
+    LifecycleRef, NotificationAction, NotificationId, NotificationInitialState, NotificationKind,
+    NotificationRecipient, NotificationSeverity, NotificationSource, PublishNotificationRequest,
+};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
@@ -361,6 +364,13 @@ impl TriggeredRunDeliveryDriver {
             );
             return;
         }
+        publish_pre_submit_failure_inbox_notification(
+            &self.services,
+            &request.creator_user_id,
+            &request.scope,
+            &request.failure_ref,
+        )
+        .await;
         let Ok(pending_permit) = Arc::clone(&self.pending_permits).try_acquire_owned() else {
             tracing::warn!(
                 target: TRACE_TARGET,
@@ -485,6 +495,66 @@ async fn notify_pre_submit_failure(
                 "background fire failure notification failed for one channel"
             );
         }
+    }
+}
+
+/// Persist one metadata-only failure record for a permanently settled fire.
+///
+/// A pre-submit failure has no run id, so the stable, opaque fire reference is
+/// hashed into the notification identity. Inbox publication remains
+/// best-effort and independent from configured external notification channels.
+async fn publish_pre_submit_failure_inbox_notification(
+    services: &RunDeliveryServices,
+    user_id: &UserId,
+    scope: &TurnScope,
+    failure_ref: &ProjectionUpdateRef,
+) {
+    let Some(inbox) = services.notification_inbox.as_ref() else {
+        return;
+    };
+    let fire_key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, failure_ref.as_str().as_bytes());
+    let notification_id = match NotificationId::new(format!("trigger-fire:{fire_key}:failed")) {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::warn!(target: TRACE_TARGET, %error, "invalid pre-submit failure Inbox id");
+            return;
+        }
+    };
+    let lifecycle_ref = match LifecycleRef::new(format!("trigger-fire:{fire_key}")) {
+        Ok(reference) => reference,
+        Err(error) => {
+            tracing::warn!(target: TRACE_TARGET, %error, "invalid pre-submit failure lifecycle ref");
+            return;
+        }
+    };
+    if let Err(error) = inbox
+        .publish(PublishNotificationRequest {
+            id: notification_id,
+            recipient: NotificationRecipient {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: user_id.clone(),
+            },
+            kind: NotificationKind::RunFailed,
+            severity: NotificationSeverity::Error,
+            source: NotificationSource {
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: None,
+                lifecycle_ref: Some(lifecycle_ref),
+            },
+            action: NotificationAction::OpenThread {
+                thread_id: scope.thread_id.clone(),
+            },
+            initial_state: NotificationInitialState::Resolved,
+            occurred_at: Utc::now(),
+        })
+        .await
+    {
+        tracing::warn!(
+            target: TRACE_TARGET,
+            %error,
+            fire_key = %fire_key,
+            "failed to publish pre-submit failure to durable Inbox"
+        );
     }
 }
 

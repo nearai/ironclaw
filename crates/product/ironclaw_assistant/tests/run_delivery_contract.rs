@@ -52,7 +52,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_notifications::{
     ListNotificationsRequest, NotificationInboxStore, NotificationInboxStorePort, NotificationKind,
-    NotificationRecipient,
+    NotificationRecipient, NotificationSeverity,
 };
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
@@ -3107,6 +3107,20 @@ async fn permanent_pre_submit_failure_notifies_every_configured_channel_with_no_
         texts.iter().all(|text| !text.contains("materialization")),
         "notification copy must not leak internal failure detail: {texts:?}"
     );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(
+        inbox.notifications.len(),
+        1,
+        "one durable Inbox record per settled fire"
+    );
+    assert_eq!(inbox.notifications[0].kind, NotificationKind::RunFailed);
+    assert_eq!(inbox.notifications[0].severity, NotificationSeverity::Error);
+    assert_eq!(inbox.notifications[0].source.thread_id, scope.thread_id);
+    assert_eq!(inbox.notifications[0].source.turn_run_id, None);
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "a terminal pre-submit failure is resolved when first persisted"
+    );
     let attempts = harness
         .store
         .list_delivery_attempts(scope)
@@ -3138,6 +3152,14 @@ async fn permanent_pre_submit_failure_notifies_every_configured_channel_with_no_
             .len(),
         2,
         "stable fire identity must reuse the durable attempts"
+    );
+    assert_eq!(
+        inbox_records(harness.notification_inbox.as_ref())
+            .await
+            .notifications
+            .len(),
+        1,
+        "replaying one settled fire must reuse the durable Inbox record"
     );
 }
 
@@ -3174,6 +3196,13 @@ async fn project_scoped_pre_submit_failure_is_not_sent_to_personal_channels() {
             .await
             .expect("attempts")
             .is_empty()
+    );
+    assert!(
+        inbox_records(harness.notification_inbox.as_ref())
+            .await
+            .notifications
+            .is_empty(),
+        "a project-scoped fire must not publish to a personal Inbox"
     );
 }
 
