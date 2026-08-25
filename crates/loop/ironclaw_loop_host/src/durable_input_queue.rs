@@ -264,17 +264,14 @@ where
         };
         let mut confirmed = Vec::new();
         for pending in pending {
-            match handler
-                .handle_background_subagent_ack(pending.effect.clone())
-                .await
-            {
+            match handler.handle_ack_effect(pending.effect.clone()).await {
                 Ok(()) => confirmed.push(pending.sequence),
                 Err(error) => tracing::debug!(
                     component = "host_input_queue",
                     operation = "retry_ack_effects",
                     %run_id,
                     %error,
-                    "background subagent acknowledgment effect failed; retaining it for retry"
+                    "input acknowledgment effect failed; retaining it for retry"
                 ),
             }
         }

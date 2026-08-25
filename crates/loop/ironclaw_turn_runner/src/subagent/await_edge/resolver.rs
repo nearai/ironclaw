@@ -20,13 +20,12 @@ use ironclaw_host_api::ids::UserId;
 use ironclaw_host_api::turn::{IdempotencyKey, LoopMessageRef, TurnRunId, TurnScope, TurnStatus};
 #[cfg(test)]
 use ironclaw_host_api::turn::{TurnActor, TurnGateRef};
-use ironclaw_loop_contracts::{AgentLoopHostError, LoopInput, LoopRunContext};
+use ironclaw_loop_contracts::{AgentLoopHostError, LoopInput, LoopInputAckEffect, LoopRunContext};
 #[cfg(test)]
 use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
 use ironclaw_loop_host::{
-    AwaitEdgeSettler, BackgroundSubagentAck, EnqueueQueuedMessageRequest,
-    HostInputAckEffectHandler, HostInputEnqueuePort, HostInputQueueError, ResolveOutcome,
-    SpawnSubagentMode,
+    AwaitEdgeSettler, EnqueueQueuedMessageRequest, HostInputAckEffectHandler, HostInputEnqueuePort,
+    HostInputQueueError, ResolveOutcome, SpawnSubagentMode,
 };
 #[cfg(test)]
 use ironclaw_threads::ThreadHistoryRequest;
@@ -193,7 +192,7 @@ where
     /// performs the missing close operation.
     async fn handle_background_subagent_ack_inner(
         &self,
-        effect: BackgroundSubagentAck,
+        effect: LoopInputAckEffect,
     ) -> Result<(), TurnError> {
         let Some(edge) = self
             .store
@@ -770,7 +769,7 @@ where
                     child_run_id,
                     message_ref: message_ref.clone(),
                 },
-                ack_effect: Some(BackgroundSubagentAck {
+                ack_effect: Some(LoopInputAckEffect {
                     child_scope: edge.child_scope.clone(),
                     parent_run_id,
                     child_run_id,
@@ -1330,9 +1329,9 @@ impl<S> HostInputAckEffectHandler for AwaitEdgeResolver<S>
 where
     S: SessionThreadService + ?Sized + 'static,
 {
-    async fn handle_background_subagent_ack(
+    async fn handle_ack_effect(
         &self,
-        effect: BackgroundSubagentAck,
+        effect: LoopInputAckEffect,
     ) -> Result<(), HostInputQueueError> {
         self.handle_background_subagent_ack_inner(effect)
             .await

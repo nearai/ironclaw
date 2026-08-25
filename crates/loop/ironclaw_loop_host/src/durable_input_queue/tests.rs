@@ -4,12 +4,13 @@ use ironclaw_loop_contracts::LoopInput;
 use ironclaw_threads::ThreadScope;
 use ironclaw_turns::TurnId;
 
-use crate::{BackgroundSubagentAck, InMemoryHostInputQueue};
+use crate::InMemoryHostInputQueue;
 use ironclaw_host_api::{
     ids::{AgentId, ProjectId, TenantId, ThreadId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
 };
+use ironclaw_loop_contracts::LoopInputAckEffect;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageStatus, ThreadHistoryRequest,
@@ -33,9 +34,9 @@ impl RecordingAckEffectHandler {
 
 #[async_trait::async_trait]
 impl HostInputAckEffectHandler for RecordingAckEffectHandler {
-    async fn handle_background_subagent_ack(
+    async fn handle_ack_effect(
         &self,
-        _effect: BackgroundSubagentAck,
+        _effect: LoopInputAckEffect,
     ) -> Result<(), HostInputQueueError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_once.swap(false, Ordering::SeqCst) {
@@ -47,8 +48,8 @@ impl HostInputAckEffectHandler for RecordingAckEffectHandler {
     }
 }
 
-fn background_ack_effect() -> BackgroundSubagentAck {
-    BackgroundSubagentAck {
+fn background_ack_effect() -> LoopInputAckEffect {
+    LoopInputAckEffect {
         child_scope: TurnScope::new(
             TenantId::new("tenant-iq").unwrap(),
             Some(AgentId::new("agent-iq").unwrap()),

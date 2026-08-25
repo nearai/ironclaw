@@ -114,9 +114,10 @@ capability surface: `SpawnSubagentArgs { subagent_kind, task, handoff?,
 mode }`, argument codec, per-kind descriptors, spawn admission, and
 `SubagentSpawnDeps` (which carries `Arc<dyn AwaitEdgeWriter>`). The
 parameters schema now advertises `mode` (enum `["blocking", "background"]`,
-default `"blocking"`); the codec also accepts the legacy
-`run_in_background: true` alias and **rejects** the contradictory
-combination `mode: "blocking"` + `run_in_background: true`.
+default `"blocking"`). For historical direct callers, the decoder also accepts
+the legacy `run_in_background: true` alias, but that alias is intentionally not
+advertised by the strict model-facing schema. The decoder **rejects** the
+contradictory combination `mode: "blocking"` + `run_in_background: true`.
 `finish_spawn` is mode-driven — it threads `args.mode` through instead of
 hard-coding `Blocking` (§4.3's "what changes where" table). None of this is
 model-reachable yet: `builtin.spawn_subagent` stays in

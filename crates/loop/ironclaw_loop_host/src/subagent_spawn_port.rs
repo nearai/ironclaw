@@ -212,6 +212,8 @@ struct SpawnSubagentWireArgs {
     handoff: Option<String>,
     #[serde(default)]
     mode: Option<SpawnSubagentMode>,
+    /// Decoder-only compatibility for historical direct callers. The strict
+    /// model-facing schema intentionally advertises only canonical `mode`.
     #[serde(default)]
     run_in_background: bool,
 }

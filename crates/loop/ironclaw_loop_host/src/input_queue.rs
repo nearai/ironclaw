@@ -12,9 +12,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::ThreadId;
-use ironclaw_loop_contracts::{LoopInput, LoopInputAckToken, LoopInputCursorToken};
+use ironclaw_loop_contracts::{
+    LoopInput, LoopInputAckEffect, LoopInputAckToken, LoopInputCursorToken,
+};
 use ironclaw_threads::{MessageStatus, SessionThreadService, ThreadMessageId, ThreadScope};
-use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
+use ironclaw_turns::{TurnId, TurnRunId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -166,21 +168,6 @@ pub trait HostInputEnqueuePort: Send + Sync {
     ) -> Result<HostInputEnvelope, HostInputQueueError>;
 }
 
-/// Durable side effect attached to a background subagent result input.
-///
-/// The queue accepts and redelivers the input independently from this effect.
-/// Once the loop acknowledges the input, the queue invokes its bound handler;
-/// until that handler succeeds the effect remains durable and retryable. The
-/// effect is deliberately typed and carries the exact edge identity needed by
-/// the await-edge resolver rather than making the queue infer lineage from a
-/// display or message reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackgroundSubagentAck {
-    pub child_scope: TurnScope,
-    pub parent_run_id: TurnRunId,
-    pub child_run_id: TurnRunId,
-}
-
 /// Host-owned callback for durable queue acknowledgment effects.
 ///
 /// Queue implementations call this only after the corresponding input ack is
@@ -188,9 +175,9 @@ pub struct BackgroundSubagentAck {
 /// pending state so later queue operations or terminal reconciliation retry it.
 #[async_trait]
 pub trait HostInputAckEffectHandler: Send + Sync {
-    async fn handle_background_subagent_ack(
+    async fn handle_ack_effect(
         &self,
-        effect: BackgroundSubagentAck,
+        effect: LoopInputAckEffect,
     ) -> Result<(), HostInputQueueError>;
 }
 
@@ -222,7 +209,7 @@ pub struct EnqueueQueuedMessageRequest {
     /// Optional durable callback effect. Only background subagent result
     /// inputs populate this field; ordinary steering/followup input leaves it
     /// `None`.
-    pub ack_effect: Option<BackgroundSubagentAck>,
+    pub ack_effect: Option<LoopInputAckEffect>,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +234,7 @@ pub(crate) struct QueueEntry {
     pub(crate) input: LoopInput,
     pub(crate) status: QueuedMessageStatusUpdate,
     #[serde(default)]
-    pub(crate) ack_effect: Option<BackgroundSubagentAck>,
+    pub(crate) ack_effect: Option<LoopInputAckEffect>,
 }
 
 /// A consumed (acked) entry whose `Queued` → `Submitted` transcript flip has
@@ -265,7 +252,7 @@ pub(crate) struct PendingSubmitFlip {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PendingAckEffect {
     pub(crate) sequence: u64,
-    pub(crate) effect: BackgroundSubagentAck,
+    pub(crate) effect: LoopInputAckEffect,
 }
 
 /// Bounded dedup identity for an input the loop already consumed. Successful
@@ -461,7 +448,7 @@ impl RunQueueModel {
     pub(crate) fn attach_ack_effect(
         &mut self,
         sequence: u64,
-        effect: Option<BackgroundSubagentAck>,
+        effect: Option<LoopInputAckEffect>,
     ) -> Result<(), HostInputQueueError> {
         let Some(entry) = self
             .entries
@@ -846,17 +833,14 @@ impl InMemoryHostInputQueue {
         };
         let mut confirmed = Vec::new();
         for pending in pending {
-            match handler
-                .handle_background_subagent_ack(pending.effect.clone())
-                .await
-            {
+            match handler.handle_ack_effect(pending.effect.clone()).await {
                 Ok(()) => confirmed.push(pending.sequence),
                 Err(error) => tracing::debug!(
                     component = "host_input_queue",
                     operation = "retry_ack_effects",
                     %run_id,
                     %error,
-                    "background subagent acknowledgment effect failed; retaining it for retry"
+                    "input acknowledgment effect failed; retaining it for retry"
                 ),
             }
         }
@@ -1168,7 +1152,7 @@ mod tests {
         };
         let thread_id = ThreadId::new("thread-iq").unwrap();
         let message_id = ThreadMessageId::new();
-        let effect = BackgroundSubagentAck {
+        let effect = LoopInputAckEffect {
             child_scope: TurnScope::new(
                 TenantId::new("tenant-iq").unwrap(),
                 Some(AgentId::new("agent-iq").unwrap()),

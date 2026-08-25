@@ -1853,13 +1853,13 @@ async fn background_ack_effect_closes_edge_exactly_once() {
         .handle_child_terminal(&fixture.event)
         .await
         .expect("enqueue leaves the edge awaiting durable input acknowledgment");
-    let effect = BackgroundSubagentAck {
+    let effect = LoopInputAckEffect {
         child_scope: fixture.child_scope.clone(),
         parent_run_id: fixture.parent_run_id,
         child_run_id: fixture.child_run_id,
     };
 
-    <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_background_subagent_ack(
+    <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_ack_effect(
         &fixture.resolver,
         effect.clone(),
     )
@@ -1878,7 +1878,7 @@ async fn background_ack_effect_closes_edge_exactly_once() {
             .is_none()
     );
 
-    <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_background_subagent_ack(
+    <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_ack_effect(
         &fixture.resolver,
         effect,
     )
@@ -1920,18 +1920,17 @@ async fn background_ack_effect_retries_close_after_attention_commit() {
         .handle_child_terminal(&fixture.event)
         .await
         .expect("enqueue leaves the edge recoverable");
-    let effect = BackgroundSubagentAck {
+    let effect = LoopInputAckEffect {
         child_scope: fixture.child_scope.clone(),
         parent_run_id: fixture.parent_run_id,
         child_run_id: fixture.child_run_id,
     };
 
-    let first =
-        <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_background_subagent_ack(
-            &fixture.resolver,
-            effect.clone(),
-        )
-        .await;
+    let first = <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_ack_effect(
+        &fixture.resolver,
+        effect.clone(),
+    )
+    .await;
     assert!(
         first.is_err(),
         "the scripted close failure must be retained"
@@ -1951,7 +1950,7 @@ async fn background_ack_effect_retries_close_after_attention_commit() {
         AwaitEdgeState::AttentionScheduled
     );
 
-    <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_background_subagent_ack(
+    <AwaitEdgeResolver<_> as HostInputAckEffectHandler>::handle_ack_effect(
         &fixture.resolver,
         effect,
     )

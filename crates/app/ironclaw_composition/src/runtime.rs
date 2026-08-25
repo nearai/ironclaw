@@ -65,7 +65,7 @@ use ironclaw_host_api::{
 use ironclaw_loop_contracts::{LoopHostMilestoneSink, LoopRunContext, RunProfileResolutionRequest};
 use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
-    AwaitEdgeWriter, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    AwaitEdgeSettler, AwaitEdgeWriter, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyUserProfileSource, FilesystemSkillBundleSource, HostIdentityContextSource,
     HostSkillContextSource, HostUserProfileSource, JsonSpawnSubagentInputCodec,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
@@ -237,6 +237,7 @@ struct RuntimeStoreParts {
     /// mirroring `bind_coordinator`).
     subagent_await_edge_writer: Arc<dyn AwaitEdgeWriter>,
     subagent_await_edge_resolver: Arc<AwaitEdgeResolver<dyn SessionThreadService>>,
+    subagent_await_edge_store: Arc<AwaitEdgeStore>,
     subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     /// Process lifecycle source for trigger active-run lookup. Every substrate
@@ -264,7 +265,12 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         processes.checkpoints(),
     )) as Arc<dyn ironclaw_turns::LoopCheckpointStore>;
 
-    let (subagent_await_edge_writer, subagent_await_edge_resolver, subagent_await_edge_evidence) = {
+    let (
+        subagent_await_edge_writer,
+        subagent_await_edge_resolver,
+        subagent_await_edge_evidence,
+        subagent_await_edge_store,
+    ) = {
         let store = Arc::new(AwaitEdgeStore::new(processes.dependencies()));
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
             Arc::clone(&store),
@@ -278,7 +284,8 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         (
             driver as Arc<dyn AwaitEdgeWriter>,
             resolver,
-            store as Arc<dyn AwaitDependentRunEvidenceStore>,
+            Arc::clone(&store) as Arc<dyn AwaitDependentRunEvidenceStore>,
+            store,
         )
     };
 
@@ -296,6 +303,7 @@ fn runtime_store_parts(services: &RebornRuntimeStores) -> RuntimeStoreParts {
         broadcast_budget_event_sink,
         subagent_await_edge_writer,
         subagent_await_edge_resolver,
+        subagent_await_edge_store,
         subagent_await_edge_evidence,
         trigger_repository: Arc::clone(&services.trigger_repository),
         admin_secret_provisioner,
@@ -397,6 +405,8 @@ mod outbound_delivery_tests;
 mod production;
 mod runtime_turn_scheduler;
 mod skills;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod subagent_delivery_test_support;
 #[cfg(feature = "test-support")]
 #[path = "runtime/test_support.rs"]
 mod test_support;
@@ -575,6 +585,13 @@ pub(crate) struct OutboundTestStores {
 /// `RebornRuntime` is the single user-facing handle returned by
 /// [`build_reborn_runtime`]. Downstream code never reaches into the substrate
 /// or worker machinery: it talks to the runtime through task-level methods.
+pub(crate) struct SubagentDeliveryRuntime {
+    pub(crate) input_queue:
+        Arc<ironclaw_loop_host::FilesystemHostInputQueue<CompositeRootFilesystem>>,
+    pub(crate) resolver: Arc<AwaitEdgeResolver<dyn SessionThreadService>>,
+    pub(crate) store: Arc<AwaitEdgeStore>,
+}
+
 pub struct RebornRuntime {
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
     user_sandbox_process_port: Option<Arc<ironclaw_host_runtime::UserSandboxProcessPort>>,
@@ -688,7 +705,7 @@ pub struct RebornRuntime {
     pub(crate) _process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_tree_store: Arc<dyn AgentTurnSpawnTreeRuntimePort>,
     thread_service: Arc<dyn SessionThreadService>,
-    input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    pub(crate) subagent_delivery: SubagentDeliveryRuntime,
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
@@ -1734,7 +1751,8 @@ impl RebornRuntime {
     }
 
     pub(crate) fn webui_input_enqueue(&self) -> Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> {
-        Arc::clone(&self.input_enqueue)
+        Arc::clone(&self.subagent_delivery.input_queue)
+            as Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>
     }
 
     /// The generic post-OAuth channel-identity binding config for this
@@ -3218,6 +3236,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         broadcast_budget_event_sink,
         subagent_await_edge_writer,
         subagent_await_edge_resolver,
+        subagent_await_edge_store,
         subagent_await_edge_evidence,
         trigger_repository,
         admin_secret_provisioner,
@@ -3826,7 +3845,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let host_input_queue_for_terminal_reconcile: Arc<
         dyn ironclaw_loop_host::HostInputQueueReconcile,
     > = host_input_queue.clone();
-    let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> = host_input_queue;
+    let host_input_enqueue: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort> =
+        host_input_queue.clone();
     // Deferred bind: background delivery enqueues a settled child's result as
     // steering input for the parent's live run through this queue.
     subagent_await_edge_resolver
@@ -3894,7 +3914,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         capability_surface_resolver,
         capability_result_writer,
         subagent_await_edge_writer,
-        subagent_await_edge_settler: subagent_await_edge_resolver,
+        subagent_await_edge_settler: Arc::clone(&subagent_await_edge_resolver)
+            as Arc<dyn AwaitEdgeSettler>,
         subagent_await_edge_evidence,
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
@@ -4602,7 +4623,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
         _process_gate_query_source: process_gate_query_source,
         turn_tree_store: turn_projection,
         thread_service,
-        input_enqueue: host_input_enqueue,
+        subagent_delivery: SubagentDeliveryRuntime {
+            input_queue: host_input_queue,
+            resolver: subagent_await_edge_resolver,
+            store: subagent_await_edge_store,
+        },
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
