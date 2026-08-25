@@ -846,6 +846,31 @@ async fn notify_background_run(
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
         }
+        if state.status == TurnStatus::BlockedResource
+            && let Some(marker) = blocked_actionable_marker(&state)
+        {
+            // Resource/policy details stay on the durable WebUI surface. A
+            // bounded Inbox-only watcher owns recovery/replacement after the
+            // delivery outcome settles, without consuming a channel-delivery
+            // permit or leaking internal policy metadata externally.
+            spawn_inbox_gate_observer(
+                services,
+                *settings,
+                scope.clone(),
+                creator_user_id.clone(),
+                run_id,
+                marker,
+            );
+            let outcome = if lookup_failed_without_targets {
+                TriggeredRunDeliveryOutcomeKind::Failed
+            } else if web_inbox_only {
+                TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
+            } else {
+                TriggeredRunDeliveryOutcomeKind::Skipped
+            };
+            record_triggered_run_outcome(delivery_store, run_id, outcome).await;
+            return outcome;
+        }
         if targets.is_empty() {
             if let Some(marker) = blocked_actionable_marker(&state) {
                 // The Inbox is itself a destination. Keep observing a WebUI-only

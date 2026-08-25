@@ -248,19 +248,22 @@ pub(crate) fn blocked_status_notification_kind(status: TurnStatus) -> Option<Not
     match status {
         TurnStatus::BlockedApproval => Some(NotificationKind::ApprovalRequired),
         TurnStatus::BlockedAuth => Some(NotificationKind::AuthenticationRequired),
+        TurnStatus::BlockedResource => Some(NotificationKind::RunBlocked),
         _ => None,
     }
 }
 
 pub(crate) fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedActionableMarker> {
     match state.status {
-        TurnStatus::BlockedApproval | TurnStatus::BlockedAuth => Some(BlockedActionableMarker {
-            status: state.status,
-            gate_ref: state
-                .gate_ref
-                .as_ref()
-                .map(|gate| gate.as_str().to_string()),
-        }),
+        TurnStatus::BlockedApproval | TurnStatus::BlockedAuth | TurnStatus::BlockedResource => {
+            Some(BlockedActionableMarker {
+                status: state.status,
+                gate_ref: state
+                    .gate_ref
+                    .as_ref()
+                    .map(|gate| gate.as_str().to_string()),
+            })
+        }
         _ => None,
     }
 }

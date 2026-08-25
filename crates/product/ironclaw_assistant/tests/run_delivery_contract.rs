@@ -1945,6 +1945,44 @@ async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completi
 }
 
 #[tokio::test]
+async fn observer_publishes_resource_block_only_to_inbox_and_resolves_after_recovery() {
+    const GATE: &str = "gate:resource-budget-00000000000000000000000001";
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::BlockedResource, Some(GATE)),
+            scripted_state(TurnStatus::BlockedResource, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "resource recovered").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-resource-block"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.last().map(String::as_str), Some("resource recovered"));
+    assert!(
+        texts.iter().all(|text| !text.contains("resource-budget")),
+        "resource policy metadata must not reach the channel: {texts:?}"
+    );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(inbox.notifications[0].kind, NotificationKind::RunBlocked);
+    assert!(inbox.notifications[0].resolved_at.is_some());
+}
+
+#[tokio::test]
 async fn observer_records_gate_route_after_approval_prompt() {
     let harness = build_harness(
         vec![scripted_state(
@@ -4061,6 +4099,59 @@ async fn triggered_empty_notification_set_delivers_nothing() {
     assert!(
         inbox.notifications[0].resolved_at.is_some(),
         "the WebUI-only watcher resolves the gate notification after the run resumes"
+    );
+}
+
+#[tokio::test]
+async fn triggered_resource_block_publishes_one_inbox_record_and_resolves_after_recovery() {
+    const GATE: &str = "gate:resource-budget-00000000000000000000000001";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedResource, Some(GATE)),
+            scripted_state(TurnStatus::BlockedResource, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Skipped
+    );
+    assert!(harness.adapter.texts().is_empty());
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::RunBlocked,
+        GATE,
+    )
+    .await;
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(
+        inbox.notifications.len(),
+        1,
+        "one record for one active gate"
+    );
+    assert_eq!(inbox.notifications[0].kind, NotificationKind::RunBlocked);
+    assert_eq!(
+        inbox.notifications[0]
+            .source
+            .lifecycle_ref
+            .as_ref()
+            .map(|reference| reference.as_str()),
+        Some(GATE)
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "resource recovery resolves the durable block notification"
     );
 }
 

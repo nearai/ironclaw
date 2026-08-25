@@ -557,7 +557,7 @@ impl RunDeliveryObserver {
             };
             if matches!(
                 actionable_state.status,
-                TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
+                TurnStatus::BlockedApproval | TurnStatus::BlockedAuth | TurnStatus::BlockedResource
             ) {
                 if let Some(message) = working_indicator.message.take() {
                     self.services
@@ -590,6 +590,23 @@ impl RunDeliveryObserver {
                     )
                     .await;
             }
+            // Resource/policy blocks are Inbox-only: they are actionable in
+            // the WebUI, but their internal reason must not be rendered onto
+            // an external channel. Persist them before the channel-plan seam
+            // and keep watching until the block clears or changes.
+            if actionable_state.status == TurnStatus::BlockedResource
+                && let Some(kind) = super::blocked_status_notification_kind(actionable_state.status)
+            {
+                self.services
+                    .publish_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        actionable_state.gate_ref.as_ref().map(|gate| gate.as_str()),
+                    )
+                    .await;
+            }
             let notification = match self
                 .notification_for_actionable_state(
                     &envelope,
@@ -603,6 +620,12 @@ impl RunDeliveryObserver {
             {
                 Some(notification) => notification,
                 None => {
+                    if actionable_state.status == TurnStatus::BlockedResource
+                        && let Some(marker) = next_blocked_marker
+                    {
+                        delivered_blocked_marker = Some(marker);
+                        continue;
+                    }
                     // A terminal state produced no deliverable notification.
                     // Never leave a stuck working indicator: retract it. For a
                     // genuine failure (not a completed-but-empty run) also post a
