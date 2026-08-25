@@ -323,11 +323,13 @@ impl RunDeliveryObserver {
         {
             return;
         }
-        // Busy-thread hint: the user's message was dropped because a run is
-        // busy. Post a one-shot state-aware hint (approve/deny/wait) rather
-        // than leaving the user in silence.
+        // Busy-thread hint: a user message arrived while a run occupies the
+        // thread. Queued steering (`DeferredBusy`) is acknowledged as folded
+        // in; a true rejection (`RejectedBusy`) tells the user to wait or
+        // resolve a gate.
         if let Some(active_run_id) = busy_hint_user_message_run_id(&envelope, &ack) {
-            self.post_busy_hint(&envelope, active_run_id).await;
+            self.post_busy_hint(&envelope, active_run_id, busy_hint_is_queued(&ack))
+                .await;
             return;
         }
         let _delivery_guard = if let Some(run_id) = submitted_run_id(&ack) {
@@ -1434,7 +1436,12 @@ impl RunDeliveryObserver {
             .remove(&conversation_key);
     }
 
-    async fn post_busy_hint(&self, envelope: &ProductInboundEnvelope, active_run_id: TurnRunId) {
+    async fn post_busy_hint(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        active_run_id: TurnRunId,
+        queued: bool,
+    ) {
         // Throttle: at most one hint per (conversation, external_event_id)
         // pair. Transport retries carry the same event id → deduplicated;
         // each new human message gets a fresh hint. Checked before any
@@ -1475,17 +1482,18 @@ impl RunDeliveryObserver {
             .await
         {
             Some(binding) => {
-                let hint = self.busy_hint_from_run_state(&binding, active_run_id).await;
+                let hint = self
+                    .busy_hint_from_run_state(&binding, active_run_id, queued)
+                    .await;
                 let scope = thread_scope_from_binding(&binding)
                     .and_then(|thread_scope| turn_scope_from_thread_scope(&binding, &thread_scope))
                     .unwrap_or_else(|_| self.services.fallback_notice_scope.clone());
                 (hint, scope)
             }
-            // The helper already logged why; the degrade is the generic copy
-            // on the host's fallback scope, which leaks nothing about a
-            // conversation this caller could not resolve.
+            // The helper already logged why; queued steering still must not
+            // tell the user to resend a message that was already accepted.
             None => (
-                prompts::BUSY_GENERIC_MESSAGE.to_string(),
+                busy_hint_fallback(queued),
                 self.services.fallback_notice_scope.clone(),
             ),
         };
@@ -1503,11 +1511,13 @@ impl RunDeliveryObserver {
 
     /// Looks up the blocking run's state and returns the appropriate
     /// busy-thread hint copy. Never errors — lookup failures degrade to the
-    /// generic copy.
+    /// queued copy when the message was accepted onto the occupying run,
+    /// otherwise the generic resend copy.
     async fn busy_hint_from_run_state(
         &self,
         binding: &ResolvedBinding,
         active_run_id: TurnRunId,
+        queued: bool,
     ) -> String {
         let scope = match thread_scope_from_binding(binding)
             .and_then(|thread_scope| turn_scope_from_thread_scope(binding, &thread_scope))
@@ -1517,9 +1527,9 @@ impl RunDeliveryObserver {
                 tracing::debug!(
                     target: "ironclaw::reborn::run_delivery",
                     error = %err,
-                    "busy-thread hint scope derivation failed; using generic copy"
+                    "busy-thread hint scope derivation failed; using fallback copy"
                 );
-                return prompts::BUSY_GENERIC_MESSAGE.to_string();
+                return busy_hint_fallback(queued);
             }
         };
         match self
@@ -1570,17 +1580,18 @@ impl RunDeliveryObserver {
                          Ironclaw web app to resume.",
                         ref = gate_ref.as_str()
                     ),
+                    None if queued => busy_hint_fallback(true),
                     None => prompts::BUSY_GENERIC_MESSAGE.to_string(),
                 },
-                _ => prompts::BUSY_GENERIC_MESSAGE.to_string(),
+                _ => busy_hint_fallback(queued),
             },
             Err(err) => {
                 tracing::debug!(
                     target: "ironclaw::reborn::run_delivery",
                     error = %err,
-                    "busy-thread hint run-state lookup failed; using generic copy"
+                    "busy-thread hint run-state lookup failed; using fallback copy"
                 );
-                prompts::BUSY_GENERIC_MESSAGE.to_string()
+                busy_hint_fallback(queued)
             }
         }
     }
@@ -1782,10 +1793,10 @@ fn rejection_hint_for_resolution(
 }
 
 /// `Some(active_run_id)` when the ack + payload combination should trigger
-/// the busy-thread hint flow: a `DeferredBusy` (legacy) or `RejectedBusy`
-/// ack on a `UserMessage` payload. `Duplicate` unwraps to the prior ack —
-/// a settled `RejectedBusy` retried by the transport still carries the
-/// blocking run id (the per-event throttle prevents double posts).
+/// the busy-thread hint flow: a `DeferredBusy` (queued steering) or
+/// `RejectedBusy` ack on a `UserMessage` payload. `Duplicate` unwraps to
+/// the prior ack — a settled `RejectedBusy` retried by the transport still
+/// carries the blocking run id (the per-event throttle prevents double posts).
 fn busy_hint_user_message_run_id(
     envelope: &ProductInboundEnvelope,
     ack: &ProductInboundAck,
@@ -1805,6 +1816,22 @@ fn busy_hint_user_message_run_id(
         } => None,
         ProductInboundAck::Duplicate { prior } => busy_hint_user_message_run_id(envelope, prior),
         _ => None,
+    }
+}
+
+fn busy_hint_is_queued(ack: &ProductInboundAck) -> bool {
+    match ack {
+        ProductInboundAck::DeferredBusy { .. } => true,
+        ProductInboundAck::Duplicate { prior } => busy_hint_is_queued(prior),
+        _ => false,
+    }
+}
+
+fn busy_hint_fallback(queued: bool) -> String {
+    if queued {
+        prompts::BUSY_QUEUED_MESSAGE.to_string()
+    } else {
+        prompts::BUSY_GENERIC_MESSAGE.to_string()
     }
 }
 

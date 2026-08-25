@@ -113,7 +113,29 @@ impl ExecutorStage<ModelInput> for ModelStage {
             .resolved_run_profile
             .resource_budget_policy
             .clone();
+        let strategy_wall_clock = ctx
+            .planner
+            .budget()
+            .wall_clock_limit(&state)
+            .map(|duration| u32::try_from(duration.as_secs()).unwrap_or(u32::MAX));
+        let wall_clock_limit_seconds = super::budget::effective_wall_clock_limit_seconds(
+            resource_budget_policy.max_wall_clock_seconds,
+            strategy_wall_clock,
+        );
         for _ in 0..max_model_attempts {
+            // Occupancy insurance: a model-availability retry storm lives
+            // entirely inside this loop, so `BudgetStage`'s once-per-iteration
+            // wall-clock check cannot see it. Stop dispatching once the cap
+            // has elapsed and re-enter the outer loop; the next
+            // `BudgetStage` pass then hard-stops through `WallClockLimit`.
+            // An in-flight `stream_model` is not interrupted.
+            if let Some(limit_seconds) = wall_clock_limit_seconds
+                && state
+                    .budget_ledger
+                    .wall_clock_exhausted(limit_seconds, chrono::Utc::now())
+            {
+                return Ok(ModelStep::RetryIteration(Box::new(state)));
+            }
             // Budget accounting counts every dispatched provider attempt,
             // including recovery retries: charge before dispatch so an
             // exhausted budget never reaches the provider. `BudgetStage`

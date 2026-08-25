@@ -95,6 +95,17 @@ impl BudgetLedger {
         *self.run_started_at.get_or_insert(now)
     }
 
+    /// `true` when the armed start is at least `limit_seconds` in the past.
+    /// An unarmed ledger is not exhausted — `BudgetStage` arms it on the
+    /// first outer-loop pass of a run, and a mid-iteration retry must not
+    /// invent a start that would immediately trip the cap.
+    pub(crate) fn wall_clock_exhausted(&self, limit_seconds: u32, now: DateTime<Utc>) -> bool {
+        let Some(started_at) = self.run_started_at else {
+            return false;
+        };
+        now.signed_duration_since(started_at).num_seconds() >= i64::from(limit_seconds)
+    }
+
     /// Charges one model-call dispatch against `policy.max_model_calls`.
     /// Returns `Exhausted` (charging nothing) when the run has already hit
     /// its ceiling.
@@ -296,6 +307,22 @@ mod tests {
 
         assert!(!ledger.settle_invocation_reservation(2, 3));
         assert_eq!(ledger.capability_invocations_made(), 2);
+    }
+
+    #[test]
+    fn wall_clock_exhausted_is_false_until_armed_then_trips_at_the_limit() {
+        let mut ledger = BudgetLedger::default();
+        let now = Utc::now();
+        assert!(
+            !ledger.wall_clock_exhausted(60, now),
+            "an unarmed ledger must not trip occupancy insurance"
+        );
+
+        ledger.set_run_started_at_for_test(Some(now - chrono::Duration::seconds(59)));
+        assert!(!ledger.wall_clock_exhausted(60, now));
+
+        ledger.set_run_started_at_for_test(Some(now - chrono::Duration::seconds(60)));
+        assert!(ledger.wall_clock_exhausted(60, now));
     }
 
     #[test]

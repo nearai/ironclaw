@@ -1024,12 +1024,12 @@ mod declared_limits_tests {
         let ceiling_calls = baseline.resource_budget_policy.max_model_calls;
         let ceiling_invocations = baseline.resource_budget_policy.max_capability_invocations;
         assert_eq!(
-            baseline.resource_budget_policy.max_wall_clock_seconds, None,
-            "the interactive profile declares no wall-clock ceiling"
+            baseline.resource_budget_policy.max_wall_clock_seconds,
+            Some(ironclaw_loop_contracts::ResourceBudgetPolicy::INTERACTIVE_MAX_WALL_CLOCK_SECONDS),
+            "the interactive profile declares occupancy wall-clock insurance"
         );
 
-        // Narrowing: every declared limit below the ceiling binds; a
-        // wall-clock declaration binds even with no profile ceiling.
+        // Narrowing: every declared limit below the ceiling binds.
         let resolver = DeclaredLimitsNarrowingResolver {
             inner: &inner,
             limits: TurnLimits {

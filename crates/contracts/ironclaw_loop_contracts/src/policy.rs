@@ -120,7 +120,9 @@ pub struct ResourceBudgetPolicy {
     pub max_capability_invocations: u32,
     /// Per-run wall-clock ceiling in seconds. `None` means no time limit.
     /// Enforced by the loop executor's budget stage as a hard stop after a
-    /// final checkpoint; declared `TurnLimits` narrow it per run.
+    /// final checkpoint, and by the model stage between recovery retries so
+    /// a sick provider cannot hold occupancy past the cap. Declared
+    /// `TurnLimits` narrow it per run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wall_clock_seconds: Option<u32>,
 }
@@ -130,6 +132,12 @@ impl ResourceBudgetPolicy {
     /// lacks the `HighBudget` authority (the mission-standard budget bound).
     pub(crate) const MISSION_STANDARD_MAX_MODEL_CALLS: u32 = 128;
     pub(crate) const MISSION_STANDARD_MAX_CAPABILITY_INVOCATIONS: u32 = 512;
+
+    /// Occupancy insurance for interactive turns. A sick model path (retry
+    /// storms, hung streams that keep heartbeating) must not hold the
+    /// one-active-run lock indefinitely — later channel and WebUI messages
+    /// cannot start a new turn until the occupying run ends.
+    pub const INTERACTIVE_MAX_WALL_CLOCK_SECONDS: u32 = 10 * 60;
 
     /// The interactive-coding tier resource budget, shared by the interactive
     /// profile and its legacy-persisted reconstruction.
@@ -143,12 +151,16 @@ impl ResourceBudgetPolicy {
     /// recovery retries), capability invocations 4x (the parallel dispatch
     /// width). The original 32/64 values predate enforcement — they were
     /// written while the caps were inert and never bound a real run.
+    ///
+    /// The wall-clock cap is occupancy insurance, not a coding-session
+    /// budget: healthy tool-heavy turns finish well under it; a provider
+    /// that keeps retrying must fail closed so the thread unlocks.
     pub(crate) fn interactive() -> Self {
         Self {
             tier: ResourceBudgetTier::from_trusted_static("interactive_standard"),
             max_model_calls: 2_048,
             max_capability_invocations: 4_096,
-            max_wall_clock_seconds: None,
+            max_wall_clock_seconds: Some(Self::INTERACTIVE_MAX_WALL_CLOCK_SECONDS),
         }
     }
 }

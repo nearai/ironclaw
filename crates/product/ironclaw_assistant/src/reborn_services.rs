@@ -677,6 +677,7 @@ const OPERATOR_LOGS_TARGET_MAX_BYTES: usize = 256;
 const NOTICE_BLOCKED_APPROVAL: &str = "An approval gate is open on this thread — resolve it (approve or deny) before continuing, then resend your message.";
 const NOTICE_BLOCKED_AUTH: &str = "An authentication gate is open on this thread — complete authentication before continuing, then resend your message.";
 const NOTICE_BUSY_GENERIC: &str = "Ironclaw is still working on a previous message — resend yours once the current task finishes.";
+const NOTICE_BUSY_QUEUED: &str = "Got it — I'll fold that into the current task.";
 const PRODUCT_STREAM_FIRST_EVENT_WAIT: Duration = Duration::from_secs(1);
 const PRODUCT_STREAM_ACCESS_REVALIDATION_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -819,6 +820,14 @@ fn rejected_busy_notice(status: TurnStatus) -> String {
         TurnStatus::BlockedApproval => NOTICE_BLOCKED_APPROVAL.to_string(),
         TurnStatus::BlockedAuth => NOTICE_BLOCKED_AUTH.to_string(),
         _ => NOTICE_BUSY_GENERIC.to_string(),
+    }
+}
+
+fn deferred_busy_notice(status: TurnStatus) -> String {
+    match status {
+        TurnStatus::BlockedApproval => NOTICE_BLOCKED_APPROVAL.to_string(),
+        TurnStatus::BlockedAuth => NOTICE_BLOCKED_AUTH.to_string(),
+        _ => NOTICE_BUSY_QUEUED.to_string(),
     }
 }
 
@@ -4406,7 +4415,7 @@ where
                     active_run_id,
                     status: busy.status,
                     event_cursor: busy.event_cursor,
-                    notice: rejected_busy_notice(busy.status),
+                    notice: deferred_busy_notice(busy.status),
                 })
             }
             ProductInboundAck::Rejected(rejection) => Err(session_rejection_error(&rejection)),

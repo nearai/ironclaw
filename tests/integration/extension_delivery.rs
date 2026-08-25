@@ -2853,10 +2853,10 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
     assert_delivered_attempt(services, &repaired_scope).await;
 
     // 8. Overlapping-message feedback and reply anchoring (#6643/#6644): a
-    // second DM arriving while a turn is still running gets an IMMEDIATE
-    // busy notice quoting that second message, the working indicator and the
-    // final reply quote the first message, and nothing is silently dropped
-    // or left positionally ambiguous.
+    // second DM arriving while a turn is still running is acknowledged as
+    // folded into the current task (quoting that second message) — not told
+    // to resend. The working indicator and the final reply quote the first
+    // message, and nothing is silently dropped or left positionally ambiguous.
     const RACE_REPLY: &str = "anchored answer for the deferred-race leg";
     let race_first_body = dm_body(608, 717171, "what's the weather right now?");
     let (race_scope, _) = preresolve_vendor_turn_scope(
@@ -2929,7 +2929,7 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
     // run open, so this poll can only pass on admission-time feedback.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if anchored_count(&race_bodies(), "still working on a previous message", 619) == 1 {
+        if anchored_count(&race_bodies(), "fold that into the current task", 619) == 1 {
             break;
         }
         assert!(
@@ -2966,7 +2966,7 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
             .count();
         if anchored_count(&bodies, RACE_REPLY, 618) == 1 && working_indicator_anchored_to_618 == 1 {
             assert_eq!(
-                anchored_count(&bodies, "still working on a previous message", 619),
+                anchored_count(&bodies, "fold that into the current task", 619),
                 1,
                 "the busy notice stays a single anchored message: {bodies:?}"
             );

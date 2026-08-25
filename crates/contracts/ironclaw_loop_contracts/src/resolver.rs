@@ -547,6 +547,12 @@ fn fingerprint_for(
             .max_capability_invocations
             .to_string(),
     );
+    update(
+        &resource_budget_policy
+            .max_wall_clock_seconds
+            .map(|seconds| seconds.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+    );
     update_bool(
         definition
             .runtime_constraints
@@ -589,6 +595,37 @@ mod tests {
             long_running_mission_profile()
                 .checkpoint_policy
                 .require_final_checkpoint
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_wall_clock_ceiling_changes() {
+        let bounded = interactive_profile();
+        let mut unbounded = bounded.clone();
+        unbounded.resource_budget_policy.max_wall_clock_seconds = None;
+
+        let bounded_provenance = provenance_for(
+            &bounded,
+            &RunProfileResolutionRequest::interactive_default(),
+        );
+        let unbounded_provenance = provenance_for(
+            &unbounded,
+            &RunProfileResolutionRequest::interactive_default(),
+        );
+
+        assert_ne!(
+            fingerprint_for(
+                &bounded,
+                &bounded.resource_budget_policy,
+                bounded.personal_context_policy,
+                &bounded_provenance
+            ),
+            fingerprint_for(
+                &unbounded,
+                &unbounded.resource_budget_policy,
+                unbounded.personal_context_policy,
+                &unbounded_provenance
+            ),
         );
     }
 

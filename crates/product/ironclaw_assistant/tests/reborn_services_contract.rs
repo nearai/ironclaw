@@ -15657,6 +15657,50 @@ async fn rejected_busy_notice_generic_status_contains_generic_copy() {
     }
 }
 
+#[tokio::test]
+async fn deferred_busy_notice_running_status_contains_queued_copy() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator =
+        FakeTurnCoordinator::with_submit_error(TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id: TurnRunId::new(),
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(5),
+        }));
+    *coordinator.explicit_run_status.lock().expect("lock") = Some(TurnStatus::Running);
+    let coordinator = Arc::new(coordinator);
+    let queue = Arc::new(ironclaw_loop_host::InMemoryHostInputQueue::new(
+        threads.clone(),
+    ));
+    let services = session_services(threads, coordinator)
+        .with_input_enqueue(queue as Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>);
+    create_thread_for(&services, caller(), "thread-notice-queued").await;
+
+    let response = services
+        .submit_turn(
+            caller(),
+            session_submit_request(json!({
+                "client_action_id": "send-notice-queued",
+                "thread_id": "thread-notice-queued",
+                "content": "hello"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit succeeds with DeferredBusy");
+
+    match response {
+        RebornSubmitTurnResponse::DeferredBusy { status, notice, .. } => {
+            assert_eq!(status, TurnStatus::Running);
+            assert_eq!(notice, "Got it — I'll fold that into the current task.");
+            assert!(
+                !notice.to_ascii_lowercase().contains("resend"),
+                "queued steering must not tell the user to resend, got {notice}"
+            );
+        }
+        other => panic!("expected DeferredBusy, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Replay regression: a replayed RejectedBusy must return RejectedBusy again,
 // never submit a new run (contract from PR #4838)

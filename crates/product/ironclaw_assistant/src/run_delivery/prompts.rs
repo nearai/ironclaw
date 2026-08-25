@@ -101,8 +101,13 @@ pub(crate) const TRIGGERED_RUN_CANCELED_MESSAGE: &str = "This scheduled run was 
 /// Posted when the blocking run is `BlockedApproval` and no gate_ref is
 /// available.
 pub(crate) const BUSY_APPROVAL_MESSAGE: &str = "Ironclaw is waiting on a pending approval before taking new messages — reply `approve` or `deny` (or `approve gate:<ref>`) to resume.";
-/// Posted for any other non-terminal blocking state, or when the state
-/// lookup fails.
+/// Posted when a follow-up was queued onto the occupying run (`DeferredBusy`).
+/// Must not tell the user to resend — the message is already in the steering
+/// queue and will be folded in at the next model boundary.
+pub(crate) const BUSY_QUEUED_MESSAGE: &str = "Got it — I'll fold that into the current task.";
+/// Posted when a follow-up was rejected (`RejectedBusy`) for any other
+/// non-terminal blocking state, or when a rejected-busy state lookup fails.
+/// The user must resend after the occupying run ends.
 pub(crate) const BUSY_GENERIC_MESSAGE: &str = "Ironclaw is still working on a previous message and can't take this one yet — please resend it once the current task finishes.";
 
 /// Stable per-(run, kind) projection id for run-notification deliveries.

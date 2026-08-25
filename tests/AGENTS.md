@@ -301,7 +301,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An extension installs and activates through the real generic runtime | `extension_runtime.rs` |
 | An inbound channel message is verified and routed by the real generic ingress mount | `extension_ingress.rs` |
 | An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
-| Pair a Telegram bot actor, run as that verified user, deliver anchored replies and busy notices, disconnect to revoke admission, then pair again to restore delivery (#6643/#6644) | `extension_delivery.rs::paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_revokes_admission` (production generated-code pairing, disconnect/repair, and anchored delivery evidence) |
+| Pair a Telegram bot actor, run as that verified user, deliver anchored replies; a DM arriving mid-run is acknowledged as folded into the current task (not told to resend), disconnect revokes admission, then pair again to restore delivery (#6643/#6644) | `extension_delivery.rs::paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_revokes_admission` (production generated-code pairing, disconnect/repair, and anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
 | A notification inbox belongs to one recipient: knowing another user's notification id grants no read and no mutation | `notification_inbox_user_isolation.rs` |
 | Connect Telegram through a generated workspace-bot code while personal linked-account tools remain separately protected | `channel_connection_projection.rs` |
