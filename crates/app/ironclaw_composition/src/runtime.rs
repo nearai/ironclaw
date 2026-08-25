@@ -589,8 +589,12 @@ pub(crate) struct OutboundTestStores {
 pub(crate) struct SubagentDeliveryRuntime {
     pub(crate) input_queue:
         Arc<ironclaw_loop_host::FilesystemHostInputQueue<CompositeRootFilesystem>>,
-    pub(crate) resolver: Arc<AwaitEdgeResolver<dyn SessionThreadService>>,
-    pub(crate) store: Arc<AwaitEdgeStore>,
+    // These handles are retained by the composed runtime so the test-support
+    // view can drive the same resolver/store that production wiring uses. The
+    // production runtime reaches them through the bound runner graph; the
+    // underscore names make that intentional ownership explicit to clippy.
+    pub(crate) _resolver: Arc<AwaitEdgeResolver<dyn SessionThreadService>>,
+    pub(crate) _store: Arc<AwaitEdgeStore>,
 }
 
 pub struct RebornRuntime {
@@ -4635,8 +4639,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         thread_service,
         subagent_delivery: SubagentDeliveryRuntime {
             input_queue: host_input_queue,
-            resolver: subagent_await_edge_resolver,
-            store: subagent_await_edge_store,
+            _resolver: subagent_await_edge_resolver,
+            _store: subagent_await_edge_store,
         },
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),

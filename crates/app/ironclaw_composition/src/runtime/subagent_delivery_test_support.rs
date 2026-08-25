@@ -12,8 +12,8 @@ pub(crate) async fn parts(
     runtime.turn_scheduler.stop_for_test().await;
     crate::test_support::SubagentDeliveryTestParts {
         turn_tree_store: Arc::clone(&runtime.turn_tree_store),
-        resolver: Arc::clone(&runtime.subagent_delivery.resolver),
-        store: Arc::clone(&runtime.subagent_delivery.store),
+        resolver: Arc::clone(&runtime.subagent_delivery._resolver),
+        store: Arc::clone(&runtime.subagent_delivery._store),
         input_queue: Arc::clone(&runtime.subagent_delivery.input_queue),
     }
 }
