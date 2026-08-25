@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use ironclaw_host_api::{decision::RuntimeCredentialAuthRequirement, resource::ResourceScope};
+use ironclaw_host_api::{
+    decision::RuntimeCredentialAuthRequirement, dispatch::CredentialStageError,
+    resource::ResourceScope,
+};
 
 /// Whether the calling user still has a device-link ceremony to complete for
 /// this package.
@@ -27,53 +30,83 @@ use ironclaw_host_api::{decision::RuntimeCredentialAuthRequirement, resource::Re
 pub(crate) enum DeviceLinkUserSetup {
     /// The package declares no device-link surface on any facet.
     NotApplicable,
-    /// The package declares one and this caller has not satisfied it.
+    /// The package declares one or more device-link facets and this caller
+    /// has not satisfied all of them.
     Required,
-    /// The package declares one and this caller has already satisfied it.
+    /// The package declares one or more device-link facets and this caller
+    /// has already satisfied every one of them.
     AlreadyLinked,
+    /// The package declares one or more device-link facets and this caller's
+    /// link state could not be read.
+    ///
+    /// Distinct from [`Self::Required`] because the credential contract makes
+    /// the distinction: `CredentialStageError::Backend` is documented as
+    /// "not attributable to the user's credentials", and the activation gate
+    /// already maps it to a transient failure rather than missing auth
+    /// (`map_activation_credential_stage_error`, pinned by
+    /// `credential_staging_separates_missing_auth_from_a_credential_store_outage`).
+    /// Collapsing it into `Required` is the outage half of exactly what that
+    /// test forbids: sending a linked user to reconnect an account they
+    /// already connected.
+    Unverified,
 }
 
-/// Classify a package's device-link requirement against *this* caller.
+/// Classify a package's device-link requirements against *this* caller.
 ///
-/// `requirement` comes from
-/// `ExtensionLifecycleManager::device_link_user_setup_requirement`, which
-/// answers the package-shaped half ("is there a device-link surface at all").
-/// This resolves the caller-shaped half against the same credential-account
+/// `requirements` comes from
+/// `ExtensionLifecycleManager::device_link_user_setup_requirements`, which
+/// answers the package-shaped half ("what device-link surfaces exist at
+/// all") — every distinct facet the package declares, not just one. This
+/// resolves the caller-shaped half against the same credential-account
 /// service the activation gate uses, so an already-linked user is not told to
 /// link again.
+///
+/// `AlreadyLinked` requires every requirement in the set to be satisfied. A
+/// package may declare more than one distinct device-link facet (its channel
+/// connection and a separate personal-account tool credential, under
+/// different providers) — collapsing to just one and reporting `AlreadyLinked`
+/// from that one alone is the false-completion shape #7853 exists to remove,
+/// just with a second facet still outstanding.
 ///
 /// Every unknown resolves to [`DeviceLinkUserSetup::Required`]. That direction
 /// is deliberate: "each user links their own account in the Web UI" stays true
 /// when we cannot tell, whereas guessing `AlreadyLinked` reproduces #7853 by
 /// letting the model report a connection complete that never happened.
 pub(crate) async fn resolve_device_link_user_setup(
-    requirement: Option<RuntimeCredentialAuthRequirement>,
+    requirements: Vec<RuntimeCredentialAuthRequirement>,
     credential_accounts: Option<&Arc<dyn RuntimeCredentialAccountSelectionService>>,
     scope: &ResourceScope,
 ) -> DeviceLinkUserSetup {
-    let Some(requirement) = requirement else {
+    if requirements.is_empty() {
         return DeviceLinkUserSetup::NotApplicable;
-    };
+    }
     let Some(credential_accounts) = credential_accounts else {
         // Product auth is not composed on this build, so caller link state is
-        // unknowable rather than absent.
-        return DeviceLinkUserSetup::Required;
+        // unknowable rather than absent — and `Unverified` is what says that.
+        return DeviceLinkUserSetup::Unverified;
     };
     let gate = RuntimeExtensionActivationCredentialGate::new(
         scope.clone(),
         Arc::clone(credential_accounts),
     );
-    match gate.missing_requirements(vec![requirement]).await {
+    match gate.missing_requirements(requirements).await {
         Ok(missing) if missing.is_empty() => DeviceLinkUserSetup::AlreadyLinked,
         Ok(_) => DeviceLinkUserSetup::Required,
-        Err(error) => {
-            // silent-ok: guidance copy must never fail a lifecycle operation,
-            // and the fail-toward-Required direction is documented above.
-            tracing::debug!(
-                error = ?error,
-                "device-link caller state unresolved; reporting link as still required"
-            );
-            DeviceLinkUserSetup::Required
+        // Total-match formality, not a live path: `configured_runtime_credential_account`
+        // folds an `AuthRequired` account error into `Ok(None)`, so it arrives
+        // above as a *missing* requirement. If that ever changes, `Required`
+        // stays the right reading of "missing, expired, or revoked".
+        Err(CredentialStageError::AuthRequired) => DeviceLinkUserSetup::Required,
+        // The one error that actually reaches here, and the contract documents
+        // it as "not attributable to the user's credentials". Both guesses are
+        // wrong, so the copy says so instead of picking one.
+        Err(CredentialStageError::Backend) => {
+            // silent-ok: guidance must never fail a lifecycle operation that
+            // otherwise succeeded, and the outage is now stated in the
+            // response rather than hidden. `warn!` is unavailable on this
+            // path — it corrupts the REPL TUI (CLAUDE.md).
+            tracing::debug!("device-link caller state could not be read; reporting it unverified");
+            DeviceLinkUserSetup::Unverified
         }
     }
 }
@@ -201,6 +234,17 @@ impl DeviceLinkGuidance {
     }
 }
 
+/// The sentence for a caller whose link state could not be read.
+///
+/// It must not resolve the ambiguity in either direction. Claiming the link is
+/// owed sends an already-linked user to redo it; claiming it is done is #7853.
+/// So the copy states the uncertainty and hands over the page, which is useful
+/// either way and asserts nothing.
+const DEVICE_LINK_UNVERIFIED_NOTICE: &str = "Whether this user has linked their personal account could not be read just now. Do \
+     not state either way: do not report the connection as complete, and do not tell them to link \
+     as though it were missing. Say the check did not complete, and point them at the extension's \
+     page in the web app.";
+
 /// Guidance for an `Active` install: what, if anything, the user must still do.
 fn active_install_next_step(setup: DeviceLinkUserSetup, setup_link: Option<&str>) -> String {
     match device_link_notice(setup, setup_link) {
@@ -224,6 +268,7 @@ fn activate_device_link_notice(
 ) -> Option<String> {
     match setup {
         DeviceLinkUserSetup::Required => Some(required_notice(setup_link)),
+        DeviceLinkUserSetup::Unverified => Some(unverified_notice(setup_link)),
         DeviceLinkUserSetup::NotApplicable | DeviceLinkUserSetup::AlreadyLinked => None,
     }
 }
@@ -234,6 +279,7 @@ fn device_link_notice(setup: DeviceLinkUserSetup, setup_link: Option<&str>) -> O
         DeviceLinkUserSetup::NotApplicable => None,
         DeviceLinkUserSetup::Required => Some(required_notice(setup_link)),
         DeviceLinkUserSetup::AlreadyLinked => Some(DEVICE_LINK_ALREADY_LINKED_NOTICE.to_string()),
+        DeviceLinkUserSetup::Unverified => Some(unverified_notice(setup_link)),
     }
 }
 
@@ -241,12 +287,23 @@ fn device_link_notice(setup: DeviceLinkUserSetup, setup_link: Option<&str>) -> O
 /// one to attach. The link is additive: the prose that names the destination in
 /// words is never replaced by it, so a deployment with no public origin loses a
 /// convenience rather than the instruction.
+fn unverified_notice(setup_link: Option<&str>) -> String {
+    with_setup_link(DEVICE_LINK_UNVERIFIED_NOTICE, setup_link)
+}
+
 fn required_notice(setup_link: Option<&str>) -> String {
+    with_setup_link(DEVICE_LINK_REQUIRED_NOTICE, setup_link)
+}
+
+/// Appends the destination when there is one, for any notice that wants it.
+///
+/// Shared by both notices that point at the page: the link is additive in the
+/// same way for each, and a second copy of this two-line match is how the copy
+/// drifted apart the first time.
+fn with_setup_link(notice: &str, setup_link: Option<&str>) -> String {
     match setup_link {
-        Some(link) => {
-            format!("{DEVICE_LINK_REQUIRED_NOTICE} {DEVICE_LINK_SETUP_LINK_PREFIX} {link}")
-        }
-        None => DEVICE_LINK_REQUIRED_NOTICE.to_string(),
+        Some(link) => format!("{notice} {DEVICE_LINK_SETUP_LINK_PREFIX} {link}"),
+        None => notice.to_string(),
     }
 }
 
@@ -255,7 +312,7 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{
         capability::RuntimeCredentialAccountSetup,
-        ids::{InvocationId, UserId, VendorId},
+        ids::{InvocationId, SecretHandle, UserId, VendorId},
     };
 
     fn device_link_requirement() -> RuntimeCredentialAuthRequirement {
@@ -422,20 +479,202 @@ mod tests {
     #[tokio::test]
     async fn no_requirement_resolves_to_not_applicable() {
         assert_eq!(
-            resolve_device_link_user_setup(None, None, &scope()).await,
+            resolve_device_link_user_setup(Vec::new(), None, &scope()).await,
             DeviceLinkUserSetup::NotApplicable
         );
     }
 
-    /// Product auth not composed means caller link state is unknowable, not
-    /// absent. Failing toward `Required` keeps a true sentence on screen;
-    /// guessing `AlreadyLinked` would let the model report a connection
-    /// complete that never happened.
+    /// Product auth not composed means caller link state is unknowable — which
+    /// is neither "linked" nor "not linked", and the enum has a state that says
+    /// exactly that. Reporting `Required` here would send an already-linked
+    /// user to redo the link; reporting `AlreadyLinked` would let the model
+    /// report a connection complete that never happened. Both are false.
     #[tokio::test]
-    async fn unresolvable_caller_state_fails_toward_required() {
+    async fn unreadable_caller_state_is_reported_unverified_not_guessed() {
         assert_eq!(
-            resolve_device_link_user_setup(Some(device_link_requirement()), None, &scope()).await,
-            DeviceLinkUserSetup::Required
+            resolve_device_link_user_setup(vec![device_link_requirement()], None, &scope()).await,
+            DeviceLinkUserSetup::Unverified
+        );
+    }
+
+    /// The `Unverified` copy must resolve the ambiguity in NEITHER direction.
+    /// A notice that leans either way is a confident false statement about
+    /// something the host just failed to read.
+    #[test]
+    fn unverified_copy_commits_to_neither_link_state() {
+        let link = "https://webui.test/extensions?configure=fixture&setup=personal_account";
+        let notice = active_install_next_step(DeviceLinkUserSetup::Unverified, Some(link));
+
+        assert!(notice.contains("could not be read"), "{notice}");
+        // Hands over the page — useful either way, asserts nothing.
+        assert!(notice.contains(link), "{notice}");
+        // Must not borrow the Required copy's directive: that sentence tells
+        // the model the link IS owed.
+        assert!(
+            !notice.contains("additionally requires them to"),
+            "must not assert the link is owed: {notice}"
+        );
+        // Must not borrow the AlreadyLinked claim either.
+        assert!(
+            !notice.contains("already linked"),
+            "must not assert the link is done: {notice}"
+        );
+    }
+
+    /// A credential store that answers but hands back no usable secret is an
+    /// outage, not an absent credential: `configured_runtime_credential_account`
+    /// turns it into `CredentialStageError::Backend`, which the contract
+    /// documents as "not attributable to the user's credentials". The
+    /// activation gate already refuses to collapse the two
+    /// (`credential_staging_separates_missing_auth_from_a_credential_store_outage`);
+    /// reporting `Required` here would be the outage half of what that test
+    /// forbids — sending a linked user to reconnect an account they already
+    /// connected.
+    #[tokio::test]
+    async fn a_credential_store_outage_is_not_reported_as_a_missing_link() {
+        let accounts: Arc<dyn RuntimeCredentialAccountSelectionService> =
+            Arc::new(SecretlessRuntimeCredentialAccounts);
+        assert_eq!(
+            resolve_device_link_user_setup(
+                vec![device_link_requirement()],
+                Some(&accounts),
+                &scope(),
+            )
+            .await,
+            DeviceLinkUserSetup::Unverified,
+            "an unreadable credential store must not be reported as an absent credential"
+        );
+    }
+
+    /// Answers every lookup with an account carrying no access secret, which
+    /// `configured_runtime_credential_account` classifies as `Backend`.
+    struct SecretlessRuntimeCredentialAccounts;
+
+    #[async_trait::async_trait]
+    impl RuntimeCredentialAccountSelectionService for SecretlessRuntimeCredentialAccounts {
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: ironclaw_auth::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            let mut account = fake_configured_credential_account();
+            account.access_secret = None;
+            Ok(account)
+        }
+
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+    }
+
+    /// A fake [`RuntimeCredentialAccountSelectionService`] that satisfies
+    /// exactly the first `satisfied` requirements it is asked about, in call
+    /// order, and reports every later one missing. `RuntimeCredentialAccountSelectionRequest`
+    /// exposes no accessor a caller outside `ironclaw_auth` can read, so a
+    /// fake here cannot branch on *which* provider a call names — call order
+    /// is the only lever available, and the test below controls that order by
+    /// building the requirement vector itself.
+    struct SatisfyFirstNRuntimeCredentialAccounts {
+        remaining_satisfied: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SatisfyFirstNRuntimeCredentialAccounts {
+        fn new(satisfied: usize) -> Self {
+            Self {
+                remaining_satisfied: std::sync::atomic::AtomicUsize::new(satisfied),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeCredentialAccountSelectionService for SatisfyFirstNRuntimeCredentialAccounts {
+        async fn select_unique_configured_runtime_account(
+            &self,
+            _request: ironclaw_auth::RuntimeCredentialAccountSelectionRequest,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            use std::sync::atomic::Ordering;
+            let satisfied = self
+                .remaining_satisfied
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
+            if satisfied {
+                Ok(fake_configured_credential_account())
+            } else {
+                Err(ironclaw_auth::AuthProductError::CredentialMissing)
+            }
+        }
+
+        async fn select_configured_account_for_binding(
+            &self,
+            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
+            _runtime_scope: ironclaw_auth::AuthProductScope,
+        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
+            // Unused by the activation gate; the device-link guidance path
+            // only ever calls the runtime-resolution half above.
+            Err(ironclaw_auth::AuthProductError::CredentialMissing)
+        }
+    }
+
+    fn fake_configured_credential_account() -> ironclaw_auth::CredentialAccount {
+        let now = chrono::Utc::now();
+        ironclaw_auth::CredentialAccount {
+            id: ironclaw_auth::CredentialAccountId::new(),
+            scope: ironclaw_auth::AuthProductScope::new(scope(), ironclaw_auth::AuthSurface::Api),
+            provider: ironclaw_auth::AuthProviderId::new("fixture-vendor").expect("provider id"),
+            label: ironclaw_auth::CredentialAccountLabel::new("fixture account")
+                .expect("account label"),
+            status: ironclaw_auth::CredentialAccountStatus::Configured,
+            ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("fixture_secret").expect("secret handle")),
+            refresh_secret: None,
+            scopes: Vec::new(),
+            provider_identity: None,
+            link_revision: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// The #7853 follow-up this module exists to prevent: a package can
+    /// declare two DISTINCT device-link requirements (its channel connection
+    /// and a separate personal-account tool credential, under different
+    /// providers — nothing ties the two together). A caller who satisfied
+    /// only the first must be reported `Required`, never `AlreadyLinked` —
+    /// `AlreadyLinked` here would tell the model the personal-account tools
+    /// will work when a required link is still missing.
+    #[tokio::test]
+    async fn two_distinct_requirements_with_only_one_satisfied_never_reports_already_linked() {
+        let channel_requirement = device_link_requirement();
+        let tool_requirement = RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("fixture-tool-vendor").expect("vendor"),
+            ..channel_requirement.clone()
+        };
+        assert_ne!(
+            channel_requirement, tool_requirement,
+            "the two facets must be distinct for this test to prove anything"
+        );
+
+        let credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService> =
+            Arc::new(SatisfyFirstNRuntimeCredentialAccounts::new(1));
+
+        let setup = resolve_device_link_user_setup(
+            vec![channel_requirement, tool_requirement],
+            Some(&credential_accounts),
+            &scope(),
+        )
+        .await;
+
+        assert_eq!(
+            setup,
+            DeviceLinkUserSetup::Required,
+            "one satisfied facet out of two must not report AlreadyLinked"
         );
     }
 }

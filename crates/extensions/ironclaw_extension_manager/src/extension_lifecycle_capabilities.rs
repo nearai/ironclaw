@@ -293,7 +293,7 @@ impl ExtensionLifecycleToolHandler {
     ) -> Result<DeviceLinkGuidance, ProductOperationFailure> {
         let setup = resolve_device_link_user_setup(
             self.extension_management
-                .device_link_user_setup_requirement(package_ref)
+                .device_link_user_setup_requirements(package_ref)
                 .await?,
             Some(&self.credential_accounts),
             scope,
@@ -1001,7 +1001,9 @@ mod tests {
 
     use super::*;
     use crate::lifecycle_test_support::{
-        ExtensionLifecycleTestServices, build_lifecycle_test_services,
+        DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID, ExtensionLifecycleTestServices,
+        build_lifecycle_test_services,
+        build_lifecycle_test_services_with_device_link_channel_fixture,
         invoke_json_with_standalone_approval, invoke_with_standalone_approval,
         lifecycle_product_context,
     };
@@ -2415,30 +2417,27 @@ mod tests {
     /// package that never declares one.
     ///
     /// The positive case (a device-link package's message DOES carry the
-    /// notice on the BARE ACTIVATE arm specifically) is NOT closed at any
-    /// tier — see the report for why: Telegram is the only device-link
-    /// package in the bundled catalog, this crate-tier harness's
-    /// `build_lifecycle_test_services` wires no native device-link adapter
-    /// (Telegram activation fails outright with "extension declares a
-    /// device-link auth surface but bound no device-link adapter" before the
-    /// resolver is ever reached), and `EXTENSION_ACTIVATE_CAPABILITY_ID` is
-    /// deliberately NOT model-visible
+    /// notice on the BARE ACTIVATE arm specifically) IS reachable at this
+    /// same crate tier, direct-invoke and all — see
+    /// `standalone_extension_activate_message_carries_the_device_link_notice_for_a_device_link_package`
+    /// below. Telegram itself cannot drive it (this harness wires no native
+    /// channel adapter, so a real Telegram activation fails binding before
+    /// the notice resolver is ever reached), and
+    /// `EXTENSION_ACTIVATE_CAPABILITY_ID` is deliberately NOT model-visible
     /// (`standalone_agent_surface_exposes_extension_lifecycle_tools` pins
-    /// `!ids.contains(&EXTENSION_ACTIVATE_CAPABILITY_ID)` — "Model callers
-    /// use builtin.extension_install") — so a scripted-model integration
-    /// turn cannot legitimately drive it either. Only a direct,
-    /// grant-carrying `host_runtime.invoke_capability` call (like this
-    /// module's own `invoke_json`/`invoke_outcome`) can reach it, and that
-    /// needs the SAME native-adapter-bound `RebornRuntime` only
-    /// `RebornIntegrationGroup::extension_delivery()` builds — which has no
-    /// test-support accessor exposing that direct-invoke seam.
-    /// `tests/integration/extension_delivery.rs`'s
-    /// `telegram_install_reports_already_linked_for_a_caller_with_a_satisfied_device_link_account`
-    /// and the pre-existing `telegram_update_becomes_a_turn_and_a_coordinated_reply`
-    /// regression both cover the sibling `builtin.extension_install` arm's
-    /// Required/AlreadyLinked notices, which share `resolve_device_link_user_setup`
-    /// and `activate_device_link_notice` with this arm — but neither drives
-    /// this arm itself.
+    /// `!ids.contains(&EXTENSION_ACTIVATE_CAPABILITY_ID)`), but neither fact
+    /// blocks a direct `invoke_json` call against a SYNTHETIC device-link
+    /// package built by
+    /// `lifecycle_test_support::build_lifecycle_test_services_with_device_link_channel_fixture`:
+    /// `activation_requirement_applies`
+    /// (`ironclaw_extension_host::extension_credential_requirements`) exempts
+    /// a device-link requirement from the pre-activation gate for any package
+    /// that declares a channel, regardless of vendor, and a package with no
+    /// generic host attached reaches `Active` without needing a real bound
+    /// adapter at all (`commit_activation`'s `publish_to_generic_host`
+    /// short-circuits `Ok(())` when `self.generic_host.get()` is `None` —
+    /// the same seam `ironclaw_extension_host::product_lifecycle`'s own
+    /// device-link fixtures already rely on).
     #[tokio::test]
     async fn standalone_extension_activate_message_does_not_carry_the_device_link_notice_for_a_non_device_link_package()
      {
@@ -2462,6 +2461,46 @@ mod tests {
             !web_access_message.contains("cannot run from chat"),
             "a package with no device-link facet must not carry the device-link notice: \
              {web_access_message}"
+        );
+    }
+
+    /// #7853 positive coverage: an `Active` device-link package's bare-activate
+    /// message DOES carry the device-link guidance for a caller who has not
+    /// linked. Companion to the negative test above, which proves a
+    /// non-device-link package never carries it; this proves the flip side —
+    /// that the notice actually reaches the model when it should, not merely
+    /// that it stays absent when it should not.
+    ///
+    /// Drives the fixture built by
+    /// `build_lifecycle_test_services_with_device_link_channel_fixture` (see
+    /// its doc comment for why this reaches `Active` for an unlinked caller
+    /// without a real native channel adapter) through the exact same
+    /// `EXTENSION_ACTIVATE_CAPABILITY_ID` handler arm as the negative test.
+    #[tokio::test]
+    async fn standalone_extension_activate_message_carries_the_device_link_notice_for_a_device_link_package()
+     {
+        let services = build_lifecycle_test_services_with_device_link_channel_fixture(
+            "extension-tools-activate-device-link-owner",
+        )
+        .await;
+
+        install_inactive(&services, DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID).await;
+        let response = invoke_json(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID}),
+        )
+        .await
+        .expect("device-link package activation succeeds");
+        assert_eq!(response["phase"], "active");
+        let message = response
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(
+            message.contains("cannot run from chat"),
+            "an Active device-link package must carry the device-link notice for a caller who \
+             has not linked: {message}"
         );
     }
 

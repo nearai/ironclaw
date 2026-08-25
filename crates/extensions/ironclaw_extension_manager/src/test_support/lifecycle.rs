@@ -12,7 +12,8 @@ use ironclaw_auth::{
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extension_registry::{
-    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
+    ExtensionInstallationStore, ExtensionLifecycleService, ExtensionManifest,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{
     Fault, FaultInjecting, InMemoryBackend, RootFilesystem, ScopedFilesystem,
@@ -56,6 +57,7 @@ use ironclaw_extension_host::{
     restore_extension_lifecycle_state,
 };
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductContext;
+use ironclaw_product_contracts::package_lifecycle::{LifecyclePackageKind, LifecyclePackageRef};
 use ironclaw_skills::ScopedSkillManagementPort;
 
 /// Public web origin every lifecycle fixture reports, so device-link guidance
@@ -131,6 +133,7 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
         Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
         Arc::new(FaultInjecting::new(InMemoryBackend::new())),
         Arc::new(SecretStore::ephemeral()),
+        None,
     )
     .await
 }
@@ -152,6 +155,7 @@ pub async fn build_lifecycle_test_services_with_oauth_client_profiles(
         oauth_client_profiles,
         Arc::new(FaultInjecting::new(InMemoryBackend::new())),
         Arc::new(SecretStore::ephemeral()),
+        None,
     )
     .await
 }
@@ -176,10 +180,204 @@ pub async fn rebuild_lifecycle_test_services_with_auth_provider(
         Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
         Arc::clone(&previous.filesystem_faults),
         Arc::clone(&previous.secret_store),
+        None,
     )
     .await
 }
 
+/// Test-only construction seam for #7853 positive-coverage tests: a catalog
+/// extended with [`device_link_channel_fixture_package`] (a package that
+/// declares BOTH a channel and a required device-link tool credential) and no
+/// generic host attached.
+///
+/// The skip matters. `activation_requirement_applies`
+/// (`ironclaw_extension_host::extension_credential_requirements`) excludes a
+/// device-link requirement from the pre-activation gate only for a package
+/// that *declares a channel* — so a channel + device-link package is the only
+/// shape that can reach `Active` for a caller who has not yet linked. But
+/// reaching `Active` through the REAL generic host requires `build_active` to
+/// bind a `ToolAdapter` and a `ChannelSurfaces` half
+/// (`ironclaw_extension_host::entrypoint::check_binding`), which needs a
+/// registered native channel adapter this crate-tier harness does not carry
+/// (`GenericExtensionHostParams.channel_adapters` is empty in
+/// `build_lifecycle_test_services_over_backing`, matching production's real
+/// channel packages like `telegram`). Skipping `attach_generic_host` mirrors
+/// `ironclaw_extension_host::product_lifecycle`'s own device-link fixtures
+/// (`device_link_user_setup_requirement_resolves_from_the_channel_facet_alone`,
+/// `fixture_extension_package`'s activation test), which never attach one
+/// either: `commit_activation`'s `publish_to_generic_host` short-circuits
+/// `Ok(())` when `self.generic_host.get()` is `None`, so activation reaches
+/// `Active` from installation-state semantics alone, without touching bind.
+/// None of the machinery under test — the pre-activation credential gate, the
+/// `device_link_user_setup` notice resolution — is bypassed by this; only the
+/// binding of the fixture's own (unused) tool/channel adapters is skipped.
+pub async fn build_lifecycle_test_services_with_device_link_channel_fixture(
+    owner_id: &str,
+) -> ExtensionLifecycleTestServices {
+    build_lifecycle_test_services_over_backing(
+        owner_id,
+        None,
+        false,
+        Arc::new(UnavailableAuthProviderClient),
+        Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+        Arc::new(FaultInjecting::new(InMemoryBackend::new())),
+        Arc::new(SecretStore::ephemeral()),
+        Some(device_link_channel_fixture_package()),
+    )
+    .await
+}
+
+/// Extension id of [`device_link_channel_fixture_package`].
+pub const DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID: &str = "fixture-device-link-channel";
+
+/// A synthetic third-party package declaring both a channel
+/// (`[channel.connection] strategy = "device_link"`) and a required
+/// device-link tool credential (`[auth.fixture-device-link-channel] method =
+/// "device_link"` backing `[[tools.credentials]] vendor =
+/// "fixture-device-link-channel"`) — the one shape
+/// `activation_requirement_applies` exempts from the pre-activation
+/// credential gate, so activation can reach `Active` for a caller who has not
+/// linked. Modeled on
+/// `ironclaw_extension_host::test_support::DEVICE_LINK_CHANNEL_MANIFEST`
+/// (`pub(crate)` to that crate, so not importable here) and on this crate's
+/// own `fixture_extension_package_with_device_link_tool_credential` pattern
+/// in `ironclaw_extension_host::product_lifecycle`'s test module.
+fn device_link_channel_fixture_package() -> ironclaw_extension_host::AvailableExtensionPackage {
+    let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "fixture-device-link-channel"
+name = "Fixture Device Link Channel"
+version = "0.1.0"
+description = "fixture: channel + device-link auth, for #7853 positive coverage"
+trust = "third_party"
+
+[runtime]
+kind = "first_party"
+service = "fixture-device-link-channel"
+
+[[tools]]
+id = "fixture-device-link-channel.whoami"
+description = "Report the linked account."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/fixture-device-link-channel/whoami.input.v1.json"
+
+[[tools.credentials]]
+handle = "fixture_device_link_session"
+vendor = "fixture-device-link-channel"
+scopes = ["session"]
+audience = { scheme = "https", host = "api.fixture-device-link.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[channel]
+id = "messages"
+display_name = "Fixture device-link messages"
+conversation_model = "continuous"
+
+[channel.reply]
+transport = "message"
+
+[channel.delivery]
+transport = "message"
+
+[channel.connection]
+provider = "fixture-device-link-channel"
+strategy = "device_link"
+instructions = "Link your fixture account."
+input_placeholder = ""
+submit_label = "Link"
+error_message = "Linking failed."
+connection_success_message = "Linked."
+
+[channel.connection.notices]
+connect_required = "Link first."
+paired = "Linked."
+already_paired_same_user = "Already linked."
+already_bound_to_other_user = "Linked elsewhere."
+expired_or_unknown = "Not linked."
+
+[channel.ingress]
+route_suffix = "events"
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "hmac_sha256"
+secret_handle = "fixture_device_link_signing_secret"
+signature_header = "X-Fixture-Signature"
+signed_payload = [ { body = true } ]
+
+[admin_configuration]
+group_id = "fixture.device_link_channel"
+display_name = "Fixture Device Link channel"
+fields = [ { handle = "fixture_device_link_signing_secret", label = "Signing secret", secret = true } ]
+
+[auth.fixture-device-link-channel]
+method = "device_link"
+display_name = "Fixture personal account"
+default_mode_label = "Scan a code"
+instructions = "Open the fixture app and scan the code."
+"#;
+    let contracts = product_extension_host_api_contract_registry().expect("host API contracts");
+    let host_port_catalog =
+        ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports");
+    let root =
+        VirtualPath::new("/system/extensions/fixture-device-link-channel").expect("extension root");
+    // `ExtensionManifest::parse` only understands the legacy v2 wire shape
+    // (`[[host_api]] capability_provider.tools`) and rejects this fixture's
+    // v3 `[[tools]]`/`[channel]`/`[auth.*]` sections outright. Parse once
+    // through `ExtensionManifestRecord::from_toml` (which accepts both wire
+    // versions) and derive the legacy `ExtensionManifest` view
+    // `ExtensionPackage::from_manifest_toml` needs from its internal v2
+    // representation — the same pattern
+    // `ironclaw_extension_host::activation_credentials`'s own device-link
+    // fixture helper (`package_from`) uses.
+    let record = ExtensionManifestRecord::from_toml(
+        manifest_toml,
+        ManifestSource::HostBundled,
+        &host_port_catalog,
+        None,
+        &contracts,
+        Some(root.clone()),
+    )
+    .expect("device-link channel fixture manifest");
+    let resolved_manifest = Arc::new(record.resolved().clone());
+    let manifest =
+        ExtensionManifest::try_from(record.manifest().clone()).expect("legacy package view");
+    let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
+        .expect("device-link channel fixture package");
+    ironclaw_extension_host::AvailableExtensionPackage {
+        package_ref: LifecyclePackageRef::new(
+            LifecyclePackageKind::Extension,
+            "fixture-device-link-channel",
+        )
+        .expect("fixture package ref"),
+        manifest_toml: manifest_toml.to_string(),
+        resolved_manifest,
+        source: ManifestSource::HostBundled,
+        package,
+        cleanup_requirements: Vec::new(),
+        surface_kinds: Vec::new(),
+        channel_directions: None,
+        channel_presentation: None,
+        assets: vec![ironclaw_extension_host::AvailableExtensionAsset {
+            path: "manifest.toml".to_string(),
+            content: ironclaw_extension_host::AvailableExtensionAssetContent::Bytes(
+                manifest_toml.as_bytes().to_vec(),
+            ),
+        }],
+        onboarding_override: None,
+        oauth_setup_override: None,
+        search_aliases: Vec::new(),
+    }
+}
+
+// arch-exempt: too_many_args, 8th test-seam-only param (`extra_catalog_package`)
+// added for #7853 positive-coverage fixtures; `attach_generic_host` is
+// deliberately NOT a separate param — it is derived from
+// `extra_catalog_package.is_some()` below rather than adding a 9th.
+#[allow(clippy::too_many_arguments)]
 async fn build_lifecycle_test_services_over_backing(
     owner_id: &str,
     network_http_egress: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
@@ -188,7 +386,13 @@ async fn build_lifecycle_test_services_over_backing(
     oauth_client_profiles: Arc<dyn ironclaw_auth::OAuthClientProfileRegistry>,
     filesystem: Arc<FaultInjecting<InMemoryBackend>>,
     secret_store: Arc<dyn SecretStorePort>,
+    extra_catalog_package: Option<ironclaw_extension_host::AvailableExtensionPackage>,
 ) -> ExtensionLifecycleTestServices {
+    // See `build_lifecycle_test_services_with_device_link_channel_fixture`'s
+    // doc comment for why a package that needs the catalog extended also
+    // needs the generic host skipped: this harness has no native channel
+    // adapter for a synthetic fixture package to bind against.
+    let attach_generic_host = extra_catalog_package.is_none();
     let owner_user_id = ironclaw_host_api::ids::UserId::new(owner_id).expect("valid owner id");
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let auth_filesystem = Arc::new(ScopedFilesystem::new(Arc::clone(&filesystem), |scope| {
@@ -271,6 +475,11 @@ async fn build_lifecycle_test_services_over_backing(
         AvailableExtensionCatalog::from_first_party_assets_with_nearai_mcp_config(None, &bundles)
             .expect("first-party extension catalog")
             .with_reserved_bundled_ids(first_party_reserved_ids.clone());
+    if let Some(extra_package) = extra_catalog_package {
+        available_extensions.extend(AvailableExtensionCatalog::from_packages(vec![
+            extra_package,
+        ]));
+    }
     let extension_host_ports =
         ironclaw_host_api::host_port::default_host_port_catalog().expect("host port catalog");
     let extension_host_api_contracts =
@@ -365,36 +574,43 @@ async fn build_lifecycle_test_services_over_backing(
         .expect("insert bundled first-party handlers");
     host_services = host_services.with_first_party_capabilities(Arc::new(first_party_registry));
 
-    let generic =
-        build_generic_extension_host(ironclaw_extension_host::GenericExtensionHostParams {
-            binder: host_services.extension_lane_tool_binder(),
-            native_factories: Vec::new(),
-            channel_adapters: Vec::new(),
-            installation_store: Arc::clone(&installation_store),
-            boot_installations: boot_installation_records(&installation_store, None)
-                .await
-                .expect("boot installation records"),
-            governor: Arc::new(InMemoryResourceGovernor::new()),
-            assembly: ExtensionHostAssemblyConfig::new(
-                first_party_reserved_ids
-                    .iter()
-                    .filter_map(|id| CapabilityId::new(id).ok())
-                    .collect(),
-                Default::default(),
-                std::time::Duration::from_secs(30),
-            ),
-            channel_egress_transport: None,
-            linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
-            linked_accounts: std::sync::Arc::new(
-                ironclaw_extension_host::UnavailableLinkedAccountResolution,
-            ),
-            admin_secrets: None,
-        })
-        .await;
-    extension_management.attach_generic_host(Arc::clone(&generic.host));
-    host_services.set_extension_tool_resolver(Arc::new(
-        ironclaw_extension_host::SnapshotToolResolver::new(generic.host.snapshot_watch()),
-    ));
+    // Skipped for `build_lifecycle_test_services_with_device_link_channel_fixture`
+    // (see its doc comment): with no generic host attached,
+    // `commit_activation`'s `publish_to_generic_host` short-circuits `Ok(())`
+    // instead of binding a `ToolAdapter`/`ChannelSurfaces` this harness has no
+    // native channel adapter to satisfy.
+    if attach_generic_host {
+        let generic =
+            build_generic_extension_host(ironclaw_extension_host::GenericExtensionHostParams {
+                binder: host_services.extension_lane_tool_binder(),
+                native_factories: Vec::new(),
+                channel_adapters: Vec::new(),
+                installation_store: Arc::clone(&installation_store),
+                boot_installations: boot_installation_records(&installation_store, None)
+                    .await
+                    .expect("boot installation records"),
+                governor: Arc::new(InMemoryResourceGovernor::new()),
+                assembly: ExtensionHostAssemblyConfig::new(
+                    first_party_reserved_ids
+                        .iter()
+                        .filter_map(|id| CapabilityId::new(id).ok())
+                        .collect(),
+                    Default::default(),
+                    std::time::Duration::from_secs(30),
+                ),
+                channel_egress_transport: None,
+                linked_sessions: ironclaw_extension_host::LinkedSessionStore::unavailable(),
+                linked_accounts: std::sync::Arc::new(
+                    ironclaw_extension_host::UnavailableLinkedAccountResolution,
+                ),
+                admin_secrets: None,
+            })
+            .await;
+        extension_management.attach_generic_host(Arc::clone(&generic.host));
+        host_services.set_extension_tool_resolver(Arc::new(
+            ironclaw_extension_host::SnapshotToolResolver::new(generic.host.snapshot_watch()),
+        ));
+    }
 
     let approval_mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/approvals").expect("valid approvals alias"),

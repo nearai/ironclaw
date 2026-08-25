@@ -34,13 +34,18 @@ function renderAt(path, { extensions = [], isLoading = false } = {}) {
 
   function Probe() {
     const location = useLocation();
+    // Mirrors ExtensionsPage: the extension `onConfigure` resolves becomes
+    // the modal's `selected` extension on the next render.
+    const [selected, setSelected] = React.useState(null);
     const onConfigure = React.useCallback((extension) => {
       configured.push(extension);
+      setSelected(extension);
     }, []);
     const { setupPath } = useExtensionSetupLanding({
       extensions,
       isLoading,
       onConfigure,
+      selected,
     });
     seen.setupPath = setupPath;
     seen.search = location.search;
@@ -77,37 +82,65 @@ test("a setup link opens the named extension on the path it asked for", async ()
 test("resolution waits for the inventory instead of missing on an empty list", async () => {
   // The params are stripped immediately but the extension list arrives
   // asynchronously; resolving against an empty in-flight list would silently
-  // land the user on a page with no modal.
-  const { configured, seen, root, container } = renderAt(
-    "/extensions?configure=telegram&setup=personal_account",
-    { extensions: [], isLoading: true },
-  );
-  await flush();
-  assert.equal(configured.length, 0);
+  // land the user on a page with no modal. This drives the SAME hook
+  // instance from `isLoading: true` on an empty list to `isLoading: false`
+  // on a populated one — no remount — so it actually exercises the held
+  // request, not just the one-shot URL strip.
+  const configured = [];
+  const onConfigure = (extension) => configured.push(extension);
+  const path = "/extensions?configure=telegram&setup=personal_account";
 
-  const loaded = [];
-  function Probe() {
-    const onConfigure = React.useCallback((extension) => {
-      loaded.push(extension);
-    }, []);
-    useExtensionSetupLanding({
-      extensions: [installed("telegram")],
-      isLoading: false,
-      onConfigure,
-    });
+  function Probe({ extensions, isLoading }) {
+    useExtensionSetupLanding({ extensions, isLoading, onConfigure });
     return null;
   }
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+
   act(() => {
     root.render(
-      <MemoryRouter initialEntries={[`/extensions${seen.search}`]}>
-        <Probe />
+      <MemoryRouter initialEntries={[path]}>
+        <Probe extensions={[]} isLoading={true} />
       </MemoryRouter>,
     );
   });
   await flush();
-  // The remount has no params left to read: the strip is one-shot by design,
-  // which is why the hook holds the request in state rather than re-reading it.
-  assert.equal(loaded.length, 0);
+  assert.equal(configured.length, 0);
+
+  // Same tree, same component instance: only the inventory props change.
+  act(() => {
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <Probe extensions={[installed("telegram")]} isLoading={false} />
+      </MemoryRouter>,
+    );
+  });
+  await flush();
+
+  assert.equal(configured.length, 1);
+  assert.equal(configured[0].packageRef.id, "telegram");
+  container.remove();
+});
+
+test("a reload after the strip has nothing left to replay", async () => {
+  // The strip is one-shot by design, which is why the hook holds the
+  // request in state rather than re-reading the URL: a genuine reload gets a
+  // fresh hook instance and a search string with nothing left to consume.
+  const { seen, container: firstContainer } = renderAt(
+    "/extensions?configure=telegram&setup=personal_account",
+    { extensions: [], isLoading: true },
+  );
+  await flush();
+
+  const { configured, container } = renderAt(`/extensions${seen.search}`, {
+    extensions: [installed("telegram")],
+    isLoading: false,
+  });
+  await flush();
+  assert.equal(configured.length, 0);
+  firstContainer.remove();
   container.remove();
 });
 
@@ -156,4 +189,81 @@ test("no configure param leaves the url and the modal alone", async () => {
   assert.equal(configured.length, 0);
   assert.equal(seen.setupPath, null);
   assert.equal(seen.search, "?ref=telegram-thread");
+});
+
+test("a later Configure action does not inherit the consumed setup path", async () => {
+  // Mirrors ExtensionsPage: `selected` is whatever the caller is about to
+  // render the modal for, and `clearSetupPath` runs when that modal closes.
+  const configured = [];
+  const onConfigure = (extension) => configured.push(extension);
+  const path = "/extensions?configure=telegram&setup=personal_account";
+  const extensions = [installed("telegram"), installed("other")];
+  let api = null;
+
+  function Probe({ selected }) {
+    api = useExtensionSetupLanding({
+      extensions,
+      isLoading: false,
+      onConfigure,
+      selected,
+    });
+    return null;
+  }
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+
+  act(() => {
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <Probe selected={null} />
+      </MemoryRouter>,
+    );
+  });
+  await flush();
+  assert.equal(configured.length, 1);
+  assert.equal(configured[0].packageRef.id, "telegram");
+
+  // The deep link's own modal — selected is the extension it resolved to —
+  // gets the path.
+  act(() => {
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <Probe selected={installed("telegram")} />
+      </MemoryRouter>,
+    );
+  });
+  await flush();
+  assert.equal(api.setupPath, "personal_account");
+
+  // A Configure click on a DIFFERENT extension while the path is still held
+  // must not inherit it, even before the deep-link modal is explicitly
+  // closed.
+  act(() => {
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <Probe selected={installed("other")} />
+      </MemoryRouter>,
+    );
+  });
+  await flush();
+  assert.equal(api.setupPath, null);
+
+  // Closing the deep-link modal clears the stored path, so reopening the
+  // SAME extension later lands on the choice screen too.
+  act(() => {
+    api.clearSetupPath();
+  });
+  act(() => {
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <Probe selected={installed("telegram")} />
+      </MemoryRouter>,
+    );
+  });
+  await flush();
+  assert.equal(api.setupPath, null);
+
+  container.remove();
 });

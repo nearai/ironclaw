@@ -170,13 +170,19 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     () => [...(channels || []), ...(tools || [])],
     [channels, tools],
   );
-  const { setupPath } = useExtensionSetupLanding({
+  const { setupPath, clearSetupPath } = useExtensionSetupLanding({
     extensions: configurableExtensions,
     isLoading: isExtensionsLoading,
     onConfigure: handleConfigure,
+    selected: configuring,
   });
   const handleImport = React.useCallback((file) => importTool({ file }), [importTool]);
-  const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
+  // Closing also releases the deep link's setup path: it applies only to the
+  // modal it opened, never to whatever Configure action comes after it.
+  const handleCloseModal = React.useCallback(() => {
+    setConfiguring(null);
+    clearSetupPath();
+  }, [clearSetupPath]);
   const handleConfirmRemove = React.useCallback(() => {
     if (!extensionToRemove) return;
     remove(extensionToRemove, {

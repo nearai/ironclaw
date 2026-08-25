@@ -402,7 +402,7 @@ impl ExtensionHostLifecycleProductService {
     ) -> Result<DeviceLinkGuidance, ProductOperationFailure> {
         let setup = resolve_device_link_user_setup(
             extension_management
-                .device_link_user_setup_requirement(package_ref)
+                .device_link_user_setup_requirements(package_ref)
                 .await?,
             self.credential_accounts.as_ref(),
             &lifecycle_resource_scope(context)?,
@@ -1516,18 +1516,16 @@ mod tests {
     /// drives via the public `.execute()` trait method) for a package with no
     /// device-link facet (web-access), proving the notice never leaks in.
     ///
-    /// The positive case cannot be reached from this crate-tier harness for
-    /// the same reason as its capability-handler sibling: Telegram is the
-    /// only device-link package in the bundled catalog, and
-    /// `build_lifecycle_test_services` wires no native device-link adapter,
-    /// so Telegram activation fails outright before this arm's
-    /// `resolve_device_link_user_setup` call is ever reached. Only the
-    /// production-wired `RebornIntegrationGroup::extension_delivery()` group
-    /// (Telegram's fixture device-link adapter) can drive that half, and it
-    /// has no test-support accessor exposing the composed
-    /// `ExtensionHostLifecycleProductService` this arm lives on (it is
-    /// reachable there only through the model-facing capability handler,
-    /// which `tests/integration/extension_delivery.rs` already covers).
+    /// The positive case IS reachable from this crate-tier harness — see
+    /// `extension_activate_action_carries_the_device_link_notice_for_a_device_link_package`
+    /// below, which drives the same `.execute_action` seam against
+    /// `build_lifecycle_test_services_with_device_link_channel_fixture`'s
+    /// synthetic channel + device-link package instead of Telegram. Telegram
+    /// itself still cannot drive it (this harness wires no native channel
+    /// adapter, so a real Telegram activation fails binding before this arm's
+    /// `resolve_device_link_user_setup` call is ever reached), but that is a
+    /// Telegram-specific binding gap, not a gap in this arm's own
+    /// reachability — see that test's doc comment for the mechanism.
     #[tokio::test]
     async fn extension_activate_action_does_not_carry_the_device_link_notice_for_a_non_device_link_package()
      {
@@ -1567,6 +1565,67 @@ mod tests {
             !message.contains("cannot run from chat"),
             "a package with no device-link facet must not carry the device-link notice: \
              {message}"
+        );
+    }
+
+    /// #7853 positive coverage for the `LifecycleProductAction::ExtensionActivate`
+    /// arm: an `Active` device-link package's message DOES carry the
+    /// device-link guidance for a caller who has not linked. Companion to the
+    /// negative test above.
+    ///
+    /// Uses `build_lifecycle_test_services_with_device_link_channel_fixture`,
+    /// which extends the catalog with a synthetic package declaring both a
+    /// channel and a required device-link tool credential, and skips
+    /// attaching a generic host. Both matter: `activation_requirement_applies`
+    /// (`ironclaw_extension_host::extension_credential_requirements`) exempts
+    /// a device-link requirement from the pre-activation gate only for a
+    /// package that declares a channel, so only that shape can reach `Active`
+    /// for an unlinked caller at all; and reaching `Active` through a real
+    /// attached generic host would require binding a `ToolAdapter` +
+    /// `ChannelSurfaces` pair this harness has no native channel adapter to
+    /// satisfy (the same gap that blocks Telegram, see the negative test's
+    /// doc comment). With no generic host attached, `commit_activation`'s
+    /// `publish_to_generic_host` short-circuits `Ok(())` instead — the same
+    /// seam `ironclaw_extension_host::product_lifecycle`'s own device-link
+    /// fixtures already rely on — so `Active` is reached without touching
+    /// bind at all.
+    #[tokio::test]
+    async fn extension_activate_action_carries_the_device_link_notice_for_a_device_link_package() {
+        let services =
+            crate::lifecycle_test_support::build_lifecycle_test_services_with_device_link_channel_fixture(
+                "lifecycle-service-activate-device-link-owner",
+            )
+            .await;
+        let owner =
+            UserId::new("lifecycle-service-activate-device-link-owner").expect("valid owner");
+        let scope =
+            ResourceScope::local_default(owner.clone(), InvocationId::new()).expect("valid scope");
+        let context = crate::lifecycle_test_support::lifecycle_product_context(scope);
+
+        let package_ref = LifecyclePackageRef::new(
+            LifecyclePackageKind::Extension,
+            crate::lifecycle_test_support::DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID,
+        )
+        .expect("valid device-link fixture ref");
+        services
+            .extension_management
+            .install(package_ref.clone(), &owner)
+            .await
+            .expect("device-link fixture installs");
+        let response = services
+            .lifecycle_service
+            .execute_action(
+                context,
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("device-link fixture activates");
+        assert_eq!(response.phase, InstallationState::Active);
+        let message = response.message.unwrap_or_default();
+        assert!(
+            message.contains("cannot run from chat"),
+            "an Active device-link package must carry the device-link notice for a caller who \
+             has not linked: {message}"
         );
     }
 
