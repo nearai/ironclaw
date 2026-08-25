@@ -524,7 +524,26 @@ path = "tests/integration/run_artifact_timings.rs"
 name = "reborn_integration_db_write_canonical"
 path = "tests/integration/db_write_canonical.rs"
 
+# Debug-info policy for dev and test (test inherits dev, so this one line
+# governs `cargo test` binaries and their dependencies too). CI has built
+# every heavy lane with CARGO_PROFILE_DEV_DEBUG=0/CARGO_PROFILE_TEST_DEBUG=0
+# for a long time; codifying it here makes local builds reproduce CI and lets
+# the per-workflow env copies be deleted as no-ops. Assert/panic messages
+# keep their file:line via panic::Location at any debug level; debug=0 only
+# drops mid-frame file:line from RUST_BACKTRACE output. Measured 2026-08-21
+# on ironclaw_common tests (rustc 1.98.0): debug=0 175 MiB / line-tables-only
+# 257 MiB (+47%) / full 272 MiB — the smaller artifacts win on 2-core CI
+# runners and the 10 GB cache budget. Debugging locally with variable
+# inspection? Override per-run: `CARGO_PROFILE_DEV_DEBUG=2 cargo <cmd>`.
+[profile.dev]
+debug = 0
+
 [profile.release]
+# Already cargo's built-in default (debug info is off by default in
+# release); made explicit because ironclaw-stress.yml restated it three
+# times as CARGO_PROFILE_RELEASE_DEBUG=0 workflow/job env — this line makes
+# those deletable no-ops too (Task 9).
+debug = 0
 strip = true          # Remove debug symbols from release binaries
 
 # The profile that 'cargo dist' will build with

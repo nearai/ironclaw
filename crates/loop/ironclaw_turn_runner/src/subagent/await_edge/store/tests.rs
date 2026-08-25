@@ -10,6 +10,7 @@ use ironclaw_processes::{
     ProcessJournalStore, ProcessKind, ProcessSubmissionPort, SubmitProcessRequest,
     in_memory_backed_process_store,
 };
+use uuid::Uuid;
 
 use super::*;
 
@@ -267,8 +268,11 @@ fn only_the_production_metadata_blob_decodes_and_anything_else_fails_closed() {
         blob[key] = serde_json::json!({"not": "a valid value"});
         poisoned.metadata = blob;
 
-        let AwaitEdgeStoreError::Backend { reason } = AwaitEdgeStore::edge_from_record(poisoned)
+        let error = AwaitEdgeStore::edge_from_record(poisoned)
             .expect_err("a malformed merged delivery key must fail closed");
+        let AwaitEdgeStoreError::Backend { reason } = &error else {
+            panic!("edge_from_record only ever produces Backend, got: {error:?}");
+        };
         assert!(
             reason.contains(key),
             "the refusal must name the offending key, got: {reason}"
@@ -323,7 +327,7 @@ async fn settled_background_edge(
             dependency_process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
             root_process_id: parent_process_id,
             scope: scope.to_resource_scope(),
-            group_ref: Some(edge.gate_ref.as_str().to_string()),
+            group_ref: Some(format!("bg:{}", scope.thread_id)),
             created_at: edge.created_at,
             metadata: serde_json::to_value(awaited_child_set_record(child_run_id, &edge))
                 .expect("serialize submitted record"),
@@ -344,6 +348,80 @@ async fn settled_background_edge(
         .expect("edge exists");
     assert_eq!(settled.state, AwaitEdgeState::Settled);
     (scope, parent_run_id, child_run_id)
+}
+
+#[tokio::test]
+async fn background_sweep_query_skips_open_rows_and_honors_human_deferred_state() {
+    let (store, journal) = new_store();
+    let (scope, parent, settled_child) = settled_background_edge(&store, &journal).await;
+    let (_, _, mut edge) = edge_fixture();
+    edge.mode = SpawnSubagentMode::Background;
+    let parent_process_id = ProcessId::from_uuid(parent.as_uuid());
+
+    // More open rows than the sweep batch limit would otherwise return. The
+    // state-prefix query must reach the settled row without consuming these
+    // historical opens first.
+    for value in 1..=33_u128 {
+        let child = ProcessId::from_uuid(Uuid::from_u128(value));
+        journal
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: parent_process_id,
+                dependency_process_id: child,
+                root_process_id: parent_process_id,
+                scope: scope.to_resource_scope(),
+                group_ref: Some(format!("bg:{}", scope.thread_id)),
+                created_at: Utc::now(),
+                metadata: serde_json::to_value(awaited_child_set_record(
+                    TurnRunId::from_uuid(child.as_uuid()),
+                    &edge,
+                ))
+                .expect("serialize open background edge"),
+            })
+            .await
+            .expect("open background edge");
+    }
+    let actionable = store
+        .list_background_for_thread(&scope, 1, false)
+        .await
+        .expect("list actionable background edges");
+    assert_eq!(actionable.len(), 1);
+    assert_eq!(
+        actionable[0].1,
+        TurnRunId::from_uuid(settled_child.as_uuid())
+    );
+
+    store
+        .record_result_appended(
+            &scope,
+            parent,
+            settled_child,
+            LoopMessageRef::new("msg:deferred").expect("message ref"),
+        )
+        .await
+        .expect("append result")
+        .expect("settled edge exists");
+    store
+        .defer_streak_capped(&scope, parent, settled_child)
+        .await
+        .expect("defer result")
+        .expect("appended edge exists");
+    assert!(
+        store
+            .list_background_for_thread(&scope, 1, false)
+            .await
+            .expect("autonomous sweep list")
+            .is_empty(),
+        "autonomous starts must leave deferred attention parked"
+    );
+    assert_eq!(
+        store
+            .list_background_for_thread(&scope, 1, true)
+            .await
+            .expect("human sweep list")
+            .len(),
+        1,
+        "human starts may retry deferred attention"
+    );
 }
 
 #[tokio::test]
@@ -410,7 +488,9 @@ async fn the_delivery_chain_refuses_to_skip_the_append() {
         .record_attention(&scope, parent, child, AttentionOutcome::Activated)
         .await
         .expect_err("attention before the append must be refused");
-    let AwaitEdgeStoreError::Backend { reason } = &error;
+    let AwaitEdgeStoreError::Backend { reason } = &error else {
+        panic!("record_attention only ever produces Backend, got: {error:?}");
+    };
     assert!(
         reason.contains("AttentionScheduled")
             && reason.contains("ResultAppended")
@@ -465,6 +545,47 @@ async fn recording_an_append_twice_keeps_the_first_ref() {
     );
 }
 
+/// `close` must refuse a `ResultAppended` edge outright: the result is
+/// durably appended to the parent thread but the parent has not yet been
+/// made attentive to it, so closing here would strand the result and hold
+/// the descendant reservation forever.
+#[tokio::test]
+async fn close_refuses_an_edge_with_an_undelivered_appended_result() {
+    let (store, journal) = new_store();
+    let (scope, parent, child) = settled_background_edge(&store, &journal).await;
+    store
+        .record_result_appended(
+            &scope,
+            parent,
+            child,
+            LoopMessageRef::new("msg:child-1").expect("valid ref"),
+        )
+        .await
+        .expect("append")
+        .expect("edge exists");
+
+    let error = store
+        .close(&scope, parent, child)
+        .await
+        .expect_err("close must refuse an edge holding an undelivered result");
+    assert_eq!(
+        error,
+        AwaitEdgeStoreError::UndeliveredResult {
+            state: AwaitEdgeState::ResultAppended,
+        }
+    );
+    assert_eq!(
+        store
+            .peek(&scope, parent, child)
+            .await
+            .expect("peek edge")
+            .expect("edge exists")
+            .state,
+        AwaitEdgeState::ResultAppended,
+        "a refused close must leave the edge exactly where it was"
+    );
+}
+
 /// The deferred branch end to end: parked, un-closeable while parked,
 /// drained forward by a later attention sweep, and only then closeable.
 /// A state you can enter but not leave would be a trap for the slice that
@@ -494,12 +615,18 @@ async fn a_streak_capped_edge_parks_unclosed_until_attention_drains_it() {
     let unclosed = store.list_unclosed_for_scope(&scope).await.expect("query");
     assert_eq!(unclosed.len(), 1, "a deferred edge must remain claimable");
 
-    // `close` must leave a parked edge alone: the kernel refuses to consume
-    // one, because closing it would strand the undelivered result.
-    store
+    // `close` must refuse a parked edge: the kernel refuses to consume one,
+    // because closing it would strand the undelivered result.
+    let close_error = store
         .close(&scope, parent, child)
         .await
-        .expect("close is a no-op on a parked edge");
+        .expect_err("close must refuse a parked edge");
+    assert_eq!(
+        close_error,
+        AwaitEdgeStoreError::UndeliveredResult {
+            state: AwaitEdgeState::AttentionDeferredStreakCap,
+        }
+    );
     assert_eq!(
         store
             .peek(&scope, parent, child)

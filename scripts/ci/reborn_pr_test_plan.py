@@ -595,7 +595,24 @@ REPO_CONFIG_TEST_OWNERS = {
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
-SHARED_REBORN_ACTION_PREFIXES = (".github/actions/setup-sccache-dist/",)
+# cargo-dist's build-setup fragment. cargo-dist re-inlines it into
+# `.github/workflows/ironclaw-release.yml` on every `dist generate`, so it is
+# workflow source that happens to live outside `.github/workflows/` — the same
+# static control as the file it is inlined into, and read by no Reborn lane.
+# The planner fails closed on unclassified paths, so a `.github/` file with no
+# rule takes the whole PR's plan step down rather than mis-scheduling it.
+PR_STATIC_CONTROL_FRAGMENTS = (".github/dist-build-setup.yml",)
+SHARED_REBORN_ACTION_PREFIXES = (
+    ".github/actions/setup-sccache-dist/",
+    ".github/actions/setup-rust/",
+    # The deliberate mapping the arm below asks for. `install-cargo-component`
+    # is consumed by `coverage.yml` and `platform-and-compat.yml`; a change to
+    # it can move what those lanes build, and no narrow lane exercises it
+    # safely, so it takes the exhaustive plan like its two siblings. Until this
+    # entry existed it hit the fail-closed arm, so a PR editing only that file
+    # took the whole plan step down instead of scheduling anything.
+    ".github/actions/install-cargo-component/",
+)
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -921,10 +938,12 @@ def build_plan(
             nextest_config_changed = True
             continue
         if path.startswith(SHARED_REBORN_ACTION_PREFIXES):
-            # Every `Tests (Reborn)` job installs the compiler cache through
-            # this local action. No narrow lane can exercise a change to it
-            # safely, so use the exhaustive plan just as we do for shared
-            # nextest configuration. Keep other `.github/actions/**` paths
+            # Every `Tests (Reborn)` job installs the compiler cache
+            # (setup-sccache-dist) or the Rust toolchain itself
+            # (setup-rust) through one of these local actions. No narrow
+            # lane can exercise a change to either safely, so use the
+            # exhaustive plan just as we do for shared nextest
+            # configuration. Keep other `.github/actions/**` paths
             # fail-closed until their consumers are mapped deliberately.
             shared_reborn_action_changed = True
             continue
@@ -946,7 +965,7 @@ def build_plan(
             exact_test_targets[package].add(("test", Path(owner).stem))
             reasons.append(f"repository config parsed by {owner}: {path}")
             continue
-        if path in PR_STATIC_CONTROL_PATHS or path.startswith(
+        if path in PR_STATIC_CONTROL_FRAGMENTS or path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
             reasons.append(f"static CI or workspace-policy checks own: {path}")
@@ -1239,7 +1258,7 @@ def build_plan(
         )
     if shared_reborn_action_changed:
         return _full_plan(
-            "shared sccache action changed; this PR runs the exhaustive plan",
+            "shared reborn action changed; this PR runs the exhaustive plan",
             canonical_packages,
         )
 

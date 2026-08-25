@@ -287,6 +287,35 @@ TOOL_CALL_PATTERNS = [
             "content": f"approved {m.group('label')}\n",
         },
     ),
+    (
+        re.compile(
+            r"reborn create notification (?P<kind>approval|authentication|completed|failed) "
+            r"automation (?P<label>[a-z0-9_-]+)",
+            re.IGNORECASE,
+        ),
+        "builtin__trigger_create",
+        lambda m: {
+            "name": f"E2E notification {m.group('kind')} {m.group('label')}",
+            "execution_contract": {
+                "version": 1,
+                "goal": {
+                    "approval": f"reborn builtin echo notification-{m.group('label')}",
+                    "authentication": "reborn install github for auth gate",
+                    "completed": f"notification completed {m.group('label')}",
+                    "failed": f"notification failed {m.group('label')}",
+                }[m.group("kind").lower()],
+                "success_criteria": ["Complete the notification lifecycle fixture"],
+                "output_instructions": "Return a concise result",
+                "no_result_text": "No result",
+                "policy": {"result_delivery": "deliver"},
+            },
+            "schedule": {
+                "kind": "once",
+                "at": "2999-06-02T00:00:00",
+                "timezone": "UTC",
+            },
+        },
+    ),
     # Reborn WebUI v2 auth-gate smoke (#4633): installation parks on GitHub's
     # required manual-token credential, then resumes through product auth.
     (
@@ -2762,6 +2791,21 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     _observe_cache_prefix(messages, tools)
     available_tool_names = _available_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
+
+    # Notification outcome E2E fixture: make the scheduled run itself fail
+    # with a non-retryable provider response. The creation turn contains the
+    # same marker without the formatted Goal block, so it still succeeds and
+    # persists the automation before the run is started explicitly.
+    if _job_contains_marker(messages, "## Goal\n\nnotification failed "):
+        return web.json_response(
+            {
+                "error": {
+                    "message": "scripted notification outcome failure",
+                    "type": "server_error",
+                }
+            },
+            status=400,
+        )
 
     trace_response = next_llm_trace_response(
         request.app["llm_trace_state"], messages, available_tool_names

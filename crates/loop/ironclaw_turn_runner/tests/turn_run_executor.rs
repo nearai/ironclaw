@@ -21,6 +21,8 @@ use ironclaw_loop_contracts::{
     LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
     LoopRunInfoPort, LoopTranscriptPort, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
+use ironclaw_loop_host::AwaitEdgeSettler;
+use ironclaw_processes::ProcessTransitionPort;
 use ironclaw_turn_runner::{
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements},
     loop_exit_applier::InMemoryLoopExitEvidencePort,
@@ -29,9 +31,92 @@ use ironclaw_turn_runner::{
     turn_scheduler::TurnRunExecutor,
 };
 use ironclaw_turns::{
-    TurnRunState, loop_exit::LoopExitApplier, runner::ClaimedTurnRun,
+    TurnError, TurnRunState, loop_exit::LoopExitApplier, runner::ClaimedTurnRun,
     test_support::in_memory_agent_turn_process_system,
 };
+
+/// No-op `AwaitEdgeSettler` test double (per the task brief: executor tests
+/// that don't exercise the sweep wire a no-op fake rather than the real
+/// resolver, which needs a live process journal/thread service this test
+/// doesn't stand up).
+struct NoOpAwaitEdgeSettler;
+
+#[async_trait]
+impl AwaitEdgeSettler for NoOpAwaitEdgeSettler {
+    async fn on_child_terminal(
+        &self,
+        _event: &ironclaw_turns::TurnLifecycleEvent,
+    ) -> Result<ironclaw_loop_host::ResolveOutcome, AgentLoopHostError> {
+        Ok(ironclaw_loop_host::ResolveOutcome::NotApplicable)
+    }
+
+    async fn sweep_thread_on_run_start(
+        &self,
+        _scope: &ironclaw_turns::TurnScope,
+        _human_initiated: bool,
+    ) -> Result<(), AgentLoopHostError> {
+        Ok(())
+    }
+
+    fn bind_coordinator(
+        &self,
+        _coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_turn_tree_store(
+        &self,
+        _store: Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_result_writer(
+        &self,
+        _result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_input_enqueue(
+        &self,
+        _port: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn as_turn_committed_event_observer(
+        self: Arc<Self>,
+    ) -> Arc<dyn ironclaw_turns::TurnCommittedEventObserver> {
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_turns::TurnCommittedEventObserver for NoOpAwaitEdgeSettler {
+    fn observes_state(&self, _state: &ironclaw_turns::TurnRunState) -> bool {
+        false
+    }
+
+    fn observes_event(&self, _event: &ironclaw_turns::TurnLifecycleEvent) -> bool {
+        false
+    }
+
+    async fn observe_committed_state(
+        &self,
+        _state: ironclaw_turns::TurnRunState,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    async fn observe_committed_event(
+        &self,
+        _event: ironclaw_turns::TurnLifecycleEvent,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+}
 
 /// The executor test must reach the caller-level error mapping without making
 /// any host-port calls. Keeping those ports fail-closed makes the test prove
@@ -257,9 +342,125 @@ fn completed_exit() -> LoopExit {
     })
 }
 
-fn claimed_run(context: &LoopRunContext) -> ClaimedTurnRun {
+/// Records every `sweep_thread_on_run_start` call
+/// (`scope`/`human_initiated`) and replays a scripted `Result` — proves the
+/// executor derives `human_initiated` from the claimed run's
+/// `subagent_activation_provenance` and that a sweep failure does not stop
+/// the driver from running.
+#[derive(Default)]
+struct RecordingAwaitEdgeSettler {
+    calls: std::sync::Mutex<Vec<(ironclaw_turns::TurnScope, bool)>>,
+    sweep_result: std::sync::Mutex<Option<Result<(), AgentLoopHostError>>>,
+}
+
+impl RecordingAwaitEdgeSettler {
+    fn with_sweep_result(self, result: Result<(), AgentLoopHostError>) -> Self {
+        *self
+            .sweep_result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+        self
+    }
+
+    fn calls(&self) -> Vec<(ironclaw_turns::TurnScope, bool)> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AwaitEdgeSettler for RecordingAwaitEdgeSettler {
+    async fn on_child_terminal(
+        &self,
+        _event: &ironclaw_turns::TurnLifecycleEvent,
+    ) -> Result<ironclaw_loop_host::ResolveOutcome, AgentLoopHostError> {
+        Ok(ironclaw_loop_host::ResolveOutcome::NotApplicable)
+    }
+
+    async fn sweep_thread_on_run_start(
+        &self,
+        scope: &ironclaw_turns::TurnScope,
+        human_initiated: bool,
+    ) -> Result<(), AgentLoopHostError> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((scope.clone(), human_initiated));
+        self.sweep_result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or(Ok(()))
+    }
+
+    fn bind_coordinator(
+        &self,
+        _coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_turn_tree_store(
+        &self,
+        _store: Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_result_writer(
+        &self,
+        _result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn bind_input_enqueue(
+        &self,
+        _port: Arc<dyn ironclaw_loop_host::HostInputEnqueuePort>,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    fn as_turn_committed_event_observer(
+        self: Arc<Self>,
+    ) -> Arc<dyn ironclaw_turns::TurnCommittedEventObserver> {
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_turns::TurnCommittedEventObserver for RecordingAwaitEdgeSettler {
+    fn observes_state(&self, _state: &ironclaw_turns::TurnRunState) -> bool {
+        false
+    }
+
+    fn observes_event(&self, _event: &ironclaw_turns::TurnLifecycleEvent) -> bool {
+        false
+    }
+
+    async fn observe_committed_state(
+        &self,
+        _state: ironclaw_turns::TurnRunState,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+
+    async fn observe_committed_event(
+        &self,
+        _event: ironclaw_turns::TurnLifecycleEvent,
+    ) -> Result<(), ironclaw_turns::TurnError> {
+        Ok(())
+    }
+}
+
+fn claimed_run_with_provenance(
+    context: &LoopRunContext,
+    subagent_activation_provenance: Option<ironclaw_turns::ActivationProvenance>,
+) -> ClaimedTurnRun {
     ClaimedTurnRun {
-        subagent_activation_provenance: None,
+        subagent_activation_provenance,
         state: TurnRunState {
             scope: context.scope.clone(),
             actor: None,
@@ -297,6 +498,143 @@ fn claimed_run(context: &LoopRunContext) -> ClaimedTurnRun {
     }
 }
 
+fn claimed_run(context: &LoopRunContext) -> ClaimedTurnRun {
+    claimed_run_with_provenance(context, None)
+}
+
+/// Builds an executor identical to the finalizer-failure test's, except
+/// wired with the given `AwaitEdgeSettler`. Shared by the sweep-derivation
+/// tests below — none of them care how the run itself ends (finalization
+/// always fails in this fixture), only what the executor asked the settler
+/// for before the driver ran.
+fn build_executor_for_sweep_test(
+    context: &LoopRunContext,
+    settler: Arc<dyn AwaitEdgeSettler>,
+) -> (
+    RebornTurnRunExecutor,
+    Arc<dyn ProcessTransitionPort<Error = TurnError>>,
+) {
+    let descriptor = context.resolved_run_profile.loop_driver.clone();
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            Arc::new(ImmediateCompletedDriver { descriptor }),
+            DriverRequirements::all_optional(),
+            DriverKind::Reference,
+        )
+        .expect("register test driver");
+    let process_system = in_memory_agent_turn_process_system();
+    let transitions = process_system.transitions();
+    let applier = Arc::new(LoopExitApplier::new(
+        transitions.clone(),
+        Arc::new(InMemoryLoopExitEvidencePort::new()),
+    ));
+    let executor = RebornTurnRunExecutor::new(
+        applier,
+        Arc::new(registry),
+        Arc::new(FinalizationFailureHostFactory {
+            context: context.clone(),
+            supplemental_usage: LoopModelUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        }),
+        None,
+        settler,
+    );
+    (executor, transitions)
+}
+
+#[tokio::test]
+async fn execute_claimed_run_sweeps_with_human_initiated_true_for_default_provenance() {
+    let context = ironclaw_agent_loop::test_support::test_run_context("executor-sweep-human");
+    let settler = Arc::new(RecordingAwaitEdgeSettler::default());
+    let (executor, transitions) =
+        build_executor_for_sweep_test(&context, Arc::clone(&settler) as Arc<dyn AwaitEdgeSettler>);
+
+    let claimed = claimed_run_with_provenance(&context, None);
+    let claimed_scope = claimed.state.scope.clone();
+    let _ = executor.execute_claimed_run(claimed, transitions).await;
+
+    let calls = settler.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "the executor must sweep exactly once per run start"
+    );
+    assert_eq!(
+        calls[0].0, claimed_scope,
+        "the sweep must run over the claimed run's own scope"
+    );
+    assert!(
+        calls[0].1,
+        "absent activation provenance is a human/permitted start"
+    );
+}
+
+#[tokio::test]
+async fn execute_claimed_run_sweeps_with_human_initiated_false_for_system_provenance() {
+    let context = ironclaw_agent_loop::test_support::test_run_context("executor-sweep-system");
+    let settler = Arc::new(RecordingAwaitEdgeSettler::default());
+    let (executor, transitions) =
+        build_executor_for_sweep_test(&context, Arc::clone(&settler) as Arc<dyn AwaitEdgeSettler>);
+
+    let claimed =
+        claimed_run_with_provenance(&context, Some(ironclaw_turns::ActivationProvenance::System));
+    let _ = executor.execute_claimed_run(claimed, transitions).await;
+
+    let calls = settler.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(
+        !calls[0].1,
+        "a System-provenance (background wake) start is not human/permitted"
+    );
+}
+
+#[tokio::test]
+async fn execute_claimed_run_sweeps_with_human_initiated_false_for_parent_agent_provenance() {
+    let context = ironclaw_agent_loop::test_support::test_run_context("executor-sweep-parent");
+    let settler = Arc::new(RecordingAwaitEdgeSettler::default());
+    let (executor, transitions) =
+        build_executor_for_sweep_test(&context, Arc::clone(&settler) as Arc<dyn AwaitEdgeSettler>);
+
+    let claimed = claimed_run_with_provenance(
+        &context,
+        Some(ironclaw_turns::ActivationProvenance::ParentAgent),
+    );
+    let _ = executor.execute_claimed_run(claimed, transitions).await;
+
+    assert!(!settler.calls()[0].1);
+}
+
+/// A sweep failure must not stop the run start: the driver still runs and
+/// the run reaches its ordinary (here, still-failing) finalization outcome —
+/// proven by the SAME finalizer-failure category the baseline test asserts,
+/// which is only reachable once `invoke_driver` actually ran.
+#[tokio::test]
+async fn execute_claimed_run_runs_the_driver_even_when_the_sweep_fails() {
+    let context = ironclaw_agent_loop::test_support::test_run_context("executor-sweep-failure");
+    let settler = Arc::new(RecordingAwaitEdgeSettler::default().with_sweep_result(Err(
+        AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "sweep unavailable"),
+    )));
+    let (executor, transitions) =
+        build_executor_for_sweep_test(&context, Arc::clone(&settler) as Arc<dyn AwaitEdgeSettler>);
+
+    let error = executor
+        .execute_claimed_run(claimed_run(&context), transitions)
+        .await
+        .expect_err("the driver still runs and finalization still fails past the sweep");
+
+    assert_eq!(error.failure_category(), "structured_finalization_failed");
+    assert_eq!(
+        settler.calls().len(),
+        1,
+        "the sweep was still attempted once"
+    );
+}
+
 #[tokio::test]
 async fn execute_claimed_run_preserves_finalizer_usage_on_host_failure() {
     let context = ironclaw_agent_loop::test_support::test_run_context("executor-finalization");
@@ -330,6 +668,7 @@ async fn execute_claimed_run_preserves_finalizer_usage_on_host_failure() {
             supplemental_usage,
         }),
         None,
+        Arc::new(NoOpAwaitEdgeSettler) as Arc<dyn AwaitEdgeSettler>,
     );
 
     let error = executor

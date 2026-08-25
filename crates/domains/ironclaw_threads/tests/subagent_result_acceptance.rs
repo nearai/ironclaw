@@ -12,6 +12,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, Fault, FaultInjecting, FaultKind,
     FileStat, FilesystemError, FilesystemOperation, Filter, InMemoryBackend, IndexSpec,
@@ -19,21 +20,23 @@ use ironclaw_filesystem::{
     VersionedEntry,
 };
 use ironclaw_host_api::{
-    ids::{AgentId, ProjectId, TenantId, ThreadId, UserId},
+    ids::{AgentId, CapabilityId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptSubagentResultRequest, AcceptedInboundMessage,
     AcceptedInboundMessageReplay, AppendAssistantDraftRequest,
-    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, FramedSubagentText, InMemorySessionThreadService,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest,
+    CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
+    CapabilityDisplayPreviewStatus, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, FilesystemSessionThreadService, FramedSubagentText,
+    InMemorySessionThreadService, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use tokio::sync::Barrier;
 
@@ -82,6 +85,26 @@ async fn ensure_thread(service: &Arc<dyn SessionThreadService>) -> ThreadId {
         .await
         .expect("thread")
         .thread_id
+}
+
+fn preview_envelope() -> CapabilityDisplayPreviewEnvelope {
+    CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
+        invocation_id: InvocationId::new(),
+        capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+        status: CapabilityDisplayPreviewStatus::Completed,
+        title: "echo".to_string(),
+        subtitle: None,
+        input_summary: Some("{\"message\":\"hello\"}".to_string()),
+        output_summary: Some("text output".to_string()),
+        output_preview: Some("hello".to_string()),
+        output_kind: Some("text".to_string()),
+        output_bytes: Some(5),
+        result_ref: Some("result:demo-preview".to_string()),
+        truncated: false,
+        updated_at: Utc::now(),
+        activity_order: None,
+    })
+    .expect("preview envelope")
 }
 
 fn result_request(
@@ -975,12 +998,21 @@ async fn filesystem_an_empty_identity_half_is_refused() {
 /// retaining a pending flip that counts against `MAX_QUEUED_INPUTS_PER_RUN`
 /// and blocks `is_settled` (both `input_queue.rs`).
 ///
-/// This case pins today's refusal, and its shape, so the 2b implementer meets
-/// the trap as a red test rather than as a wedged parent run. The fix belongs
-/// in these backends — an already-terminal row has nothing to flip, so the
-/// flip returns it unchanged — never in widening `ensure_user_accepted` to
-/// admit system rows: that would re-open `Queued`/`RejectedBusy` onto a result
-/// row and erase the system-vs-user distinction this door exists to hold.
+/// This case pins today's refusal on the human steering door
+/// (`mark_message_queued`), and — per D14 — the *no-op* the queue's
+/// best-effort `Submitted` flip must get from `mark_message_submitted`: an
+/// already-terminal row has nothing to flip, so the flip returns it
+/// unchanged rather than erroring. Neither half widens `ensure_user_accepted`
+/// to admit system rows: that would re-open `Queued`/`RejectedBusy` onto a
+/// result row and erase the system-vs-user distinction this door exists to
+/// hold.
+///
+/// D14's no-op is scoped to `MessageKind::System` rows specifically — the
+/// exact kind `accept_subagent_result` writes — not to every finalized row.
+/// A finalized row of a different kind (`CapabilityDisplayPreview` here)
+/// must still fail loud through `InvalidMessageTransition`: a caller bug
+/// that calls `mark_message_submitted` against the wrong message id must
+/// surface, not silently succeed.
 async fn a_result_row_is_refused_by_the_steering_ladder(service: Arc<dyn SessionThreadService>) {
     let thread = ensure_thread(&service).await;
     let accepted = service
@@ -1003,6 +1035,19 @@ async fn a_result_row_is_refused_by_the_steering_ladder(service: Arc<dyn Session
         "expected InvalidMessageTransition from Finalized, got {queued:?}"
     );
 
+    // The queued refusal left the row exactly as accepted — still terminal,
+    // still system-class, still model-visible.
+    let before = service
+        .read_thread_message(&scope(), &thread, accepted.message_id)
+        .await
+        .expect("read succeeds")
+        .expect("row exists");
+    assert_eq!(before.kind, MessageKind::System);
+    assert_eq!(before.status, MessageStatus::Finalized);
+
+    // D14: the queue's best-effort Submitted flip treats an already-terminal
+    // row as already-settled — it succeeds and returns the row completely
+    // unchanged, not `InvalidMessageTransition`.
     let submitted = service
         .mark_message_submitted(
             &scope(),
@@ -1012,27 +1057,59 @@ async fn a_result_row_is_refused_by_the_steering_ladder(service: Arc<dyn Session
             "run-1".to_string(),
         )
         .await
-        .expect_err("the queue's best-effort Submitted flip cannot settle a terminal row today");
-    assert!(
-        matches!(
-            &submitted,
-            SessionThreadError::InvalidMessageTransition { message_id, from, attempted }
-                if *message_id == accepted.message_id
-                    && *from == MessageStatus::Finalized
-                    && *attempted == "mark_message_submitted"
-        ),
-        "expected InvalidMessageTransition from Finalized, got {submitted:?}"
+        .expect("the queue's best-effort Submitted flip no-ops on a terminal row");
+    assert_eq!(
+        submitted, before,
+        "a terminal row must come back byte-for-byte unchanged from the Submitted flip"
     );
 
-    // Both refusals left the row exactly as accepted — still terminal, still
-    // system-class, still model-visible.
-    let row = service
+    let after = service
         .read_thread_message(&scope(), &thread, accepted.message_id)
         .await
         .expect("read succeeds")
         .expect("row exists");
-    assert_eq!(row.kind, MessageKind::System);
-    assert_eq!(row.status, MessageStatus::Finalized);
+    assert_eq!(
+        after, before,
+        "the persisted row must be untouched by the Submitted flip"
+    );
+
+    // A finalized row of a DIFFERENT kind is not covered by the D14 no-op:
+    // the guard is scoped to `MessageKind::System` (the exact kind
+    // `accept_subagent_result` writes), so a caller bug that targets the
+    // wrong message id must still surface `InvalidMessageTransition` rather
+    // than silently succeeding.
+    let preview = service
+        .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
+            scope: scope(),
+            thread_id: thread.clone(),
+            turn_run_id: "run-1".to_string(),
+            preview: preview_envelope(),
+        })
+        .await
+        .expect("preview append succeeds");
+    assert_eq!(preview.kind, MessageKind::CapabilityDisplayPreview);
+    assert_eq!(preview.status, MessageStatus::Finalized);
+
+    let preview_submitted = service
+        .mark_message_submitted(
+            &scope(),
+            &thread,
+            preview.message_id,
+            "turn-1".to_string(),
+            "run-1".to_string(),
+        )
+        .await
+        .expect_err("a finalized non-system row must still be refused by mark_message_submitted");
+    assert!(
+        matches!(
+            &preview_submitted,
+            SessionThreadError::InvalidMessageTransition { message_id, from, attempted }
+                if *message_id == preview.message_id
+                    && *from == MessageStatus::Finalized
+                    && *attempted == "mark_message_submitted"
+        ),
+        "expected InvalidMessageTransition from Finalized, got {preview_submitted:?}"
+    );
 }
 
 #[tokio::test]

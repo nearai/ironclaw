@@ -394,6 +394,62 @@ where
         };
         prepared.remove(&run_id)
     }
+
+    async fn submit_with_resolved_profile(
+        &self,
+        request: SubmitTurnRequest,
+        resolved_run_profile: ResolvedRunProfile,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let started_at = live_latency_started_at();
+        let scope = request.scope.clone();
+        let response = match &self.process_runtime {
+            Some(runtime) => {
+                runtime
+                    .submit_turn_with_resolved_profile(
+                        request,
+                        resolved_run_profile,
+                        &*self.admission_policy,
+                    )
+                    .await
+            }
+            None => {
+                self.store
+                    .submit_turn_with_resolved_profile(
+                        request,
+                        resolved_run_profile,
+                        self.admission_policy.as_ref(),
+                    )
+                    .await
+            }
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                trace_coordinator_latency_error(
+                    "store_submit_turn_with_resolved_profile",
+                    &scope,
+                    None,
+                    started_at,
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        let SubmitTurnResponse::Accepted { run_id, .. } = &response;
+        trace_coordinator_latency_ok(
+            "store_submit_turn_with_resolved_profile",
+            &scope,
+            Some(*run_id),
+            started_at,
+        );
+        let wake_started_at = live_latency_started_at();
+        notify_queued_run_best_effort(
+            self.wake_notifier.as_ref(),
+            submit_wake(scope.clone(), &response),
+        );
+        trace_coordinator_latency_ok("notify_queued_run", &scope, Some(*run_id), wake_started_at);
+        Ok(response)
+    }
 }
 
 /// Per-submit resolver decorator that clamps the resolved profile's budget
@@ -606,6 +662,19 @@ where
         &self,
         request: ActivateThreadRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
+        if request.provenance == ActivationProvenance::Human
+            && request.resolved_run_profile.is_some()
+        {
+            return Err(TurnError::InvalidRequest {
+                reason: "human activation cannot supply a trusted run profile snapshot".to_string(),
+            });
+        }
+        if request.resolved_run_profile.is_some() && request.requested_run_profile.is_some() {
+            return Err(TurnError::InvalidRequest {
+                reason: "trusted activation cannot combine a profile snapshot with a profile hint"
+                    .to_string(),
+            });
+        }
         // Autonomous-wake containment. Nothing else bounds the cumulative
         // spawn -> settle -> wake -> spawn cycle: a parent that spawns a fresh
         // child on every background completion would otherwise loop
@@ -671,7 +740,8 @@ where
         // admission, idempotency replay, profile resolution, and the wake
         // notification are shared with every other submission. The only
         // difference an activation makes is the provenance stamp.
-        self.submit_turn(SubmitTurnRequest {
+        let resolved_run_profile = request.resolved_run_profile.clone();
+        let submit_request = SubmitTurnRequest {
             scope: request.scope,
             actor: request.actor,
             accepted_message_ref: request.accepted_message_ref,
@@ -686,8 +756,14 @@ where
             spawn_tree_root_run_id: None,
             product_context: None,
             subagent_activation_provenance: Some(request.provenance),
-        })
-        .await
+        };
+        match resolved_run_profile {
+            Some(resolved_run_profile) => {
+                self.submit_with_resolved_profile(submit_request, resolved_run_profile)
+                    .await
+            }
+            None => self.submit_turn(submit_request).await,
+        }
     }
 
     async fn resume_turn(
