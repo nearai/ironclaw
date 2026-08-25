@@ -22,7 +22,7 @@ pub enum GoogleDocsAction {
         title: String,
     },
 
-    /// Get document metadata and structure (title, body text, named ranges).
+    /// Get document metadata (title, revision, body length, named ranges).
     GetDocument {
         /// The document ID (same as Google Drive file ID).
         document_id: String,
@@ -163,6 +163,68 @@ pub enum GoogleDocsAction {
         /// Array of raw request objects as per Google Docs API.
         requests: Vec<serde_json::Value>,
     },
+
+    /// Inspect paragraphs and tables with stable document indexes.
+    InspectDocument {
+        /// The document ID.
+        document_id: String,
+    },
+
+    /// Apply one or more text replacements after validating their anchors.
+    ApplyTextEdits {
+        /// The document ID.
+        document_id: String,
+        /// Anchored replacements to apply atomically.
+        edits: Vec<AnchoredTextEdit>,
+    },
+
+    /// Insert and populate a rectangular table in one operation.
+    CreateTableWithData {
+        /// The document ID.
+        document_id: String,
+        /// Character index at which to insert the table.
+        index: i64,
+        /// Rectangular row-major table contents.
+        table_data: Vec<Vec<String>>,
+        /// Bold the first row after populating the table.
+        #[serde(default)]
+        bold_header: bool,
+    },
+
+    /// Verify expected text and table content against provider state.
+    VerifyDocument {
+        /// The document ID.
+        document_id: String,
+        /// Text fragments that must each occur in the document.
+        #[serde(default)]
+        expected_text: Vec<String>,
+        /// Tables that must match by position.
+        #[serde(default)]
+        expected_tables: Vec<TableExpectation>,
+    },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AnchoredTextEdit {
+    /// Exact text to replace.
+    pub find: String,
+    /// Replacement text.
+    pub replace: String,
+    /// Permit replacing every occurrence. When false, the anchor must be unique.
+    #[serde(default)]
+    pub replace_all: bool,
+    /// Case-sensitive match (default: true).
+    #[serde(default = "default_true")]
+    pub match_case: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TableExpectation {
+    /// Zero-based document-order table index. Defaults to the expectation's position.
+    #[serde(default)]
+    pub table_index: Option<usize>,
+    /// Expected row-major cell text. Each row must be rectangular.
+    pub table_data: Vec<Vec<String>>,
 }
 
 fn default_insert_index() -> i64 {
@@ -210,6 +272,91 @@ pub struct ReadContentResult {
     pub document_id: String,
     pub title: String,
     pub content: String,
+}
+
+/// Structured document result for semantic inspection.
+#[derive(Debug, Serialize)]
+pub struct InspectDocumentResult {
+    pub document_id: String,
+    pub title: String,
+    pub revision_id: String,
+    pub body_length: i64,
+    pub elements: Vec<DocumentElement>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DocumentElement {
+    Paragraph(ParagraphElement),
+    Table(TableElement),
+}
+
+#[derive(Debug, Serialize)]
+pub struct ParagraphElement {
+    pub start_index: i64,
+    pub end_index: i64,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub named_style: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TableElement {
+    pub start_index: i64,
+    pub end_index: i64,
+    pub rows: Vec<Vec<TableCell>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TableCell {
+    pub start_index: i64,
+    pub end_index: i64,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApplyTextEditsResult {
+    pub document_id: String,
+    pub revision_id: String,
+    pub edits_applied: usize,
+    pub occurrences_changed: i64,
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CreateTableStage {
+    TableInserted,
+    TablePopulated,
+    HeaderStyled,
+    Verified,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateTableWithDataResult {
+    pub document_id: String,
+    pub revision_id: String,
+    pub rows: usize,
+    pub columns: usize,
+    pub populated_cells: usize,
+    pub verified: bool,
+    pub stage: CreateTableStage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerifyDocumentResult {
+    pub document_id: String,
+    pub revision_id: String,
+    pub verified: bool,
+    pub checks: Vec<VerificationCheck>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerificationCheck {
+    pub expectation: String,
+    pub passed: bool,
 }
 
 /// Result from insert_text, delete_content, replace_text.

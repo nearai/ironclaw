@@ -1095,7 +1095,10 @@ impl RecordingLlm {
 
         let new_messages = &messages[start..];
 
-        // Emit UserInput steps for new user messages
+        // Emit UserInput steps for new user messages. `Role::User` only — a
+        // `Role::HostReminder` is host boilerplate appended per request, not
+        // something the user typed, and recording it as user input would put a
+        // fresh timestamp into every replayed trace (#6985).
         let new_user_messages: Vec<&ChatMessage> = new_messages
             .iter()
             .filter(|m| m.role == Role::User)
@@ -1139,6 +1142,9 @@ impl RecordingLlm {
         // the stable prefix (e.g. "[Tool `mission_create` returned:") and
         // drop the volatile payload (mission UUIDs, etc.). The fallback is
         // a hard cap at 80 bytes on a UTF-8 char boundary.
+        // `Role::User` only: the tail `Role::HostReminder` carries the runtime
+        // clock, so hinting on it would embed a per-run timestamp in the trace
+        // and never match on replay — exactly the volatility this hint avoids.
         let hint = messages
             .iter()
             .rev()

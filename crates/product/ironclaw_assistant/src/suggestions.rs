@@ -1,15 +1,7 @@
 //! Product-surface orchestration for durable backend suggestions.
 
 use chrono::{Duration as ChronoDuration, Utc};
-use ironclaw_host_api::{
-    capability::EXTENSION_SEARCH_CAPABILITY_ID,
-    ids::{CapabilityId, InvocationId},
-    output::OutputContract,
-    resource::ResourceScope,
-};
-use ironclaw_memory::{
-    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
-};
+use ironclaw_host_api::{ids::InvocationId, output::OutputContract, resource::ResourceScope};
 use ironclaw_product_contracts::{
     inbound::ProductInboundAck,
     inbound_requests::{
@@ -96,7 +88,6 @@ where
         // Validate every local prerequisite before claiming the durable
         // generation. Once the claim exists, only the accept door and its
         // bounded lease window remain, so a crash can be recovered safely.
-        let tools = suggestion_tool_allowlist()?;
         let output = suggestion_output_contract()?;
         let scope = suggestion_scope(&caller);
         let proposed_generation_id = GenerationId::new(Uuid::new_v4().to_string())
@@ -171,7 +162,6 @@ where
                 accept_key: &accept_key,
                 existing_run_id: run_id,
                 lease_owner: &lease_owner,
-                tools: &tools,
                 output: &output,
             },
         )
@@ -319,7 +309,6 @@ struct SuggestionGenerationSubmission<'a> {
     accept_key: &'a str,
     existing_run_id: Option<ironclaw_host_api::turn::TurnRunId>,
     lease_owner: &'a str,
-    tools: &'a [CapabilityId],
     output: &'a OutputContract,
 }
 
@@ -336,7 +325,6 @@ async fn submit_suggestion_generation(
         accept_key,
         existing_run_id,
         lease_owner,
-        tools,
         output,
     } = submission_context;
     let submission = UnboundTurnSubmission {
@@ -349,7 +337,15 @@ async fn submit_suggestion_generation(
                 "Generate useful suggestions for what I can ask IronClaw to do next.",
             )],
         }],
-        tools: tools.to_vec(),
+        // No declared tool list: the run takes the profile's surface,
+        // narrowed by `require_no_approval` to what the user's own permissions
+        // already auto-run. That narrowing does not restrict effects — the
+        // surface can include write-effect capabilities the user has
+        // auto-approved; read/list-only behaviour is carried by
+        // SUGGESTION_SYSTEM_PROMPT alone, not enforced here. Declaring ids
+        // here would mean re-deriving the approval decision in product code.
+        tools: Vec::new(),
+        require_no_approval: true,
         output: output.clone(),
         requested_model: None,
         idempotency_key: accept_key.to_string(),
@@ -398,20 +394,6 @@ async fn submit_suggestion_generation(
         .as_ref()
         .map(active_suggestions)
         .unwrap_or_else(empty_suggestions_response))
-}
-
-fn suggestion_tool_allowlist() -> Result<Vec<CapabilityId>, ProductSurfaceError> {
-    [
-        MEMORY_SEARCH_CAPABILITY_ID,
-        MEMORY_READ_CAPABILITY_ID,
-        MEMORY_TREE_CAPABILITY_ID,
-        EXTENSION_SEARCH_CAPABILITY_ID,
-    ]
-    .into_iter()
-    .map(|capability_id| {
-        CapabilityId::new(capability_id).map_err(ProductSurfaceError::internal_from)
-    })
-    .collect()
 }
 
 fn suggestion_output_contract() -> Result<OutputContract, ProductSurfaceError> {

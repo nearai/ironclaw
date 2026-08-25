@@ -27,6 +27,11 @@ Observers and transport projections do not own state. A committed journal
 mutation is successful even if an in-process wake hint fails; required
 consumers must be replayable from durable journal cursors.
 
+Background observer replay uses a bounded exponential retry budget. Exhausting
+that budget emits an operator-visible error and stops without acknowledging the
+cursor; a later commit or observer registration resumes from the same durable
+position instead of losing the stalled commit.
+
 ## Durable layout
 
 The store uses `RootFilesystem` multi-key transactions under:

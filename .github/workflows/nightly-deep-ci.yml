@@ -107,7 +107,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: ./.github/actions/setup-rust
       - name: Install pinned cargo-mutants
         run: cargo install cargo-mutants --locked --version 27.1.0
       - name: Self-test mutation audit guardrails

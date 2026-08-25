@@ -124,12 +124,23 @@ async fn profile_set_write_is_readable_through_the_wired_profile_source() {
         .submit_turn("what's my setup")
         .await
         .expect("turn completes");
+    // Profile facts render inside the runtime-context section, which rides
+    // the conversation tail as a <system-reminder> user message so the cached
+    // system prefix stays byte-stable (#6985).
     prompt_thread
-        .assert_system_prompt_contains("locale=en-US")
+        .assert_system_prompt_excludes("locale=en-US")
         .await
-        .expect("profile_set locale must reach the model-visible system prompt");
+        .expect("profile_set locale must stay out of the cached system prefix");
     prompt_thread
-        .assert_system_prompt_contains("America/Los_Angeles")
+        .assert_system_prompt_excludes("America/Los_Angeles")
         .await
-        .expect("profile_set timezone must reach the model-visible system prompt");
+        .expect("profile_set timezone must stay out of the cached system prefix");
+    prompt_thread
+        .assert_rides_conversation_tail("locale=en-US")
+        .await
+        .expect("profile_set locale must ride the conversation tail");
+    prompt_thread
+        .assert_rides_conversation_tail("America/Los_Angeles")
+        .await
+        .expect("profile_set timezone must ride the conversation tail");
 }

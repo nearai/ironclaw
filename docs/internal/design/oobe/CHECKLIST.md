@@ -12,8 +12,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done. Every code box imp
 - [x] Branch merged up to date with `main` (post-#6918 family-folder reorg); the `AUTOMATION-TASKS-CONTRACT.md` moved into `docs/design/oobe/`.
 - [ ] **Carousel gate (D-F5)** — *deferred to the implementation PR:* when the carousel is (re)built, it must not return `MOCK_COMPLETED_TASKS` to real users (behind DEV/flag or an empty real projection).
 - [x] Contract reconciled to the post-#6918 family-folder names (`ironclaw_event_log` + `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `ironclaw_assistant`; `src/webui_v2/` confirmed current).
-- [ ] Decision round #1 recorded (PROPOSAL §10 items 2, 4, 5).
-- [ ] (If approved) first-draft `DESIGN.md` seeded with v2 tokens + card taxonomy (D-F6).
+- [ ] Decision round #1 recorded (PROPOSAL §10 items 2 and 4; item 5 settled 2026-08-21).
+- [x] D-F6 settled — `DESIGN.md`, tokens and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md); no local seed is landed here (PROPOSAL §5.6).
 
 ## F1 — Automation-task backend (D-F1)
 
@@ -52,10 +52,12 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done. Every code box imp
 - [ ] Carousel gate (D-F5) retired — projection is the source of truth.
 - [ ] Foundational demoable end-to-end on a fresh account.
 
-## F5 — Design track (D-F6) — optional, parallel
+## F5 — Design track pilot (D-F6) — optional, parallel
 
-- [ ] `DESIGN.md` finalized (principles · theming · typography · a11y floors · card taxonomy · REJECT list).
-- [ ] (Optional) Storybook workbench for card / action-bar / drawer / mode-pill: smoke play test + token/CSS check + one story per state.
+*✎ 2026-08-21: `DESIGN.md`, tokens and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257) — OOBE contributes the pilot, not the governance (PROPOSAL §5.6).*
+
+- [ ] OOBE card taxonomy + a11y floors contributed **into** that program's `DESIGN.md` (Phase-2 work, issue #7042 under Epic #7781) — no parallel constitution seeded here.
+- [ ] Card / action-bar / drawer / mode-pill stories added to the Phase-1 catalog (#7750) once it lands: smoke play test + token/CSS check + one story per state.
 - [ ] Design validation gate passes on the OOBE components (1:1 parity vs. mockup; tokens; light+dark; a11y).
 
 ## Foundational exit gate

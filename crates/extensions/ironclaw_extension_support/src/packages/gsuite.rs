@@ -297,7 +297,11 @@ pub(super) fn google_docs_bundle() -> PackageBundle {
                 "format_paragraph",
                 "insert_table",
                 "create_list",
-                "batch_update"
+                "batch_update",
+                "inspect_document",
+                "apply_text_edits",
+                "create_table_with_data",
+                "verify_document"
             ]
         ),
         onboarding: None,
@@ -393,5 +397,38 @@ pub(super) fn google_slides_bundle() -> PackageBundle {
         ),
         onboarding: None,
         trust_effects: Some(trust_effects()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn google_docs_bundle_embeds_semantic_tool_assets() {
+        let bundle = google_docs_bundle();
+        let paths: Vec<&str> = bundle
+            .assets
+            .iter()
+            .map(|asset| asset.path.as_str())
+            .collect();
+
+        for operation in [
+            "inspect_document",
+            "apply_text_edits",
+            "create_table_with_data",
+            "verify_document",
+        ] {
+            let schema_path = format!("schemas/google-docs/{operation}.input.v1.json");
+            assert!(
+                paths.contains(&schema_path.as_str()),
+                "missing schema asset for {operation}"
+            );
+            let prompt_path = format!("prompts/google-docs/{operation}.md");
+            assert!(
+                paths.contains(&prompt_path.as_str()),
+                "missing prompt asset for {operation}"
+            );
+        }
     }
 }

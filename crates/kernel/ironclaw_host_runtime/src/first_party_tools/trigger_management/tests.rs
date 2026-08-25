@@ -48,6 +48,20 @@ fn execution_contract(goal: impl Into<String>) -> Value {
 #[test]
 fn trigger_create_description_teaches_contract_owned_delivery_with_no_stored_target() {
     assert!(
+        TRIGGER_CREATE_DESCRIPTION.contains("Keep the contract concise and outcome-focused")
+            && TRIGGER_CREATE_DESCRIPTION.contains("Do not inspect or enumerate future-work data")
+            && TRIGGER_CREATE_DESCRIPTION
+                .contains("do not prescribe a speculative tool-call sequence"),
+        "trigger_create must avoid creation-time simulation of the future run: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
+        TRIGGER_CREATE_DESCRIPTION
+            .contains("A successful response means the routine is durably persisted")
+            && TRIGGER_CREATE_DESCRIPTION.contains("do not call trigger_create again")
+            && TRIGGER_CREATE_DESCRIPTION.contains("unless the user explicitly asks"),
+        "trigger_create success must be a terminal authoring outcome: {TRIGGER_CREATE_DESCRIPTION}"
+    );
+    assert!(
         TRIGGER_CREATE_DESCRIPTION
             .contains("Derive execution_contract.policy.result_delivery from the user's wording")
             && TRIGGER_CREATE_DESCRIPTION.contains(
@@ -348,6 +362,16 @@ async fn structured_trigger_create_persists_contract_and_frozen_prompt() {
     )
     .await
     .expect("structured trigger created");
+    assert_eq!(output["authoring_status"], "complete");
+    assert!(
+        output["next_action"]
+            .as_str()
+            .is_some_and(
+                |guidance| guidance.contains("Do not call trigger_create again")
+                    && guidance.contains("unless the user explicitly asks")
+            ),
+        "successful persistence must give the model an explicit terminal authoring outcome: {output}"
+    );
     assert_eq!(output["trigger"]["execution_contract"]["version"], 1);
 
     let records = repository

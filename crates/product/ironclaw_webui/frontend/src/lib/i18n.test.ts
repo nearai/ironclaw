@@ -538,11 +538,12 @@ test("locale packs include extension setup and OAuth failure copy", () => {
   }
 });
 
-test("pairing connect copy drops the removed paste-a-code flow and stays consistent across locales", () => {
-  // Keys retired with the paste-a-code pairing panel / renamed fallbacks — must
-  // be gone from EVERY locale (there is no full key-set parity test, so a
-  // straggler in one locale would otherwise linger silently).
+test("locale packs drop retired UI keys and stay consistent across locales", () => {
+  // Keys retired with removed UI flows — must be gone from EVERY locale (there
+  // is no full key-set parity test, so a straggler in one locale would
+  // otherwise linger silently).
   const retiredKeys = [
+    "login.tagline",
     "pairing.title",
     "pairing.instructions",
     "pairing.placeholder",

@@ -44,9 +44,12 @@ export function useSuggestions() {
   const start = useMutation({
     mutationFn: (suggestionId: string) => startSuggestion(suggestionId),
     // The started card gains a durable thread/run binding; refresh so it
-    // renders as started if the user comes back to the landing.
+    // renders as started if the user comes back to the landing. Starting also
+    // creates a thread server-side, outside useThreads, so refresh the
+    // non-polling sidebar query at the same boundary.
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: SUGGESTIONS_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
     },
   });
 

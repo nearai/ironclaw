@@ -1410,11 +1410,12 @@ async def test_reborn_v2_settings_import_rejects_unsupported_payloads(
                 "buffer": json.dumps({"settings": settings}).encode(),
             }
         )
-        status = reborn_v2_page.get_by_role("status").filter(
+        error_notice = reborn_v2_page.get_by_role("alert").filter(
             has_text="No supported settings found in the selected file"
         )
-        await expect(status).to_have_count(1)
-        await expect(status).to_have_text(
+        await expect(error_notice).to_have_count(1)
+        await expect(error_notice).to_have_attribute("data-tone", "danger")
+        await expect(error_notice).to_have_text(
             "No supported settings found in the selected file"
         )
         await expect(
