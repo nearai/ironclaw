@@ -64,6 +64,7 @@ test("opening a cold notification center immediately renders a loading shell", a
     "[data-testid='notification-panel-loading']",
   );
   assert.ok(loadingShell, "the lazy boundary provides immediate visual feedback");
+  assert.equal(loadingShell.getAttribute("role"), "status");
   assert.equal(loadingShell.getAttribute("aria-busy"), "true");
   assert.match(loadingShell.textContent || "", /notifications\.loadingTitle/);
 

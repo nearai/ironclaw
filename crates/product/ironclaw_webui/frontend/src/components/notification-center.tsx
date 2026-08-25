@@ -14,12 +14,8 @@ const NotificationPanel = React.lazy(() =>
   }))
 );
 
-function NotificationPanelLoading({ close, panelRef }) {
+function NotificationPanelLoading({ close }) {
   const t = useT();
-
-  React.useEffect(() => {
-    panelRef.current?.focus?.();
-  }, [panelRef]);
 
   if (typeof document === "undefined") return null;
   return createPortal(
@@ -32,41 +28,20 @@ function NotificationPanelLoading({ close, panelRef }) {
         className="fixed inset-0 z-[9998] bg-black/35 lg:bg-transparent"
       />
       <section
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("notifications.title")}
+        role="status"
+        aria-live="polite"
         aria-busy="true"
         data-testid="notification-panel-loading"
-        ref={panelRef}
-        tabIndex={-1}
         className={cn(
           "fixed inset-x-0 bottom-0 z-[9999] overflow-hidden",
           "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_24px_70px_-24px_rgba(0,0,0,0.8)]",
           "lg:inset-auto lg:right-12 lg:top-16 lg:w-[24rem] lg:rounded-[12px]",
         )}
       >
-        <div className="flex items-center justify-between gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3">
-          <h2 className="text-sm font-semibold text-[var(--v2-text-strong)]">
-            {t("notifications.title")}
-          </h2>
-          <button
-            type="button"
-            onClick={close}
-            aria-label={t("notifications.close")}
-            title={t("notifications.close")}
-            className={cn(
-              "grid h-7 w-7 place-items-center rounded-[8px]",
-              "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
-            )}
-          >
-            <Icon name="close" className="h-4 w-4" />
-          </button>
+        <div className="border-b border-[var(--v2-panel-border)] px-4 py-3">
+          <div aria-hidden="true" className="v2-skeleton h-4 w-24 rounded" />
         </div>
-        <div
-          role="status"
-          aria-live="polite"
-          className="space-y-3 px-4 py-4"
-        >
+        <div className="space-y-3 px-4 py-4">
           <p className="text-xs text-[var(--v2-text-muted)]">
             {t("notifications.loadingTitle")}
           </p>
@@ -180,7 +155,7 @@ export function NotificationCenter({ state }) {
       {open &&
       (
         <React.Suspense
-          fallback={<NotificationPanelLoading close={close} panelRef={panelRef} />}
+          fallback={<NotificationPanelLoading close={close} />}
         >
           <NotificationPanel
             messages={messages}
