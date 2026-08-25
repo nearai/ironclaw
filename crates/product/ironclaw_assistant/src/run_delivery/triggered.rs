@@ -894,6 +894,22 @@ async fn notify_background_run(
                     error = %err,
                     "background run notification build failed"
                 );
+                if state.status == TurnStatus::BlockedAuth
+                    && let Some(marker) = blocked_actionable_marker(&state)
+                {
+                    // The Inbox publication happened before optional prompt
+                    // enrichment. Keep its lifecycle aligned after external
+                    // auth rendering fails, without retaining this delivery
+                    // permit or retrying the broken channel surface.
+                    spawn_inbox_gate_observer(
+                        services,
+                        *settings,
+                        scope.clone(),
+                        creator_user_id.clone(),
+                        run_id,
+                        marker,
+                    );
+                }
                 let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;

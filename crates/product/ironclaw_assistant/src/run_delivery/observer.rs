@@ -590,6 +590,22 @@ impl RunDeliveryObserver {
                     )
                     .await;
             }
+            // Persist the actionable gate before optional prompt enrichment or
+            // channel rendering. An auth-provider outage must not hide the
+            // run-bound recovery action from the durable WebUI Inbox.
+            if actionable_state.status == TurnStatus::BlockedAuth
+                && let Some(kind) = super::blocked_status_notification_kind(actionable_state.status)
+            {
+                self.services
+                    .publish_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        actionable_state.gate_ref.as_ref().map(|gate| gate.as_str()),
+                    )
+                    .await;
+            }
             let notification = match self
                 .notification_for_actionable_state(
                     &envelope,
@@ -599,10 +615,10 @@ impl RunDeliveryObserver {
                     run_id,
                     &actionable_state,
                 )
-                .await?
+                .await
             {
-                Some(notification) => notification,
-                None => {
+                Ok(Some(notification)) => notification,
+                Ok(None) => {
                     // A terminal state produced no deliverable notification.
                     // Never leave a stuck working indicator: retract it. For a
                     // genuine failure (not a completed-but-empty run) also post a
@@ -651,10 +667,31 @@ impl RunDeliveryObserver {
                     }
                     return Ok(());
                 }
+                Err(error)
+                    if actionable_state.status == TurnStatus::BlockedAuth
+                        && next_blocked_marker.is_some() =>
+                {
+                    // Prompt enrichment and external rendering are optional
+                    // delivery surfaces. Keep the authoritative Inbox item
+                    // actionable and continue observing so verified recovery
+                    // can resolve it even while the auth prompt backend is
+                    // unavailable.
+                    tracing::warn!(
+                        target: "ironclaw::reborn::run_delivery",
+                        %run_id,
+                        %error,
+                        "auth prompt enrichment failed; continuing with durable Inbox notification"
+                    );
+                    delivered_blocked_marker = next_blocked_marker;
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
             let event_kind = notification.event_kind;
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
-            if let Some(kind) = inbox_kind_for_event(event_kind) {
+            if actionable_state.status != TurnStatus::BlockedAuth
+                && let Some(kind) = inbox_kind_for_event(event_kind)
+            {
                 self.services
                     .publish_inbox_notification(
                         &binding.actor_user_id,

@@ -573,6 +573,22 @@ struct OAuthPromptSource {
     authorization_url: Option<String>,
 }
 
+struct FailingAuthPromptSource;
+
+#[async_trait]
+impl BlockedAuthPromptSource for FailingAuthPromptSource {
+    async fn auth_prompt_for_blocked_run(
+        &self,
+        _request: BlockedAuthPromptRequest<'_>,
+    ) -> Result<AuthPromptView, ProductAdapterError> {
+        Err(ProductAdapterError::SurfaceTransient {
+            reason: ironclaw_host_api::product_adapter_error::RedactedString::new(
+                "auth prompt backend unavailable",
+            ),
+        })
+    }
+}
+
 #[async_trait]
 impl BlockedAuthPromptSource for OAuthPromptSource {
     async fn auth_prompt_for_blocked_run(
@@ -2203,6 +2219,76 @@ async fn observer_delivers_a_prompt_for_each_distinct_auth_gate() {
 }
 
 #[tokio::test]
+async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
+    const GATE: &str = "gate:auth-extension-00000000000000000000000001";
+    let harness = build_harness_with_gate_ports(
+        vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(GATE)),
+            scripted_state(TurnStatus::BlockedAuth, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
+        },
+        &["status"],
+        None,
+        binding(),
+        Some(Arc::new(FailingAuthPromptSource)),
+        None,
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "authenticated and finished").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-auth-enrichment-down"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::AuthenticationRequired
+    );
+    assert_eq!(inbox.notifications[0].source.turn_run_id, Some(run_id));
+    assert_eq!(
+        inbox.notifications[0]
+            .source
+            .lifecycle_ref
+            .as_ref()
+            .map(|reference| reference.as_str()),
+        Some(GATE)
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_some(),
+        "verified run recovery resolves the durable auth notification"
+    );
+    assert!(
+        harness
+            .adapter
+            .texts()
+            .iter()
+            .all(|text| !text.contains("Authentication required")),
+        "a failed enrichment must not invent an auth channel prompt"
+    );
+    assert_eq!(
+        harness.adapter.texts().last().map(String::as_str),
+        Some("authenticated and finished"),
+        "prompt enrichment failure must not abort final reply observation"
+    );
+}
+
+#[tokio::test]
 async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route() {
     // `vendor_message_ref` is an unvalidated vendor string, so a channel can
     // hand back a ref that is not a legal route segment (here: a control
@@ -2818,7 +2904,11 @@ fn build_triggered_harness_with_turns(
     let initially_active = catalog.clone();
     build_triggered_harness_with_turns_catalog(
         turns,
-        auth_url,
+        auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
         catalog,
         initially_active,
         None,
@@ -2867,7 +2957,11 @@ fn build_triggered_harness_with_catalog(
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     build_triggered_harness_with_turns_catalog(
         turns,
-        auth_url,
+        auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
         catalog,
         initially_active,
         communication_preferences,
@@ -2878,7 +2972,7 @@ fn build_triggered_harness_with_catalog(
 /// [`build_triggered_harness_with_catalog`] with a prebuilt turn coordinator.
 fn build_triggered_harness_with_turns_catalog(
     turns: Arc<ScriptedTurnCoordinator>,
-    auth_url: Option<&str>,
+    blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     catalog: Vec<TestNotificationTarget>,
     initially_active: Vec<TestNotificationTarget>,
     communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
@@ -2929,11 +3023,7 @@ fn build_triggered_harness_with_turns_catalog(
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
         approval_context: None,
-        blocked_auth_prompts: auth_url.map(|url| {
-            Arc::new(OAuthPromptSource {
-                authorization_url: Some(url.to_string()),
-            }) as Arc<dyn BlockedAuthPromptSource>
-        }),
+        blocked_auth_prompts,
         auth_flow_cancel: None,
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
@@ -3550,6 +3640,52 @@ async fn triggered_auth_prompt_reaches_only_dm_targets_and_run_stays_parked() {
     assert_eq!(
         delivered_conversations(&harness.adapter),
         vec!["dm-creator".to_string(), "chan-eng".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn triggered_auth_prompt_failure_keeps_inbox_lifecycle_observable() {
+    const GATE: &str = "gate:auth-extension-00000000000000000000000002";
+    let harness = build_triggered_harness_with_turns_catalog(
+        Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ])),
+        Some(Arc::new(FailingAuthPromptSource)),
+        vec![DM_TARGET],
+        vec![DM_TARGET],
+        None,
+        None,
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed
+    );
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::AuthenticationRequired,
+        GATE,
+    )
+    .await;
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::AuthenticationRequired
+    );
+    assert!(inbox.notifications[0].resolved_at.is_some());
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "failed enrichment must not invent or retry external auth copy"
     );
 }
 
