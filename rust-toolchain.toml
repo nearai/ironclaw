@@ -1,0 +1,24 @@
+# Single source of truth for the Rust toolchain, local and CI.
+# - Every in-repo cargo/rustc run resolves this file (rustup precedence:
+#   RUSTUP_TOOLCHAIN env > directory override > this file > rustup default),
+#   so local clippy/rustfmt finally match CI's.
+# - CI workflows install Rust through
+#   .github/actions/setup-rust, whose `toolchain` input defaults to the same
+#   version as `channel` below (kept in sync by
+#   scripts/ci/ws12_workflow_contracts.py); a lane that intentionally runs a
+#   different toolchain (the two nightly-2025-11-01 coverage lanes) passes
+#   an explicit `toolchain:` input, and the composite exports
+#   RUSTUP_TOOLCHAIN naming exactly what it installed either way, so this
+#   file can never silently override a job's chosen toolchain.
+# - The cargo-dist release workflow is covered through
+#   .github/dist-build-setup.yml, which cargo-dist re-includes on every
+#   regeneration, so no lane installs Rust outside the composite.
+# - Bumping: change `channel` here AND the `toolchain` input default in
+#   .github/actions/setup-rust/action.yml in the same PR (the ws12 gate
+#   fails on any mismatch). Expect Swatinem/rust-cache keys to rotate with
+#   the compiler version.
+# - Docker builds are unaffected: the Dockerfile COPYs an explicit path list
+#   that excludes this file and stays on its base-image toolchain.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]

@@ -89,7 +89,6 @@ registerPack("ar", {
   "status.checking": "جارٍ التحقق",
 
   // Login page
-  "login.tagline": "Gateway v2",
   "login.hero": "تحكم بالوكيل المحلي دون فقدان أثر المُشغِّل.",
   "login.heroSub": "يُبقي الوصول عبر الرمز (Token) وحدة تحكم المتصفح مرتبطة بنفس تشغيل البوابة والموافقات والأدوات وحالة الخيط.",
   "login.bearerAuth": "مصادقة Bearer",

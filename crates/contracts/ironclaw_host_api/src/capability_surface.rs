@@ -160,6 +160,16 @@ impl CapabilitySurfacePolicy {
         self.capability_ids = self.capability_ids.without(denied);
         self
     }
+
+    /// Drop capabilities whose authorization resolves to `RequireApproval`
+    /// from the surface, instead of rendering them as askable.
+    ///
+    /// For an unattended run there is nobody to answer the prompt, so an
+    /// askable capability is a run that parks rather than one that asks.
+    pub fn without_approval_gated(mut self) -> Self {
+        self.include_requires_approval = false;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +219,15 @@ mod tests {
             .narrow_to_capability_ids([shared.clone(), child_only]);
 
         assert_eq!(policy.capability_ids, CapabilityIdScope::only([shared]));
+    }
+
+    #[test]
+    fn without_approval_gated_stops_rendering_askable_capabilities() {
+        let policy = CapabilitySurfacePolicy::allow_all();
+        assert!(policy.include_requires_approval);
+
+        let policy = policy.without_approval_gated();
+
+        assert!(!policy.include_requires_approval);
     }
 }

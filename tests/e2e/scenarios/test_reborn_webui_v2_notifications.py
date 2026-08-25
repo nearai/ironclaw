@@ -275,10 +275,11 @@ async def test_reborn_v2_completion_waits_for_matching_final_reply_render(
             """,
             ["run-unrelated", "An unrelated run answered."],
         )
-        await expect(page.locator(SEL_V2["msg_assistant"])).to_contain_text(
-            "An unrelated run answered.",
-            timeout=5000,
+        unrelated_reply = page.locator(SEL_V2["msg_assistant"]).filter(
+            has_text="An unrelated run answered."
         )
+        await unrelated_reply.first.wait_for(state="visible", timeout=5000)
+        assert await unrelated_reply.count() == 1
         assert state["read_at"] is None
 
         async with page.expect_response(
@@ -300,10 +301,11 @@ async def test_reborn_v2_completion_waits_for_matching_final_reply_render(
                 [RUN_ID, "The scheduled report is ready."],
             )
 
-        await expect(page.locator(SEL_V2["msg_assistant"])).to_contain_text(
-            "The scheduled report is ready.",
-            timeout=5000,
+        matching_reply = page.locator(SEL_V2["msg_assistant"]).filter(
+            has_text="The scheduled report is ready."
         )
+        await matching_reply.first.wait_for(state="visible", timeout=5000)
+        assert await matching_reply.count() == 1
         assert state["read_at"] is not None
         # The point of deferring the acknowledgement is that the answer is on
         # screen before the notification is settled. Asserting the DOM after the

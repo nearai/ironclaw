@@ -22,6 +22,10 @@
 //! - `insert_table`: Insert a table at a position
 //! - `create_list`: Create bulleted/numbered list from paragraphs
 //! - `batch_update`: Execute multiple raw Docs API operations atomically
+//! - `inspect_document`: Read paragraphs and tables with document indexes
+//! - `apply_text_edits`: Apply validated text-anchored replacements atomically
+//! - `create_table_with_data`: Insert, populate, style, and verify a table
+//! - `verify_document`: Verify expected text and table contents
 //!
 //! # Tips
 //!
@@ -32,6 +36,8 @@
 //! - Use index -1 to append at the end of the document.
 //! - When doing multiple edits, process from highest index to lowest
 //!   to avoid index shifting issues.
+//! - Prefer inspect_document, apply_text_edits, create_table_with_data, and
+//!   verify_document over manual index probing for ordinary document work.
 //!
 //! # Example Usage
 //!
@@ -74,11 +80,12 @@ impl exports::near::agent::tool::Guest for GoogleDocsTool {
     }
 
     fn description() -> String {
-        "Google Docs integration for creating, reading, editing, and formatting documents. \
-         Supports text operations (insert, delete, find-replace), text formatting (bold, italic, \
-         font, color, size), paragraph styling (headings, alignment, spacing), tables, and \
-         bulleted/numbered lists. Also provides a batch_update action for complex multi-step \
-         edits executed atomically. Document IDs are the same as Google Drive file IDs, so use \
+        "Google Docs integration for creating, inspecting, editing, verifying, and formatting \
+         documents. Prefer the semantic inspect_document, apply_text_edits, \
+         create_table_with_data, and verify_document actions for validated operations with \
+         provider read-back. Low-level index-based text, formatting, table, list, and batch_update \
+         actions remain available as compatibility and escape-hatch operations. Document IDs are \
+         the same as Google Drive file IDs, so use \
          the google-drive tool to search for existing documents. The host injects a Google \
          product-auth credential with the documents scope. \
          To discover all available API operations, use http GET to fetch \
@@ -233,6 +240,36 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, GuestFai
             let result = api::batch_update(&document_id, requests)?;
             serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
         }
+
+        GoogleDocsAction::InspectDocument { document_id } => {
+            let result = api::inspect_document(&document_id)?;
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
+        }
+
+        GoogleDocsAction::ApplyTextEdits { document_id, edits } => {
+            let result = api::apply_text_edits(&document_id, &edits)?;
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
+        }
+
+        GoogleDocsAction::CreateTableWithData {
+            document_id,
+            index,
+            table_data,
+            bold_header,
+        } => {
+            let result =
+                api::create_table_with_data(&document_id, index, &table_data, bold_header)?;
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
+        }
+
+        GoogleDocsAction::VerifyDocument {
+            document_id,
+            expected_text,
+            expected_tables,
+        } => {
+            let result = api::verify_document(&document_id, &expected_text, &expected_tables)?;
+            serde_json::to_string(&result).map_err(|e| api::serialization_failure(&e))?
+        }
     };
 
     Ok(result)
@@ -254,6 +291,10 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, GuestFailu
         "google-docs.insert_table" => Ok("insert_table"),
         "google-docs.create_list" => Ok("create_list"),
         "google-docs.batch_update" => Ok("batch_update"),
+        "google-docs.inspect_document" => Ok("inspect_document"),
+        "google-docs.apply_text_edits" => Ok("apply_text_edits"),
+        "google-docs.create_table_with_data" => Ok("create_table_with_data"),
+        "google-docs.verify_document" => Ok("verify_document"),
         _ => Err(input_failure("unsupported_google_docs_capability")),
     }
 }

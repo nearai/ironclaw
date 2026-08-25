@@ -89,7 +89,6 @@ registerPack("ja", {
   "status.checking": "確認中",
 
   // Login page
-  "login.tagline": "Gateway v2",
   "login.hero": "オペレーターの痕跡を失わずにローカルエージェントを制御。",
   "login.heroSub": "トークンアクセスにより、ブラウザコンソールは同じゲートウェイランタイム、承認、ツール、スレッド状態に紐づきます。",
   "login.bearerAuth": "Bearer 認証",

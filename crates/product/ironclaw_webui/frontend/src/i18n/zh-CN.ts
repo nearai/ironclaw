@@ -89,7 +89,6 @@ registerPack("zh-CN", {
   "status.checking": "检查中",
 
   // Login page
-  "login.tagline": "Gateway v2",
   "login.hero": "本地代理控制，不丢失操作轨迹。",
   "login.heroSub": "令牌访问将浏览器控制台绑定到同一网关运行时、审批、工具和线程状态。",
   "login.bearerAuth": "Bearer 认证",

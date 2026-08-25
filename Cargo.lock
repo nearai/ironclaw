@@ -3813,7 +3813,6 @@ dependencies = [
  "ironclaw_identity",
  "ironclaw_loop_contracts",
  "ironclaw_loop_host",
- "ironclaw_memory",
  "ironclaw_notifications",
  "ironclaw_outbound",
  "ironclaw_processes",

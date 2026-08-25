@@ -234,22 +234,22 @@ pub async fn run() -> HarnessResult<()> {
     reader
         .submit_turn("What is the staging launch code?")
         .await?;
-    reader.assert_system_prompt_contains("plum-42").await?;
-    reader.assert_system_prompt_excludes("banana-99").await?;
+    reader.assert_model_request_contains("plum-42").await?;
+    reader.assert_model_request_excludes("banana-99").await?;
     reader
-        .assert_system_prompt_excludes(OTHER_SCOPE_MARKER)
+        .assert_model_request_excludes(OTHER_SCOPE_MARKER)
         .await?;
     // #7294 leak probe: the writer conversation's transcript (recorded above,
     // sharing this query's vocabulary) must not cross into this conversation's
     // prompt through either retrieval lane.
     reader
-        .assert_system_prompt_excludes(TRANSCRIPT_ONLY_MARKER)
+        .assert_model_request_excludes(TRANSCRIPT_ONLY_MARKER)
         .await?;
     // #7294 presentation pin: recalled durable memory arrives behind the
     // recall-framing guidance, so the model reads it as a recollection to
     // verify rather than as live state.
     reader
-        .assert_system_prompt_contains("Recalled memory notice:")
+        .assert_model_request_contains("Recalled memory notice:")
         .await?;
 
     Ok(())

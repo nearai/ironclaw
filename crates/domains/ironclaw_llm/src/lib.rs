@@ -83,9 +83,9 @@ pub use provider::sanitize_tool_messages;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionResponseFormat,
     CompletionStreamSink, ContentPart, FinishReason, ImageUrl, JsonSchemaResponseFormat,
-    LlmProvider, ModelFallbackRoute, ModelMetadata, ReasoningDetail, ReasoningDetails, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
-    generate_tool_call_id, normalized_model_override,
+    LlmProvider, ModelFallbackRoute, ModelMetadata, REMINDER_CLOSE, REMINDER_OPEN, ReasoningDetail,
+    ReasoningDetails, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, ToolResult, generate_tool_call_id, normalized_model_override,
 };
 pub use reasoning::{
     clean_response, contains_codex_text_tool_call_syntax,

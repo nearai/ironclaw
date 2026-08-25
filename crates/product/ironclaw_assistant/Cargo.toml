@@ -57,7 +57,6 @@ ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2"
 ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
 ironclaw_triggers = { path = "../../domains/ironclaw_triggers", version = "0.1.0" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
-ironclaw_memory = { path = "../../domains/ironclaw_memory", version = "0.1.0" }
 ironclaw_turns = { path = "../../kernel/ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

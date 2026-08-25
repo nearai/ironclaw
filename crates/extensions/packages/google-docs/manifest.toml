@@ -1,8 +1,8 @@
 schema_version = "reborn.extension_manifest.v3"
 id = "google-docs"
 name = "Google Docs"
-version = "0.1.0"
-description = "Google Docs capabilities for creating, reading, editing, and formatting documents."
+version = "0.2.0"
+description = "Google Docs capabilities for semantic and low-level document creation, inspection, editing, formatting, and verification."
 trust = "first_party_requested"
 
 [runtime]
@@ -60,7 +60,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.get_document"
-description = "Get document metadata and structure."
+description = "Get document metadata (title, revision, length, and named ranges)."
 effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
@@ -224,5 +224,73 @@ prompt_doc_ref = "prompts/google-docs/batch_update.md"
 handle = "google_runtime_token"
 vendor = "google"
 scopes = ["https://www.googleapis.com/auth/documents"]
+audience = { scheme = "https", host = "docs.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-docs.inspect_document"
+description = "Inspect paragraphs and tables with their Google Docs indexes."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/inspect_document.input.v1.json"
+prompt_doc_ref = "prompts/google-docs/inspect_document.md"
+
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/documents.readonly"]
+audience = { scheme = "https", host = "docs.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-docs.apply_text_edits"
+description = "Apply validated text-anchored replacements atomically and verify the result."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/apply_text_edits.input.v1.json"
+prompt_doc_ref = "prompts/google-docs/apply_text_edits.md"
+
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/documents"]
+audience = { scheme = "https", host = "docs.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-docs.create_table_with_data"
+description = "Insert, populate, optionally style, and verify a rectangular table in one operation."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/create_table_with_data.input.v1.json"
+prompt_doc_ref = "prompts/google-docs/create_table_with_data.md"
+
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/documents"]
+audience = { scheme = "https", host = "docs.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "google-docs.verify_document"
+description = "Verify expected text and table contents against current provider state."
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-docs/verify_document.input.v1.json"
+prompt_doc_ref = "prompts/google-docs/verify_document.md"
+
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/documents.readonly"]
 audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
