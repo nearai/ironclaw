@@ -10,11 +10,11 @@ const SETUP_QUERY_PARAM = "setup";
 // browser must not silently land the user on the wrong ceremony.
 const SETUP_PATHS = Object.freeze(["personal_account", "workspace_bot"]);
 
-// #7853: device-link guidance rendered into a Telegram or Slack thread cannot
-// show the link panel there — the payload it displays IS a login token, so the
-// ceremony only runs in the web app. Before this the guidance named the
-// destination in prose and left the user to find the Extensions page, the right
-// extension, and the right path unaided.
+// #7853: device-link guidance rendered into a chat channel cannot show the link
+// panel there — the payload it displays IS a login token, so the ceremony only
+// runs in the web app. Before this the guidance named the destination in prose
+// and left the user to find the Extensions page, the right extension, and the
+// right path unaided.
 //
 // `{origin}/extensions?configure=<packageId>&setup=personal_account` closes
 // that hand-off. Deliberately NOT the shape `/chat?connect=` uses: that route

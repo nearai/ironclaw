@@ -870,8 +870,8 @@ impl ExtensionLifecycleManager {
     /// * a personal-account tool surface whose credentials resolve to
     ///   [`RuntimeCredentialAccountSetup::DeviceLink`].
     ///
-    /// Consulting only the channel facet is what broke #7853: #7766 moved
-    /// Telegram's channel to `web_generated_code` while leaving its
+    /// Consulting only the channel facet is what broke #7853: #7766 moved one
+    /// extension's channel to `web_generated_code` while leaving its
     /// personal-account tools on device-link, so this went silently false and
     /// the model stopped telling users where to link. The tool facet alone
     /// would fail the mirror case, because

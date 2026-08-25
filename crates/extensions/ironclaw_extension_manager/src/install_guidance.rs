@@ -177,9 +177,9 @@ const DEVICE_LINK_SETUP_LINK_PREFIX: &str = "Give them this link, copied exactly
 /// The two halves travel together because either alone is a defect. A link
 /// without the state gets offered to a caller who already linked — #7853's
 /// shape with a click attached. A state without the link is the prose-only
-/// hand-off: a user reading the guidance in a Telegram or Slack thread cannot
-/// render the device-link panel there, so before this they were told to go find
-/// the Extensions page unaided.
+/// hand-off: a user reading the guidance in a chat channel cannot render the
+/// device-link panel there — only the web app can — so before this they were
+/// told to go find the Extensions page unaided.
 pub(crate) struct DeviceLinkGuidance {
     setup: DeviceLinkUserSetup,
     setup_link: Option<String>,

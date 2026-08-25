@@ -233,9 +233,9 @@ impl ExtensionHostLifecycleProductService {
                 // `LifecycleProductPayload::ExtensionActivate` has no
                 // `next_step`, and `activation_success_message` derives its copy
                 // from the channel connection strategy alone — so an extension
-                // whose device link hangs off its TOOL credentials (Telegram
-                // after #7766) reaches Active here with no mention that a
-                // personal link is still owed. That is #7853 through a third
+                // whose device link hangs off its TOOL credentials rather
+                // than its channel connection reaches Active here with no
+                // mention that a personal link is still owed. That is #7853 through a third
                 // caller; the notice rides `message`, which every payload has.
                 if response.phase == InstallationState::Active {
                     let setup = self
