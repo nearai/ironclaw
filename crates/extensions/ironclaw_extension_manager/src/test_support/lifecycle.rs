@@ -127,13 +127,16 @@ pub async fn build_lifecycle_test_services_with_auth_provider(
 ) -> ExtensionLifecycleTestServices {
     build_lifecycle_test_services_over_backing(
         owner_id,
-        network_http_egress,
-        google_oauth_configured,
-        auth_provider_client,
-        Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
-        Arc::new(FaultInjecting::new(InMemoryBackend::new())),
-        Arc::new(SecretStore::ephemeral()),
-        None,
+        LifecycleHarnessOptions {
+            network_http_egress,
+            google_oauth_configured,
+            auth_provider_client,
+            oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            filesystem: Arc::new(FaultInjecting::new(InMemoryBackend::new())),
+            secret_store: Arc::new(SecretStore::ephemeral()),
+            extra_catalog_package: None,
+            attach_generic_host: true,
+        },
     )
     .await
 }
@@ -149,13 +152,16 @@ pub async fn build_lifecycle_test_services_with_oauth_client_profiles(
 ) -> ExtensionLifecycleTestServices {
     build_lifecycle_test_services_over_backing(
         owner_id,
-        network_http_egress,
-        google_oauth_configured,
-        Arc::new(UnavailableAuthProviderClient),
-        oauth_client_profiles,
-        Arc::new(FaultInjecting::new(InMemoryBackend::new())),
-        Arc::new(SecretStore::ephemeral()),
-        None,
+        LifecycleHarnessOptions {
+            network_http_egress,
+            google_oauth_configured,
+            auth_provider_client: Arc::new(UnavailableAuthProviderClient),
+            oauth_client_profiles,
+            filesystem: Arc::new(FaultInjecting::new(InMemoryBackend::new())),
+            secret_store: Arc::new(SecretStore::ephemeral()),
+            extra_catalog_package: None,
+            attach_generic_host: true,
+        },
     )
     .await
 }
@@ -174,13 +180,16 @@ pub async fn rebuild_lifecycle_test_services_with_auth_provider(
 ) -> ExtensionLifecycleTestServices {
     build_lifecycle_test_services_over_backing(
         owner_id,
-        network_http_egress,
-        google_oauth_configured,
-        auth_provider_client,
-        Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
-        Arc::clone(&previous.filesystem_faults),
-        Arc::clone(&previous.secret_store),
-        None,
+        LifecycleHarnessOptions {
+            network_http_egress,
+            google_oauth_configured,
+            auth_provider_client,
+            oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            filesystem: Arc::clone(&previous.filesystem_faults),
+            secret_store: Arc::clone(&previous.secret_store),
+            extra_catalog_package: None,
+            attach_generic_host: true,
+        },
     )
     .await
 }
@@ -216,13 +225,16 @@ pub async fn build_lifecycle_test_services_with_device_link_channel_fixture(
 ) -> ExtensionLifecycleTestServices {
     build_lifecycle_test_services_over_backing(
         owner_id,
-        None,
-        false,
-        Arc::new(UnavailableAuthProviderClient),
-        Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
-        Arc::new(FaultInjecting::new(InMemoryBackend::new())),
-        Arc::new(SecretStore::ephemeral()),
-        Some(device_link_channel_fixture_package()),
+        LifecycleHarnessOptions {
+            network_http_egress: None,
+            google_oauth_configured: false,
+            auth_provider_client: Arc::new(UnavailableAuthProviderClient),
+            oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            filesystem: Arc::new(FaultInjecting::new(InMemoryBackend::new())),
+            secret_store: Arc::new(SecretStore::ephemeral()),
+            extra_catalog_package: Some(device_link_channel_fixture_package()),
+            attach_generic_host: false,
+        },
     )
     .await
 }
@@ -373,13 +385,16 @@ instructions = "Open the fixture app and scan the code."
     }
 }
 
-// arch-exempt: too_many_args, 8th test-seam-only param (`extra_catalog_package`)
-// added for #7853 positive-coverage fixtures; `attach_generic_host` is
-// deliberately NOT a separate param — it is derived from
-// `extra_catalog_package.is_some()` below rather than adding a 9th.
-#[allow(clippy::too_many_arguments)]
-async fn build_lifecycle_test_services_over_backing(
-    owner_id: &str,
+/// Explicit assembly knobs for [`build_lifecycle_test_services_over_backing`].
+///
+/// Grouped into a struct (rather than more positional parameters) so that
+/// `attach_generic_host` can stay its own named field instead of being
+/// derived from `extra_catalog_package`. The two are unrelated harness
+/// decisions: a future caller that extends the catalog for a reason
+/// unrelated to device-link coverage must still choose explicitly whether it
+/// wants the real generic host wired in, rather than silently losing tool
+/// binding and the snapshot tool resolver because the catalog grew.
+struct LifecycleHarnessOptions {
     network_http_egress: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
     google_oauth_configured: bool,
     auth_provider_client: Arc<dyn ironclaw_auth::AuthProviderClient>,
@@ -387,12 +402,31 @@ async fn build_lifecycle_test_services_over_backing(
     filesystem: Arc<FaultInjecting<InMemoryBackend>>,
     secret_store: Arc<dyn SecretStorePort>,
     extra_catalog_package: Option<ironclaw_extension_host::AvailableExtensionPackage>,
+    /// Whether to build and attach the real generic extension host (tool
+    /// binder, channel adapters, snapshot tool resolver).
+    ///
+    /// See `build_lifecycle_test_services_with_device_link_channel_fixture`'s
+    /// doc comment for the one case where this is `false`: this harness has
+    /// no native channel adapter for a synthetic device-link fixture package
+    /// to bind against, so `commit_activation`'s `publish_to_generic_host`
+    /// must be allowed to short-circuit `Ok(())` instead.
+    attach_generic_host: bool,
+}
+
+async fn build_lifecycle_test_services_over_backing(
+    owner_id: &str,
+    options: LifecycleHarnessOptions,
 ) -> ExtensionLifecycleTestServices {
-    // See `build_lifecycle_test_services_with_device_link_channel_fixture`'s
-    // doc comment for why a package that needs the catalog extended also
-    // needs the generic host skipped: this harness has no native channel
-    // adapter for a synthetic fixture package to bind against.
-    let attach_generic_host = extra_catalog_package.is_none();
+    let LifecycleHarnessOptions {
+        network_http_egress,
+        google_oauth_configured,
+        auth_provider_client,
+        oauth_client_profiles,
+        filesystem,
+        secret_store,
+        extra_catalog_package,
+        attach_generic_host,
+    } = options;
     let owner_user_id = ironclaw_host_api::ids::UserId::new(owner_id).expect("valid owner id");
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let auth_filesystem = Arc::new(ScopedFilesystem::new(Arc::clone(&filesystem), |scope| {

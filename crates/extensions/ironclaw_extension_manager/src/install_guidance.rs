@@ -283,7 +283,7 @@ fn device_link_notice(setup: DeviceLinkUserSetup, setup_link: Option<&str>) -> O
     }
 }
 
-/// [`DEVICE_LINK_REQUIRED_NOTICE`] with the destination attached when there is
+/// [`DEVICE_LINK_UNVERIFIED_NOTICE`] with the destination attached when there is
 /// one to attach. The link is additive: the prose that names the destination in
 /// words is never replaced by it, so a deployment with no public origin loses a
 /// convenience rather than the instruction.

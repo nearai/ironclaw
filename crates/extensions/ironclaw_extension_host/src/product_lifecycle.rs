@@ -903,6 +903,26 @@ impl ExtensionLifecycleManager {
             requirements.push(descriptor.auth_requirement);
         }
         let package = self.lifecycle_package(&extension_id).await?;
+        // `contains` is full `RuntimeCredentialAuthRequirement` equality
+        // (provider + setup + requester_extension + provider_scopes), so it
+        // only collapses the channel-facet requirement pushed above against a
+        // tool-facet requirement that matches on every field, `provider_scopes`
+        // included. `manifest_runtime_credential_auth_requirements` already
+        // unions `provider_scopes` for duplicates *within* its own walk of
+        // `manifest.capabilities`, but that merge never sees the channel
+        // facet, so a channel requirement and a tool requirement that share
+        // provider/requester/DeviceLink identity with differing
+        // `provider_scopes` still land here as two entries instead of one
+        // merged requirement. Considered and left as-is: every requirement
+        // reaching this loop is filtered to `DeviceLink` above, and
+        // `credential_setup_requires_stored_scopes` (in
+        // `ironclaw_auth::product_auth::credentials::runtime_credentials`)
+        // returns `false` for `DeviceLink`, so account selection never gates
+        // on `provider_scopes` for this setup kind — two such near-duplicates
+        // always resolve to the same found/missing verdict. The unmerged
+        // duplicate costs one redundant credential-account lookup, not a
+        // wrong `AlreadyLinked`/`Required` result. Revisit if this loop is
+        // ever widened to a scope-sensitive setup kind (e.g. `OAuth`).
         for requirement in manifest_runtime_credential_auth_requirements(&package.manifest)
             .into_iter()
             .filter(|requirement| {
