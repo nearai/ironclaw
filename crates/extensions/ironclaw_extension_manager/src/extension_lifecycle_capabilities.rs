@@ -273,6 +273,31 @@ fn lifecycle_output_decode_error(error: impl std::fmt::Debug) -> FirstPartyCapab
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
 }
 
+impl ExtensionLifecycleToolHandler {
+    /// Whether this caller still owes `package_ref` a device link.
+    ///
+    /// Shared by the install and activate arms, which differ only in how they
+    /// map the error — mirroring
+    /// `ExtensionHostLifecycleProductService::device_link_user_setup` in the
+    /// sibling surface. Resolved only after the package is installed: the
+    /// package-shaped half reads the resolved manifest, which does not exist
+    /// before that.
+    async fn device_link_user_setup(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        scope: &ironclaw_host_api::resource::ResourceScope,
+    ) -> Result<DeviceLinkUserSetup, ProductOperationFailure> {
+        Ok(resolve_device_link_user_setup(
+            self.extension_management
+                .device_link_user_setup_requirement(package_ref)
+                .await?,
+            Some(&self.credential_accounts),
+            scope,
+        )
+        .await)
+    }
+}
+
 #[async_trait]
 impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
     async fn dispatch(
@@ -367,15 +392,10 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                         if activation_response.phase == InstallationState::Active =>
                     {
                         connection_preview_source = Some(activation_response.clone());
-                        let device_link_setup = resolve_device_link_user_setup(
-                            self.extension_management
-                                .device_link_user_setup_requirement(&package_ref)
-                                .await
-                                .map_err(install_activation_readiness_error)?,
-                            Some(&self.credential_accounts),
-                            &request.scope,
-                        )
-                        .await;
+                        let device_link_setup = self
+                            .device_link_user_setup(&package_ref, &request.scope)
+                            .await
+                            .map_err(install_activation_readiness_error)?;
                         Ok(install_response_with_activation(
                             install_response,
                             &activation_response,
@@ -420,32 +440,31 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                 // `next_step`, so the device-link guidance the install arm
                 // renders would be dropped entirely here (#7853). Route it
                 // through the payload-shape-independent `message` instead.
-                let device_link_setup = resolve_device_link_user_setup(
-                    self.extension_management
-                        .device_link_user_setup_requirement(&package_ref)
-                        .await
-                        .map_err(lifecycle_error)?,
-                    Some(&self.credential_accounts),
-                    &request.scope,
-                )
-                .await;
                 let mut response = self
                     .extension_management
                     .activate_with_credential_gate(
-                        package_ref,
+                        package_ref.clone(),
                         request.scope.clone(),
                         &credential_gate,
                         &request.scope.user_id,
                     )
                     .await
                     .map_err(lifecycle_error)?;
-                if response.phase == InstallationState::Active
-                    && let Some(notice) = activate_device_link_notice(device_link_setup)
-                {
-                    response.message = Some(match response.message.take() {
-                        Some(message) => format!("{message} {notice}"),
-                        None => notice.to_string(),
-                    });
+                // Resolved only once activation reached `Active`, matching the
+                // install arm: an activation that is denied, blocked, or errors
+                // has nothing to advise about, and the caller-state lookup is
+                // pure waste on that path.
+                if response.phase == InstallationState::Active {
+                    let device_link_setup = self
+                        .device_link_user_setup(&package_ref, &request.scope)
+                        .await
+                        .map_err(lifecycle_error)?;
+                    if let Some(notice) = activate_device_link_notice(device_link_setup) {
+                        response.message = Some(match response.message.take() {
+                            Some(message) => format!("{message} {notice}"),
+                            None => notice.to_string(),
+                        });
+                    }
                 }
                 Ok(response)
             }

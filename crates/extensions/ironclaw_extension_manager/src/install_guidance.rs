@@ -132,3 +132,93 @@ fn device_link_notice(setup: DeviceLinkUserSetup) -> Option<&'static str> {
         DeviceLinkUserSetup::AlreadyLinked => Some(DEVICE_LINK_ALREADY_LINKED_NOTICE),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{
+        capability::RuntimeCredentialAccountSetup,
+        ids::{InvocationId, UserId, VendorId},
+    };
+
+    fn device_link_requirement() -> RuntimeCredentialAuthRequirement {
+        RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("telegram").expect("vendor"),
+            setup: RuntimeCredentialAccountSetup::DeviceLink,
+            requester_extension: ironclaw_host_api::ids::ExtensionId::new("telegram")
+                .expect("extension"),
+            provider_scopes: Vec::new(),
+        }
+    }
+
+    fn scope() -> ResourceScope {
+        ResourceScope::local_default(
+            UserId::new("user-alpha").expect("user"),
+            InvocationId::new(),
+        )
+        .expect("scope")
+    }
+
+    /// The three states must stay distinguishable in the copy. Collapsing
+    /// `AlreadyLinked` into `Required` would tell a user who has already linked
+    /// to go link again — the false-guidance class #7853 exists to remove — and
+    /// the bare-activate arm's positive case cannot be driven end to end, so
+    /// this is the only place that pins it.
+    #[test]
+    fn each_state_renders_distinct_install_guidance() {
+        let none = active_install_next_step(DeviceLinkUserSetup::NotApplicable);
+        assert_eq!(none, ACTIVATION_COMPLETE);
+
+        let required = active_install_next_step(DeviceLinkUserSetup::Required);
+        assert!(required.starts_with(ACTIVATION_COMPLETE), "{required}");
+        assert!(required.contains("cannot run from chat"), "{required}");
+
+        let linked = active_install_next_step(DeviceLinkUserSetup::AlreadyLinked);
+        assert!(linked.starts_with(ACTIVATION_COMPLETE), "{linked}");
+        assert!(linked.contains("already linked"), "{linked}");
+        assert!(
+            !linked.contains("cannot run from chat"),
+            "an already-linked caller must never be sent to link again: {linked}"
+        );
+    }
+
+    /// The activate arms carry the notice on `message`, and only when the
+    /// caller actually owes a link. `AlreadyLinked` stays silent here on
+    /// purpose: an activate response is not the place to volunteer that nothing
+    /// is owed.
+    #[test]
+    fn activate_notice_fires_only_when_a_link_is_owed() {
+        assert_eq!(
+            activate_device_link_notice(DeviceLinkUserSetup::Required),
+            Some(DEVICE_LINK_REQUIRED_NOTICE)
+        );
+        assert_eq!(
+            activate_device_link_notice(DeviceLinkUserSetup::NotApplicable),
+            None
+        );
+        assert_eq!(
+            activate_device_link_notice(DeviceLinkUserSetup::AlreadyLinked),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn no_requirement_resolves_to_not_applicable() {
+        assert_eq!(
+            resolve_device_link_user_setup(None, None, &scope()).await,
+            DeviceLinkUserSetup::NotApplicable
+        );
+    }
+
+    /// Product auth not composed means caller link state is unknowable, not
+    /// absent. Failing toward `Required` keeps a true sentence on screen;
+    /// guessing `AlreadyLinked` would let the model report a connection
+    /// complete that never happened.
+    #[tokio::test]
+    async fn unresolvable_caller_state_fails_toward_required() {
+        assert_eq!(
+            resolve_device_link_user_setup(Some(device_link_requirement()), None, &scope()).await,
+            DeviceLinkUserSetup::Required
+        );
+    }
+}
