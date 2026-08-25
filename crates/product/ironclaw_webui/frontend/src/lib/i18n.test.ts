@@ -197,9 +197,13 @@ test("non-English locale packs localize exposed route copy", () => {
     ...Object.keys(english).filter((key) => key.startsWith("chat.oobe.")),
   ];
 
+  for (const key of keys) {
+    assert.equal(typeof english[key], "string", `en must define ${key}`);
+  }
   for (const locale of LOCALES.filter((candidate) => candidate !== "en")) {
     const pack = loadLocalePack(locale);
     for (const key of keys) {
+      assert.equal(typeof pack[key], "string", `${locale} must define ${key}`);
       assert.notEqual(pack[key], english[key], `${locale} must localize ${key}`);
     }
   }
