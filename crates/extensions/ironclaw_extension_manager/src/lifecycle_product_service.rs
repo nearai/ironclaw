@@ -818,15 +818,15 @@ mod tests {
         match response.payload {
             Some(LifecycleProductPayload::ExtensionInstall { next_step, .. }) => {
                 assert!(
-                    next_step.contains("Web UI"),
-                    "next_step must send the user to the Web UI: {next_step}"
+                    next_step.contains("web app"),
+                    "next_step must name where the link is finished: {next_step}"
                 );
                 assert!(
                     next_step.contains("cannot run from chat"),
                     "next_step must say chat cannot finish this: {next_step}"
                 );
                 assert!(
-                    next_step.contains("link their own account"),
+                    next_step.contains("link their personal account"),
                     "next_step must name the per-user link step: {next_step}"
                 );
             }

@@ -81,21 +81,27 @@ pub(crate) async fn resolve_device_link_user_setup(
 /// The sentence every surface renders when the calling user still owes a
 /// device link, defined once.
 ///
-/// It is deliberately worded to stop the model short of reporting success: the
-/// ceremony renders a scannable code and asks for a one-time code and an
-/// account password, so it cannot run from chat on any surface, and claiming
-/// the connection is finished is exactly the false completion #7853 describes.
+/// Worded to stop the model short of reporting success, and to be safe to
+/// quote: the model paraphrases this, so it states the benefit in the user's
+/// terms (the manifest's own "read your chats and send messages as you") and
+/// keeps the directive in its own sentence. Fusing directive into fact is how
+/// a paraphrase becomes "I should direct you there rather than reporting the
+/// connection complete."
+///
+/// Claiming the connection is finished is exactly the false completion #7853
+/// describes, so the copy never does.
 ///
 /// Both renderers below compose this rather than restating it. An earlier
 /// revision of this module spelled it out twice — the same drift shape the
 /// module exists to remove.
-const DEVICE_LINK_REQUIRED_NOTICE: &str = "Personal capabilities and chatting as the user still require each user to link their own \
-     account from this extension's card in the Web UI — that ceremony cannot run from chat, so \
-     direct the user there rather than reporting the connection complete.";
+const DEVICE_LINK_REQUIRED_NOTICE: &str = "Reading this user's own chats, or sending messages as them, additionally requires them to \
+     link their personal account from the extension's page in the web app — that step shows a QR \
+     code to scan and cannot run from chat. Tell them what is still missing and where to finish \
+     it; do not report the connection as complete.";
 
-/// The sentence for a caller who has already finished the ceremony.
-const DEVICE_LINK_ALREADY_LINKED_NOTICE: &str = "The calling user's own account is already linked for this extension, so personal \
-     capabilities are available — do not ask them to link, scan, or authorize it again.";
+/// The sentence for a caller who has already finished the link.
+const DEVICE_LINK_ALREADY_LINKED_NOTICE: &str = "This user has already linked their personal account, so reading their chats and sending \
+     messages as them will work. Do not ask them to link, scan, or authorize anything again.";
 
 /// What an `Active` install reports when nothing further is owed.
 const ACTIVATION_COMPLETE: &str = "Activation completed; model-visible extension tools are ready.";
