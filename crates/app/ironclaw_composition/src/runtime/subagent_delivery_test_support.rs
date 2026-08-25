@@ -2,6 +2,10 @@
 
 use std::sync::Arc;
 
+/// Permanently stops the test runtime's turn scheduler.
+///
+/// Callers must manually drive delivery after this function returns and must
+/// not submit any further turns to the stopped scheduler.
 pub(crate) async fn parts(
     runtime: &super::RebornRuntime,
 ) -> crate::test_support::SubagentDeliveryTestParts {

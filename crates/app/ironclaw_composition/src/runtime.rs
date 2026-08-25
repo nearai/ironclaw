@@ -589,7 +589,9 @@ pub(crate) struct OutboundTestStores {
 pub(crate) struct SubagentDeliveryRuntime {
     pub(crate) input_queue:
         Arc<ironclaw_loop_host::FilesystemHostInputQueue<CompositeRootFilesystem>>,
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) resolver: Arc<AwaitEdgeResolver<dyn SessionThreadService>>,
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) store: Arc<AwaitEdgeStore>,
 }
 
@@ -3237,7 +3239,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         broadcast_budget_event_sink,
         subagent_await_edge_writer,
         subagent_await_edge_resolver,
-        subagent_await_edge_store,
+        subagent_await_edge_store: _subagent_await_edge_store,
         subagent_await_edge_evidence,
         trigger_repository,
         admin_secret_provisioner,
@@ -4635,8 +4637,10 @@ pub(crate) async fn build_runtime_with_resource_governor(
         thread_service,
         subagent_delivery: SubagentDeliveryRuntime {
             input_queue: host_input_queue,
+            #[cfg(any(test, feature = "test-support"))]
             resolver: subagent_await_edge_resolver,
-            store: subagent_await_edge_store,
+            #[cfg(any(test, feature = "test-support"))]
+            store: _subagent_await_edge_store,
         },
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
