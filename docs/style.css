@@ -10,7 +10,7 @@ code {
 @media (min-width: 1024px) {
     #navbar .nav-tabs {
         position: fixed;
-        left: 284px;
+        left: 272px;
         top: 0;
         height: 3.5rem;
     }
