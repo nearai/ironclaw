@@ -489,6 +489,53 @@ impl HostRuntimeCapabilityHarness {
         .await
     }
 
+    /// Seed a Configured credential account directly through
+    /// `CredentialAccountService::create_account`, WITH real secret material,
+    /// bypassing the manual-token setup/submit flow entirely.
+    ///
+    /// [`Self::seed_credential_account_with_material`] routes through
+    /// `request_manual_token_setup`/`submit_manual_token`, which is the
+    /// production path for a `method = "manual_token"` auth recipe. A
+    /// provider whose declared auth method is something else (e.g.
+    /// Telegram's `device_link`) has no such recipe to resolve, so that path
+    /// is not the right seed for it. This is the direct seed
+    /// `RuntimeExtensionActivationCredentialGate::missing_requirements`
+    /// (`ironclaw_extension_host::extension_activation_credentials`) actually
+    /// reads at selection time — the same shape
+    /// `ironclaw_extension_manager`'s crate-tier lifecycle tests use
+    /// (`seed_configured_account_with_scopes`) — for a caller-satisfied
+    /// requirement check that does not depend on the provider's setup kind.
+    pub(crate) async fn seed_configured_credential_account(
+        &self,
+        scope: &ResourceScope,
+        provider: &str,
+        label: &str,
+    ) -> HarnessResult<()> {
+        let product_auth = self
+            .product_auth
+            .as_ref()
+            .ok_or("harness missing local-dev product auth (not built via new_with_options)")?;
+        product_auth
+            .credential_account_service()
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::credential_owner(scope, AuthSurface::Api),
+                provider: AuthProviderId::new(provider)?,
+                label: CredentialAccountLabel::new(label)?,
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(ironclaw_host_api::ids::SecretHandle::new(format!(
+                    "itest-{provider}-configured-token"
+                ))?),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .map_err(|error| format!("direct configured-account seed failed: {error:?}"))?;
+        Ok(())
+    }
+
     /// The composed product-auth bundle — the same `Arc` production assembly
     /// attached the device-link driver to, so an integration scenario drives
     /// the real seam rather than a harness-built twin.

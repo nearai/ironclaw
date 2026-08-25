@@ -2367,6 +2367,67 @@ mod tests {
         );
     }
 
+    /// #7853 GAP 1 (crate-tier half): `LifecycleProductPayload::ExtensionActivate`
+    /// has no `next_step` field, so the bare `builtin.extension_activate`
+    /// capability arm — unlike `builtin.extension_install` — had ZERO
+    /// coverage of its device-link guidance, which instead rides the
+    /// payload-shape-independent `message` field
+    /// (`activate_device_link_notice`). This drives the real capability
+    /// handler end to end for a package with no device-link facet at all
+    /// (web-access, zero-config), proving the notice never leaks in for a
+    /// package that never declares one.
+    ///
+    /// The positive case (a device-link package's message DOES carry the
+    /// notice on the BARE ACTIVATE arm specifically) is NOT closed at any
+    /// tier — see the report for why: Telegram is the only device-link
+    /// package in the bundled catalog, this crate-tier harness's
+    /// `build_lifecycle_test_services` wires no native device-link adapter
+    /// (Telegram activation fails outright with "extension declares a
+    /// device-link auth surface but bound no device-link adapter" before the
+    /// resolver is ever reached), and `EXTENSION_ACTIVATE_CAPABILITY_ID` is
+    /// deliberately NOT model-visible
+    /// (`standalone_agent_surface_exposes_extension_lifecycle_tools` pins
+    /// `!ids.contains(&EXTENSION_ACTIVATE_CAPABILITY_ID)` — "Model callers
+    /// use builtin.extension_install") — so a scripted-model integration
+    /// turn cannot legitimately drive it either. Only a direct,
+    /// grant-carrying `host_runtime.invoke_capability` call (like this
+    /// module's own `invoke_json`/`invoke_outcome`) can reach it, and that
+    /// needs the SAME native-adapter-bound `RebornRuntime` only
+    /// `RebornIntegrationGroup::extension_delivery()` builds — which has no
+    /// test-support accessor exposing that direct-invoke seam.
+    /// `tests/integration/extension_delivery.rs`'s
+    /// `telegram_install_reports_already_linked_for_a_caller_with_a_satisfied_device_link_account`
+    /// and the pre-existing `telegram_update_becomes_a_turn_and_a_coordinated_reply`
+    /// regression both cover the sibling `builtin.extension_install` arm's
+    /// Required/AlreadyLinked notices, which share `resolve_device_link_user_setup`
+    /// and `activate_device_link_notice` with this arm — but neither drives
+    /// this arm itself.
+    #[tokio::test]
+    async fn standalone_extension_activate_message_does_not_carry_the_device_link_notice_for_a_non_device_link_package()
+     {
+        let services =
+            test_services("extension-tools-activate-no-device-link-owner", None, false).await;
+
+        install_inactive(&services, "web-access").await;
+        let web_access = invoke_json(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "web-access"}),
+        )
+        .await
+        .expect("web-access activation succeeds");
+        assert_eq!(web_access["phase"], "active");
+        let web_access_message = web_access
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(
+            !web_access_message.contains("cannot run from chat"),
+            "a package with no device-link facet must not carry the device-link notice: \
+             {web_access_message}"
+        );
+    }
+
     #[tokio::test]
     async fn standalone_extension_lifecycle_tool_lists_all_and_rejects_malformed_inputs() {
         let services = test_services("extension-tools-invalid-owner", None, false).await;

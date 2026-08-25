@@ -1478,6 +1478,71 @@ mod tests {
         assert!(scope.thread_id.is_none());
     }
 
+    /// #7853 GAP 1 (WebUI/CLI arm half): `LifecycleProductAction::ExtensionActivate`
+    /// carries the same message-only device-link guidance as the model-facing
+    /// `builtin.extension_activate` capability (`extension_lifecycle_capabilities.rs`'s
+    /// sibling test), but through this separate `ExtensionHostLifecycleProductService::execute_action`
+    /// arm (line ~207) — the CLI's `ironclaw extension activate` command and
+    /// any internal auth-continuation completion both route through this
+    /// service, not the capability handler. Drives the real service end to
+    /// end (`.execute_action`, the same seam `hosted_mcp_registration.rs`
+    /// drives via the public `.execute()` trait method) for a package with no
+    /// device-link facet (web-access), proving the notice never leaks in.
+    ///
+    /// The positive case cannot be reached from this crate-tier harness for
+    /// the same reason as its capability-handler sibling: Telegram is the
+    /// only device-link package in the bundled catalog, and
+    /// `build_lifecycle_test_services` wires no native device-link adapter,
+    /// so Telegram activation fails outright before this arm's
+    /// `resolve_device_link_user_setup` call is ever reached. Only the
+    /// production-wired `RebornIntegrationGroup::extension_delivery()` group
+    /// (Telegram's fixture device-link adapter) can drive that half, and it
+    /// has no test-support accessor exposing the composed
+    /// `ExtensionHostLifecycleProductService` this arm lives on (it is
+    /// reachable there only through the model-facing capability handler,
+    /// which `tests/integration/extension_delivery.rs` already covers).
+    #[tokio::test]
+    async fn extension_activate_action_does_not_carry_the_device_link_notice_for_a_non_device_link_package()
+     {
+        let services = crate::lifecycle_test_support::build_lifecycle_test_services(
+            "lifecycle-service-activate-no-device-link-owner",
+            None,
+            false,
+        )
+        .await;
+        let owner =
+            UserId::new("lifecycle-service-activate-no-device-link-owner").expect("valid owner");
+        let scope =
+            ResourceScope::local_default(owner.clone(), InvocationId::new()).expect("valid scope");
+        let context = crate::lifecycle_test_support::lifecycle_product_context(scope);
+
+        let web_access_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access")
+                .expect("valid web-access ref");
+        services
+            .extension_management
+            .install(web_access_ref.clone(), &owner)
+            .await
+            .expect("web-access installs");
+        let response = services
+            .lifecycle_service
+            .execute_action(
+                context,
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: web_access_ref,
+                },
+            )
+            .await
+            .expect("web-access activates");
+        assert_eq!(response.phase, InstallationState::Active);
+        let message = response.message.unwrap_or_default();
+        assert!(
+            !message.contains("cannot run from chat"),
+            "a package with no device-link facet must not carry the device-link notice: \
+             {message}"
+        );
+    }
+
     /// A `LifecycleProductContext::Command` whose verified auth subject is
     /// `subject`.
     ///
