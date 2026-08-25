@@ -3,10 +3,8 @@ code {
     overflow: scroll;
 }
 
-/* Align the Docs / Changelog tabs with the content area's left edge, just
-   past the sidebar (theme puts them on the right, beside the navbar links).
-   The sidebar is a fixed 256px + 16px gutter, so the content edge sits at a
-   constant 272px; the navbar is fixed, so the tabs can anchor to it. */
+/* Move the navbar tabs from the theme's right side to the content edge
+   (fixed 256px sidebar + 16px gutter = 272px). */
 @media (min-width: 1024px) {
     #navbar .nav-tabs {
         position: fixed;
