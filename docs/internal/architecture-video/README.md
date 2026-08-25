@@ -5,21 +5,22 @@
 > the v1 monolith; nothing here reflects the current Reborn stack
 > (`webui → ProductSurface → assistant → composition → runtime`, the turn
 > runtime, or the family directory layout). For current architecture docs
-> read `openwiki/`; to bring the video up to date, regenerate the scenes via
-> `.claude/skills/architecture-video/SKILL.md` — do not cite this video's
-> content until that happens. Content last updated in #2365 (2026-04-18);
-> only dependencies and paths have changed since.
+> read `openwiki/`. ✎ 2026-08-21: the `architecture-video` Claude skill was
+> removed (its scene walkthrough taught the deleted v1 architecture and the
+> video was never regenerated); to bring the video up to date, rewrite the
+> scenes in `src/scenes/` against the current Reborn docs and render with
+> `scripts/render-architecture-video.sh` — do not cite this video's content
+> until that happens. Content last updated in #2365 (2026-04-18); only
+> dependencies and paths have changed since.
 
 A Remotion-based animated video that walks new contributors through IronClaw's
 internals — the five primitives, execution loop, CodeAct, thread state machine,
 skills pipeline, tool dispatcher, channels, extensibility traits, and the LLM
 provider decorator chain.
 
-See the project-level render script and Claude skill for end-to-end use:
+See the project-level render script for end-to-end use:
 
 - `scripts/render-architecture-video.sh` — one-command MP4 render
-- `.claude/skills/architecture-video/SKILL.md` — how to update scenes when
-  architecture changes
 
 ## Commands
 

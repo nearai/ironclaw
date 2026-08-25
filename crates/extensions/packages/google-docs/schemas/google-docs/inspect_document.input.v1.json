@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Docs inspect_document",
+  "description": "Inspect paragraphs and tables with their document indexes.",
+  "type": "object",
+  "required": ["document_id"],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "The document ID."
+    }
+  },
+  "additionalProperties": false
+}

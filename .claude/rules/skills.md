@@ -59,7 +59,7 @@ The parser supports more than the example above shows (source of truth:
   within those caps or your extra triggers simply don't exist.
 
 When parser behavior changes, update this file in the same PR
-(`ironclaw-reborn-skill-maintainer` rule 7).
+(`.claude/rules/guidance-maintenance.md` rule 7).
 
 ## Selection Pipeline
 

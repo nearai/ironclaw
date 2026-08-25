@@ -61,6 +61,7 @@ from provider_operation_types import (
 from reborn_webui_harness import (
     YOLO_PROFILE,
     capability_preview_payload,
+    client_action_id,
     close_reborn_server,
     create_thread,
     enable_reborn_global_auto_approve,
@@ -388,6 +389,80 @@ async def _wait_for_trace_replay(mock_llm_server: str, timeout: float = 30) -> d
     )
 
 
+async def _submit_and_wait_for_trace_replay(
+    client,
+    server: str,
+    thread_id: str,
+    user_input: str,
+    mock_llm_server: str,
+    *,
+    timeout: float,
+) -> dict:
+    """Cancel an unfinished run so it cannot consume the next test's trace."""
+    submitted = await send_message(client, server, thread_id, user_input)
+    try:
+        return await _wait_for_trace_replay(mock_llm_server, timeout=timeout)
+    except BaseException as replay_error:
+        try:
+            response = await asyncio.shield(
+                client.post(
+                    f"{server}/api/webchat/v2/threads/{thread_id}"
+                    f"/runs/{submitted['run_id']}/cancel",
+                    json={
+                        "client_action_id": client_action_id(),
+                        "reason": "qa_trace_replay_failed",
+                    },
+                    timeout=15,
+                )
+            )
+            response.raise_for_status()
+        except Exception as cleanup_error:
+            replay_error.add_note(f"run cancellation also failed: {cleanup_error}")
+        raise
+
+
+async def test_trace_replay_failure_cancels_the_submitted_run(monkeypatch):
+    requests = []
+
+    class RecordingResponse:
+        def raise_for_status(self):
+            return None
+
+    class RecordingClient:
+        async def post(self, url, *, json, timeout):
+            requests.append((url, json, timeout))
+            return RecordingResponse()
+
+    async def fail_replay(_mock_llm_server, timeout):
+        raise AssertionError(f"synthetic replay timeout after {timeout}s")
+
+    async def accept_message(_client, _server, _thread_id, _user_input):
+        return {"run_id": "run-1"}
+
+    monkeypatch.setattr(sys.modules[__name__], "send_message", accept_message)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_wait_for_trace_replay",
+        fail_replay,
+    )
+
+    with pytest.raises(AssertionError, match="synthetic replay timeout"):
+        await _submit_and_wait_for_trace_replay(
+            RecordingClient(),
+            "http://reborn.invalid",
+            "thread-1",
+            "user input",
+            "http://mock-llm.invalid",
+            timeout=120,
+        )
+
+    assert len(requests) == 1
+    url, body, request_timeout = requests[0]
+    assert url.endswith("/threads/thread-1/runs/run-1/cancel")
+    assert body["reason"] == "qa_trace_replay_failed"
+    assert request_timeout == 15
+
+
 async def _fetch_all_timeline_pages_with_retry(
     client: httpx.AsyncClient, server: str, thread_id: str
 ) -> dict:
@@ -501,6 +576,7 @@ async def test_slack_mutation_cleanup_covers_thread_replies(
                 )
 
 
+@pytest.mark.timeout(150)
 @pytest.mark.parametrize(
     "journey_case", PROVIDER_JOURNEY_RUNS, ids=PROVIDER_JOURNEY_RUN_IDS
 )
@@ -563,10 +639,16 @@ async def _replay_qa_journey_provider_leg(
 
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, server)
-        await send_message(client, server, thread_id, user_input)
 
         replay_timeout = journey_case.replay.timeout_seconds
-        replay = await _wait_for_trace_replay(mock_llm_server, timeout=replay_timeout)
+        replay = await _submit_and_wait_for_trace_replay(
+            client,
+            server,
+            thread_id,
+            user_input,
+            mock_llm_server,
+            timeout=replay_timeout,
+        )
         assistant = await wait_for_assistant_message(
             client, server, thread_id, timeout=replay_timeout
         )
@@ -693,6 +775,7 @@ def _provider_operation_cases_for_shard():
     ]
 
 
+@pytest.mark.timeout(150)
 @pytest.mark.parametrize(
     "operation_case",
     _provider_operation_cases_for_shard(),
@@ -734,13 +817,14 @@ async def test_provider_operation_case_executes_with_provider_readback(
 
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, server)
-        await send_message(
+        replay = await _submit_and_wait_for_trace_replay(
             client,
             server,
             thread_id,
             trace["steps"][0]["response"]["content"],
+            mock_llm_server,
+            timeout=120,
         )
-        replay = await _wait_for_trace_replay(mock_llm_server, timeout=120)
         await wait_for_assistant_message(client, server, thread_id, timeout=120)
         timeline = await _fetch_all_timeline_pages_with_retry(client, server, thread_id)
 
@@ -790,6 +874,7 @@ async def test_provider_operation_case_executes_with_provider_readback(
     }
 
 
+@pytest.mark.timeout(150)
 @pytest.mark.parametrize(
     "fault_case",
     PROVIDER_FAULT_CASES,
@@ -827,13 +912,14 @@ async def test_provider_fault_profile_preserves_safe_operation_outcomes(
 
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         thread_id = await create_thread(client, server)
-        await send_message(
+        replay = await _submit_and_wait_for_trace_replay(
             client,
             server,
             thread_id,
             trace["steps"][0]["response"]["content"],
+            mock_llm_server,
+            timeout=120,
         )
-        replay = await _wait_for_trace_replay(mock_llm_server, timeout=120)
         await wait_for_assistant_message(client, server, thread_id, timeout=120)
         timeline = await _fetch_all_timeline_pages_with_retry(client, server, thread_id)
 

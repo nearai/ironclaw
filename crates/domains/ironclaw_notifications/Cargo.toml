@@ -1,0 +1,33 @@
+[package]
+name = "ironclaw_notifications"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Durable user notification inbox records for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+libsql = { version = "0.9", default-features = false, features = ["core"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use ironclaw_extension_contracts::channel_adapter::{
-    OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome, ReactionAction,
-    RunReaction,
+    OutboundEnvelope, OutboundPart, OutboundTarget, OutboundVisibility, PartDeliveryOutcome,
+    ReactionAction, RunReaction,
 };
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
@@ -57,6 +57,7 @@ fn envelope(parts: Vec<OutboundPart>, topic: Option<&str>) -> OutboundEnvelope {
         parts,
         reply_context: None,
         registrations: Vec::new(),
+        visibility: OutboundVisibility::Public,
     }
 }
 

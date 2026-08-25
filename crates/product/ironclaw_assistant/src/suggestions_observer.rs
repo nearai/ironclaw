@@ -353,6 +353,7 @@ mod tests {
             .observe_process_commit(ProcessJournalCommit {
                 state: snapshot,
                 kind: ProcessJournalKind::Completed,
+                occurred_at: Some(now),
                 sanitized_reason: None,
             })
             .await

@@ -5,6 +5,10 @@ file is one loop decision axis.
 
 ## Files
 
+Re-derive this list with `ls crates/loop/ironclaw_agent_loop/src/strategies/`
+before trusting it — each file is one decision axis, so a new file here means
+a new axis.
+
 - `context.rs` chooses prompt/context request shape, not prompt assembly.
 - `capability.rs` narrows an already-resolved capability surface.
 - `model.rs` chooses model preference.
@@ -15,6 +19,9 @@ file is one loop decision axis.
 - `stop.rs` decides whether the loop is done.
 - `drain.rs` decides when steering/followup inputs are drained.
 - `budget.rs` owns iteration and wall-clock limits.
+- `compaction.rs` chooses the transcript-compaction boundary.
+- `active_task_compaction.rs` is the active-task-preserving compaction policy.
+- `progress.rs` is the loop-detection/diminishing-returns strategy.
 - `mod.rs` declares strategy modules and crate-internal re-exports only.
 
 ## Boundaries

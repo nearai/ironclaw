@@ -46,9 +46,6 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
         className="w-full max-w-md p-6 shadow-none sm:p-8"
       >
         <div className="mb-8">
-          <p className="mb-3 font-mono text-xs uppercase tracking-[0.2em] text-[var(--v2-accent-text)]">
-            {t("login.tagline")}
-          </p>
           <h1
             className="text-5xl font-semibold leading-none tracking-[-0.04em] text-[var(--v2-text-strong)]"
           >
@@ -58,6 +55,22 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
             {t("login.secureSub")}
           </p>
         </div>
+
+        {/* OAuth providers sit above the gateway token form; the divider
+            separates the two sibling auth methods and is page-owned because
+            it belongs to neither the provider buttons nor the token form. */}
+        {oauthProviders.length > 0 &&
+          (<div className="mb-6 space-y-3">
+            <OAuthProviderButtons
+              providers={oauthProviders}
+              redirectAfter={oauthRedirectAfter}
+            />
+            <div className="flex items-center gap-3 text-[11px] uppercase text-[var(--v2-text-faint)]">
+              <span className="h-px flex-1 bg-[var(--v2-panel-border)]"></span>
+              <span>{t("login.oauthDivider")}</span>
+              <span className="h-px flex-1 bg-[var(--v2-panel-border)]"></span>
+            </div>
+          </div>)}
 
         <form
           className="space-y-4"
@@ -91,20 +104,19 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
               )}
             >{error}</p>)}
 
+          {/* Neutral (not the app's blue-gradient primary CTA) — with the
+              gateway token form now the secondary auth path below OAuth,
+              Connect should carry the same visual weight as the OAuth
+              buttons rather than reading as the loudest control on the card. */}
           <Button
             type="submit"
-            variant="primary"
+            variant="secondary"
             fullWidth
             disabled={isSubmitting}
           >
             {t("login.connect")}
           </Button>
         </form>
-
-        <OAuthProviderButtons
-          providers={oauthProviders}
-          redirectAfter={oauthRedirectAfter}
-        />
 
         {/* No OAuth providers configured is the local single-user desktop
             signal (`/auth/providers` returns an empty list when no SSO is

@@ -116,7 +116,7 @@ fn skip_trivia(source: &str, mut cursor: usize) -> usize {
         }
         let rest = &source[cursor.min(source.len())..];
         if let Some(stripped) = rest.strip_prefix("//") {
-            cursor += 2 + stripped.find('\n').map_or(stripped.len(), |end| end);
+            cursor += 2 + stripped.find('\n').unwrap_or(stripped.len());
         } else if let Some(stripped) = rest.strip_prefix("/*") {
             cursor += 2 + stripped.find("*/").map_or(stripped.len(), |end| end + 2);
         } else {

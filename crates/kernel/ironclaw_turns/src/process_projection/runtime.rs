@@ -16,10 +16,10 @@ use ironclaw_processes::{
     JournaledProcessSnapshot, ProcessCheckpointId, ProcessCheckpointPort, ProcessCheckpointRef,
     ProcessConcurrencyClass, ProcessControlPort, ProcessJournalCommit,
     ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalEntry, ProcessJournalKind,
-    ProcessJournalSource, ProcessKind, ProcessLeaseSnapshot, ProcessLeaseToken,
-    ProcessLifecycleStatus, ProcessOperationId, ProcessOutcome, ProcessRuntimePort,
-    ProcessSnapshotSource, ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind,
-    ProcessTreePort, ProcessWorkerId, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
+    ProcessJournalSource, ProcessKind, ProcessLeaseToken, ProcessLifecycleStatus,
+    ProcessOperationId, ProcessOutcome, ProcessRuntimePort, ProcessSnapshotSource,
+    ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTreePort,
+    ProcessWorkerId, PruneReleasedProcessRequest, RecordProcessCheckpointRequest,
     ReleaseProcessTreeRequest, ReserveProcessTreeRequest, ResumeProcessRequest,
     SubmitProcessRequest, SubmitProcessWithCheckpointRequest,
 };
@@ -29,7 +29,7 @@ use super::{
         turn_lifecycle_event_from_process_journal_entry, turn_scope_from_process_scope,
         turn_status_from_process_status,
     },
-    metadata::{AgentTurnProcessMetadata, AgentTurnProcessStateMetadata},
+    metadata::AgentTurnProcessStateMetadata,
     store_adapter::ProcessJournalStoreTurnAdapter,
 };
 use crate::{
@@ -91,7 +91,7 @@ impl ProcessJournalCommitObserver for AgentTurnProcessCommitObserver {
             process_id: commit.state.process_id,
             process_kind: commit.state.process_kind,
             scope: commit.state.scope,
-            occurred_at: Some(Utc::now()),
+            occurred_at: commit.occurred_at,
             owner_user_id: commit.state.owner_user_id,
             status: commit.state.status,
             kind: commit.kind,
@@ -193,6 +193,26 @@ impl AgentTurnProcessRuntime {
             })
             .await
             .map_err(profile_resolution_error_to_turn_error)?;
+        self.submit_turn_with_resolved(request, resolved).await
+    }
+
+    pub async fn submit_turn_with_resolved_profile(
+        &self,
+        request: SubmitTurnRequest,
+        resolved: ironclaw_loop_contracts::ResolvedRunProfile,
+        admission_policy: &dyn TurnAdmissionPolicy,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        admission_policy
+            .check_submit(&request)
+            .map_err(TurnError::AdmissionRejected)?;
+        self.submit_turn_with_resolved(request, resolved).await
+    }
+
+    async fn submit_turn_with_resolved(
+        &self,
+        request: SubmitTurnRequest,
+        resolved: ironclaw_loop_contracts::ResolvedRunProfile,
+    ) -> Result<SubmitTurnResponse, TurnError> {
         let profile = TurnRunProfile::from_resolved(resolved.clone());
         let run_id = request.requested_run_id.unwrap_or_default();
         let turn_id = TurnId::new();
@@ -212,6 +232,7 @@ impl AgentTurnProcessRuntime {
             model_usage: None,
             execution_outcome: None,
             subagent_depth: 0,
+            subagent_activation_provenance: request.subagent_activation_provenance,
             spawn_tree_descendant_cap: None,
             product_context: request.product_context,
             resume_disposition: None,
@@ -291,6 +312,9 @@ impl AgentTurnProcessRuntime {
             subagent_depth,
             spawn_tree_root_run_id: Some(turn_run_id_from_process_id(root_process_id)),
             product_context: parent_metadata.product_context.clone(),
+            // A fresh child run is a spawn, not a re-activation of an existing
+            // thread, so it carries no activation provenance.
+            subagent_activation_provenance: None,
         };
         admission_policy
             .check_submit(&submit_template)
@@ -317,6 +341,11 @@ impl AgentTurnProcessRuntime {
             model_usage: None,
             execution_outcome: None,
             subagent_depth,
+            // A fresh child run is a spawn, not a re-activation of an existing
+            // thread, so it carries no activation provenance. `ParentAgent` is
+            // reserved for `subagent_extend` re-activating an already-terminal
+            // child.
+            subagent_activation_provenance: None,
             spawn_tree_descendant_cap: Some(request.spawn_tree_descendant_cap),
             product_context: parent_metadata.product_context,
             resume_disposition: None,
@@ -628,6 +657,19 @@ fn failure_prohibits_retry(failure: &SanitizedFailure) -> bool {
 
 #[async_trait]
 impl crate::AgentTurnRuntimePort for AgentTurnProcessRuntime {
+    async fn recent_runs_for_thread(
+        &self,
+        scope: &TurnScope,
+        limit: u32,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        self.snapshots
+            .recent_agent_turn_snapshots(&scope.to_resource_scope(), limit)
+            .await?
+            .into_iter()
+            .map(turn_run_record_from_process_snapshot)
+            .collect()
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -636,6 +678,21 @@ impl crate::AgentTurnRuntimePort for AgentTurnProcessRuntime {
     ) -> Result<SubmitTurnResponse, TurnError> {
         AgentTurnProcessRuntime::submit_turn(self, request, admission_policy, run_profile_resolver)
             .await
+    }
+
+    async fn submit_turn_with_resolved_profile(
+        &self,
+        request: SubmitTurnRequest,
+        resolved_run_profile: ironclaw_loop_contracts::ResolvedRunProfile,
+        admission_policy: &dyn TurnAdmissionPolicy,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        AgentTurnProcessRuntime::submit_turn_with_resolved_profile(
+            self,
+            request,
+            resolved_run_profile,
+            admission_policy,
+        )
+        .await
     }
 
     async fn resume_turn(
@@ -797,40 +854,6 @@ fn resumed_agent_turn_metadata(
     Ok(json!({ "agent_turn": metadata }))
 }
 
-pub trait TurnRunProcessExt {
-    fn to_process_snapshot(&self) -> JournaledProcessSnapshot;
-}
-
-impl TurnRunProcessExt for TurnRunRecord {
-    fn to_process_snapshot(&self) -> JournaledProcessSnapshot {
-        JournaledProcessSnapshot {
-            process_id: process_id_from_turn_run_id(self.run_id),
-            process_kind: ProcessKind::AgentTurn,
-            scope: self.scope.to_resource_scope(),
-            status: process_status_from_turn_status(self.status),
-            suspension: process_suspension_from_record(self),
-            checkpoint_ref: self.checkpoint_id.map(process_checkpoint_ref),
-            // Legacy turn-record projection: the record carries only the
-            // checkpoint id, so the kind reads as unknown.
-            checkpoint_kind: None,
-            input_ref: None,
-            failure: self.failure.clone(),
-            journal_cursor: ProcessJournalCursor(self.event_cursor.0),
-            lease: process_lease_from_record(self),
-            crash_reclaim_count: 0,
-            created_at: self.received_at,
-            owner_user_id: self.scope.explicit_owner_user_id().cloned(),
-            concurrency_class: process_concurrency_class(
-                self.product_context.as_ref(),
-                &self.profile.id,
-            ),
-            parent_process_id: self.parent_run_id.map(process_id_from_turn_run_id),
-            root_process_id: self.spawn_tree_root_run_id.map(process_id_from_turn_run_id),
-            metadata: json!({ "agent_turn": AgentTurnProcessMetadata::from_record(self) }),
-        }
-    }
-}
-
 pub trait TurnRunStateProcessExt {
     fn to_process_state_snapshot(&self) -> JournaledProcessSnapshot;
 }
@@ -976,17 +999,6 @@ pub fn process_journal_kind_from_turn_event_kind(kind: TurnEventKind) -> Process
     }
 }
 
-pub(crate) fn process_suspension_from_record(record: &TurnRunRecord) -> Option<ProcessSuspension> {
-    let kind = GateKind::from_status(record.status).map(process_suspension_kind_from_gate_kind)?;
-    Some(ProcessSuspension {
-        kind,
-        gate_ref: record.gate_ref.clone(),
-        activity_id: record.blocked_activity_id,
-        credential_requirements: record.credential_requirements.clone(),
-        detail: None,
-    })
-}
-
 fn process_suspension_from_state(state: &TurnRunState) -> Option<ProcessSuspension> {
     let kind = GateKind::from_status(state.status).map(process_suspension_kind_from_gate_kind)?;
     Some(ProcessSuspension {
@@ -1006,16 +1018,6 @@ fn process_suspension_from_event(event: &TurnLifecycleEvent) -> Option<ProcessSu
         activity_id: gate.activity_id,
         credential_requirements: gate.credential_requirements.clone(),
         detail: None,
-    })
-}
-
-fn process_lease_from_record(record: &TurnRunRecord) -> Option<ProcessLeaseSnapshot> {
-    Some(ProcessLeaseSnapshot {
-        worker_id: ProcessWorkerId::from_trusted(record.runner_id?.to_wire_string()),
-        lease_token: ProcessLeaseToken::from_trusted(record.lease_token?.to_wire_string()),
-        lease_expires_at: record.lease_expires_at,
-        last_heartbeat_at: record.last_heartbeat_at,
-        claim_count: record.claim_count,
     })
 }
 
@@ -1128,6 +1130,7 @@ fn turn_run_record_from_process_snapshot(
         received_at: state.received_at,
         parent_run_id: snapshot.parent_process_id.map(turn_run_id_from_process_id),
         subagent_depth: metadata.subagent_depth,
+        subagent_activation_provenance: metadata.subagent_activation_provenance,
         spawn_tree_root_run_id: snapshot.root_process_id.map(turn_run_id_from_process_id),
         product_context: state.product_context,
         resume_disposition: state.resume_disposition,
@@ -1206,6 +1209,7 @@ pub fn claimed_turn_run_from_process_claim(
         resolved_run_profile,
         subagent_depth: metadata.subagent_depth,
         spawn_tree_descendant_cap: metadata.spawn_tree_descendant_cap,
+        subagent_activation_provenance: metadata.subagent_activation_provenance,
         runner_id: turn_runner_id_from_worker(&claimed.worker_id)?,
         lease_token: turn_lease_token_from_process(&claimed.lease_token)?,
     })

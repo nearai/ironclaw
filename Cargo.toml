@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/contracts/ironclaw_common", "crates/substrates/ironclaw_observability", "crates/contracts/ironclaw_host_api", "crates/product/ironclaw_host_ingress", "crates/substrates/ironclaw_libsql_runtime", "crates/substrates/ironclaw_filesystem", "crates/domains/ironclaw_attachments", "crates/domains/ironclaw_extractors", "crates/substrates/ironclaw_documents", "crates/domains/ironclaw_memory", "crates/extensions/packages/memory-native", "crates/extensions/packages/mem0", "crates/events/ironclaw_event_log", "crates/events/ironclaw_event_projections", "crates/events/ironclaw_event_streams", "crates/events/ironclaw_event_store", "crates/extensions/ironclaw_extension_registry", "crates/extensions/ironclaw_extension_host", "crates/extensions/ironclaw_extension_manager", "crates/kernel/ironclaw_processes", "crates/lanes/ironclaw_sandbox", "crates/lanes/ironclaw_mcp", "crates/lanes/ironclaw_wasm", "crates/lanes/ironclaw_wasm_limiter", "crates/kernel/ironclaw_capabilities", "crates/substrates/ironclaw_secrets", "crates/substrates/ironclaw_network", "crates/kernel/ironclaw_host_runtime", "crates/kernel/ironclaw_runtime_policy", "crates/kernel/ironclaw_authorization", "crates/kernel/ironclaw_approvals", "crates/kernel/ironclaw_resources", "crates/domains/ironclaw_auth", "crates/kernel/ironclaw_trust", "crates/kernel/ironclaw_turns", "crates/contracts/ironclaw_loop_contracts", "crates/contracts/ironclaw_extension_contracts", "crates/contracts/ironclaw_product_contracts", "crates/loop/ironclaw_agent_loop", "crates/domains/ironclaw_threads", "crates/contracts/ironclaw_prompt_envelope", "crates/loop/ironclaw_hooks", "crates/loop/ironclaw_loop_host", "crates/loop/ironclaw_turn_runner", "crates/app/ironclaw_config", "crates/product/ironclaw_operator", "crates/app/ironclaw_composition", "crates/domains/ironclaw_identity", "crates/extensions/ironclaw_extension_support", "crates/app/ironclaw_cli", "crates/domains/ironclaw_trace_commons", "crates/product/ironclaw_webui", "crates/product/ironclaw_openai_compat", "crates/domains/ironclaw_conversations", "crates/product/ironclaw_assistant", "crates/extensions/packages/telegram", "crates/extensions/packages/slack", "crates/extensions/packages/web-app", "crates/domains/ironclaw_outbound", "crates/domains/ironclaw_triggers", "crates/domains/ironclaw_web_app", "crates/app/ironclaw_architecture_tests", "crates/substrates/ironclaw_safety", "crates/domains/ironclaw_skills", "crates/domains/ironclaw_llm", "tools/ironclaw_stress"]
+members = [".", "crates/contracts/ironclaw_common", "crates/substrates/ironclaw_observability", "crates/contracts/ironclaw_host_api", "crates/product/ironclaw_host_ingress", "crates/substrates/ironclaw_libsql_runtime", "crates/substrates/ironclaw_filesystem", "crates/domains/ironclaw_attachments", "crates/domains/ironclaw_extractors", "crates/substrates/ironclaw_documents", "crates/domains/ironclaw_memory", "crates/extensions/packages/memory-native", "crates/extensions/packages/mem0", "crates/events/ironclaw_event_log", "crates/events/ironclaw_event_projections", "crates/events/ironclaw_event_streams", "crates/events/ironclaw_event_store", "crates/extensions/ironclaw_extension_registry", "crates/extensions/ironclaw_extension_host", "crates/extensions/ironclaw_extension_manager", "crates/kernel/ironclaw_processes", "crates/lanes/ironclaw_sandbox", "crates/lanes/ironclaw_mcp", "crates/lanes/ironclaw_wasm", "crates/lanes/ironclaw_wasm_limiter", "crates/kernel/ironclaw_capabilities", "crates/substrates/ironclaw_secrets", "crates/substrates/ironclaw_network", "crates/kernel/ironclaw_host_runtime", "crates/kernel/ironclaw_runtime_policy", "crates/kernel/ironclaw_authorization", "crates/kernel/ironclaw_approvals", "crates/kernel/ironclaw_resources", "crates/domains/ironclaw_auth", "crates/kernel/ironclaw_trust", "crates/kernel/ironclaw_turns", "crates/contracts/ironclaw_loop_contracts", "crates/contracts/ironclaw_extension_contracts", "crates/contracts/ironclaw_product_contracts", "crates/loop/ironclaw_agent_loop", "crates/domains/ironclaw_threads", "crates/contracts/ironclaw_prompt_envelope", "crates/loop/ironclaw_hooks", "crates/loop/ironclaw_loop_host", "crates/loop/ironclaw_turn_runner", "crates/app/ironclaw_config", "crates/product/ironclaw_operator", "crates/app/ironclaw_composition", "crates/domains/ironclaw_identity", "crates/extensions/ironclaw_extension_support", "crates/app/ironclaw_cli", "crates/domains/ironclaw_trace_commons", "crates/product/ironclaw_webui", "crates/product/ironclaw_openai_compat", "crates/domains/ironclaw_conversations", "crates/product/ironclaw_assistant", "crates/extensions/packages/telegram", "crates/extensions/packages/slack", "crates/extensions/packages/web-app", "crates/domains/ironclaw_notifications", "crates/domains/ironclaw_outbound", "crates/domains/ironclaw_triggers", "crates/domains/ironclaw_web_app", "crates/app/ironclaw_architecture_tests", "crates/substrates/ironclaw_safety", "crates/domains/ironclaw_skills", "crates/domains/ironclaw_llm", "tools/ironclaw_stress"]
 default-members = ["crates/app/ironclaw_cli"]
 exclude = [
     # Standalone helper binary, `[workspace]`-rooted and never built here (it
@@ -121,6 +121,7 @@ ironclaw_host_ingress = { path = "crates/product/ironclaw_host_ingress", version
 ironclaw_runtime_policy = { path = "crates/kernel/ironclaw_runtime_policy", version = "0.1.0" }
 ironclaw_common = { path = "crates/contracts/ironclaw_common" }
 ironclaw_safety = { path = "crates/substrates/ironclaw_safety" }
+ironclaw_sandbox = { path = "crates/lanes/ironclaw_sandbox" }
 ironclaw_trace_commons = { path = "crates/domains/ironclaw_trace_commons", version = "0.1.0" }
 # The Reborn integration harness provisions Postgres testcontainers in every
 # feature lane (StorageMode::Postgres skips at runtime when unavailable), so
@@ -163,6 +164,7 @@ ironclaw_extension_host = { path = "crates/extensions/ironclaw_extension_host", 
 # test drives moved to the manager with the product face it builds.
 ironclaw_extension_manager = { path = "crates/extensions/ironclaw_extension_manager", version = "0.1.0", features = ["test-support"] }
 ironclaw_filesystem = { path = "crates/substrates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_notifications = { path = "crates/domains/ironclaw_notifications", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/lanes/ironclaw_mcp", version = "0.1.0" }
 ironclaw_extension_support = { path = "crates/extensions/ironclaw_extension_support", version = "0.1.0" }
 # W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
@@ -295,6 +297,10 @@ name = "reborn_integration_document_edit"
 path = "tests/integration/document_edit.rs"
 
 [[test]]
+name = "reborn_integration_notification_inbox_user_isolation"
+path = "tests/integration/notification_inbox_user_isolation.rs"
+
+[[test]]
 name = "reborn_integration_sandbox_shell_turn"
 path = "tests/integration/reborn_sandbox_shell_turn.rs"
 
@@ -349,6 +355,10 @@ path = "tests/integration/channel_connection_projection.rs"
 [[test]]
 name = "reborn_integration_comm_context"
 path = "tests/integration/comm_context.rs"
+
+[[test]]
+name = "reborn_integration_prompt_prefix_stability"
+path = "tests/integration/prompt_prefix_stability.rs"
 
 [[test]]
 name = "reborn_integration_durable"
@@ -507,10 +517,33 @@ name = "reborn_integration_wiring_parity"
 path = "tests/integration/wiring_parity.rs"
 
 [[test]]
+name = "reborn_integration_run_artifact_timings"
+path = "tests/integration/run_artifact_timings.rs"
+
+[[test]]
 name = "reborn_integration_db_write_canonical"
 path = "tests/integration/db_write_canonical.rs"
 
+# Debug-info policy for dev and test (test inherits dev, so this one line
+# governs `cargo test` binaries and their dependencies too). CI has built
+# every heavy lane with CARGO_PROFILE_DEV_DEBUG=0/CARGO_PROFILE_TEST_DEBUG=0
+# for a long time; codifying it here makes local builds reproduce CI and lets
+# the per-workflow env copies be deleted as no-ops. Assert/panic messages
+# keep their file:line via panic::Location at any debug level; debug=0 only
+# drops mid-frame file:line from RUST_BACKTRACE output. Measured 2026-08-21
+# on ironclaw_common tests (rustc 1.98.0): debug=0 175 MiB / line-tables-only
+# 257 MiB (+47%) / full 272 MiB — the smaller artifacts win on 2-core CI
+# runners and the 10 GB cache budget. Debugging locally with variable
+# inspection? Override per-run: `CARGO_PROFILE_DEV_DEBUG=2 cargo <cmd>`.
+[profile.dev]
+debug = 0
+
 [profile.release]
+# Already cargo's built-in default (debug info is off by default in
+# release); made explicit because ironclaw-stress.yml restated it three
+# times as CARGO_PROFILE_RELEASE_DEBUG=0 workflow/job env — this line makes
+# those deletable no-ops too (Task 9).
+debug = 0
 strip = true          # Remove debug symbols from release binaries
 
 # The profile that 'cargo dist' will build with

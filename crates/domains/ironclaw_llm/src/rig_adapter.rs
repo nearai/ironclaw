@@ -70,7 +70,7 @@ pub struct RigAdapter<M: CompletionModel> {
     native_streaming: bool,
     /// Whether this rig-core provider serializes `CompletionRequest::output_schema`.
     ///
-    /// rig-core 0.33's dedicated DeepSeek and OpenRouter request paths accept
+    /// rig-core 0.36's dedicated DeepSeek and OpenRouter request paths accept
     /// the field in the shared request type but omit it from their wire
     /// payloads. Keep that limitation explicit at the adapter boundary rather
     /// than silently dispatching a request whose structured-output contract is
@@ -432,21 +432,16 @@ impl<M: CompletionModel> RigAdapter<M> {
         // completed call. Raising it here, before a response object exists,
         // is what lets retry and failover see a failure instead of a success.
         //
-        // What this actually detects, in rig-core 0.33: **Ollama only**. Its
-        // stream yields `FinalResponse` solely inside `if response.done`
-        // (`providers/ollama.rs:706`), so a stream that stops early genuinely
-        // leaves `stream.response` unset. OpenAI
-        // (`providers/openai/completion/streaming.rs:330`), Anthropic
-        // (`providers/anthropic/streaming.rs:333`), Gemini
-        // (`providers/gemini/streaming.rs:233`), OpenRouter
-        // (`providers/openrouter/streaming.rs:323`) and DeepSeek
-        // (`providers/deepseek.rs:862`) all yield a usage-only `FinalResponse`
-        // unconditionally after the SSE loop — including after the plain
-        // `Err(StreamEnded) => break` arm — so on those five a server that
-        // closes mid-answer still sets `stream.response` and this check does
-        // not fire. Catching that needs a terminal-observed signal rig-core
-        // does not carry; it is a known limitation of this adapter, not a
-        // claim it makes.
+        // What this actually detects, in rig-core 0.36: **Ollama only**. Its
+        // stream yields `FinalResponse` solely inside `if response.done`, so a
+        // stream that stops early genuinely leaves `stream.response` unset.
+        // Anthropic and Gemini, plus the shared OpenAI-compatible stream driver
+        // used by OpenAI, OpenRouter, and DeepSeek, all yield a usage-only
+        // `FinalResponse` after the SSE loop — including after the plain
+        // `Err(StreamEnded) => break` arm. On those five a server that closes
+        // mid-answer still sets `stream.response` and this check does not fire.
+        // Catching that needs a terminal-observed signal rig-core does not
+        // carry; it is a known limitation of this adapter, not a claim it makes.
         let Some(terminal_frame) = stream.response.as_ref() else {
             return Err(LlmError::StreamInterrupted {
                 provider: self.model_name.clone(),
@@ -457,7 +452,7 @@ impl<M: CompletionModel> RigAdapter<M> {
         let raw_terminal_frame = serialize_raw_response(terminal_frame);
         let cache_creation_input_tokens = extract_cache_creation(raw_terminal_frame.as_ref());
         let provider_finish = extract_finish_reason(raw_terminal_frame.as_ref());
-        // Note: in rig-core 0.33 only Ollama's terminal frame still carries a
+        // Note: in rig-core 0.36 only Ollama's terminal frame still carries a
         // finish reason (`done_reason`). The other five define
         // `StreamingResponse` as usage-only, so their per-chunk
         // `finish_reason`/`stop_reason` is dropped before it reaches this
@@ -509,6 +504,24 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                         p.push_str(&msg.content);
                     }
                     None => preamble = Some(msg.content.clone()),
+                }
+            }
+            crate::Role::HostReminder => {
+                // Host guidance rides the conversation tail, so it lands right
+                // after the tool results of the iteration that produced it
+                // (#6985). Anthropic rejects consecutive User messages — the
+                // same constraint the Tool arm below merges for — so fold the
+                // reminder into the trailing User message instead of pushing a
+                // second one.
+                if msg.content.is_empty() {
+                    continue;
+                }
+                let reminder = UserContent::text(&msg.content);
+                match history.last_mut() {
+                    Some(RigMessage::User { content }) => content.push(reminder),
+                    _ => history.push(RigMessage::User {
+                        content: OneOrMany::one(reminder),
+                    }),
                 }
             }
             crate::Role::User => {
@@ -1066,7 +1079,7 @@ fn extract_finish_reason(raw: Option<&serde_json::Value>) -> Option<FinishReason
 
 /// Locate the provider's finish-reason field across the response shapes rig fronts.
 ///
-/// Paths verified against rig-core 0.33:
+/// Paths verified against rig-core 0.36:
 /// - OpenAI-shaped (`openai`, `openai_compatible`, `tinfoil`, `azure`,
 ///   `deepseek`, `openrouter`): `choices[0].finish_reason`
 /// - Anthropic-by-key: `stop_reason`
@@ -1376,7 +1389,7 @@ where
 
         let raw_response = serialize_raw_response(&response.raw_response);
         let provider_finish = extract_finish_reason(raw_response.as_ref());
-        let (text, _tool_calls, finish, _reasoning, _reasoning_details) =
+        let (text, _tool_calls, finish, reasoning, _reasoning_details) =
             extract_response(&response.choice, &response.usage, provider_finish);
 
         let resp = CompletionResponse {
@@ -1384,7 +1397,7 @@ where
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
-            reasoning: None,
+            reasoning,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
             cache_creation_input_tokens: extract_cache_creation(raw_response.as_ref()),
         };
@@ -1743,6 +1756,62 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The tail host reminder must not create a second consecutive user
+    /// message after a tool result. This adapter serves OpenAI, Anthropic,
+    /// Ollama and Tinfoil; the Tool arm already merges for exactly this reason
+    /// ("multiple consecutive User messages (which Anthropic rejects)"), and
+    /// #6985 put a reminder at the tail of every loop iteration, landing
+    /// directly after that iteration's tool results.
+    #[test]
+    fn host_reminder_merges_into_the_trailing_user_message() {
+        use crate::provider::{ChatMessage, ToolCall};
+
+        let messages = vec![
+            ChatMessage::system("cached prefix"),
+            ChatMessage::user("fetch the page"),
+            ChatMessage::assistant_with_tool_calls(
+                Some("calling".to_string()),
+                vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "http".to_string(),
+                    arguments: serde_json::json!({}),
+                    arguments_parse_error: None,
+                    reasoning: None,
+                    signature: None,
+                }],
+            ),
+            ChatMessage::tool_result("call-1", "http", "200 OK"),
+            ChatMessage::host_reminder("Current date/time at loop start: 10:00"),
+        ];
+
+        let (preamble, history) = super::convert_messages(&messages);
+
+        assert_eq!(preamble.as_deref(), Some("cached prefix"));
+        for pair in history.windows(2) {
+            let same_role = matches!(
+                (&pair[0], &pair[1]),
+                (
+                    super::RigMessage::User { .. },
+                    super::RigMessage::User { .. }
+                )
+            );
+            assert!(!same_role, "consecutive User messages: {history:#?}");
+        }
+        // The reminder rode into the tool-result user message rather than
+        // becoming a second one.
+        let super::RigMessage::User { content } = history.last().expect("trailing user message")
+        else {
+            panic!("expected a trailing user message, got {history:#?}");
+        };
+        assert!(
+            content.iter().any(|part| matches!(
+                part,
+                super::UserContent::Text(text) if text.text.contains("Current date/time at loop start")
+            )),
+            "reminder text missing from the merged message: {content:#?}"
+        );
+    }
+
     use super::*;
     use rig::completion::CompletionError;
     use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
@@ -2006,6 +2075,7 @@ mod tests {
                     output_tokens: 1,
                     total_tokens: 2,
                     cached_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 },
                 raw_response: serde_json::json!({}),
                 message_id: None,
@@ -2517,6 +2587,7 @@ mod tests {
                 output_tokens: self.output_tokens,
                 total_tokens: self.input_tokens + self.output_tokens,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }

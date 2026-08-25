@@ -99,9 +99,10 @@ use crate::{
     CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
     ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
     PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_NEW_COMMAND_OPERATION_ID,
-    PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID, ProductCommand,
-    ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
-    ProductModelCommand, ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID,
+    PendingApprovalInteractionView, ProductCommand, ProductCommandDescriptor,
+    ProductInboundCommand, ProductLifecycleCommandInput, ProductModelCommand,
+    ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
     ProductStatusCommandInput, ProductStopCommandInput, ProductStopInvocation,
     ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
@@ -148,8 +149,12 @@ mod product_capability_handlers;
 mod product_commands;
 mod project_fs;
 mod projects;
-mod run_artifact;
+// pub(crate): lib.rs re-exports `reborn_services::run_artifact::timings`
+// directly, which needs this segment of the path visible crate-wide; the
+// module's own contents stay unexported except through that re-export.
+pub(crate) mod run_artifact;
 mod thread_artifact;
+mod timings_source;
 mod trace_credits;
 mod types;
 mod views;
@@ -204,6 +209,13 @@ pub use fs_browse::{
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse,
 };
+use ironclaw_notifications::{
+    LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
+    NOTIFICATION_PAGE_LIMIT_MAX, NoopNotificationInboxStore, NotificationAction,
+    NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
+    PublishNotificationRequest,
+};
 pub use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
     ProductView,
@@ -212,15 +224,26 @@ use ironclaw_product_contracts::ironhub::{
     IRONHUB_DELIVER_INSTALL_COMMAND_ID, IronhubInstallDeliveryRequest,
     IronhubInstallDeliveryResult, IronhubLinkService,
 };
+use ironclaw_product_contracts::notification_inbox::{
+    NOTIFICATIONS_ARCHIVE_COMMAND_ID, NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID,
+    NOTIFICATIONS_MARK_READ_COMMAND_ID, NOTIFICATIONS_VIEW,
+};
+use ironclaw_product_contracts::notification_inbox::{
+    ProductListNotificationsRequest, ProductListNotificationsResponse,
+    ProductMarkAllNotificationsReadRequest, ProductNotification, ProductNotificationAction,
+    ProductNotificationKind, ProductNotificationMutationRequest,
+    ProductNotificationMutationResponse, ProductNotificationSeverity,
+};
 pub use ironclaw_product_contracts::package_lifecycle::ChannelConnectStrategy as RebornChannelConnectStrategy;
 pub use ironclaw_product_contracts::product_wire::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornCommandRejection, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunMutationResult,
+    RebornAutomationRunMutationStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornCommandRejection, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExecuteProductCommandRequest, RebornExtensionActionResponse,
     RebornExtensionCredentialSetup, RebornExtensionOnboardingPayload,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
@@ -303,8 +326,8 @@ pub use run_artifact::{
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
 };
 pub use thread_artifact::{
-    RebornThreadArtifact, RebornThreadArtifactRequest, THREAD_ARTIFACT_MAX_MESSAGES,
-    THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
+    RebornThreadArtifact, RebornThreadArtifactRequest, RunArtifactRunTimings,
+    THREAD_ARTIFACT_MAX_MESSAGES, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
 };
 pub use types::{
     RebornAuthAccount, RebornCreateThreadResponse, RebornExecuteProductCommandResponse,
@@ -407,6 +430,9 @@ pub const PROJECT_MEMBER_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
 pub const AUTOMATION_PAUSE_CAPABILITY_ID: &str = "builtin.automation_pause";
 pub const AUTOMATION_PAUSE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_PAUSE_CAPABILITY_ID);
+pub const AUTOMATION_RUN_CAPABILITY_ID: &str = "builtin.automation_run";
+pub const AUTOMATION_RUN_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(AUTOMATION_RUN_CAPABILITY_ID);
 pub const AUTOMATION_RESUME_CAPABILITY_ID: &str = "builtin.automation_resume";
 pub const AUTOMATION_RESUME_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_RESUME_CAPABILITY_ID);
@@ -530,6 +556,11 @@ pub const AUTOMATION_PAUSE_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
     RebornAutomationMutationResponse,
 > = ProductSurfaceCommandDescriptor::new(AUTOMATION_PAUSE_COMMAND_ID);
+pub const AUTOMATION_RUN_COMMAND_ID: &str = "automation.run";
+pub const AUTOMATION_RUN_COMMAND: ProductSurfaceCommandDescriptor<
+    RebornAutomationRequest,
+    RebornAutomationMutationResponse,
+> = ProductSurfaceCommandDescriptor::new(AUTOMATION_RUN_COMMAND_ID);
 pub const AUTOMATION_RESUME_COMMAND_ID: &str = "automation.resume";
 pub const AUTOMATION_RESUME_COMMAND: ProductSurfaceCommandDescriptor<
     RebornAutomationRequest,
@@ -1127,8 +1158,28 @@ struct AutomationApprovalThreadCandidate {
     title: Option<AutomationNotificationTitle>,
 }
 
+struct AutomationApprovalThread {
+    record: SessionThreadRecord,
+    approvals: Vec<PendingApprovalInteractionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LegacyApprovalBackfillKey {
+    tenant_id: String,
+    user_id: String,
+    agent_id: Option<String>,
+    project_id: Option<String>,
+}
+
 #[async_trait]
 pub trait AutomationProductService: Send + Sync {
+    /// Whether this service can enumerate caller-scoped historical runs for
+    /// the one-release migration of approval gates created before durable
+    /// Inbox publishing existed.
+    fn supports_legacy_approval_notification_backfill(&self) -> bool {
+        false
+    }
+
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
@@ -1136,6 +1187,14 @@ pub trait AutomationProductService: Send + Sync {
     ) -> Result<Vec<RebornAutomationInfo>, ProductSurfaceError>;
 
     async fn pause_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
+    }
+
+    async fn run_automation(
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
@@ -1223,6 +1282,14 @@ impl AutomationProductService for UnsupportedAutomationProductService {
     }
 
     async fn pause_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        Err(automation_unavailable())
+    }
+
+    async fn run_automation(
         &self,
         _caller: ProductAgentBoundCaller,
         _automation_id: String,
@@ -1516,6 +1583,86 @@ fn operator_config_capability_forbidden() -> ProductSurfaceError {
 
 fn product_view_forbidden() -> ProductSurfaceError {
     ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
+}
+
+fn notification_recipient(caller: &ProductSurfaceCaller) -> NotificationRecipient {
+    NotificationRecipient {
+        tenant_id: caller.tenant_id.clone(),
+        user_id: caller.user_id.clone(),
+    }
+}
+
+fn notification_mutation_request(
+    caller: &ProductSurfaceCaller,
+    request: ProductNotificationMutationRequest,
+) -> Result<NotificationMutationRequest, ProductSurfaceError> {
+    let notification_id = ironclaw_notifications::NotificationId::new(request.notification_id)
+        .map_err(|_| {
+            ProductSurfaceError::validation(
+                "notification_id",
+                ProductSurfaceValidationCode::InvalidId,
+            )
+        })?;
+    Ok(NotificationMutationRequest {
+        recipient: notification_recipient(caller),
+        notification_id,
+        occurred_at: Utc::now(),
+    })
+}
+
+fn map_notification_inbox_error(
+    error: ironclaw_notifications::NotificationInboxError,
+) -> ProductSurfaceError {
+    match error {
+        // Unlike the backend and serialization reasons below, this one is a
+        // fixed literal from this crate — never backend text — so it is safe to
+        // record before the boundary sanitizes the client-facing error.
+        ironclaw_notifications::NotificationInboxError::InvalidRequest { reason } => {
+            tracing::warn!(%reason, "notification inbox rejected a request at the product boundary");
+            ProductSurfaceError::validation(
+                "notification",
+                ProductSurfaceValidationCode::InvalidValue,
+            )
+        }
+        ironclaw_notifications::NotificationInboxError::NotificationNotFound => {
+            ProductSurfaceError::not_found()
+        }
+        ironclaw_notifications::NotificationInboxError::AccessDenied => {
+            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Forbidden, 403, false)
+        }
+        // The bound reason is filesystem, CAS, and serde text: it carries host
+        // paths, mount internals, and payload fragments. This boundary logs the
+        // fixed category only, matching how every other backend mapping here
+        // discards its payload.
+        ironclaw_notifications::NotificationInboxError::Backend { .. } => {
+            tracing::warn!("notification inbox backend unavailable at the product boundary");
+            ProductSurfaceError::service_unavailable(true)
+        }
+        ironclaw_notifications::NotificationInboxError::Serialization { .. } => {
+            tracing::warn!("notification inbox serialization failed at the product boundary");
+            ProductSurfaceError::internal()
+        }
+    }
+}
+
+fn product_notification_kind(kind: NotificationKind) -> ProductNotificationKind {
+    match kind {
+        NotificationKind::ApprovalRequired => ProductNotificationKind::ApprovalRequired,
+        NotificationKind::AuthenticationRequired => ProductNotificationKind::AuthenticationRequired,
+        NotificationKind::RunBlocked => ProductNotificationKind::RunBlocked,
+        NotificationKind::RunFailed => ProductNotificationKind::RunFailed,
+        NotificationKind::RunCompleted => ProductNotificationKind::RunCompleted,
+        NotificationKind::DeliveryFailed => ProductNotificationKind::DeliveryFailed,
+    }
+}
+
+fn product_notification_severity(severity: NotificationSeverity) -> ProductNotificationSeverity {
+    match severity {
+        NotificationSeverity::Info => ProductNotificationSeverity::Info,
+        NotificationSeverity::Success => ProductNotificationSeverity::Success,
+        NotificationSeverity::Warning => ProductNotificationSeverity::Warning,
+        NotificationSeverity::Error => ProductNotificationSeverity::Error,
+    }
 }
 
 fn product_view_requires_operator_config(view_id: &str) -> bool {
@@ -2250,6 +2397,19 @@ pub trait ProductCapabilityInvoker: Send + Sync {
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, ProductSurfaceError>;
+
+    /// Persist structured output produced by product-owned capability
+    /// handlers through the same durable result boundary as runtime-owned
+    /// capabilities.
+    async fn complete_product_result(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _output: serde_json::Value,
+        _activity_id: ActivityId,
+        _summary: &'static str,
+    ) -> Result<Resolution, ProductSurfaceError> {
+        Err(ProductSurfaceError::service_unavailable(false))
+    }
 }
 
 /// Fail-closed default for compositions that have not attached the product
@@ -2361,6 +2521,8 @@ pub struct RebornServices<
     channel_config_service: Option<Arc<dyn ChannelConfigProductService>>,
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
+    notification_inbox: Arc<dyn NotificationInboxStorePort>,
+    legacy_approval_backfill_attempted: Arc<StdMutex<HashSet<LegacyApprovalBackfillKey>>>,
     session_inbound_ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
     /// The session lane's product surface, built once. Every input is an
     /// immutable builder-wired `Arc`, so rebuilding it per `submit_turn`
@@ -2462,6 +2624,8 @@ where
                 UnsupportedOutboundPreferencesProductService::new_static(),
             ),
             notification_setup_service: Arc::new(UnsupportedChannelNotificationSetupService),
+            notification_inbox: Arc::new(NoopNotificationInboxStore),
+            legacy_approval_backfill_attempted: Arc::new(StdMutex::new(HashSet::new())),
             session_inbound_ledger: Arc::new(
                 crate::in_memory_ledger::InMemoryIdempotencyLedger::new(),
             ),
@@ -2669,6 +2833,14 @@ where
         self
     }
 
+    pub fn with_notification_inbox(
+        mut self,
+        notification_inbox: Arc<dyn NotificationInboxStorePort>,
+    ) -> Self {
+        self.notification_inbox = notification_inbox;
+        self
+    }
+
     async fn invoke_json_capability<T>(
         &self,
         caller: ProductSurfaceCaller,
@@ -2845,6 +3017,120 @@ where
         };
         self.list_visible_threads_for_scope(scope, request, caller)
             .await
+    }
+
+    async fn build_notifications_view(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductListNotificationsRequest,
+        cursor: Option<String>,
+    ) -> Result<ProductListNotificationsResponse, ProductSurfaceError> {
+        let limit = request.limit.unwrap_or(30) as usize;
+        if limit == 0 || limit > NOTIFICATION_PAGE_LIMIT_MAX {
+            return Err(ProductSurfaceError::validation(
+                "limit",
+                ProductSurfaceValidationCode::InvalidValue,
+            ));
+        }
+        if cursor.is_none() {
+            // best-effort-ok: one-release legacy approval discovery must never
+            // gate the authoritative durable Inbox read. The attempt guard
+            // prevents a failing compatibility backend from being hammered on
+            // every browser poll; a process restart creates a fresh retry.
+            if let Err(error) = self.backfill_legacy_approval_notifications(&caller).await {
+                tracing::warn!(?error, "legacy approval notification backfill failed");
+            }
+        }
+        let page = self
+            .notification_inbox
+            .list(ListNotificationsRequest {
+                recipient: notification_recipient(&caller),
+                limit,
+                cursor,
+                include_archived: false,
+            })
+            .await
+            .map_err(map_notification_inbox_error)?;
+        Ok(ProductListNotificationsResponse {
+            notifications: page
+                .notifications
+                .into_iter()
+                .map(|record| ProductNotification {
+                    id: record.id.as_str().to_string(),
+                    kind: product_notification_kind(record.kind),
+                    severity: product_notification_severity(record.severity),
+                    action: match record.action {
+                        NotificationAction::OpenThread { thread_id } => {
+                            ProductNotificationAction::OpenThread {
+                                thread_id: thread_id.to_string(),
+                            }
+                        }
+                    },
+                    thread_id: record.source.thread_id.to_string(),
+                    turn_run_id: record.source.turn_run_id.map(|id| id.to_string()),
+                    created_at: record.created_at,
+                    updated_at: record.updated_at,
+                    read_at: record.read_at,
+                    resolved_at: record.resolved_at,
+                })
+                .collect(),
+            next_cursor: page.next_cursor,
+            unread_count: page.unread_count,
+        })
+    }
+
+    async fn mark_notification_read(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductNotificationMutationRequest,
+    ) -> Result<ProductNotificationMutationResponse, ProductSurfaceError> {
+        // Terminal implementation of an authenticated ProductSurface command:
+        // the recipient is always re-derived from the verified caller, never
+        // accepted from the request body.
+        // `updated` reports what the store actually changed. A repeated
+        // mark-read succeeds without changing anything, and answering `true`
+        // there would hand the client evidence of a durable write that never
+        // happened.
+        let outcome = self
+            .notification_inbox
+            .mark_read(notification_mutation_request(&caller, request)?)
+            .await
+            .map_err(map_notification_inbox_error)?;
+        Ok(ProductNotificationMutationResponse {
+            updated: outcome.applied(),
+        })
+    }
+
+    async fn mark_all_notifications_read(
+        &self,
+        caller: ProductSurfaceCaller,
+    ) -> Result<ProductNotificationMutationResponse, ProductSurfaceError> {
+        let outcome = self
+            .notification_inbox
+            .mark_all_read(MarkAllNotificationsReadRequest {
+                recipient: notification_recipient(&caller),
+                occurred_at: Utc::now(),
+            })
+            .await
+            .map_err(map_notification_inbox_error)?;
+        Ok(ProductNotificationMutationResponse {
+            updated: outcome.applied(),
+        })
+    }
+
+    async fn archive_notification(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ProductNotificationMutationRequest,
+    ) -> Result<ProductNotificationMutationResponse, ProductSurfaceError> {
+        let outcome = self
+            .notification_inbox
+            .archive(notification_mutation_request(&caller, request)?)
+            .await
+            .map_err(map_notification_inbox_error)?;
+        Ok(ProductNotificationMutationResponse {
+            updated: outcome.applied(),
+        })
     }
 
     /// Wire the generic channel-config configure port. Without it, the
@@ -3150,8 +3436,24 @@ where
         if let Some(operation) =
             product_capability_handlers::ProductCapabilityHandler::parse(&capability)
         {
-            let summary = operation.success_summary();
-            operation.invoke(self, caller, input).await?;
+            let completion_caller = caller.clone();
+            let run_result = operation.invoke(self, caller, input).await?;
+            let summary = match run_result.as_ref().map(|result| result.status) {
+                Some(RebornAutomationRunMutationStatus::Replayed) => {
+                    "automation run was already submitted"
+                }
+                Some(RebornAutomationRunMutationStatus::Submitted) | None => {
+                    operation.success_summary()
+                }
+            };
+            if let Some(run_result) = run_result {
+                let output =
+                    serde_json::to_value(run_result).map_err(ProductSurfaceError::internal_from)?;
+                return self
+                    .product_capability_invoker
+                    .complete_product_result(completion_caller, output, activity_id, summary)
+                    .await;
+            }
             return self.api_capability_success(activity_id, summary);
         }
         self.product_capability_invoker
@@ -4256,6 +4558,19 @@ where
                 let next_cursor = response.next_cursor.clone();
                 views::view_page_with_cursor(response, next_cursor)
             }
+            id if id == NOTIFICATIONS_VIEW.id => {
+                let request = serde_json::from_value(query.params).map_err(|_| {
+                    ProductSurfaceError::validation(
+                        "input",
+                        ProductSurfaceValidationCode::InvalidValue,
+                    )
+                })?;
+                let response = self
+                    .build_notifications_view(caller, request, query.cursor)
+                    .await?;
+                let next_cursor = response.next_cursor.clone();
+                views::view_page_with_cursor(response, next_cursor)
+            }
             id if id == AUTOMATIONS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(ProductSurfaceError::internal_from)?;
@@ -5046,6 +5361,23 @@ where
             .await
     }
 
+    async fn run_automation(
+        &self,
+        caller: ProductSurfaceCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(ProductSurfaceError::from_status(
+                ProductSurfaceErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        self.automation_service
+            .run_automation(caller, automation_id)
+            .await
+    }
+
     async fn resume_automation(
         &self,
         caller: ProductSurfaceCaller,
@@ -5573,6 +5905,164 @@ where
                 false,
             ));
         };
+        let candidates = self
+            .automation_approval_thread_candidates(&bound_caller)
+            .await?;
+
+        let mut seen = HashSet::new();
+        let mut threads = Vec::with_capacity(visible_limit);
+        if let Some(candidate_thread_id) = candidate_thread_id {
+            let thread_id = parse_thread_id_field("candidate_thread_id", candidate_thread_id)?;
+            if seen.insert(thread_id.clone()) {
+                let listed_candidate = candidates
+                    .iter()
+                    .find(|candidate| candidate.thread_id == thread_id)
+                    .cloned();
+                let approval_thread = if let Some(candidate) = listed_candidate {
+                    self.automation_run_thread_record(
+                        &caller,
+                        &bound_caller,
+                        candidate.thread_id,
+                        candidate.title,
+                    )
+                    .await?
+                } else {
+                    self.automation_run_thread_record(&caller, &bound_caller, thread_id, None)
+                        .await?
+                };
+                if let Some(approval_thread) = approval_thread {
+                    threads.push(approval_thread.record);
+                }
+            }
+        }
+        for candidate in candidates {
+            if threads.len() >= visible_limit {
+                break;
+            }
+            if !seen.insert(candidate.thread_id.clone()) {
+                continue;
+            }
+            let Some(approval_thread) = self
+                .automation_run_thread_record(
+                    &caller,
+                    &bound_caller,
+                    candidate.thread_id,
+                    candidate.title,
+                )
+                .await?
+            else {
+                continue;
+            };
+            threads.push(approval_thread.record);
+        }
+
+        Ok(RebornListThreadsResponse {
+            threads,
+            next_cursor: None,
+        })
+    }
+
+    async fn backfill_legacy_approval_notifications(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<(), ProductSurfaceError> {
+        if !self
+            .automation_service
+            .supports_legacy_approval_notification_backfill()
+        {
+            return Ok(());
+        }
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller.clone()) else {
+            return Ok(());
+        };
+        let migration_key = LegacyApprovalBackfillKey {
+            tenant_id: caller.tenant_id.as_str().to_string(),
+            user_id: caller.user_id.as_str().to_string(),
+            agent_id: caller
+                .agent_id
+                .as_ref()
+                .map(|agent_id| agent_id.as_str().to_string()),
+            project_id: caller
+                .project_id
+                .as_ref()
+                .map(|project_id| project_id.as_str().to_string()),
+        };
+        if !self
+            .legacy_approval_backfill_attempted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(migration_key)
+        {
+            return Ok(());
+        }
+
+        let migrate = async {
+            let candidates = self
+                .automation_approval_thread_candidates(&bound_caller)
+                .await?;
+            for candidate in candidates {
+                let Some(approval_thread) = self
+                    .automation_run_thread_record(
+                        caller,
+                        &bound_caller,
+                        candidate.thread_id,
+                        candidate.title,
+                    )
+                    .await?
+                else {
+                    continue;
+                };
+                let occurred_at = approval_thread
+                    .record
+                    .updated_at
+                    .or(approval_thread.record.created_at)
+                    .unwrap_or_else(Utc::now);
+                for approval in approval_thread.approvals {
+                    let lifecycle_ref = LifecycleRef::new(approval.gate_ref.as_str())
+                        .map_err(map_notification_inbox_error)?;
+                    let id = crate::run_delivery::run_notification_inbox_id(
+                        approval.run_id,
+                        NotificationKind::ApprovalRequired,
+                        Some(lifecycle_ref.as_str()),
+                    )
+                    .map_err(map_notification_inbox_error)?;
+                    self.notification_inbox
+                        .publish(PublishNotificationRequest {
+                            id,
+                            recipient: notification_recipient(caller),
+                            kind: NotificationKind::ApprovalRequired,
+                            severity: NotificationSeverity::Warning,
+                            source: NotificationSource {
+                                thread_id: approval.scope.thread_id.clone(),
+                                turn_run_id: Some(approval.run_id),
+                                lifecycle_ref: Some(lifecycle_ref),
+                            },
+                            action: NotificationAction::OpenThread {
+                                thread_id: approval.scope.thread_id,
+                            },
+                            initial_state: NotificationInitialState::Open,
+                            occurred_at,
+                        })
+                        .await
+                        .map_err(map_notification_inbox_error)?;
+                }
+            }
+            Ok::<(), ProductSurfaceError>(())
+        };
+
+        tokio::time::timeout(NOTIFICATION_APPROVAL_QUERY_TIMEOUT, migrate)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "legacy approval notification backfill timed out");
+                ProductSurfaceError::service_unavailable(true)
+            })??;
+        Ok(())
+    }
+
+    async fn automation_approval_thread_candidates(
+        &self,
+        bound_caller: &ProductAgentBoundCaller,
+    ) -> Result<Vec<AutomationApprovalThreadCandidate>, ProductSurfaceError> {
         let automations = self
             .automation_service
             .list_automations(
@@ -5606,58 +6096,7 @@ where
                 break;
             }
         }
-
-        let mut seen = HashSet::new();
-        let mut threads = Vec::with_capacity(visible_limit);
-        if let Some(candidate_thread_id) = candidate_thread_id {
-            let thread_id = parse_thread_id_field("candidate_thread_id", candidate_thread_id)?;
-            if seen.insert(thread_id.clone()) {
-                let listed_candidate = candidates
-                    .iter()
-                    .find(|candidate| candidate.thread_id == thread_id)
-                    .cloned();
-                let record = if let Some(candidate) = listed_candidate {
-                    self.automation_run_thread_record(
-                        &caller,
-                        &bound_caller,
-                        candidate.thread_id,
-                        candidate.title,
-                    )
-                    .await?
-                } else {
-                    self.automation_run_thread_record(&caller, &bound_caller, thread_id, None)
-                        .await?
-                };
-                if let Some(record) = record {
-                    threads.push(record);
-                }
-            }
-        }
-        for candidate in candidates {
-            if threads.len() >= visible_limit {
-                break;
-            }
-            if !seen.insert(candidate.thread_id.clone()) {
-                continue;
-            }
-            let Some(record) = self
-                .automation_run_thread_record(
-                    &caller,
-                    &bound_caller,
-                    candidate.thread_id,
-                    candidate.title,
-                )
-                .await?
-            else {
-                continue;
-            };
-            threads.push(record);
-        }
-
-        Ok(RebornListThreadsResponse {
-            threads,
-            next_cursor: None,
-        })
+        Ok(candidates)
     }
 
     async fn automation_run_thread_record(
@@ -5666,7 +6105,7 @@ where
         bound_caller: &ProductAgentBoundCaller,
         thread_id: ThreadId,
         automation_title: Option<AutomationNotificationTitle>,
-    ) -> Result<Option<SessionThreadRecord>, ProductSurfaceError> {
+    ) -> Result<Option<AutomationApprovalThread>, ProductSurfaceError> {
         let Some(trigger_scope) = self
             .automation_service
             .resolve_run_thread_scope(bound_caller.clone(), &thread_id)
@@ -5691,7 +6130,7 @@ where
         thread_id: ThreadId,
         trigger_scope: TriggerRunThreadScope,
         title: Option<AutomationNotificationTitle>,
-    ) -> Result<Option<SessionThreadRecord>, ProductSurfaceError> {
+    ) -> Result<Option<AutomationApprovalThread>, ProductSurfaceError> {
         let true_agent_id = trigger_scope
             .agent_id
             .clone()
@@ -5705,10 +6144,10 @@ where
             thread_id.clone(),
         );
         let run_actor = TurnActor::new(creator_user_id.clone());
-        if !self
-            .thread_scope_has_pending_approval(&approval_turn_scope, &run_actor)
-            .await?
-        {
+        let approvals = self
+            .pending_approvals_for_thread_scope(&approval_turn_scope, &run_actor)
+            .await?;
+        if approvals.is_empty() {
             return Ok(None);
         }
 
@@ -5755,14 +6194,14 @@ where
         {
             record.title = Some(title.as_str().to_string());
         }
-        Ok(Some(record))
+        Ok(Some(AutomationApprovalThread { record, approvals }))
     }
 
-    async fn thread_scope_has_pending_approval(
+    async fn pending_approvals_for_thread_scope(
         &self,
         scope: &TurnScope,
         actor: &TurnActor,
-    ) -> Result<bool, ProductSurfaceError> {
+    ) -> Result<Vec<PendingApprovalInteractionView>, ProductSurfaceError> {
         let pending = self
             .approval_interactions
             .list_pending(ListPendingApprovalsRequest {
@@ -5771,7 +6210,7 @@ where
             })
             .await
             .map_err(|error| map_adapter_error(error.into()))?;
-        Ok(!pending.approvals.is_empty())
+        Ok(pending.approvals)
     }
 
     fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {
@@ -7093,6 +7532,7 @@ fn map_thread_error(error: SessionThreadError) -> ProductSurfaceError {
         }
         SessionThreadError::InvalidAttachment(_)
         | SessionThreadError::InvalidPreparedContext { .. }
+        | SessionThreadError::InvalidSubagentResult { .. }
         | SessionThreadError::PreparedContextKeyMismatch { .. } => {
             ProductSurfaceError::from_status_kind(
                 ProductSurfaceErrorCode::InvalidRequest,

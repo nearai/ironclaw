@@ -125,6 +125,23 @@ async def test_provider_fault_proxy_is_transparent_and_redacts_credentials(
     assert "never-record-this-token" not in str(proxy.state)
 
 
+async def test_provider_fault_proxy_can_record_an_explicit_forward_rule(fault_proxy):
+    proxy, upstream_requests = fault_proxy
+    proxy.arm(
+        ProviderFaultProfile(name="observed_forward", action="forward"),
+        method="GET",
+        path="/objects/1",
+    )
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{proxy.url}/objects/1")
+
+    assert response.status_code == 200
+    assert len(upstream_requests) == 1
+    assert proxy.state["requests"][0]["fault"] == "observed_forward"
+    assert proxy.state["requests"][0]["forwarded"] is True
+
+
 async def test_provider_fault_proxy_fingerprints_issued_token_without_recording_it(
     fault_proxy,
 ):

@@ -382,9 +382,9 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs"
-lines = [2033]
+lines = [1427]
 owner = "@nearai/reborn"
-reason = "Background subagent spawn-mode arm; base lcov shows 0 hits at the same statement (67088a426 line 2024). Only GateRef::new -> TurnGateRef::new changed."
+reason = "Background subagent spawn-mode arm; base lcov shows 0 hits at the same statement (67088a426 line 2024). Only GateRef::new -> TurnGateRef::new changed. Was line 2032 until the resolver test-move refactor shifted it."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
@@ -538,9 +538,9 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs"
-lines = [563]
+lines = [853]
 owner = "@nearai/reborn"
-reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
+reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2. Was line 563 (handle_child_terminal_inner's return type) until the resolver test-move refactor shifted it."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
@@ -603,14 +603,6 @@ review_after = "2026-10-31"
 [[exemption]]
 path = "crates/loop/ironclaw_hooks/src/middleware/transcript_port.rs"
 lines = [152, 273]
-owner = "@nearai/reborn"
-reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
-issue = "https://github.com/nearai/ironclaw/issues/6963"
-review_after = "2026-10-31"
-
-[[exemption]]
-path = "crates/loop/ironclaw_loop_host/src/system_inference.rs"
-lines = [374, 395, 429, 443]
 owner = "@nearai/reborn"
 reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
@@ -1002,7 +994,7 @@ review_after = "2026-11-01"
 
 [[exemption]]
 path = "crates/kernel/ironclaw_turns/src/process_projection/metadata.rs"
-lines = [130, 131, 132]
+lines = [123, 124, 125]
 owner = "@nearai/reborn"
 reason = "serde default fn for legacy persisted rows missing steering_allowed; integration always writes the field. Crate-tier legacy-row deserialization test covers it."
 issue = "https://github.com/nearai/ironclaw/issues/7006"
@@ -2483,4 +2475,15 @@ lines = [
 owner = "@nearai/reborn"
 reason = "Error-mapping arm renames from the lane governor port (#7160 in #7170): the adapter arms are not integration-instrumented on this path (zero measured lines among the candidates -> empty-denominator); behavior pinned by the lane-seam denial tests added in the same slice. Same-run floors passed."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
+review_after = "2026-10-31"
+
+# ---------------------------------------------------------------------------
+# PR #7001 stable prompt prefix (#6985).
+
+[[exemption]]
+path = "crates/contracts/ironclaw_loop_contracts/src/instruction_bundle.rs"
+lines = [438, 452]
+owner = "@nearai/reborn"
+reason = "Closing `)?;` lines of the relocated push_runtime_context/push_inline_message calls (#6985 moved the calls after the thread section). LLVM maps only the `?` early-return error region to these physical lines; the success paths execute in every integration turn (runtime context) and in reborn_integration_prompt_prefix_stability (inline nudges), while the error arms guard host-validated inputs and are not reachable through the integration tier."
+issue = "https://github.com/nearai/ironclaw/issues/6985"
 review_after = "2026-10-31"

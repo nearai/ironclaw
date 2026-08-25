@@ -31,6 +31,10 @@ use ironclaw_product_contracts::surface::{
 
 pub use ironclaw_product_contracts::product_wire::RebornRunArtifactRequest;
 
+pub mod timings;
+
+use timings::RunArtifactTimings;
+
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";
 pub const RUN_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "run_artifact",
@@ -46,6 +50,10 @@ pub struct RebornRunArtifact {
     pub run: RebornGetRunStateResponse,
     pub messages: Vec<RunArtifactMessage>,
     pub logs: RunArtifactLogs,
+    /// Best-effort per-iteration and per-tool timing. `#[serde(default)]` so a
+    /// `v1` artifact downloaded before timings existed still deserializes.
+    #[serde(default)]
+    pub timings: RunArtifactTimings,
     pub redaction: RunArtifactRedaction,
 }
 
@@ -55,6 +63,15 @@ pub struct RunArtifactMessage {
     pub sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// When the message row was first persisted. `None` for records written
+    /// before per-message timestamps existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// Last time the message row materially changed. For an assistant reply
+    /// this is the finalization time, which is what makes step-to-step gaps
+    /// meaningful.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
     pub kind: MessageKind,
     pub status: MessageStatus,
     pub content: String,
@@ -140,6 +157,14 @@ where
         let (messages, message_redaction_applied) = self
             .artifact_messages_for_records(thread_scope, &thread_id, run_records, &redactor)
             .await?;
+        // Borrow `caller` here, before `artifact_logs` takes it by value below.
+        let timings = self.artifact_timings(
+            &caller,
+            &thread_id,
+            &run_id,
+            run.received_at,
+            messages.iter(),
+        );
         let (logs, log_redaction_applied) = self
             .artifact_logs(caller, &thread_id, Some(&run_id), &redactor)
             .await;
@@ -151,6 +176,7 @@ where
             run,
             messages,
             logs,
+            timings,
             redaction: RunArtifactRedaction {
                 pipeline: ARTIFACT_REDACTION_PIPELINE.to_string(),
                 applied: message_redaction_applied || log_redaction_applied,
@@ -301,6 +327,8 @@ pub(super) fn artifact_messages(
                 message_id: record.message_id.to_string(),
                 sequence: record.sequence,
                 run_id: record.turn_run_id.clone(),
+                created_at: record.created_at,
+                updated_at: record.updated_at,
                 kind: record.kind,
                 status: record.status,
                 content,
@@ -423,6 +451,32 @@ mod tests {
         assert!(!serialized.contains("/Users/alice"));
         assert!(!serialized.contains("secret-value"));
         assert!(serialized.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn assembler_exports_durable_message_timestamps() {
+        let thread_id = ThreadId::new("thread-a").expect("thread id");
+        let created = Utc::now();
+        let updated = created + chrono::Duration::seconds(41);
+        let mut source = record(
+            &thread_id,
+            ThreadMessageId::new(),
+            1,
+            MessageKind::Assistant,
+            "hello",
+        );
+        source.created_at = Some(created);
+        source.updated_at = Some(updated);
+
+        let (messages, _) = artifact_messages(
+            vec![source],
+            &HashMap::new(),
+            &DeterministicTraceRedactor::new(Vec::new()),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].created_at, Some(created));
+        assert_eq!(messages[0].updated_at, Some(updated));
     }
 
     fn record(

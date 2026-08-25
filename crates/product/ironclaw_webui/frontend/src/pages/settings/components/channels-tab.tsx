@@ -1,5 +1,6 @@
 import { Badge } from "../../../design-system/badge";
 import { Card } from "../../../design-system/card";
+import { Skeleton } from "../../../design-system/skeleton";
 import { useT } from "../../../lib/i18n";
 import { useChannels } from "../hooks/useChannels";
 import { matchesSearch } from "../lib/settings-search";
@@ -175,15 +176,15 @@ export function ChannelsTab({ searchQuery = "" }) {
     return (
       <div className="space-y-5">
         <Card padding="md">
-          <div className="mb-4 h-3 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+          <Skeleton className="mb-4 h-3 w-28 rounded" />
           {[1, 2, 3].map(
             (i) => (
               <div
                 key={i}
                 className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-4 first:border-0"
               >
-                <div className="h-4 w-32 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-                <div className="h-6 w-16 animate-pulse rounded-full bg-[var(--v2-surface-muted)]" />
+                <Skeleton className="h-4 w-32 rounded" />
+                <Skeleton className="h-6 w-16 rounded-full" />
               </div>
             )
           )}

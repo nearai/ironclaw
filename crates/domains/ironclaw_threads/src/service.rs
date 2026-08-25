@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use ironclaw_host_api::ids::ThreadId;
 
 use crate::{
-    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
-    AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
-    BoundedThreadMessages, BoundedThreadMessagesRequest, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    FinalizedAssistantMessageByRunRequest, InboundMessageReplayMetadata,
+    AcceptInboundMessageRequest, AcceptSubagentResultRequest, AcceptedInboundMessage,
+    AcceptedInboundMessageReplay, AcceptedSubagentResult, AppendAssistantDraftRequest,
+    AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
+    AppendToolResultReferenceRequest, BoundedThreadMessages, BoundedThreadMessagesRequest,
+    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
+    EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, InboundMessageReplayMetadata,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent,
     PublishStructuredFinalizationMessageRequest, PutStructuredFinalizationRequest,
@@ -73,6 +73,28 @@ pub trait SessionThreadService: Send + Sync {
         let _ = request;
         Err(SessionThreadError::Backend(
             "accept_prepared_context is not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Accept one background child's framed result into the **parent's**
+    /// thread as a durable **system-class** row — never [`crate::MessageKind::User`],
+    /// because a child's output is untrusted agent text, not a human
+    /// instruction on the steering contract.
+    ///
+    /// Deduplicates on the same acceptance identity tuple
+    /// [`Self::accept_inbound_message`] uses, here
+    /// `(scope, "subagent-result:{parent_run_id}", {child_run_id})`. That tuple
+    /// — not any caller-side bookkeeping — is what makes the append idempotent
+    /// across the hard crash window: a replay re-accepts and receives the SAME
+    /// `message_id` and `sequence` back with `idempotent_replay: true`.
+    async fn accept_subagent_result(
+        &self,
+        request: AcceptSubagentResultRequest,
+    ) -> Result<AcceptedSubagentResult, SessionThreadError> {
+        let _ = request;
+        Err(SessionThreadError::Backend(
+            "accept_subagent_result is not implemented by this SessionThreadService backend"
                 .to_string(),
         ))
     }
@@ -507,6 +529,13 @@ where
         request: crate::PreparedContextRequest,
     ) -> Result<crate::AcceptedPreparedContext, SessionThreadError> {
         self.as_ref().accept_prepared_context(request).await
+    }
+
+    async fn accept_subagent_result(
+        &self,
+        request: AcceptSubagentResultRequest,
+    ) -> Result<AcceptedSubagentResult, SessionThreadError> {
+        self.as_ref().accept_subagent_result(request).await
     }
 
     async fn read_prepared_context(

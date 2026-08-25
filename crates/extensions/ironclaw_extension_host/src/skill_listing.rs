@@ -114,8 +114,7 @@ mod tests {
         assert!(
             result
                 .iter()
-                .any(|skill| skill.name == "code-review"
-                    && skill.source == ManagedSkillSource::System)
+                .any(|skill| skill.name == "coding" && skill.source == ManagedSkillSource::System)
         );
         assert!(
             result
@@ -137,8 +136,7 @@ mod tests {
         assert!(
             result
                 .iter()
-                .any(|skill| skill.name == "code-review"
-                    && skill.source == ManagedSkillSource::System)
+                .any(|skill| skill.name == "coding" && skill.source == ManagedSkillSource::System)
         );
         assert!(!storage_root.exists());
     }
@@ -199,24 +197,24 @@ mod tests {
     async fn local_skill_list_prefers_user_skill_over_bundled_duplicate_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("standalone");
-        write_skill(&storage_root, "code-review");
+        write_skill(&storage_root, "coding");
 
         let result = list_reborn_local_skills("list-owner", &storage_root)
             .await
             .expect("list skills");
 
-        let code_review_skills = result
+        let coding_skills = result
             .iter()
-            .filter(|skill| skill.name == "code-review")
+            .filter(|skill| skill.name == "coding")
             .collect::<Vec<_>>();
-        assert_eq!(code_review_skills.len(), 2);
+        assert_eq!(coding_skills.len(), 2);
         assert!(
-            code_review_skills
+            coding_skills
                 .iter()
                 .any(|skill| skill.source == ManagedSkillSource::User)
         );
         assert!(
-            code_review_skills
+            coding_skills
                 .iter()
                 .any(|skill| skill.source == ManagedSkillSource::System)
         );
@@ -236,29 +234,24 @@ mod tests {
     async fn local_skill_list_prefers_embedded_bundled_summary_over_storage_system_skill() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("standalone");
-        write_system_skill(&storage_root, "code-review", "old system description");
-        let bundled_code_review = bundled_reborn_skill_summaries()
+        write_system_skill(&storage_root, "coding", "old system description");
+        let bundled_coding = bundled_reborn_skill_summaries()
             .expect("bundled summaries")
             .into_iter()
-            .find(|skill| skill.name == "code-review")
-            .expect("bundled code-review");
+            .find(|skill| skill.name == "coding")
+            .expect("bundled coding");
 
         let result = list_reborn_local_skills("list-owner", &storage_root)
             .await
             .expect("list skills");
 
-        let system_code_reviews = result
+        let system_coding = result
             .iter()
-            .filter(|skill| {
-                skill.name == "code-review" && skill.source == ManagedSkillSource::System
-            })
+            .filter(|skill| skill.name == "coding" && skill.source == ManagedSkillSource::System)
             .collect::<Vec<_>>();
-        assert_eq!(system_code_reviews.len(), 1);
-        assert_eq!(
-            system_code_reviews[0].description,
-            bundled_code_review.description
-        );
-        assert_ne!(system_code_reviews[0].description, "old system description");
+        assert_eq!(system_coding.len(), 1);
+        assert_eq!(system_coding[0].description, bundled_coding.description);
+        assert_ne!(system_coding[0].description, "old system description");
     }
 
     fn write_skill(storage_root: &std::path::Path, name: &str) {

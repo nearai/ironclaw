@@ -1,0 +1,480 @@
+<title>IronClaw OOBE — Integration Review</title>
+<style>
+  :root{
+    --ground:#f4f7fb; --surface:#ffffff; --surface-2:#eef2f8;
+    --ink:#14181f; --ink-soft:#48515f; --ink-faint:#7b8698;
+    --border:#dde3ed; --border-strong:#c7d0dd;
+    --accent:#1f6fb0; --accent-soft:rgba(40,130,200,.10);
+    --reuse:#2f8f82; --reuse-ink:#1f6f63; --reuse-bg:rgba(47,143,130,.12);
+    --new:#b6791c; --new-ink:#8f5e12; --new-bg:rgba(190,130,40,.13);
+    --vision:#6d4fd8; --vision-ink:#5a3fc0; --vision-bg:rgba(120,90,235,.11);
+    --rail:#c7d0dd;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --maxw:1080px;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --ground:#111114; --surface:#181a20; --surface-2:#1f222a;
+      --ink:#e9edf4; --ink-soft:#a7b1c1; --ink-faint:#6c7786;
+      --border:#2a2e38; --border-strong:#3a404c;
+      --accent:#57a8e6; --accent-soft:rgba(87,168,230,.13);
+      --reuse:#46b7a7; --reuse-ink:#63c6b7; --reuse-bg:rgba(70,183,167,.13);
+      --new:#e2a54c; --new-ink:#eab868; --new-bg:rgba(226,165,76,.13);
+      --vision:#a68cff; --vision-ink:#b7a3ff; --vision-bg:rgba(140,110,245,.15);
+      --rail:#3a404c;
+    }
+  }
+  :root[data-theme="light"]{
+    --ground:#f4f7fb; --surface:#ffffff; --surface-2:#eef2f8;
+    --ink:#14181f; --ink-soft:#48515f; --ink-faint:#7b8698;
+    --border:#dde3ed; --border-strong:#c7d0dd;
+    --accent:#1f6fb0; --accent-soft:rgba(40,130,200,.10);
+    --reuse:#2f8f82; --reuse-ink:#1f6f63; --reuse-bg:rgba(47,143,130,.12);
+    --new:#b6791c; --new-ink:#8f5e12; --new-bg:rgba(190,130,40,.13);
+    --vision:#6d4fd8; --vision-ink:#5a3fc0; --vision-bg:rgba(120,90,235,.11);
+    --rail:#c7d0dd;
+  }
+  :root[data-theme="dark"]{
+    --ground:#111114; --surface:#181a20; --surface-2:#1f222a;
+    --ink:#e9edf4; --ink-soft:#a7b1c1; --ink-faint:#6c7786;
+    --border:#2a2e38; --border-strong:#3a404c;
+    --accent:#57a8e6; --accent-soft:rgba(87,168,230,.13);
+    --reuse:#46b7a7; --reuse-ink:#63c6b7; --reuse-bg:rgba(70,183,167,.13);
+    --new:#e2a54c; --new-ink:#eab868; --new-bg:rgba(226,165,76,.13);
+    --vision:#a68cff; --vision-ink:#b7a3ff; --vision-bg:rgba(140,110,245,.15);
+    --rail:#3a404c;
+  }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
+    font-size:15.5px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 22px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+
+  /* ---- header ---- */
+  header{border-bottom:1px solid var(--border);background:var(--surface);
+    position:sticky;top:0;z-index:20;backdrop-filter:saturate(1.1)}
+  .hbar{display:flex;align-items:center;gap:14px;padding:13px 0;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:-.01em}
+  .brand .glyph{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;
+    background:linear-gradient(150deg,var(--accent),var(--vision));color:#fff;font-size:15px}
+  .brand small{font-family:var(--mono);font-weight:600;color:var(--ink-faint);
+    font-size:11px;letter-spacing:.02em}
+  .htabs{margin-left:auto;display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+  .htabs a{font-family:var(--mono);font-size:11.5px;color:var(--ink-soft);
+    padding:5px 9px;border-radius:7px;border:1px solid transparent}
+  .htabs a:hover{border-color:var(--border-strong);text-decoration:none;color:var(--ink)}
+  .toggle{font-family:var(--mono);font-size:11.5px;cursor:pointer;background:var(--surface-2);
+    border:1px solid var(--border-strong);color:var(--ink-soft);border-radius:7px;padding:5px 10px}
+  .toggle:hover{color:var(--ink)}
+
+  /* ---- hero ---- */
+  .hero{padding:52px 0 30px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--accent);font-weight:600;margin:0 0 14px}
+  h1{font-size:clamp(30px,5vw,46px);line-height:1.05;letter-spacing:-.025em;font-weight:850;
+    margin:0 0 18px;text-wrap:balance;max-width:20ch}
+  .lede{font-size:18px;line-height:1.55;color:var(--ink-soft);max-width:60ch;margin:0 0 22px}
+  .lede b{color:var(--ink);font-weight:650}
+  .bench{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+  .bench .b{display:flex;flex-direction:column;gap:2px;border:1px solid var(--border);
+    background:var(--surface);border-radius:11px;padding:11px 14px;min-width:170px}
+  .bench .b span{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-faint)}
+  .bench .b strong{font-size:13.5px;font-weight:650}
+
+  /* ---- sections ---- */
+  section{padding:34px 0;border-top:1px solid var(--border)}
+  .sec-head{display:flex;align-items:baseline;gap:12px;margin:0 0 6px;flex-wrap:wrap}
+  .sec-num{font-family:var(--mono);font-size:12px;color:var(--ink-faint);font-weight:600}
+  h2{font-size:23px;letter-spacing:-.02em;font-weight:800;margin:0;text-wrap:balance}
+  .sec-sub{color:var(--ink-soft);max-width:66ch;margin:8px 0 22px;font-size:15px}
+
+  /* ---- legend / chips ---- */
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin:0 0 22px;font-size:13px}
+  .lg{display:inline-flex;align-items:center;gap:8px;color:var(--ink-soft)}
+  .sw{width:13px;height:13px;border-radius:4px;flex:none}
+  .sw.reuse{background:var(--reuse-bg);border:1.5px solid var(--reuse)}
+  .sw.new{background:var(--new-bg);border:1.5px solid var(--new)}
+  .sw.vision{background:var(--vision-bg);border:1.5px solid var(--vision)}
+  .tag{font-family:var(--mono);font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:999px;
+    letter-spacing:.02em;white-space:nowrap;line-height:1.5}
+  .tag.reuse{background:var(--reuse-bg);color:var(--reuse-ink);border:1px solid var(--reuse)}
+  .tag.new{background:var(--new-bg);color:var(--new-ink);border:1px solid var(--new)}
+  .tag.vision{background:var(--vision-bg);color:var(--vision-ink);border:1px solid var(--vision)}
+  .tag.plain{background:var(--surface-2);color:var(--ink-soft);border:1px solid var(--border-strong)}
+  code,.mono{font-family:var(--mono);font-size:.88em}
+  p code{background:var(--surface-2);padding:1px 5px;border-radius:5px;font-size:.85em;color:var(--ink)}
+
+  /* ---- scope map (two columns) ---- */
+  .scope{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .col{border:1px solid var(--border);border-radius:14px;background:var(--surface);overflow:hidden}
+  .col-head{padding:13px 16px;font-weight:750;font-size:14px;display:flex;align-items:center;gap:9px;
+    border-bottom:1px solid var(--border)}
+  .col-head .dot{width:9px;height:9px;border-radius:50%}
+  .col.reuse .col-head{background:var(--reuse-bg)} .col.reuse .dot{background:var(--reuse)}
+  .col.new .col-head{background:var(--new-bg)} .col.new .dot{background:var(--new)}
+  .col-head small{font-family:var(--mono);font-weight:500;color:var(--ink-faint);font-size:11px;margin-left:auto}
+  .row{display:flex;gap:11px;padding:12px 16px;border-top:1px solid var(--border);align-items:flex-start}
+  .row:first-of-type{border-top:0}
+  .row .id{font-family:var(--mono);font-size:11px;font-weight:700;flex:none;width:24px;padding-top:1px}
+  .col.reuse .id{color:var(--reuse-ink)} .col.new .id{color:var(--new-ink)}
+  .row .body{min-width:0}
+  .row .body strong{font-weight:650;font-size:14px}
+  .row .body em{font-style:normal;color:var(--ink-faint);font-family:var(--mono);font-size:11.5px;display:block;margin-top:2px}
+
+  /* ---- integration schematic ---- */
+  .schematic{border:1px solid var(--border);border-radius:16px;background:var(--surface);
+    padding:8px 8px 8px 0;overflow-x:auto}
+  .layer{display:grid;grid-template-columns:172px 1fr;gap:0;position:relative}
+  .layer + .layer{border-top:1px dashed var(--border)}
+  .layer .lname{padding:16px 14px 16px 46px;position:relative;display:flex;flex-direction:column;gap:3px;justify-content:center}
+  .layer .lname b{font-family:var(--mono);font-size:12.5px;font-weight:700;letter-spacing:-.01em;color:var(--ink)}
+  .layer .lname span{font-size:11px;color:var(--ink-faint)}
+  /* rail */
+  .layer .lname::before{content:"";position:absolute;left:24px;top:0;bottom:0;width:2px;background:var(--rail)}
+  .layer:first-child .lname::before{top:50%}
+  .layer:last-child .lname::before{bottom:50%}
+  .layer .node{content:"";position:absolute;left:19px;top:50%;transform:translateY(-50%);
+    width:12px;height:12px;border-radius:50%;background:var(--surface);border:2px solid var(--accent)}
+  .lcells{display:grid;grid-template-columns:1fr 1.35fr;gap:10px;padding:12px 14px 12px 6px;align-items:stretch}
+  .cell{border-radius:11px;padding:10px 12px;font-size:12.5px;line-height:1.5}
+  .cell h4{margin:0 0 7px;font-family:var(--mono);font-size:10px;letter-spacing:.07em;text-transform:uppercase;
+    color:var(--ink-faint);font-weight:600}
+  .cell.main{background:var(--surface-2);border:1px solid var(--border)}
+  .cell.adds{background:transparent;border:1px dashed var(--border-strong)}
+  .cell ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:5px}
+  .cell li{display:flex;gap:7px;align-items:flex-start}
+  .cell li .mono{color:var(--ink-soft)}
+  .flowarrow{text-align:center;color:var(--ink-faint);font-family:var(--mono);font-size:11px;padding:2px 0 8px 46px}
+
+  /* ---- timeline ---- */
+  .phases{display:flex;gap:8px;flex-wrap:wrap;align-items:stretch}
+  .phase{flex:1 1 150px;border:1px solid var(--border);border-radius:12px;background:var(--surface);
+    padding:12px 13px;display:flex;flex-direction:column;gap:6px;min-width:150px;position:relative}
+  .phase .pk{font-family:var(--mono);font-size:11px;font-weight:700}
+  .phase .pt{font-size:13.5px;font-weight:650;line-height:1.3}
+  .phase .pd{font-size:12px;color:var(--ink-soft)}
+  .phase.f{border-top:3px solid var(--new)} .phase.f .pk{color:var(--new-ink)}
+  .phase.v{border-top:3px solid var(--vision)} .phase.v .pk{color:var(--vision-ink)}
+  .phase.gate{border-top:3px solid var(--accent)} .phase.gate .pk{color:var(--accent)}
+  .track-label{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--ink-faint);font-weight:600;margin:22px 0 10px;display:flex;align-items:center;gap:9px}
+  .track-label::after{content:"";height:1px;background:var(--border);flex:1}
+
+  /* ---- dependency grid ---- */
+  .deps{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+  .depcol h3{font-size:13px;font-family:var(--mono);letter-spacing:.04em;text-transform:uppercase;
+    color:var(--ink-faint);font-weight:600;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+  .dep{border:1px solid var(--border);border-radius:12px;background:var(--surface);padding:13px 15px;margin-bottom:11px}
+  .dep.load{border-color:var(--new);box-shadow:0 0 0 1px var(--new) inset}
+  .dep-top{display:flex;align-items:center;gap:9px;margin-bottom:7px;flex-wrap:wrap}
+  .dep-top .dc{font-family:var(--mono);font-size:11.5px;font-weight:700}
+  .depcol.f .dc{color:var(--new-ink)} .depcol.v .dc{color:var(--vision-ink)}
+  .dep-top .dt{font-weight:700;font-size:14px}
+  .dep p{margin:5px 0 0;font-size:12.5px;color:var(--ink-soft)}
+  .dep p b{color:var(--ink);font-weight:600}
+  .dep .warn{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--new-ink);
+    background:var(--new-bg);border:1px solid var(--new);border-radius:999px;padding:1px 7px}
+
+  /* ---- framing callouts ---- */
+  .frames{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .frame{border:1px solid var(--border);border-radius:14px;background:var(--surface);padding:18px 20px}
+  .frame h3{margin:0 0 4px;font-size:16px;font-weight:800;letter-spacing:-.01em}
+  .frame .src{font-family:var(--mono);font-size:11px;color:var(--ink-faint);margin:0 0 14px}
+  .frame ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:9px}
+  .frame li{display:flex;gap:9px;font-size:13px;line-height:1.45;align-items:flex-start}
+  .frame li .ck{color:var(--reuse);flex:none;font-weight:800;font-family:var(--mono)}
+  .frame li b{font-weight:650}
+
+  /* ---- decisions ---- */
+  .decisions{display:flex;flex-direction:column;gap:2px;counter-reset:d}
+  .dec{display:flex;gap:15px;padding:15px 4px;border-top:1px solid var(--border);align-items:flex-start}
+  .dec:first-child{border-top:0}
+  .dec .n{counter-increment:d;font-family:var(--mono);font-weight:800;font-size:15px;color:var(--accent);
+    flex:none;width:34px}
+  .dec .n::before{content:counter(d,decimal-leading-zero)}
+  .dec .q strong{font-weight:700;font-size:15px}
+  .dec .q p{margin:4px 0 0;color:var(--ink-soft);font-size:13.5px}
+
+  footer{border-top:1px solid var(--border);padding:26px 0 60px;color:var(--ink-faint);font-size:12.5px}
+  footer .mono{color:var(--ink-soft)}
+
+  @media (max-width:760px){
+    .scope,.deps,.frames{grid-template-columns:1fr}
+    .layer{grid-template-columns:1fr}
+    .layer .lname{padding:14px 14px 4px 46px}
+    .layer .node{top:24px}
+    .lcells{grid-template-columns:1fr;padding-left:46px}
+    .htabs{display:none}
+  }
+  @media (prefers-reduced-motion:no-preference){
+    .fade{opacity:0;transform:translateY(8px);animation:rise .5s ease forwards}
+    @keyframes rise{to{opacity:1;transform:none}}
+  }
+</style>
+
+<header>
+  <div class="wrap hbar">
+    <div class="brand">
+      <span class="glyph" aria-hidden="true">◈</span>
+      <span>IronClaw · OOBE Integration<br><small>Proposal &amp; plan review</small></span>
+    </div>
+    <nav class="htabs" aria-label="Document set">
+      <a href="#scope">Scope</a>
+      <a href="#schematic">Integration</a>
+      <a href="#phasing">Phasing</a>
+      <a href="#deps">Dependencies</a>
+      <a href="#framing">Framing</a>
+      <a href="#decisions">Decisions</a>
+      <button class="toggle" id="themeToggle" type="button" aria-label="Toggle color theme">◐ theme</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="hero fade">
+    <p class="eyebrow">Reviewer's guide · WebChat v2 first-run</p>
+    <h1>Bringing OOBE &amp; onboarding into IronClaw</h1>
+    <p class="lede">A two-phase plan to turn the onboarding prototype into shipped product — a near-term <b>Foundational</b> track that rides rails already on <code>main</code>, and a north-star <b>Vision</b> track that follows. This page renders the parts a reviewer scans: <b>what extends shipped code vs. what is net-new</b>, how it wires into the existing five layers, and every dependency with its implementation approach.</p>
+    <div class="bench">
+      <div class="b"><span>Benchmarked on</span><strong>PR #6918 doc set</strong></div>
+      <div class="b"><span>Governance</span><strong>APDD design/dev kit</strong></div>
+      <div class="b"><span>Prototype</span><strong>PR #6994 · Issue #6993</strong></div>
+      <div class="b"><span>Interactive</span><strong><a href="mockup.html">Mockup ↗</a></strong></div>
+    </div>
+  </div>
+
+  <!-- SCOPE -->
+  <section id="scope">
+    <div class="sec-head"><span class="sec-num">01</span><h2>Foundational scope — shipped vs. net-new</h2></div>
+    <p class="sec-sub">The framing the review turns on. Most of Foundational is a thin layer over functionality that already ships — it adds <b>no new auth path, no new approval system, no new streaming indicator, and no new automations manager</b>. The genuinely new surface is small and testable.</p>
+    <div class="legend">
+      <span class="lg"><span class="sw reuse"></span> Reuse / extend code shipped on <code>main</code></span>
+      <span class="lg"><span class="sw new"></span> Net-new feature or surface</span>
+      <span class="lg"><span class="sw vision"></span> Vision-only (deferred, additive)</span>
+    </div>
+    <div class="scope">
+      <div class="col reuse">
+        <div class="col-head"><span class="dot"></span> Builds on preexisting <small>7 capabilities</small></div>
+        <div class="row"><span class="id">P1</span><div class="body"><strong>Landing surface for the cards</strong><em>empty-state.tsx — hero + composer, untouched</em></div></div>
+        <div class="row"><span class="id">P2</span><div class="body"><strong>Card busy / “Automating…” state</strong><em>NearProcessIndicator (#6901) — reused verbatim</em></div></div>
+        <div class="row"><span class="id">P3</span><div class="body"><strong>Per-card Connect CTA + OAuth</strong><em>extension-pairing-api · product-auth-oauth-events</em></div></div>
+        <div class="row"><span class="id">P4</span><div class="body"><strong>Agent modes (Suggest / Plan / Auto)</strong><em>new UI over resolve_gate · global_auto_approve</em></div></div>
+        <div class="row"><span class="id">P5</span><div class="body"><strong>“Done for you” → manage it</strong><em>pages/automations/ management page</em></div></div>
+        <div class="row"><span class="id">P6</span><div class="body"><strong>Approve / Modify / Cancel · Revert</strong><em>TaskActionBar generalizes ApprovalCard</em></div></div>
+        <div class="row"><span class="id">P7</span><div class="body"><strong>Brand logos + theming</strong><em>v2 design tokens — no new token system</em></div></div>
+      </div>
+      <div class="col new">
+        <div class="col-head"><span class="dot"></span> Net-new in Foundational <small>6 pieces</small></div>
+        <div class="row"><span class="id">N1</span><div class="body"><strong>Suggested-task card + carousel / drawer</strong><em>frontend · prototype exists (mock) in #6994</em></div></div>
+        <div class="row"><span class="id">N2</span><div class="body"><strong>Pills-collapse drawer + dismiss + restore</strong><em>new interaction model</em></div></div>
+        <div class="row"><span class="id">N3</span><div class="body"><strong>AutomationTask events + projection</strong><em>ironclaw_event_log · ironclaw_event_projections</em></div></div>
+        <div class="row"><span class="id">N4</span><div class="body"><strong>5 HTTP routes + 5 facade methods</strong><em>webui_v2 · ProductSurface (mediated)</em></div></div>
+        <div class="row"><span class="id">N5</span><div class="body"><strong>First-run suggestion producer</strong><em>the load-bearing new mechanism → triggers</em></div></div>
+        <div class="row"><span class="id">N6</span><div class="body"><strong>Agent-mode persistence + typed gate</strong><em>generalizes global_auto_approve per-kind</em></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCHEMATIC -->
+  <section id="schematic">
+    <div class="sec-head"><span class="sec-num">02</span><h2>How it wires into the existing five layers</h2></div>
+    <p class="sec-sub">A WebChat v2 feature crosses <code>webui → ProductSurface → product → composition → runtime</code>. Each layer already carries shipped machinery (left); OOBE adds a small, well-placed increment (right). Effects run through the mediated capability host — no bypass of authorization, approvals, or accounting.</p>
+    <div class="schematic">
+      <div class="layer">
+        <div class="lname"><span class="node"></span><b>ironclaw_webui</b><span>SPA · frontend/</span></div>
+        <div class="lcells">
+          <div class="cell main"><h4>On main</h4><ul>
+            <li><span class="mono">empty-state.tsx</span></li>
+            <li><span class="mono">NearProcessIndicator</span></li>
+            <li><span class="mono">extension-pairing-api</span></li>
+            <li><span class="mono">pages/automations/</span></li>
+          </ul></div>
+          <div class="cell adds"><h4>OOBE adds</h4><ul>
+            <li><span class="tag new">N1 N2</span> suggestion drawer + task cards</li>
+            <li><span class="tag reuse">P3</span> Connect CTA → existing OAuth flow</li>
+            <li><span class="tag reuse">P2 P5</span> busy state + manage deep-link</li>
+            <li><span class="tag new">P4</span> agent-mode pill</li>
+          </ul></div>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="lname"><span class="node"></span><b>webui_v2</b><span>HTTP routes</span></div>
+        <div class="lcells">
+          <div class="cell main"><h4>On main</h4><ul>
+            <li><span class="mono">webui_v2_routes()</span> descriptors</li>
+            <li>authenticated caller scoping</li>
+          </ul></div>
+          <div class="cell adds"><h4>OOBE adds</h4><ul>
+            <li><span class="tag new">N4</span> 5 task routes (list/approve/modify/cancel/revert)</li>
+            <li><span class="tag new">N6</span> agent-mode settings route</li>
+          </ul></div>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="lname"><span class="node"></span><b>ProductSurface</b><span>ironclaw_product_contracts</span></div>
+        <div class="lcells">
+          <div class="cell main"><h4>On main</h4><ul>
+            <li><span class="mono">ProductSurface*</span> types</li>
+            <li>typed capability commands</li>
+          </ul></div>
+          <div class="cell adds"><h4>OOBE adds</h4><ul>
+            <li><span class="tag new">N4</span> 5 AutomationTask DTOs / commands</li>
+          </ul></div>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="lname"><span class="node"></span><b>ironclaw_assistant</b><span>facade + effects</span></div>
+        <div class="lcells">
+          <div class="cell main"><h4>On main</h4><ul>
+            <li>mediated capability facade</li>
+            <li>product adapters (Gmail / Calendar)</li>
+          </ul></div>
+          <div class="cell adds"><h4>OOBE adds</h4><ul>
+            <li><span class="tag new">N4</span> 5 facade methods — server-confirmed, mediated</li>
+            <li><span class="tag reuse">P6</span> Modify re-runs on automated tasks</li>
+          </ul></div>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="lname"><span class="node"></span><b>composition</b><span>app/ironclaw_composition</span></div>
+        <div class="lcells">
+          <div class="cell main"><h4>On main</h4><ul>
+            <li>storage / runtime wiring by profile</li>
+          </ul></div>
+          <div class="cell adds"><h4>OOBE adds</h4><ul>
+            <li><span class="tag new">N3 N5</span> wire projection + suggestion producer</li>
+          </ul></div>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="lname"><span class="node"></span><b>runtime</b><span>events · projections · streams · triggers</span></div>
+        <div class="lcells">
+          <div class="cell main"><h4>On main</h4><ul>
+            <li><span class="mono">runtime_event.rs</span> · projections · streams</li>
+            <li><span class="mono">triggers</span> trusted-fire</li>
+            <li><span class="mono">resolve_gate · global_auto_approve</span></li>
+          </ul></div>
+          <div class="cell adds"><h4>OOBE adds</h4><ul>
+            <li><span class="tag new">N3</span> 5 AutomationTask events + projection <span class="mono">(tenant,user)</span>-scoped</li>
+            <li><span class="tag new">N5</span> first-run suggestion producer</li>
+            <li><span class="tag new">N6</span> typed per-kind auto-approve</li>
+          </ul></div>
+        </div>
+      </div>
+    </div>
+    <p class="sec-sub" style="margin-top:16px">Family folders <b>now on <code>main</code></b> (the #6918 reorg has landed): events + projection → <code>crates/events/</code> · facade + DTOs → <code>crates/product/ironclaw_assistant</code> · routes → <code>crates/product/ironclaw_webui</code> · suggestion producer → <code>crates/domains/ironclaw_triggers</code>. This branch is merged up to date with that reorg — no second move needed.</p>
+  </section>
+
+  <!-- PHASING -->
+  <section id="phasing">
+    <div class="sec-head"><span class="sec-num">03</span><h2>Phasing</h2></div>
+    <p class="sec-sub">Foundational ships first, phase by phase; Vision follows and is strictly additive — every Vision piece is a superset of a Foundational one, so nothing is redone.</p>
+
+    <div class="track-label">Foundational — ships against current main</div>
+    <div class="phases">
+      <div class="phase gate"><span class="pk">F0</span><span class="pt">De-risk &amp; unblock</span><span class="pd">Gate the mock carousel (D-F5) so #6994 can merge; reconcile the contract.</span></div>
+      <div class="phase f"><span class="pk">F1</span><span class="pt">Task backend</span><span class="pd">5 events · projection + isolation test · 5 routes · 5 facade methods. <span class="tag new">D-F1</span></span></div>
+      <div class="phase f"><span class="pk">F2</span><span class="pt">Suggestion producer</span><span class="pd">Fresh users get real proposals. Gated on decision. <span class="tag new">D-F2</span></span></div>
+      <div class="phase f"><span class="pk">F3</span><span class="pt">Connect + mode</span><span class="pd">Reuse ext-auth; wire the 3 modes into the gate. <span class="tag new">D-F3 D-F4</span></span></div>
+      <div class="phase f"><span class="pk">F4</span><span class="pt">E2E + CUJ</span><span class="pd">Full decision loop; add the onboarding Critical User Journey.</span></div>
+      <div class="phase f"><span class="pk">F5</span><span class="pt">Design track</span><span class="pd">Optional, parallel: DESIGN.md + card workbench. <span class="tag new">D-F6</span></span></div>
+    </div>
+
+    <div class="track-label">Vision — north-star, after Foundational</div>
+    <div class="phases">
+      <div class="phase v"><span class="pk">V1</span><span class="pt">Reveal + anticipatory</span><span class="pd">ai-spark reveal on AutomationTaskAutomated; “working on it” states.</span></div>
+      <div class="phase v"><span class="pk">V2</span><span class="pt">Cold-start connect</span><span class="pd">Queued multi-tool OAuth over the same pairing infra.</span></div>
+      <div class="phase v"><span class="pk">V3</span><span class="pt">Docked drawer</span><span class="pd">Composer-docked bordered frame; reuses the drawer state machine.</span></div>
+      <div class="phase v"><span class="pk">V4</span><span class="pt">Name + Bypass</span><span class="pd">Username derivation + the 4th (Bypass) gate mode.</span></div>
+    </div>
+  </section>
+
+  <!-- DEPENDENCIES -->
+  <section id="deps">
+    <div class="sec-head"><span class="sec-num">04</span><h2>Dependencies &amp; implementation approach</h2></div>
+    <p class="sec-sub">Every dependency states what it needs and how to build it. The frontend data seam is already shaped for all of these — wiring is a mock→<code>fetch</code> body swap with no component change.</p>
+    <div class="deps">
+      <div class="depcol f">
+        <h3><span class="sw new"></span> Foundational</h3>
+        <div class="dep"><div class="dep-top"><span class="dc">D-F1</span><span class="dt">Task backend</span></div><p><b>Needs:</b> the durable source of truth. <b>Approach:</b> 5 redacted events → <code>(tenant,user)</code>-scoped projection (+ isolation test) → 5 routes + descriptor rows → 5 mediated facade methods returning server-confirmed records.</p></div>
+        <div class="dep load"><div class="dep-top"><span class="dc">D-F2</span><span class="dt">Suggestion producer</span><span class="warn">⚠ load-bearing</span></div><p><b>Needs:</b> something must emit the first proposals — not covered by the existing contract. <b>Approach:</b> ship a deterministic starter set gated on admin-whitelisted tools; design the triggers-hosted suggester as the Vision upgrade.</p></div>
+        <div class="dep"><div class="dep-top"><span class="dc">D-F3</span><span class="dt">Connect wiring</span></div><p><b>Needs:</b> authorize the user's account per tool. <b>Approach:</b> route the card into the <b>existing</b> extension-auth flow via the shared <code>extension_name</code> resolver — no new auth path, no frontend-only fallback.</p></div>
+        <div class="dep"><div class="dep-top"><span class="dc">D-F4</span><span class="dt">Agent mode + gate</span></div><p><b>Needs:</b> durable mode + real gate behavior. <b>Approach:</b> settings endpoint + session hydration; <code>auto</code> = typed per-kind generalization of <code>global_auto_approve</code>, with gate-suppression tests + audit trail.</p></div>
+        <div class="dep"><div class="dep-top"><span class="dc">D-F5</span><span class="dt">Carousel de-risk</span></div><p><b>Needs:</b> stop showing mock cards to real users (the merge blocker). <b>Approach:</b> read the real projection (empty until tasks exist) or DEV/flag-gate until D-F1 lands.</p></div>
+        <div class="dep"><div class="dep-top"><span class="dc">D-F6</span><span class="dt">DESIGN.md + tokens</span></div><p><b>Needs:</b> IronClaw has no design constitution yet. <b>Approach:</b> seed <code>DESIGN.md</code> with the v2 tokens + card taxonomy; the OOBE cards are the natural pilot. Cross-cutting, deferrable.</p></div>
+      </div>
+      <div class="depcol v">
+        <h3><span class="sw vision"></span> Vision (additional)</h3>
+        <div class="dep"><div class="dep-top"><span class="dc">D-V1</span><span class="dt">Queued OAuth</span></div><p><b>Superset of D-F3.</b> Batched multi-tool orchestration over the same pairing infra. Frontend-heavy; no new backend auth path.</p></div>
+        <div class="dep"><div class="dep-top"><span class="dc">D-V2</span><span class="dt">Reveal animation</span></div><p><b>Superset of the static first card.</b> ai-spark sweep on <code>AutomationTaskAutomated</code> (already emitted by D-F1); honored under <code>prefers-reduced-motion</code>.</p></div>
+        <div class="dep"><div class="dep-top"><span class="dc">D-V3</span><span class="dt">Anticipatory states</span></div><p><b>Superset of the empty landing.</b> “No automations yet” / “working on the first one” projection states through the stream path (#6993).</p></div>
+        <div class="dep"><div class="dep-top"><span class="dc">D-V4</span><span class="dt">Docked drawer</span></div><p><b>Superset of the pills-collapse drawer.</b> New docked-container component + composer layout; reuses the Foundational state machine.</p></div>
+        <div class="dep"><div class="dep-top"><span class="dc">D-V5</span><span class="dt">Username derivation</span></div><p><b>Superset of the nameless greeting.</b> Resolve a deterministic source with documented precedence + fallback. <b>Open decision.</b></p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FRAMING -->
+  <section id="framing">
+    <div class="sec-head"><span class="sec-num">05</span><h2>Documentation &amp; development framing applied</h2></div>
+    <p class="sec-sub">The package deliberately mirrors two references — the framing of merged PR #6918 and the APDD product/design governance kit — so it reads the way this team already reviews architecture work.</p>
+    <div class="frames">
+      <div class="frame">
+        <h3>APDD-Kit</h3>
+        <p class="src">product/design governance · docs-first workflow</p>
+        <ul>
+          <li><span class="ck">✓</span><span><b>Docs-first feature workflow</b> — spec → team review → plan → test, before code.</span></li>
+          <li><span class="ck">✓</span><span><b>Feedback &amp; Decisions anchor</b> stays open until review is folded in (PROPOSAL §10).</span></li>
+          <li><span class="ck">✓</span><span><b>Critical Bug Fix Log</b> seeded per Rule 2 — every future critical fix logs + tests in the same diff.</span></li>
+          <li><span class="ck">✓</span><span><b>Design track</b> — DESIGN.md + tokens + a Storybook workbench proposed with the OOBE cards as pilot.</span></li>
+          <li><span class="ck">✓</span><span><b>Critical User Journey</b> baseline — a first-run onboarding CUJ added to regression (§8.4).</span></li>
+        </ul>
+      </div>
+      <div class="frame">
+        <h3>PR #6918</h3>
+        <p class="src">target-architecture · execution discipline</p>
+        <ul>
+          <li><span class="ck">✓</span><span><b>Four-doc set</b> — executive README → evidence-backed PROPOSAL → sequenced PLAN → definition-of-done CHECKLIST.</span></li>
+          <li><span class="ck">✓</span><span><b>Move-only / mock→real PRs are behavior-free</b> and reviewed as such — semantic change never rides along.</span></li>
+          <li><span class="ck">✓</span><span><b>Guidance travels with the change</b> — contract, rules, and plan status update in the same diff.</span></li>
+          <li><span class="ck">✓</span><span><b>main stays shippable</b> after every PR — the carousel gate holds until the projection is real.</span></li>
+          <li><span class="ck">✓</span><span><b>Lands in the family folders now on <code>main</code></b> — the #6918 reorg landed; branch merged up to date, no second move.</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- DECISIONS -->
+  <section id="decisions">
+    <div class="sec-head"><span class="sec-num">06</span><h2>Decisions reviewers should weigh</h2></div>
+    <p class="sec-sub">These gate the phases they belong to and are cheap to hold, expensive to skip. Full context in PROPOSAL §10.</p>
+    <div class="decisions">
+      <div class="dec"><span class="n"></span><div class="q"><strong>Phase boundary.</strong><p>Is the Foundational cut correct, or should a Vision piece (docked drawer, reveal) graduate into Foundational?</p></div></div>
+      <div class="dec"><span class="n"></span><div class="q"><strong>The suggestion producer (D-F2).</strong><p>Deterministic starter set vs. triggers-hosted suggester vs. agent-driven — the one genuinely new mechanism and biggest open question.</p></div></div>
+      <div class="dec"><span class="n"></span><div class="q"><strong>Agent-mode gate semantics (D-F4).</strong><p>Confirm <code>auto</code> as the typed generalization of <code>global_auto_approve</code>, and the bounds of “approved task types” (per-tool / per-action / caps).</p></div></div>
+      <div class="dec"><span class="n"></span><div class="q"><strong>Carousel gating (D-F5).</strong><p>The merge blocker on #6994 — real projection now, or DEV/flag gate first?</p></div></div>
+      <div class="dec"><span class="n"></span><div class="q"><strong>DESIGN.md pilot (D-F6).</strong><p>Adopt the APDD design track here (DESIGN.md + tokens now, Storybook later), or defer?</p></div></div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Package: <span class="mono">docs/design/oobe/</span> — README · PROPOSAL · PLAN · CHECKLIST, beside the interactive <span class="mono">mockup.html</span>. Prototype: PR #6994 · backend tracking: Issue #6993. Benchmarked on merged PR #6918 and the APDD governance kit.</p>
+  </footer>
+</main>
+
+<script>
+  (function(){
+    var btn=document.getElementById('themeToggle');
+    function sysDark(){return window.matchMedia&&window.matchMedia('(prefers-color-scheme:dark)').matches;}
+    function cur(){var t=document.documentElement.getAttribute('data-theme');return t?t:(sysDark()?'dark':'light');}
+    btn.addEventListener('click',function(){
+      var next=cur()==='dark'?'light':'dark';
+      document.documentElement.setAttribute('data-theme',next);
+    });
+  })();
+</script>

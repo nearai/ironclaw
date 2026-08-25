@@ -139,7 +139,7 @@ struct InvokedCapabilityBatch {
 }
 
 struct InvokedCapabilityBatchError {
-    error: ironclaw_loop_contracts::AgentLoopHostError,
+    error: Box<ironclaw_loop_contracts::AgentLoopHostError>,
     launched_count: usize,
 }
 
@@ -226,7 +226,7 @@ impl CapabilityStage {
                 .await
                 .map(InvokedCapabilityBatch::from_resolution_batch)
                 .map_err(|error| InvokedCapabilityBatchError {
-                    error,
+                    error: Box::new(error),
                     launched_count: 0,
                 });
         }
@@ -283,10 +283,10 @@ impl CapabilityStage {
                 }
                 None => {
                     return Err(InvokedCapabilityBatchError {
-                        error: ironclaw_loop_contracts::AgentLoopHostError::new(
+                        error: Box::new(ironclaw_loop_contracts::AgentLoopHostError::new(
                             ironclaw_loop_contracts::AgentLoopHostErrorKind::Internal,
                             "parallel capability invocation completed without an indexed outcome",
-                        ),
+                        )),
                         launched_count: launched,
                     });
                 }
@@ -754,7 +754,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     .completed_turn(ctx, state, result_refs_start, capability_batch)
                     .await;
             }
-            Err(failure) => return Err(capability_host_error(failure.error)),
+            Err(failure) => return Err(capability_host_error(*failure.error)),
         };
 
         let InvokedCapabilityBatch {
@@ -1424,8 +1424,11 @@ impl CapabilityStage {
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
                 clear_matching_pending_external_tool_resume(&mut state, &call);
-                let auth_resume =
-                    auth_resume_from_gate(waypoint.resume.as_ref(), prior_approval.as_ref());
+                let auth_resume = auth_resume_from_gate(
+                    &gate_ref,
+                    waypoint.resume.as_ref(),
+                    prior_approval.as_ref(),
+                );
                 // `credential_requirements` now ride the host `GateRecord::Auth`
                 // (§5.2.9), not this model-visible channel; the runner re-reads them
                 // from the record at the blocked exit to rebuild
@@ -2067,6 +2070,7 @@ fn clear_matching_pending_approval_resume(
 }
 
 fn auth_resume_for_gate(
+    gate_ref: &LoopGateRef,
     mut auth_resume: Option<CapabilityAuthResume>,
     prior_approval: Option<&CapabilityApprovalResume>,
 ) -> Option<CapabilityAuthResume> {
@@ -2086,6 +2090,7 @@ fn auth_resume_for_gate(
             auth_resume
         }
         None => Some(CapabilityAuthResume::resolved(
+            gate_ref.clone(),
             prior_approval.resume_token.clone(),
             Some(prior_identity()),
         )),
@@ -2450,13 +2455,14 @@ fn approval_resume_from_gate(
 /// fold in any prior-approval identity (kept on the wire this slice; its host-side
 /// move is deferred to §5.3 Stage 2a-ii).
 fn auth_resume_from_gate(
+    gate_ref: &LoopGateRef,
     resume_token: Option<&ResumeToken>,
     prior_approval: Option<&CapabilityApprovalResume>,
 ) -> Option<CapabilityAuthResume> {
     let base = resume_token
         .and_then(|token| CapabilityResumeToken::new(token.as_str()).ok())
-        .map(|resume_token| CapabilityAuthResume::resolved(resume_token, None));
-    auth_resume_for_gate(base, prior_approval)
+        .map(|resume_token| CapabilityAuthResume::resolved(gate_ref.clone(), resume_token, None));
+    auth_resume_for_gate(gate_ref, base, prior_approval)
 }
 
 struct ChildResultAppendInput {

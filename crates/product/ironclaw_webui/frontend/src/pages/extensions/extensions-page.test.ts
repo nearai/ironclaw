@@ -41,7 +41,7 @@ function componentProps(root, component) {
   return props;
 }
 
-function renderExtensionsPage(tab, extensionState = {}) {
+function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}) {
   const hookValues = [];
   let hookCursor = 0;
   const removeCalls = [];
@@ -50,7 +50,10 @@ function renderExtensionsPage(tab, extensionState = {}) {
   function ConfigureModal() {}
   function CustomMcpRegistrationModal() {}
   function InlineNotice() {}
+  function PageScroll() {}
+  function PageStack() {}
   function RegistryTab() {}
+  function Skeleton() {}
   const translations = {
     "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
     "ext.catalog.loadErrorDesc": "The extension catalog could not be loaded.",
@@ -81,6 +84,8 @@ function renderExtensionsPage(tab, extensionState = {}) {
     InlineNotice,
     ToolsTab() {},
     Navigate() {},
+    PageScroll,
+    PageStack,
     React: {
       useCallback: (fn) => fn,
       useEffect: (effect) => effect(),
@@ -104,6 +109,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
       },
     },
     RegistryTab,
+    Skeleton,
     globalThis: {},
     html(strings, ...values) {
       return { strings: Array.from(strings), values };
@@ -140,7 +146,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
   vm.runInNewContext(extensionsPageSourceForTest(), context);
   const render = () => {
     hookCursor = 0;
-    return context.globalThis.__testExports.ExtensionsPage();
+    return context.globalThis.__testExports.ExtensionsPage({ isAdmin });
   };
   return {
     ...context,
@@ -351,6 +357,7 @@ test("ExtensionsPage restores install focus to a registry-only installed card", 
     "the installed registry card remains a programmatic focus fallback",
   );
 });
+
 
 test("custom MCP Done closes registration without opening configure", () => {
   const harness = renderExtensionsPage("registry");

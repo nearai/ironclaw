@@ -27,6 +27,11 @@ Observers and transport projections do not own state. A committed journal
 mutation is successful even if an in-process wake hint fails; required
 consumers must be replayable from durable journal cursors.
 
+Background observer replay uses a bounded exponential retry budget. Exhausting
+that budget emits an operator-visible error and stops without acknowledging the
+cursor; a later commit or observer registration resumes from the same durable
+position instead of losing the stalled commit.
+
 ## Durable layout
 
 The store uses `RootFilesystem` multi-key transactions under:
@@ -109,6 +114,21 @@ logical retries may mint a fresh invocation identity.
 Queue claims keyset-page until the queue is exhausted or enough eligible work
 is found. Owner and concurrency-class quota reads are reused per unique key;
 quota-blocked prefixes cannot starve later eligible work.
+
+Dependency queries may provide `allowed_states` for actionable delivery
+sweeps. The row-native dependency projection indexes lineage scope, group,
+state, and the canonical dependent/dependency pair; bounded reads issue one
+exact prefix query per allowed state, then merge the streams by that pair
+cursor. `allowed_states` requires `group_ref` because the bounded projection
+uses group equality as part of its exact prefix; callers that need the
+historical group-less query retain the existing no-state-filter shape.
+
+The actionable projection is declared before row-native writers are exposed.
+This PR is the first writer of `bg:{thread_id}` dependency rows, and deployment
+is gated on the fleet-wide 2a rollout, so no retained production background
+rows predate the projection. Existing group-less or non-background rows remain
+available through the compatibility query path; no broad startup backfill or
+silent scan fallback is permitted.
 
 ## Compatibility and migration
 

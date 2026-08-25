@@ -85,6 +85,7 @@ fn submit_request(
     idempotency_key: &str,
 ) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        subagent_activation_provenance: None,
         scope,
         actor: TurnActor::new(UserId::new("user-prepared-run").expect("user")),
         accepted_message_ref: AcceptedMessageRef::new("accepted-prepared-run").expect("accepted"),

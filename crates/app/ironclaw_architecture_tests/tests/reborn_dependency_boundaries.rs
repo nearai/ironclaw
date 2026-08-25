@@ -795,7 +795,23 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // obligations that were previously prose in a design doc no
         // implementor reads. Enforcement of all of it stays where it was.
         // Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 10_512),
+        // 10_512 -> 10_672 (2026-08-19, #7681 private connect nudge): a union
+        // re-pin, not one change's growth. Main alone had already reached
+        // 10_639 (measured on origin/main with this row at 0), consuming 127
+        // of the 150-line working slack before this branch merged; the
+        // branch's own delta is +33 lines — the `OutboundVisibility` enum and
+        // the `visibility` field on `OutboundEnvelope`, plus
+        // `ChannelReply::supports_private_delivery` and the doc that names it
+        // as the fail-closed input for host decisions that depend on a
+        // delivery staying private. Declaration only: the ephemeral endpoint
+        // routing lives in the Slack package and the link decision in
+        // ironclaw_extension_host. Count read from this test's own failure
+        // message on the merged tree.
+        // 10_672 -> 10_841 (2026-08-14, capability response normalization):
+        // ToolAdapter auth errors carry the neutral bounded provider diagnostic
+        // through the extension ABI. Parsing and model-safety behavior remain
+        // in runtime lanes and loop_host.
+        ("ironclaw_extension_contracts", 10_841),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -851,7 +867,8 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // forever, and `RuntimeCredentialAccountSetup::DeviceLink`.
         // 19_483 -> 19_718 (#7532): the provider-neutral turn execution
         // policy and validated required-skill identity shared by trusted
-        // trigger ingress and the runner.
+        // trigger ingress and the runner. Resolution, activation, and
+        // capability enforcement remain in their owning implementation crates.
         // + (2026-08-13, unbound turns): the `prepared_context` module —
         // `PreparedTurnDeclarations`, `OutputContract`, `TurnLimits`, the
         // `PreparedContextSource` admission-probe trait, and the
@@ -861,7 +878,33 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // this test's own failure message.
         // Reviewed growth: immutable, provider-neutral output-contract DTOs
         // belong beside the turn contract consumed across loop families.
-        ("ironclaw_host_api", 20_156),
+        // 20_156 -> 20_334 (2026-08-19, #7686 restack): capability dispatch-result
+        // declarations retained beside main's provider-neutral output contracts.
+        // 20_334 -> 20_481 (2026-08-14, capability response normalization):
+        // provider diagnostics and rejected-attempt accounting are neutral
+        // dispatch DTOs beside main's provider-neutral output contracts.
+        // Protocol decoding and settlement stay in their owning runtime crates;
+        // the count was re-measured on the merged tree.
+        // 20_481 -> 20_516 (2026-08-19, #7752 merge): +35 lines in `turn.rs`
+        // for `turn::ActivationProvenance`, the enum tagging why a run was
+        // created (Human / ParentAgent / System).
+        // It is turn vocabulary, and `ironclaw_turns` may not own turn
+        // vocabulary — a new turn type goes to `host_api` by that crate's own
+        // charter — so there is no lower crate to move it to. Pure DTO: three
+        // unit variants and a serde derive, no behavior. The 35-line delta is
+        // from the merged `turn.rs`; the resulting ceiling is re-captured from
+        // this test's own report, never counted by eye.
+        // 20_516 -> 20_632 (2026-08-23, #7812): +116 lines for the
+        // `PreparedTurnDeclarations::require_no_approval` narrowing flag and the
+        // `CapabilitySurfacePolicy::without_approval_gated` builder, plus their
+        // inline tests. Both are contract vocabulary with no logic: the flag is
+        // a defaulted bool DTO field, and the builder sets an existing field of
+        // the type that already owns it, matching the sibling
+        // `deny_capability_ids`/`narrow_to_capability_ids` builders. The
+        // behavior that reads them lives in `ironclaw_turn_runner`, so there is
+        // no lower crate to move this to. Count read from this test's own
+        // failure message, never counted by eye.
+        ("ironclaw_host_api", 20_632),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane
@@ -917,27 +960,32 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // union — the #7147 parallel-baseline lesson applied. Framing/render
         // vocabulary only — scope filtering stays in the memory providers
         // and host runtime. Count read from this test's own failure message.
-        // 13_306 -> 13_316 (2026-08-12, #7416 hook-aware parallel batches):
+        // 13_306 -> 13_390 (2026-08-11, #6985 prompt-prefix stability): typed
+        // leading inline roles keep subagent framing ahead of persisted
+        // conversation history. Role vocabulary and its partition only —
+        // provider assembly stays in ironclaw_llm. Count read from this test's
+        // own failure message.
+        // 13_390 -> 13_400 (2026-08-12, #7416 hook-aware parallel batches):
         // one defaulted port capability declares when ordered batch middleware
         // must retain batch entry. Scheduling and hook behavior remain in their
         // owning loop crates. Count read from this test's own failure message.
-        // 13_316 -> 13_326 (2026-08-12, merge with #7484 context eviction):
+        // 13_400 -> 13_410 (2026-08-12, merge with #7484 context eviction):
         // one bounded truncation-watermark DTO carried across the existing
         // context and prompt contracts. Window selection and task-pinning
         // behavior remain in ironclaw_threads and ironclaw_loop_host.
-        // 13_326 -> 13_334 (2026-08-11, #7484 eviction compaction): typed
+        // 13_410 -> 13_418 (2026-08-11, #7484 eviction compaction): typed
         // tool-result compaction metadata plus window-eviction initiator/mode
         // variants. Cut-point policy and execution remain in agent_loop and
         // loop_host. Count read from this test's own failure message.
-        // 13_334 -> 13_345 (2026-08-12, #7416 fail-closed batch ordering):
+        // 13_418 -> 13_429 (2026-08-12, #7416 fail-closed batch ordering):
         // the batch-ordering port contract now defaults to ordered entry and
         // documents the explicit opt-in required for concurrent singles.
         // Scheduling and wrapper behavior remain in their owning loop crates.
-        // 13_345 -> 13_524 (2026-08-12, #7509 prompt recovery hardening):
+        // 13_429 -> 13_608 (2026-08-12, #7509 prompt recovery hardening):
         // production prompt validation checks structural limits and control
         // characters only; decoded Basic-auth samples remain test-only. Count
-        // read from this test's own failure message after merging #7416.
-        ("ironclaw_loop_contracts", 13_524),
+        // read from this test's own failure message after merging #7416 and #6985.
+        ("ironclaw_loop_contracts", 13_608),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
@@ -1007,7 +1055,12 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // Suggestions add a product-surface-neutral generate/list/start/dismiss
         // contract shared by WebUI and future channel adapters. The DTOs and
         // ProductSurface vocabulary belong here; no orchestration moved in.
-        ("ironclaw_product_contracts", 16_418),
+        // 16_192 -> 16_581 (2026-08-17, #7688 durable notification inbox plus
+        // suggestions):
+        // typed notification records, pagination, and lifecycle command DTOs.
+        // Storage and lifecycle behavior live in ironclaw_notifications;
+        // this crate only owns the authenticated ProductSurface wire contract.
+        ("ironclaw_product_contracts", 16_581),
         // 832 -> 432 (2026-08-12, #7373 refresh merge, main): re-pinned to the
         // measured count — this row still carried the +400 seed pad the
         // 2026-08-07 re-pin removed from its siblings.

@@ -152,7 +152,7 @@ pub async fn discover_hosted_mcp_package_with_policy(
 /// `Required`-preparation package retry forever instead of failing terminally.
 fn classify_mcp_client_error(error: ironclaw_mcp::McpClientError) -> HostedMcpDiscoveryError {
     match error {
-        ironclaw_mcp::McpClientError::AuthChallenge { challenge } => {
+        ironclaw_mcp::McpClientError::AuthChallenge { challenge, .. } => {
             HostedMcpDiscoveryError::CredentialsRejected(challenge)
         }
         // The host-runtime egress sanitizer strips `WWW-Authenticate` and only
@@ -162,13 +162,15 @@ fn classify_mcp_client_error(error: ironclaw_mcp::McpClientError) -> HostedMcpDi
         // A plain bearer server's 401 never advertises that, so it legitimately
         // arrives here as `AuthRequired` with no metadata — it is still a
         // credential rejection, never a retryable transport failure.
-        ironclaw_mcp::McpClientError::AuthRequired => HostedMcpDiscoveryError::CredentialsRejected(
-            ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge {
-                status: 401,
-                www_authenticate_metadata: Vec::new(),
-                protected_resource_metadata: Vec::new(),
-            },
-        ),
+        ironclaw_mcp::McpClientError::AuthRequired { .. } => {
+            HostedMcpDiscoveryError::CredentialsRejected(
+                ironclaw_extension_contracts::hosted_mcp::McpAuthChallenge {
+                    status: 401,
+                    www_authenticate_metadata: Vec::new(),
+                    protected_resource_metadata: Vec::new(),
+                },
+            )
+        }
         ironclaw_mcp::McpClientError::InvalidToolCatalog { reason } => {
             HostedMcpDiscoveryError::Permanent(reason)
         }
@@ -440,7 +442,9 @@ effects = ["network"]
 
     #[test]
     fn bare_auth_required_classifies_as_credentials_rejected() {
-        let classified = classify_mcp_client_error(ironclaw_mcp::McpClientError::AuthRequired);
+        let classified = classify_mcp_client_error(ironclaw_mcp::McpClientError::AuthRequired {
+            usage: ironclaw_host_api::resource::ResourceUsage::default(),
+        });
         assert!(matches!(
             classified,
             HostedMcpDiscoveryError::CredentialsRejected(challenge)

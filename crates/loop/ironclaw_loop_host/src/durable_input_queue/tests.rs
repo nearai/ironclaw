@@ -10,11 +10,56 @@ use ironclaw_host_api::{
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
 };
+use ironclaw_loop_contracts::LoopInputAckEffect;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageStatus, ThreadHistoryRequest,
 };
 use ironclaw_turns::{LoopMessageRef, TurnScope};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+struct RecordingAckEffectHandler {
+    calls: Arc<AtomicUsize>,
+    fail_once: AtomicBool,
+}
+
+impl RecordingAckEffectHandler {
+    fn failing_once(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            calls,
+            fail_once: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl HostInputAckEffectHandler for RecordingAckEffectHandler {
+    async fn handle_ack_effect(
+        &self,
+        _effect: LoopInputAckEffect,
+    ) -> Result<(), HostInputQueueError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_once.swap(false, Ordering::SeqCst) {
+            return Err(HostInputQueueError::Unavailable {
+                reason: "scripted ack effect failure".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn background_ack_effect() -> LoopInputAckEffect {
+    LoopInputAckEffect {
+        child_scope: TurnScope::new(
+            TenantId::new("tenant-iq").unwrap(),
+            Some(AgentId::new("agent-iq").unwrap()),
+            None,
+            ThreadId::new("child-iq").unwrap(),
+        ),
+        parent_run_id: TurnRunId::new(),
+        child_run_id: TurnRunId::new(),
+    }
+}
 
 fn make_fs(backend: Arc<InMemoryBackend>) -> Arc<ScopedFilesystem<InMemoryBackend>> {
     let mounts = MountView::new(vec![MountGrant::new(
@@ -126,6 +171,7 @@ async fn durable_queue_survives_store_reconstruction() {
                 thread_id: ThreadId::new("ghost").unwrap(),
                 message_id: ThreadMessageId::new(),
                 input: input.clone(),
+                ack_effect: None,
             })
             .await
             .expect("enqueue")
@@ -199,6 +245,7 @@ async fn durable_consumed_dedup_survives_store_reconstruction() {
                 thread_id: thread.thread_id.clone(),
                 message_id: accepted.message_id,
                 input: input.clone(),
+                ack_effect: None,
             })
             .await
             .expect("enqueue before restart");
@@ -224,6 +271,7 @@ async fn durable_consumed_dedup_survives_store_reconstruction() {
             thread_id: thread.thread_id,
             message_id: accepted.message_id,
             input,
+            ack_effect: None,
         })
         .await
         .expect("replay after restart dedups");
@@ -300,6 +348,7 @@ async fn conformance_enqueue_poll_ack<Q: ConformanceQueue>(
         thread_id: thread.thread_id.clone(),
         message_id: accepted.message_id,
         input: input.clone(),
+        ack_effect: None,
     };
     let first = queue
         .enqueue_queued_message(enqueue_request())
@@ -413,6 +462,7 @@ async fn conformance_reject_unconsumed<Q: ConformanceQueue>(
                 thread_id: thread.thread_id.clone(),
                 message_id: *message_id,
                 input: steering(&format!("msg:{message_id}")),
+                ack_effect: None,
             })
             .await
             .expect("enqueue");
@@ -494,6 +544,7 @@ async fn conformance_origin_cursor_semantics<Q: ConformanceQueue>(queue: Q) {
             thread_id: ThreadId::new("thread-origin").unwrap(),
             message_id: ThreadMessageId::new(),
             input: steering("msg:origin-unique"),
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
@@ -579,6 +630,7 @@ async fn corrupt_durable_document_surfaces_unavailable_and_is_preserved() {
             thread_id: ThreadId::new("thread-corrupt").unwrap(),
             message_id: ThreadMessageId::new(),
             input: steering("msg:corrupt"),
+            ack_effect: None,
         })
         .await;
     assert!(
@@ -624,6 +676,7 @@ async fn concurrent_enqueues_and_acks_survive_cas_contention() {
                     thread_id: ThreadId::new("thread-contention").unwrap(),
                     message_id: ThreadMessageId::new(),
                     input: steering(&format!("msg:contended-{index}")),
+                    ack_effect: None,
                 })
                 .await
         }));
@@ -678,6 +731,7 @@ async fn ack_is_non_fatal_and_idempotent_when_status_flip_fails() {
             thread_id: ThreadId::new("ghost").unwrap(),
             message_id: ThreadMessageId::new(),
             input: steering("msg:ghost"),
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
@@ -711,6 +765,7 @@ async fn conformance_enqueue_dedups_identical_input<Q: ConformanceQueue>(queue: 
         thread_id: ThreadId::new("ghost").unwrap(),
         message_id: ThreadMessageId::new(),
         input: steering("msg:dup"),
+        ack_effect: None,
     };
     let first = queue
         .enqueue_queued_message(request())
@@ -758,6 +813,7 @@ async fn conformance_ack_rejects_unknown_sequence<Q: ConformanceQueue>(queue: Q)
             thread_id: ThreadId::new("ghost").unwrap(),
             message_id: ThreadMessageId::new(),
             input: steering("msg:live"),
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
@@ -813,6 +869,7 @@ async fn conformance_enqueue_bounds_per_run_capacity<Q: ConformanceQueue>(queue:
         thread_id: ThreadId::new("ghost").unwrap(),
         message_id: ThreadMessageId::new(),
         input: steering(&format!("msg:{tag}")),
+        ack_effect: None,
     };
     let half = crate::input_queue::MAX_QUEUED_INPUTS_PER_RUN / 2;
     for index in 0..half {
@@ -910,6 +967,7 @@ async fn conformance_consumed_dedup_does_not_exhaust_capacity<Q: ConformanceQueu
                 thread_id: thread.thread_id.clone(),
                 message_id: accepted.message_id,
                 input: input.clone(),
+                ack_effect: None,
             })
             .await
             .expect("successful consumptions must not exhaust live capacity");
@@ -929,6 +987,7 @@ async fn conformance_consumed_dedup_does_not_exhaust_capacity<Q: ConformanceQueu
             thread_id: thread.thread_id,
             message_id,
             input,
+            ack_effect: None,
         })
         .await
         .expect("newest consumed input remains deduplicated");
@@ -1024,6 +1083,7 @@ async fn conformance_terminal_reconcile_settles_and_stays_settled<Q: Conformance
             thread_id: thread.thread_id.clone(),
             message_id: accepted.message_id,
             input: steering(&format!("msg:{}", accepted.message_id)),
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
@@ -1112,6 +1172,7 @@ async fn conformance_ack_and_reject_settle_exactly_once<Q: ConformanceQueue>(
             thread_id: thread.thread_id.clone(),
             message_id: accepted.message_id,
             input: steering(&format!("msg:{}", accepted.message_id)),
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
@@ -1207,6 +1268,7 @@ async fn conformance_replay_of_consumed_input_repairs_instead_of_reminting<Q: Co
         thread_id: ThreadId::new("ghost").unwrap(),
         message_id,
         input: steering("msg:consumed-replay"),
+        ack_effect: None,
     };
     let first = queue
         .enqueue_queued_message(request())
@@ -1276,6 +1338,7 @@ async fn durable_reject_unconsumed_retains_document_until_flips_settle() {
             thread_id: ThreadId::new("ghost").unwrap(),
             message_id: ThreadMessageId::new(),
             input: steering("msg:unflippable"),
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
@@ -1302,6 +1365,7 @@ async fn durable_reject_unconsumed_retains_document_until_flips_settle() {
             thread_id: ThreadId::new("ghost").unwrap(),
             message_id: ThreadMessageId::new(),
             input: steering("msg:late"),
+            ack_effect: None,
         })
         .await;
     assert!(
@@ -1368,6 +1432,7 @@ async fn durable_reject_unconsumed_reclaims_settled_document() {
             thread_id: thread.thread_id.clone(),
             message_id: accepted.message_id,
             input: steering(&format!("msg:{}", accepted.message_id)),
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
@@ -1383,4 +1448,111 @@ async fn durable_reject_unconsumed_reclaims_settled_document() {
             .is_none(),
         "a fully settled terminal queue must reclaim its durable document"
     );
+}
+
+#[tokio::test]
+async fn durable_ack_effect_failure_survives_rehydration_and_retries() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let filesystem = make_fs(Arc::clone(&backend));
+    let thread_service: Arc<dyn SessionThreadService> =
+        Arc::new(InMemorySessionThreadService::default());
+    let run_id = TurnRunId::new();
+    let effect = background_ack_effect();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let first_handler = Arc::new(RecordingAckEffectHandler::failing_once(Arc::clone(&calls)));
+    {
+        let queue = FilesystemHostInputQueue::new(
+            Arc::clone(&filesystem),
+            owner_scope(),
+            Arc::clone(&thread_service),
+        );
+        queue
+            .bind_ack_effect_handler(first_handler)
+            .expect("bind first handler");
+        let envelope = queue
+            .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                run_id,
+                turn_id: TurnId::new(),
+                scope: ghost_scope(),
+                thread_id: ThreadId::new("parent-iq").unwrap(),
+                message_id: ThreadMessageId::new(),
+                input: LoopInput::SubagentSettled {
+                    child_run_id: effect.child_run_id,
+                    message_ref: LoopMessageRef::new("msg:result-iq").unwrap(),
+                },
+                ack_effect: Some(effect.clone()),
+            })
+            .await
+            .expect("enqueue effect");
+        queue
+            .ack_consumed(run_id, vec![envelope.ack_token])
+            .await
+            .expect("durable input ack remains successful when callback fails");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let second_handler = Arc::new(RecordingAckEffectHandler {
+        calls: Arc::clone(&calls),
+        fail_once: AtomicBool::new(false),
+    });
+    let queue = FilesystemHostInputQueue::new(
+        Arc::clone(&filesystem),
+        owner_scope(),
+        Arc::clone(&thread_service),
+    );
+    queue
+        .bind_ack_effect_handler(second_handler)
+        .expect("bind retry handler");
+    queue
+        .enqueue_queued_message(EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: ghost_scope(),
+            thread_id: ThreadId::new("parent-iq").unwrap(),
+            message_id: ThreadMessageId::new(),
+            input: LoopInput::Steering {
+                message_ref: LoopMessageRef::new("msg:retry-trigger").unwrap(),
+            },
+            ack_effect: None,
+        })
+        .await
+        .expect("next queue operation retries pending effect");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unacked_terminal_reject_does_not_invoke_background_ack_effect() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler = Arc::new(RecordingAckEffectHandler {
+        calls: Arc::clone(&calls),
+        fail_once: AtomicBool::new(false),
+    });
+    let thread_service: Arc<dyn SessionThreadService> =
+        Arc::new(InMemorySessionThreadService::default());
+    let queue = InMemoryHostInputQueue::new(Arc::clone(&thread_service));
+    queue
+        .bind_ack_effect_handler(handler)
+        .expect("bind handler");
+    let effect = background_ack_effect();
+    let run_id = TurnRunId::new();
+    queue
+        .enqueue_queued_message(EnqueueQueuedMessageRequest {
+            run_id,
+            turn_id: TurnId::new(),
+            scope: ghost_scope(),
+            thread_id: ThreadId::new("parent-iq").unwrap(),
+            message_id: ThreadMessageId::new(),
+            input: LoopInput::SubagentSettled {
+                child_run_id: effect.child_run_id,
+                message_ref: LoopMessageRef::new("msg:unacked-iq").unwrap(),
+            },
+            ack_effect: Some(effect),
+        })
+        .await
+        .expect("enqueue effect");
+    queue
+        .reject_unconsumed(run_id)
+        .await
+        .expect("terminal reconciliation");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

@@ -17,53 +17,42 @@ Working rules for the host-port adapter crate. Orientation lives in
 
 ## What This Crate Owns
 
-- The base implementations of the `ironclaw_loop_contracts` ports over
-  host-owned kernel services — adapter glue, not the executor, runner, product
-  workflow, or low-level runtime.
-- `skill_context.rs` and `identity_context.rs` prompt-safe
-  instruction/context builders (safe summaries and refs; full prompt
-  materialization is owned by the prompt port contract).
-- `capability_port.rs`, `capability_surface_filter.rs`, and
-  `capability_surface_policy.rs` capability-surface adapters, filtering, and
-  profile-to-policy resolution. The neutral policy vocabulary belongs to
-  `ironclaw_host_api`.
-- `input_queue.rs` / `input_port.rs` steering and followup queues;
-  `cancellation_port.rs` cancellation observation.
+Base implementations of every `ironclaw_loop_contracts` port over host-owned
+kernel services — adapter glue, not the executor, runner, product workflow, or
+low-level runtime. `src/` has outgrown a hand-maintained file inventory (50+
+files, plus 17 `prompts/*.md`); re-derive the current one with
+`ls crates/loop/ironclaw_loop_host/src/` and
+`ls crates/loop/ironclaw_loop_host/prompts/` rather than trusting a bullet
+list. Stable anchors, by category:
+
+- `lib.rs` — crate root; port implementations are wired here.
+- `capability_port.rs` / `capability_surface_filter.rs` /
+  `capability_surface_policy.rs` — capability-surface adapters, filtering, and
+  profile-to-policy resolution (neutral policy vocabulary stays in
+  `ironclaw_host_api`).
 - `model_gateway.rs` / `model_routes.rs` / `thread_resolving_model_gateway.rs`
-  — the model-gateway adapter over `ironclaw_llm::LlmProvider` and the
-  model-route policy vocabulary it resolves (absorbed from
-  `ironclaw_turn_runner`, PROPOSAL §6.7.2).
-- `driver_host_port_adapters.rs` — checkpoint/progress/no-extra-input port
-  adapters for a claimed run.
+  — the model-gateway adapter over `ironclaw_llm::LlmProvider`, the one
+  sanctioned provider-client exception in this family (PROPOSAL §6.7.2).
 - `tool_disclosure.rs` / `tool_disclosure_port.rs` / `tool_disclosure_mode.rs`
-  — progressive tool disclosure: catalog, `LoopCapabilityPort` decorator, and
-  the `REBORN_TOOL_DISCLOSURE` switch.
-- `skill_bundle_source.rs` / `filesystem_skill_bundle_source.rs` skill-bundle
-  source ports (`SkillBundleSource`, `FilesystemSkillBundleSource`,
-  `SkillBundleDescriptor`/`SkillBundleId`/`SkillBundleProvenance`).
-- `skill_activation/` + `prompts/skill_listing_header.md` — skill activation
-  selection and its observer seam, the `ironclaw.skill.activate` capability,
-  the bundle asset reader, the skill execution adapter, and the scoped handles
-  granted to bundled skill-context implementations. **Arrived 2026-08-05
+  — progressive tool disclosure and the `REBORN_TOOL_DISCLOSURE` switch.
+- `skill_activation/` — skill activation selection. **Arrived 2026-08-05
   (CHECKLIST WS8) as the whole of the dissolved
-  `ironclaw_first_party_extension_ports` crate** (PROPOSAL §9 row 55); it
-  added no dependency to this crate. Its old crate boundary survives as an
-  equality over the module's imports —
+  `ironclaw_first_party_extension_ports` crate** (PROPOSAL §9 row 55); its old
+  crate boundary survives as an equality over the module's imports —
   `cargo test -p ironclaw_architecture_tests --test reborn_dependency_boundaries dissolved_ports_module_keeps_its_crate_boundary`
   — so this module may reach only `host_api`, `loop_contracts`, `filesystem`,
   `skills`, `turns`, and this crate, even though `loop_host` itself may reach
   far more.
-- `system_prompt_assets.rs` + `prompts/{default_system,tool_disclosure_protocol,self_knowledge,benchmarking_mode,scheduled_trigger_mode}.md`
-  — the system-prompt *content*: `DEFAULT_SYSTEM_PROMPT` (seed text written
-  once into the user-editable `SYSTEM.md`) and the four protocols appended in
-  memory at resolve time (`SELF_KNOWLEDGE_PROTOCOL_PROMPT` unconditional,
-  `TOOL_DISCLOSURE_PROTOCOL_PROMPT` bridged mode only,
-  `BENCHMARKING_MODE_PROTOCOL_PROMPT` process-wide benchmarking only, and
-  `SCHEDULED_TRIGGER_MODE_PROTOCOL_PROMPT` trusted scheduled-trigger origin
-  only). The text lives in `prompts/*.md`, never inline in Rust. Evicted from
-  the composition root, which owns assembly and the boot-time seeding of the
-  on-disk `SYSTEM.md` (`std::fs` on a real host path — this crate performs no
-  such I/O), never the text (PROPOSAL §6.10.1).
+- `system_prompt_assets.rs` + `prompts/*.md` — the system-prompt *content*
+  (`DEFAULT_SYSTEM_PROMPT` seed text plus the protocol appendices resolved at
+  runtime). Text lives in `prompts/*.md`, never inline in Rust. Evicted from
+  the composition root, which owns assembly and boot-time seeding of the
+  on-disk `SYSTEM.md`, never the text (PROPOSAL §6.10.1).
+
+Everything else in `src/` (budget/compaction accounting, subagent prompt/spawn
+ports, tool search, context-window caching, model-visible output scrubbing,
+skill-bundle sources, input/cancellation ports, …) is real and current but not
+enumerated above — trust `ls src/`, not a stale list.
 
 ## Do Not Move In Here
 

@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use ironclaw_host_api::turn::LoopGateRef;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CheckpointSchemaId, LoopCheckpointRequest,
@@ -15,7 +14,7 @@ use crate::executor::CanonicalAgentLoopExecutor;
 use ironclaw_loop_contracts::AgentLoopDriverHost;
 
 use super::{
-    AgentLoopExecutorError, CancelCheck, CheckpointWrite, ExecutorStage, HostStage, StageContext,
+    AgentLoopExecutorError, CancelCheck, CheckpointWrite, HostStage, StageContext,
     cancelled_exit_with_reason, cancelled_reason_from_signal, checkpoint_kind_to_host,
     debug_host_unavailable,
 };
@@ -34,6 +33,73 @@ impl CheckpointStage {
         kind: CheckpointKind,
     ) -> Result<CheckpointWrite, AgentLoopExecutorError> {
         self.write_with_gate_ref(ctx, state, kind, None).await
+    }
+
+    /// Iteration-batched `BeforeModel` write for the canonical per-iteration
+    /// boundary.
+    ///
+    /// Writing the full serialized state before every model call costs one
+    /// checkpoint row plus one process-row update per iteration. Flushing only
+    /// every `before_model_checkpoint_interval`-th iteration trades that for a
+    /// bounded replay cost — but only where the trade is actually safe, which
+    /// is narrower than it first appears.
+    ///
+    /// # Why the previous checkpoint kind gates the skip
+    ///
+    /// The scheduler's lease-expiry recovery does not just resume from the
+    /// newest checkpoint, it decides WHETHER to resume from that checkpoint's
+    /// kind (`ironclaw_processes`' `replays_side_effect`, read in
+    /// `apply_recover_expired`). A run whose newest checkpoint is
+    /// `BeforeSideEffect` is failed closed rather than requeued, because
+    /// nothing durable proves the effect did not land.
+    ///
+    /// So the `BeforeModel` written after a tool-calling iteration is not
+    /// bookkeeping: it is what clears the fail-closed marker the preceding
+    /// `BeforeSideEffect` left on the process row. Skipping it would convert
+    /// an auto-recoverable crash into a user-visible `lease_expired` failure,
+    /// which is a durability regression, not a replay cost. Batching is
+    /// therefore allowed only when the previous durable checkpoint is itself
+    /// resumable — pinned by
+    /// `run_interrupted_on_a_batched_away_iteration_resumes_without_repeating_side_effects`.
+    ///
+    /// # What a skip does cost
+    ///
+    /// Only replayed MODEL calls. `state.last_checkpoint` keeps pointing at
+    /// the previous durable checkpoint, which is what resume reads, and every
+    /// exit path — gate, cancel, budget, terminal — still writes its own
+    /// `BeforeBlock` or `Final` checkpoint before returning.
+    ///
+    /// The other `BeforeModel` writers (input drain, compaction, model-retry
+    /// recovery) call [`write`] directly and stay unbatched: each persists
+    /// consumed one-shot budget that a replay must not re-grant.
+    pub(super) async fn write_before_model_batched(
+        &self,
+        ctx: StageContext<'_>,
+        state: LoopExecutionState,
+    ) -> Result<LoopExecutionState, AgentLoopExecutorError> {
+        let policy = &ctx
+            .host
+            .run_context()
+            .resolved_run_profile
+            .checkpoint_policy;
+        // Fail-closed on the first iteration too: no previous checkpoint means
+        // nothing to fall back to, so it always flushes.
+        let previous_is_resumable = state
+            .last_checkpoint
+            .as_ref()
+            .is_some_and(|marker| !marker.kind.replays_side_effect());
+        if previous_is_resumable && !policy.flushes_before_model_at(state.iteration) {
+            tracing::debug!(
+                iteration = state.iteration,
+                interval = policy.before_model_flush_interval(),
+                "skipping batched BeforeModel checkpoint between flush points"
+            );
+            return Ok(state);
+        }
+        Ok(self
+            .write(ctx, state, CheckpointKind::BeforeModel)
+            .await?
+            .state)
     }
 
     /// Variant of [`write`] for `BeforeBlock` checkpoints. Stores the
@@ -265,24 +331,6 @@ fn recovery_event_host_error(error: AgentLoopHostError) -> AgentLoopExecutorErro
         safe_summary,
         reason_kind: error.reason_kind,
         detail: error.detail.or(rejected_summary_detail),
-    }
-}
-
-pub(super) struct CheckpointInput {
-    pub(super) state: LoopExecutionState,
-    pub(super) kind: CheckpointKind,
-}
-
-#[async_trait]
-impl ExecutorStage<CheckpointInput> for CheckpointStage {
-    type Output = CheckpointWrite;
-
-    async fn process(
-        &self,
-        ctx: StageContext<'_>,
-        input: CheckpointInput,
-    ) -> Result<CheckpointWrite, AgentLoopExecutorError> {
-        self.write(ctx, input.state, input.kind).await
     }
 }
 

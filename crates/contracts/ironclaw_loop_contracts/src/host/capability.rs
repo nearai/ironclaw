@@ -15,7 +15,7 @@ pub use ironclaw_host_api::capability::CapabilityDescriptionTrust;
 
 use crate::content_digest::ContentDigest;
 use crate::model_observation::{CapabilityFailureDetail, ModelVisibleToolObservation};
-use ironclaw_host_api::turn::{CapabilityActivityId, LoopResultRef};
+use ironclaw_host_api::turn::{CapabilityActivityId, LoopGateRef, LoopResultRef};
 
 use super::error::{AgentLoopHostError, AgentLoopHostErrorKind, unsupported_host_method};
 use super::model::CapabilityCallCandidate;
@@ -350,6 +350,10 @@ pub struct AuthResumeApprovalIdentity {
 /// human approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityAuthResume {
+    /// The durable auth-gate record whose diagnostic belongs to this resume.
+    /// It is required so a denial can recover the exact model-visible provider
+    /// explanation without copying diagnostic text into checkpoint state.
+    pub gate_ref: LoopGateRef,
     /// Encodes the original activity identity so the host can reuse the
     /// matching execution context after auth completes. A denied gate does not
     /// re-dispatch, so its activity identity is already carried by
@@ -378,18 +382,21 @@ pub struct CapabilityAuthResume {
 
 impl CapabilityAuthResume {
     pub fn resolved(
+        gate_ref: LoopGateRef,
         resume_token: CapabilityResumeToken,
         prior_approval: Option<AuthResumeApprovalIdentity>,
     ) -> Self {
         Self {
+            gate_ref,
             resume_token: Some(resume_token),
             disposition: None,
             prior_approval,
         }
     }
 
-    pub fn denied() -> Self {
+    pub fn denied(gate_ref: LoopGateRef) -> Self {
         Self {
+            gate_ref,
             resume_token: None,
             disposition: Some(ironclaw_host_api::turn::GateResumeDisposition::Denied),
             prior_approval: None,

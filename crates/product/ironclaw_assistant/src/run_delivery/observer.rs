@@ -19,12 +19,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extension_contracts::auth_prompt::AuthPromptChallengeKind;
 use ironclaw_extension_contracts::channel_adapter::{
-    OutboundPart, ProductTriggerReason, ReactionAction, RunReaction,
+    OutboundPart, OutboundVisibility, ProductTriggerReason, ReactionAction, RunReaction,
 };
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_host_api::product_adapter::{ProductAdapterError, ProductSurfaceRejectionKind};
+use ironclaw_notifications::NotificationKind;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
@@ -574,6 +575,21 @@ impl RunDeliveryObserver {
                 )
                 .await;
             }
+            let next_blocked_marker = blocked_actionable_marker(&actionable_state);
+            if let Some(previous) = delivered_blocked_marker.as_ref()
+                && Some(previous) != next_blocked_marker.as_ref()
+                && let Some(kind) = super::blocked_status_notification_kind(previous.status)
+            {
+                self.services
+                    .resolve_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        previous.gate_ref.as_deref(),
+                    )
+                    .await;
+            }
             let notification = match self
                 .notification_for_actionable_state(
                     &envelope,
@@ -636,9 +652,19 @@ impl RunDeliveryObserver {
                     return Ok(());
                 }
             };
-            let next_blocked_marker = blocked_actionable_marker(&actionable_state);
             let event_kind = notification.event_kind;
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
+            if let Some(kind) = inbox_kind_for_event(event_kind) {
+                self.services
+                    .publish_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        gate_ref_for_routing.as_deref(),
+                    )
+                    .await;
+            }
             let delivered_messages = self
                 .deliver_run_notification(
                     RunNotificationDeliveryContext {
@@ -1301,10 +1327,9 @@ impl RunDeliveryObserver {
     /// in a shared conversation it lands as a reply anchored on the sender's
     /// own message (the envelope's message-scoped conversation ref carries
     /// the anchor — a threading surface roots a thread on the ping, a flat
-    /// surface quotes it), so the nudge addresses the one unpaired sender
-    /// rather than the room. The
-    /// text is fixed, host-authored, and link-free (OAuth links and pairing
-    /// codes stay out of shared surfaces by the private-setup rules).
+    /// surface quotes it), requested `EphemeralTo` the sender so the nudge —
+    /// and the connect link its manifest text may carry — reaches only that
+    /// one unpaired sender rather than the room (#7681).
     /// Deliberately performs NO binding lookup (the sender is unbound by
     /// definition). Transport retries arrive as `Duplicate`, so this fires
     /// at most once per inbound event, and the per-conversation reservation
@@ -1334,15 +1359,21 @@ impl RunDeliveryObserver {
         let Some(reserved_at) = self.reserve_connect_nudge(conversation_key.clone()) else {
             return true;
         };
+        let visibility = if envelope_is_direct_chat(envelope) {
+            OutboundVisibility::Public
+        } else {
+            OutboundVisibility::EphemeralTo(envelope.external_actor_ref().clone())
+        };
         let delivered = self
             .services
-            .post_notice(
+            .post_notice_with_visibility(
                 DeliveryIntent::ConnectRequired,
                 self.services.fallback_notice_scope.clone(),
                 None,
                 envelope.external_conversation_ref(),
                 &self.connection_notices.connect_required,
                 format!("connect-nudge:{}", envelope.external_event_id().as_str()),
+                visibility,
             )
             .await;
         if delivered.is_none() {
@@ -1552,6 +1583,15 @@ impl RunDeliveryObserver {
                 prompts::BUSY_GENERIC_MESSAGE.to_string()
             }
         }
+    }
+}
+
+fn inbox_kind_for_event(event_kind: RunNotificationEventKind) -> Option<NotificationKind> {
+    match event_kind {
+        RunNotificationEventKind::ApprovalNeeded => Some(NotificationKind::ApprovalRequired),
+        RunNotificationEventKind::AuthRequired => Some(NotificationKind::AuthenticationRequired),
+        RunNotificationEventKind::RunBlocked => Some(NotificationKind::RunBlocked),
+        _ => None,
     }
 }
 

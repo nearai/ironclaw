@@ -12,6 +12,7 @@ jobs:
     if: ${{ github.repository_owner == 'nearai' }}
     name: Release-plz release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -23,7 +24,7 @@ jobs:
           persist-credentials: false
       - &install-rust
         name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # Generating a GitHub token, so that PRs and tags created by
       # the release-plz-action can trigger actions workflows.
@@ -48,6 +49,7 @@ jobs:
     if: ${{ github.repository_owner == 'nearai' }}
     name: Release-plz PR
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: write

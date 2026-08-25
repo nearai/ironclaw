@@ -35,6 +35,7 @@ test("SettingsToolbar supplies the controlled SearchField contract", () => {
     Button,
     FileReader: function FileReader() {},
     Icon,
+    InlineNotice() {},
     NoSupportedSettingsImportError: class extends Error {},
     React: {
       useCallback: (callback) => callback,

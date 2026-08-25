@@ -354,6 +354,109 @@ async fn input_stage_steering_input_is_drained_like_user_message() {
     }
 }
 
+/// The production caller — not the pure consume helper — owns the sequence a
+/// settled subagent result depends on: `InputStage::process` writes a
+/// `BeforeModel` checkpoint of the advanced cursor and only THEN acks, and the
+/// ack is what flips the queued transcript row to `Submitted` (model-visible).
+/// A `GateResolved` parked right behind the settled input pins the other half:
+/// the barrier stops the drain, so its ack token must never be acked and the
+/// cursor must not run past it. Both user-facing drain modes reach the settled
+/// input, so both are driven here.
+#[tokio::test]
+async fn input_stage_drains_subagent_settled_ahead_of_a_barrier_in_both_modes() {
+    for mode in [
+        UserFacingInputDrainMode::Steering,
+        UserFacingInputDrainMode::FollowUp,
+    ] {
+        let host = MockHost::new(Vec::new());
+        let run_context = host.run_context().clone();
+        let host = host.with_input_batches(vec![LoopInputBatch {
+            inputs: vec![
+                LoopInput::SubagentSettled {
+                    child_run_id: TurnRunId::new(),
+                    message_ref: message_ref("msg:child-result-1"),
+                },
+                LoopInput::GateResolved {
+                    gate_ref: LoopGateRef::new("gate:blocks-the-drain").expect("valid gate ref"),
+                },
+            ],
+            input_acks: vec![
+                input_ack(
+                    &run_context,
+                    "input-cursor:after-settled",
+                    "input-ack:settled",
+                ),
+                input_ack(&run_context, "input-cursor:after-gate", "input-ack:gate"),
+            ],
+            next_cursor: input_cursor(&run_context, "input-cursor:after-gate"),
+        }]);
+        let family = crate::families::default();
+        let ctx = StageContext {
+            planner: family.planner(),
+            host: &host,
+        };
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let step = InputStage
+            .process(ctx, DrainInput { state, mode })
+            .await
+            .expect("input stage");
+
+        match step {
+            InputStep::Continue { state, drained } => {
+                assert!(drained, "settled results must drain in {mode:?}");
+                assert_eq!(
+                    state.input_cursor,
+                    input_cursor(&run_context, "input-cursor:after-settled"),
+                    "the cursor stops at the barrier in {mode:?}"
+                );
+            }
+            InputStep::Exit(exit) => panic!("expected continue in {mode:?}, got {exit:?}"),
+        }
+
+        assert_eq!(
+            host.acked_input_tokens(),
+            vec![LoopInputAckToken::new("input-ack:settled").expect("valid ack token")],
+            "only the settled input is acked in {mode:?}; the gate stays queued"
+        );
+        assert_eq!(
+            host.checkpoint_kinds(),
+            vec![LoopCheckpointKind::BeforeModel],
+            "the advanced cursor is checkpointed in {mode:?}"
+        );
+        let staged_before_model = host
+            .staged_payloads()
+            .into_iter()
+            .find(|request| request.kind == LoopCheckpointKind::BeforeModel)
+            .unwrap_or_else(|| panic!("no BeforeModel checkpoint payload staged in {mode:?}"));
+        let staged_state = LoopExecutionState::from_checkpoint_payload(
+            &staged_before_model.payload,
+            CheckpointKind::BeforeModel,
+        )
+        .expect("checkpoint payload");
+        // `checkpoint_kinds()` proves only the checkpoint's kind, and the
+        // final `state.input_cursor` above proves only the in-memory cursor —
+        // neither proves what cursor value was actually persisted. Decode the
+        // staged payload bytes (what the host would durably journal) and
+        // assert the cursor inside it directly, so a regression that
+        // checkpoints a stale cursor and only later advances the in-memory
+        // one cannot pass silently.
+        assert_eq!(
+            staged_state.input_cursor,
+            input_cursor(&run_context, "input-cursor:after-settled"),
+            "the persisted checkpoint cursor must be the advanced cursor in {mode:?}"
+        );
+        assert_eq!(
+            host.events(),
+            vec![
+                "checkpoint:before_model".to_string(),
+                "ack_inputs".to_string(),
+            ],
+            "the checkpoint must be durable before the ack in {mode:?}"
+        );
+    }
+}
+
 #[test]
 fn consume_drainable_inputs_empty_batch_short_circuits() {
     let host = MockHost::new(Vec::new());
@@ -396,6 +499,67 @@ fn consume_drainable_inputs_returns_planner_contract_error_when_acks_missing() {
             detail: "input batch omitted ack metadata for consumed inputs"
         }
     ));
+}
+
+/// A settled subagent result must be consumed by the real drain call site — in
+/// BOTH user-facing modes — before the drain stops at a barrier input. Placing
+/// a `GateResolved` right behind it is the case a predicate-only test cannot
+/// see: it proves the settled input was consumed (cursor advanced by exactly
+/// one, one ack token returned) rather than merely classified as drainable.
+#[test]
+fn consume_drainable_inputs_drains_subagent_settled_ahead_of_a_barrier_in_both_modes() {
+    for mode in [
+        UserFacingInputDrainMode::Steering,
+        UserFacingInputDrainMode::FollowUp,
+    ] {
+        let host = MockHost::new(Vec::new());
+        let run_context = host.run_context();
+        let mut state = LoopExecutionState::initial_for_run(run_context);
+        let before_cursor = state.input_cursor.clone();
+        let batch = LoopInputBatch {
+            inputs: vec![
+                LoopInput::SubagentSettled {
+                    child_run_id: TurnRunId::new(),
+                    message_ref: message_ref("msg:child-result-1"),
+                },
+                LoopInput::GateResolved {
+                    gate_ref: LoopGateRef::new("gate:blocks-the-drain").expect("valid gate ref"),
+                },
+            ],
+            input_acks: vec![
+                input_ack(
+                    run_context,
+                    "input-cursor:after-settled",
+                    "input-ack:settled",
+                ),
+                input_ack(run_context, "input-cursor:after-gate", "input-ack:gate"),
+            ],
+            next_cursor: before_cursor.clone(),
+        };
+
+        let (drained, ack_tokens, cancelled_reason_kind) =
+            consume_drainable_inputs(&batch, mode, &mut state).expect("consume inputs");
+
+        assert!(drained, "settled results must drain in {mode:?}");
+        assert!(
+            cancelled_reason_kind.is_none(),
+            "no cancellation in {mode:?}"
+        );
+        assert_eq!(
+            ack_tokens,
+            vec![LoopInputAckToken::new("input-ack:settled").expect("valid ack token")],
+            "only the settled input is consumed in {mode:?}; the gate is a barrier"
+        );
+        assert_eq!(
+            state.input_cursor,
+            input_cursor(run_context, "input-cursor:after-settled"),
+            "the cursor must advance past the settled input in {mode:?}"
+        );
+        assert_ne!(
+            state.input_cursor, before_cursor,
+            "the cursor must not stay put in {mode:?}"
+        );
+    }
 }
 
 #[tokio::test]

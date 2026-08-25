@@ -41,6 +41,7 @@ async fn invoke_capability_rejects_both_resume_modes_set() {
             input_ref: CapabilityInputRef::new("input:test-dual-resume").expect("valid input ref"),
         }),
         auth_resume: Some(CapabilityAuthResume {
+            gate_ref: LoopGateRef::new("gate:auth-dual-resume").expect("valid auth gate ref"),
             resume_token: Some(resume_token),
             disposition: None,
             prior_approval: None,
@@ -319,6 +320,8 @@ async fn invoke_capability_rejects_auth_resume_activity_mismatch() {
             input_ref: invocation.input_ref,
             approval_resume: None,
             auth_resume: Some(CapabilityAuthResume {
+                gate_ref: LoopGateRef::new("gate:auth-mismatched-activity")
+                    .expect("valid auth gate ref"),
                 resume_token: Some(resume_token_for_different_activity(invocation.activity_id)),
                 disposition: None,
                 prior_approval: None,

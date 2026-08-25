@@ -1,6 +1,7 @@
 import { Navigate, useNavigate, useParams } from "react-router";
 import React from "react";
 import { RouteLoadBoundary } from "../../app/route-load-boundary";
+import { PageScroll, PageStack } from "../../layout/page-shell";
 
 const UserDetail = React.lazy(() =>
   import("./components/user-detail").then(({ UserDetail }) => ({ default: UserDetail }))
@@ -50,12 +51,10 @@ export function AdminPage({ threadScrapingEnabled = false }) {
   }
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto">
-      <div className="v2-page-entrance flex-1 p-4 sm:p-6">
-        <div className="space-y-5">
-          <RouteLoadBoundary>{tabContent[tab]}</RouteLoadBoundary>
-        </div>
-      </div>
-    </div>
+    <PageScroll>
+      <PageStack>
+        <RouteLoadBoundary>{tabContent[tab]}</RouteLoadBoundary>
+      </PageStack>
+    </PageScroll>
   );
 }

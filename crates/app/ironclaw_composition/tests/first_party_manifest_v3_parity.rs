@@ -137,6 +137,18 @@ const SLACK_ADDITIONS: PackageAdditions = PackageAdditions {
     added_scopes: &["im:write", "reactions:read", "reactions:write"],
 };
 
+/// Google Docs gained semantic operations after the v2 freeze. They reuse the
+/// existing read/write scope ceiling and are appended after every legacy tool.
+const GOOGLE_DOCS_ADDITIONS: PackageAdditions = PackageAdditions {
+    tool_ids: &[
+        "google-docs.inspect_document",
+        "google-docs.apply_text_edits",
+        "google-docs.create_table_with_data",
+        "google-docs.verify_document",
+    ],
+    added_scopes: &[],
+};
+
 fn assert_static_projection_parity(dir: &str) {
     assert_projection_parity_with_additions(dir, &NO_ADDITIONS);
 }
@@ -577,7 +589,10 @@ macro_rules! static_parity {
 static_parity!(github_v3_projects_identically, "github");
 static_parity!(gmail_v3_projects_identically, "gmail");
 static_parity!(google_calendar_v3_projects_identically, "google-calendar");
-static_parity!(google_docs_v3_projects_identically, "google-docs");
+#[test]
+fn google_docs_v3_projects_identically_with_semantic_additions() {
+    assert_projection_parity_with_additions("google-docs", &GOOGLE_DOCS_ADDITIONS);
+}
 static_parity!(google_drive_v3_projects_identically, "google-drive");
 static_parity!(google_sheets_v3_projects_identically, "google-sheets");
 static_parity!(google_slides_v3_projects_identically, "google-slides");
@@ -760,6 +775,10 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
         api_post.paths,
         [
             "/api/chat.postMessage",
+            // Sender-visible-only delivery for the unbound-user connect nudge
+            // (#7681). Same `chat:write` bot scope as `chat.postMessage`, so
+            // this widens the allowlist without widening the Slack grant.
+            "/api/chat.postEphemeral",
             "/api/chat.delete",
             "/api/conversations.open",
             "/api/files.completeUploadExternal",

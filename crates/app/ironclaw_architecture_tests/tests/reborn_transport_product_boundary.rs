@@ -133,6 +133,7 @@ const PRODUCT_SYMBOLS_WEBUI_STILL_NAMES: &[(&str, &str)] = &[
     ("AUTOMATION_PAUSE_COMMAND", "inventory"),
     ("AUTOMATION_RENAME_COMMAND", "inventory"),
     ("AUTOMATION_RESUME_COMMAND", "inventory"),
+    ("AUTOMATION_RUN_COMMAND", "inventory"),
     ("CANCEL_RUN_COMMAND", "inventory"),
     ("CREATE_THREAD_COMMAND", "inventory"),
     ("EXTENSIONS_VIEW", "inventory"),
@@ -223,7 +224,7 @@ const PRODUCT_SYMBOLS_OPENAI_COMPAT_STILL_NAMES: &[(&str, &str)] = &[
 // `product_attachment_capabilities` to `ironclaw_attachments` as
 // `AttachmentCapabilities` / `attachment_capabilities` — the two symbols this
 // list called out by name as that row's to own. Shrink-only.
-const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 103;
+const WEBUI_PRODUCT_SYMBOL_BASELINE: usize = 104;
 const OPENAI_COMPAT_PRODUCT_SYMBOL_BASELINE: usize = 3;
 
 /// Boundary vocabulary this row moved: declared in `ironclaw_product_contracts`

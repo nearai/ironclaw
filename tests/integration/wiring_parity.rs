@@ -34,11 +34,13 @@ mod support;
 use std::collections::HashSet;
 
 use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_product_contracts::inspector::DiagnosticScope;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::harness::HarnessResult;
 use reborn_support::harness::options::ToolsProfile;
 use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
+use reborn_support::reply::RebornScriptedReply;
 
 // ---------------------------------------------------------------------------
 // Part 1: DefaultPlannedRuntimeParts Some/None shape parity
@@ -216,6 +218,37 @@ async fn test_default_planned_runtime_parts_shape_matches_production() {
         harness.planned_runtime_parts_shape(),
         "RebornIntegrationHarness::test_default()",
     );
+}
+
+/// Task 5 (run-artifact-timings): the harness must hand out the SAME
+/// `InMemoryDiagnosticStore` instance the loop's diagnostic sinks write into,
+/// mirroring production's one-store shape (`runtime.rs:3455`,
+/// `product_surface.rs:98`). Before this test, `group.rs` built a throwaway
+/// store inline and kept no handle, so nothing could read what a run actually
+/// recorded.
+#[tokio::test]
+async fn harness_shares_one_diagnostic_store_with_the_loop() {
+    let harness = RebornIntegrationHarness::builder("wiring-parity")
+        .script([RebornScriptedReply::text("diagnostic")])
+        .build()
+        .await
+        .expect("harness");
+    let run_id = harness
+        .submit_turn("write diagnostics")
+        .await
+        .expect("scripted turn");
+
+    let snapshot = harness
+        .diagnostic_store()
+        .snapshot(&DiagnosticScope::new(
+            harness.binding.tenant_id.clone(),
+            harness.binding.actor_user_id.clone(),
+            harness.binding.thread_id.clone(),
+            run_id,
+        ))
+        .expect("diagnostic snapshot")
+        .expect("the loop must write to the shared diagnostic store");
+    assert!(!snapshot.model_calls.is_empty());
 }
 
 #[tokio::test]

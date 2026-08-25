@@ -1,3 +1,4 @@
+// arch-exempt: large_file, bounded dependency-query paging fields land beside the pre-existing dependency vocabulary they extend, plan #7788
 //! Durable process journal contracts.
 //!
 //! These types describe the kernel-level process lifecycle independently from
@@ -513,6 +514,10 @@ pub struct ProcessJournalEntry {
 pub struct ProcessJournalCommit {
     pub state: JournaledProcessSnapshot,
     pub kind: ProcessJournalKind,
+    /// Timestamp of the journal transition that produced this committed
+    /// state. Observers use it for replay-stable materialized records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanitized_reason: Option<String>,
 }
@@ -712,8 +717,56 @@ pub struct ProcessTreeReservation {
 pub enum ProcessDependencyState {
     Open,
     Settled,
+    /// The settled dependency's result is durably recorded on the dependent.
+    ResultAppended,
+    /// The dependent has been made attentive to the recorded result.
+    AttentionScheduled,
+    /// Attention was withheld on purpose; the dependent must be made attentive
+    /// later. Not a failure, and not closed.
+    AttentionDeferred,
     Consumed,
     Abandoned,
+}
+
+impl ProcessDependencyState {
+    /// The states a dependency may hold immediately before entering `self` —
+    /// the dependent-notification lifecycle expressed as a relation instead of
+    /// as an expectation each caller has to assert correctly.
+    ///
+    /// Total over the enum on purpose: a new variant cannot compile without
+    /// naming its predecessors, and both closing doors (the state-column CAS
+    /// and consume/abandon) read this one relation rather than each carrying
+    /// its own list.
+    pub fn legal_predecessors(self) -> &'static [Self] {
+        match self {
+            // An edge is born here; nothing precedes it.
+            Self::Open => &[],
+            Self::Settled => &[Self::Open],
+            Self::ResultAppended => &[Self::Settled],
+            // Two predecessors: making a deferred dependent attentive *is*
+            // scheduling attention, so a parked edge has a forward path.
+            Self::AttentionScheduled => &[Self::ResultAppended, Self::AttentionDeferred],
+            Self::AttentionDeferred => &[Self::ResultAppended],
+            // `ResultAppended` has no attention recorded yet and
+            // `AttentionDeferred` is parked for a later sweep; closing either
+            // would strand the dependent with an undelivered result.
+            Self::Consumed => &[Self::Settled, Self::AttentionScheduled],
+            // Giving up is legal from anywhere still in flight.
+            Self::Abandoned => &[
+                Self::Open,
+                Self::Settled,
+                Self::ResultAppended,
+                Self::AttentionScheduled,
+                Self::AttentionDeferred,
+            ],
+        }
+    }
+
+    /// Whether the edge has reached a terminal state and its descendant
+    /// reservation has already been released.
+    pub fn is_closed(self) -> bool {
+        matches!(self, Self::Consumed | Self::Abandoned)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -741,6 +794,10 @@ pub struct ProcessDependencyRecord {
     pub settled_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumed_at: Option<Timestamp>,
+    /// When the state column last moved under a delivery transition.
+    /// Absent on rows written before delivery substates existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transitioned_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -775,6 +832,43 @@ pub struct CloseProcessDependencyRequest {
     pub closed_at: Timestamp,
 }
 
+/// A compare-and-swap over one dependency's state column: the write lands only
+/// if the stored state is a legal predecessor of `next`
+/// (`ProcessDependencyState::legal_predecessors`). A caller does not assert
+/// which state it is advancing from — the relation derives it, so a step
+/// cannot be skipped by naming the wrong one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitionProcessDependencyRequest {
+    pub dependent_process_id: ProcessId,
+    pub dependency_process_id: ProcessId,
+    pub scope: ResourceScope,
+    pub next: ProcessDependencyState,
+    /// Merged into the record's metadata object when present; `None` leaves the
+    /// recorded payload untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+    pub transitioned_at: Timestamp,
+}
+
+/// Ordering contract: filters (`group_ref`, `include_closed`) apply BEFORE
+/// `after`/`limit` — the keyset bound walks the already-filtered, sorted
+/// sequence, never the raw unfiltered index. Sort order is the pair
+/// `(dependent_process_id, dependency_process_id)`, the same order
+/// `query_process_dependencies` already returns when `after`/`limit` are both
+/// `None`.
+///
+/// `after`/`limit` are the store's bounded-query mode (kernel charter:
+/// "Normal startup and process requests may use exact reads and bounded,
+/// partition-leading keyset queries only" — `AGENTS.md`). Both `None` is
+/// byte-for-byte identical to the pre-existing unbounded query every
+/// existing caller relies on. `after` is a keyset cursor over that same
+/// `(dependent_process_id, dependency_process_id)` sort key — the pair of
+/// the last row a prior page returned; the next page resumes strictly after
+/// it. `limit` caps the number of rows a bounded query returns. When present,
+/// `allowed_states` is evaluated before the cursor and limit; bounded
+/// multi-state reads use one exact ordered-index prefix per state and merge
+/// those streams in canonical pair order. `None` preserves the historical
+/// state-agnostic behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessDependencyQuery {
     pub scope: ResourceScope,
@@ -782,8 +876,18 @@ pub struct ProcessDependencyQuery {
     pub dependent_process_id: Option<ProcessId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_ref: Option<String>,
+    /// Restrict the query to these dependency delivery states. `None` keeps
+    /// the historical state-agnostic query behavior; an empty list matches no
+    /// rows. Bounded actionable sweeps use this field so open edges cannot
+    /// consume the batch before a deliverable edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_states: Option<Vec<ProcessDependencyState>>,
     #[serde(default)]
     pub include_closed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<(ProcessId, ProcessId)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -951,6 +1055,16 @@ pub trait ProcessSnapshotSource: Send + Sync {
         &self,
         scope: &ResourceScope,
     ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error>;
+
+    /// Newest-first, bounded read of one scope's agent-turn processes.
+    ///
+    /// Unlike [`Self::process_snapshots`] this is explicitly bounded: callers
+    /// that need a fixed recent window must not enumerate a whole scope.
+    async fn recent_agent_turn_snapshots(
+        &self,
+        scope: &ResourceScope,
+        limit: u32,
+    ) -> Result<Vec<JournaledProcessSnapshot>, Self::Error>;
 }
 
 #[async_trait]
@@ -1025,6 +1139,22 @@ pub trait ProcessDependencyPort: Send + Sync {
     async fn abandon_process_dependency(
         &self,
         request: CloseProcessDependencyRequest,
+    ) -> Result<Option<ProcessDependencyRecord>, Self::Error>;
+
+    /// Advances a dependency's state column only if it still holds the
+    /// requested `expected` state, so a delivery step that crashed part-way can
+    /// be replayed without double-applying the next one. Replaying a
+    /// transition that already landed is idempotent; an unknown edge yields
+    /// `Ok(None)`; any other stored state is an error.
+    ///
+    /// This operation writes the state column only. Closing an edge also
+    /// releases its descendant reservation and the two are one journal
+    /// command, so `Consumed` and `Abandoned` are refused here: they are
+    /// reachable only through `consume_process_dependency` /
+    /// `abandon_process_dependency`.
+    async fn transition_process_dependency(
+        &self,
+        request: TransitionProcessDependencyRequest,
     ) -> Result<Option<ProcessDependencyRecord>, Self::Error>;
 
     async fn query_process_dependencies(
@@ -1391,6 +1521,52 @@ mod tests {
         let absent: JournaledProcessSnapshot =
             serde_json::from_value(encoded).expect("a snapshot written before the kind existed");
         assert_eq!(absent.checkpoint_kind, None);
+    }
+
+    #[test]
+    fn process_journal_commit_without_occurred_at_remains_readable() {
+        let commit = ProcessJournalCommit {
+            state: JournaledProcessSnapshot {
+                process_id: ProcessId::new(),
+                process_kind: ProcessKind::Internal,
+                scope: ResourceScope {
+                    tenant_id: TenantId::new("tenant-legacy-commit").expect("tenant"),
+                    user_id: UserId::new("user-legacy-commit").expect("user"),
+                    agent_id: None,
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+                },
+                status: ProcessLifecycleStatus::Completed,
+                suspension: None,
+                checkpoint_ref: None,
+                checkpoint_kind: None,
+                input_ref: None,
+                failure: None,
+                journal_cursor: ProcessJournalCursor(1),
+                lease: None,
+                crash_reclaim_count: 0,
+                created_at: chrono::Utc::now(),
+                owner_user_id: None,
+                concurrency_class: None,
+                parent_process_id: None,
+                root_process_id: None,
+                metadata: Value::Null,
+            },
+            kind: ProcessJournalKind::Completed,
+            occurred_at: Some(chrono::Utc::now()),
+            sanitized_reason: None,
+        };
+        let mut legacy = serde_json::to_value(commit).expect("serialize current commit");
+        legacy
+            .as_object_mut()
+            .expect("commit object")
+            .remove("occurred_at");
+
+        let decoded: ProcessJournalCommit =
+            serde_json::from_value(legacy).expect("legacy commit remains readable");
+        assert_eq!(decoded.occurred_at, None);
     }
 
     #[test]

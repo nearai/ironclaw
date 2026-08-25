@@ -12,7 +12,10 @@ use crate::{
     TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnGateRef, TurnId, TurnLeaseToken,
     TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
 };
-use ironclaw_loop_contracts::{LoopModelRouteSnapshot, RunProfileResolver};
+use ironclaw_loop_contracts::{
+    LoopModelRouteSnapshot, ResolvedRunProfile, RunProfileResolutionError,
+    RunProfileResolutionRequest, RunProfileResolver,
+};
 
 #[async_trait]
 pub trait AgentTurnRuntimePort: Send + Sync {
@@ -22,6 +25,20 @@ pub trait AgentTurnRuntimePort: Send + Sync {
         admission_policy: &dyn TurnAdmissionPolicy,
         run_profile_resolver: &dyn RunProfileResolver,
     ) -> Result<SubmitTurnResponse, TurnError>;
+
+    /// Submit an internal continuation with the already-authorized profile
+    /// snapshot. Implementors that predate this seam remain source-compatible:
+    /// the default delegates through a resolver that returns the supplied
+    /// snapshot unchanged.
+    async fn submit_turn_with_resolved_profile(
+        &self,
+        request: SubmitTurnRequest,
+        resolved_run_profile: ResolvedRunProfile,
+        admission_policy: &dyn TurnAdmissionPolicy,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        let resolver = SnapshotRunProfileResolver(resolved_run_profile);
+        self.submit_turn(request, admission_policy, &resolver).await
+    }
 
     async fn resume_turn(
         &self,
@@ -41,6 +58,39 @@ pub trait AgentTurnRuntimePort: Send + Sync {
     /// [`TurnError::ScopeNotFound`]. This keeps scoped lookups non-enumerating
     /// and gives higher-level helpers one canonical missing-run shape.
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
+
+    /// The newest `limit` agent-turn runs on this exact thread scope, newest
+    /// first.
+    ///
+    /// Bounded by construction: the derived activation-streak caps read a
+    /// fixed window of recent runs instead of keeping a stored counter, so
+    /// this must never enumerate a thread's whole history.
+    ///
+    /// Defaults to a refusal rather than an empty window. An empty window
+    /// reads as "streak not established" and would admit every autonomous
+    /// wake, so a runtime that cannot answer this question must not be able
+    /// to silently disable the cap that depends on it.
+    async fn recent_runs_for_thread(
+        &self,
+        _scope: &TurnScope,
+        _limit: u32,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        Err(TurnError::InvalidRequest {
+            reason: "this turn runtime cannot read a thread's recent run window".to_string(),
+        })
+    }
+}
+
+struct SnapshotRunProfileResolver(ResolvedRunProfile);
+
+#[async_trait]
+impl RunProfileResolver for SnapshotRunProfileResolver {
+    async fn resolve_run_profile(
+        &self,
+        _request: RunProfileResolutionRequest,
+    ) -> Result<ResolvedRunProfile, RunProfileResolutionError> {
+        Ok(self.0.clone())
+    }
 }
 
 /// Classify an active run reference through the shared turn-state lookup.
@@ -183,6 +233,9 @@ pub struct TurnRunRecord {
     pub subagent_depth: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_tree_root_run_id: Option<TurnRunId>,
+    /// Why this run was activated. Immutable after creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_activation_provenance: Option<crate::ActivationProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_context: Option<crate::ProductTurnContext>,
     #[serde(
@@ -234,6 +287,7 @@ mod tests {
         }))
         .expect("profile deserialization");
         TurnRunRecord {
+            subagent_activation_provenance: None,
             run_id: TurnRunId::new(),
             turn_id: crate::TurnId::new(),
             scope,

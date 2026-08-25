@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     decision::RuntimeCredentialAuthRequirement,
-    dispatch::{DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind},
     ids::{ExtensionId, RunId, SecretHandle, UserId, VendorId},
     invocation::InvocationOrigin,
     resource::{ResourceEstimate, ResourceReservation, ResourceScope},
@@ -294,15 +294,16 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
     match result {
         Err(DispatchError::AuthRequired {
             capability,
-            required_secrets,
-            credential_requirements,
+            requirement,
+            ..
         }) => {
             assert_eq!(capability, descriptor.id);
             assert!(
-                required_secrets.is_empty(),
-                "auth_required() handler yields no required handles; got {required_secrets:?}"
+                requirement.required_secrets.is_empty(),
+                "auth_required() handler yields no required handles; got {:?}",
+                requirement.required_secrets
             );
-            assert!(credential_requirements.is_empty());
+            assert!(requirement.credential_requirements.is_empty());
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
@@ -413,10 +414,8 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
         .await;
 
     match result {
-        Err(DispatchError::AuthRequired {
-            required_secrets, ..
-        }) => {
-            assert_eq!(required_secrets, vec![handle]);
+        Err(DispatchError::AuthRequired { requirement, .. }) => {
+            assert_eq!(requirement.required_secrets, vec![handle]);
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
@@ -480,10 +479,9 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
 
     match result {
         Err(DispatchError::AuthRequired {
-            credential_requirements,
-            ..
+            requirement: got, ..
         }) => {
-            assert_eq!(credential_requirements, vec![requirement]);
+            assert_eq!(got.credential_requirements, vec![requirement]);
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
@@ -539,8 +537,8 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
     assert!(
         matches!(
             result,
-            Err(DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::Backend,
+            Err(DispatchError::Rejected {
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
                 ..
             })
         ),
@@ -613,7 +611,7 @@ impl crate::FirstPartyCapabilityHandler for PanicOnDispatchHandler {
 
 // Test double: reconcile always fails with UnknownReservation.
 // Used to verify the reconcile-failure path in FirstPartyRuntimeAdapter
-// releases the reservation and returns DispatchError::FirstParty { Resource }.
+// releases the reservation and returns DispatchError::Rejected { Resource }.
 struct ReconcileFailingGovernor {
     inner: InMemoryResourceGovernor,
 }
@@ -736,8 +734,8 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
     assert!(
         matches!(
             result,
-            Err(DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::Resource,
+            Err(DispatchError::Rejected {
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
                 ..
             })
         ),
@@ -1238,7 +1236,7 @@ impl crate::FirstPartyCapabilityHandler for DispatchFailingWithUsageHandler {
 ///
 /// When `governor.reconcile` fails (simulated by `ReconcileFailingGovernor`):
 ///   (a) The adapter must return the **original** handler error
-///       (`DispatchError::FirstParty { OperationFailed }`) — NOT the
+///       (`DispatchError::Rejected { OperationFailed }`) — NOT the
 ///       `Resource` accounting error that `first_party_resource_error` produces.
 ///   (b) The reservation must be released (reserved tally returns to baseline),
 ///       because `account_failed` calls `governor.release` after a reconcile
@@ -1290,12 +1288,12 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
         })
         .await;
 
-    // (a) Must return the original handler error — NOT DispatchError::FirstParty{Resource}.
+    // (a) Must return the original handler error — NOT DispatchError::Rejected{Resource}.
     assert!(
         matches!(
             result,
-            Err(DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::OperationFailed,
+            Err(DispatchError::Rejected {
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
                 ..
             })
         ),

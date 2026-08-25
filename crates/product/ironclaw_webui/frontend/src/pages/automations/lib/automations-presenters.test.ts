@@ -5,6 +5,7 @@ import { test } from "vitest";
 import {
   automationSummary,
   filterAutomations,
+  formatAutomationDate,
   normalizeAutomations as normalizeAutomationsRaw,
   runStatusBreakdown,
   runSummaryView,
@@ -83,6 +84,17 @@ const norm = (value) =>
   typeof value === "string" ? value.replace(/[\u202f\u00a0]/g, " ") : value;
 const scheduleLabel = (cron, timezone, locale = "en") =>
   norm(scheduleLabelRaw(cron, timezone, t, locale));
+// Date labels are browser-local by design (production must never render UTC),
+// so the calendar date a fixture instant renders as depends on the machine
+// timezone: "2026-06-04T16:01:00Z" is Jun 4 in UTC but Jun 5 in UTC+8 (#7767).
+// Assertions that only care about *which* timestamp the presenter selected
+// derive the expected label from that instant with the same formatter the
+// presenter uses, instead of hard-coding a date that only holds near UTC.
+const dateLabel = (iso) => {
+  const label = formatAutomationDate(iso, null, "en");
+  assert.ok(label, `fixture timestamp must be parseable: ${iso}`);
+  return label;
+};
 const normalizeAutomations = (response, locale = "en") =>
   normalizeAutomationsRaw(response, t, locale).map((automation) => ({
     ...automation,
@@ -206,7 +218,7 @@ test("normalizeAutomations preserves legacy last_run_at when recent history is e
   });
 
   assert.equal(automations.length, 1);
-  assert.match(automations[0].last_run_label, /Jun 4/);
+  assert.equal(automations[0].last_run_label, dateLabel("2026-06-04T16:01:00Z"));
   assert.equal(automations[0].last_status_label, "Done");
 });
 
@@ -269,8 +281,10 @@ test("normalizeAutomations uses a legacy terminal run timestamp beside an active
   });
 
   assert.equal(automations.length, 1);
-  assert.match(automations[0].last_run_label, /Jun 4/);
-  assert.doesNotMatch(automations[0].last_run_label, /Jun 5/);
+  // The terminal run's submitted_at, never the in-flight run's timestamp or the
+  // legacy top-level last_run_at (both a day later).
+  assert.equal(automations[0].last_run_label, dateLabel("2026-06-04T16:00:01Z"));
+  assert.notEqual(automations[0].last_run_label, dateLabel("2026-06-05T16:00:01Z"));
   assert.equal(automations[0].last_status_label, "Done");
   assert.equal(automations[0].success_rate_label, "100% visible runs");
   assert.equal(automations[0].recent_runs[1].completed_label, "Not completed");
@@ -466,7 +480,7 @@ test("normalizeAutomations presents bounded recent run history", () => {
   assert.equal(automations[0].latest_unattached_run_thread_timestamp, null);
   assert.equal(automations[0].latest_run.run_id, "run-running");
   assert.equal(automations[0].current_run.run_id, "run-running");
-  assert.match(automations[0].last_run_label, /Jun 4/);
+  assert.equal(automations[0].last_run_label, dateLabel("2026-06-04T16:03:00Z"));
   assert.equal(automations[0].last_status_label, "Error");
   assert.equal(automations[0].last_status_tone, "danger");
   assert.equal(automations[0].primary_status_label, "Running");
@@ -902,6 +916,24 @@ test("once label reflects source timezone wall-clock, not UTC", () => {
 
   // LA label must carry the LA tz parenthetical
   assert.match(laLabel, /\(America\/Los_Angeles\)/);
+});
+
+// The `dateLabel` oracle above pins *which* instant a presenter field renders,
+// not how it is rendered. Pin the rendered shape once here, with an explicit
+// timeZone so the expected calendar date holds on any machine (#7767).
+test("formatAutomationDate renders a localized short month, day and clock time", () => {
+  assert.equal(
+    norm(formatAutomationDate("2026-06-04T16:01:00Z", "Unknown", "en", "UTC")),
+    "Jun 4, 04:01 PM",
+  );
+  // Same instant, one timezone east of the date boundary: browser-local
+  // formatting must follow the requested zone rather than snapping to UTC.
+  assert.equal(
+    norm(formatAutomationDate("2026-06-04T16:01:00Z", "Unknown", "en", "Asia/Shanghai")),
+    "Jun 5, 12:01 AM",
+  );
+  assert.equal(formatAutomationDate(null, "No runs yet", "en", "UTC"), "No runs yet");
+  assert.equal(formatAutomationDate("not-a-date", "No runs yet", "en", "UTC"), "No runs yet");
 });
 
 // #5886: an active_hold overrides the normal status pill so the UI explains

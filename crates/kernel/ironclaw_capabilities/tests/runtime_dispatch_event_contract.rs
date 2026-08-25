@@ -19,7 +19,9 @@ use ironclaw_capabilities::{
 use ironclaw_event_log::*;
 use ironclaw_host_api::{
     authorized::Authorized,
-    dispatch::{CapabilityDispatchRequest, DispatchError, RuntimeDispatchErrorKind},
+    dispatch::{
+        CapabilityDispatchRequest, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
+    },
     ids::{
         ActivityId, CapabilityId, CorrelationId, ExtensionId, InvocationId, MissionId, ProcessId,
         ProductKind, ProjectId, ResourceReservationId, RunId, TenantId, ThreadId, UserId,
@@ -191,9 +193,11 @@ async fn dispatcher_marks_loop_dispatch_failure_events_with_parent_run() {
             provider: ExtensionId::new("echo-script").unwrap(),
             runtime: RuntimeKind::Script,
             adapter: Arc::new(FailingBinding {
-                error: || DispatchError::Script {
-                    kind: RuntimeDispatchErrorKind::ExitFailure,
-                    model_visible_cause: None,
+                error: || DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Script),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure),
+                    diagnostic: None,
+                    detail: None,
                 },
             }),
         },
@@ -213,8 +217,8 @@ async fn dispatcher_marks_loop_dispatch_failure_events_with_parent_run() {
 
     assert!(matches!(
         error,
-        DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure),
             ..
         }
     ));
@@ -329,9 +333,11 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_binding_failure() {
             provider: ExtensionId::new("echo-script").unwrap(),
             runtime: RuntimeKind::Script,
             adapter: Arc::new(FailingBinding {
-                error: || DispatchError::Script {
-                    kind: RuntimeDispatchErrorKind::ExitFailure,
-                    model_visible_cause: None,
+                error: || DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Script),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure),
+                    diagnostic: None,
+                    detail: None,
                 },
             }),
         },
@@ -348,8 +354,8 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_binding_failure() {
 
     assert!(matches!(
         err,
-        DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure,
+        DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure),
             ..
         }
     ));
@@ -484,17 +490,21 @@ impl BoundCapabilityAdapter for EchoBinding {
             None => self
                 .governor
                 .reserve(request.scope.clone(), request.estimate.clone())
-                .map_err(|_| DispatchError::Wasm {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                    model_visible_cause: None,
+                .map_err(|_| DispatchError::Rejected {
+                    runtime: Some(RuntimeKind::Wasm),
+                    kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                    diagnostic: None,
+                    detail: None,
                 })?,
         };
         let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
-            .map_err(|_| DispatchError::Wasm {
-                kind: RuntimeDispatchErrorKind::Resource,
-                model_visible_cause: None,
+            .map_err(|_| DispatchError::Rejected {
+                runtime: Some(RuntimeKind::Wasm),
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource),
+                diagnostic: None,
+                detail: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

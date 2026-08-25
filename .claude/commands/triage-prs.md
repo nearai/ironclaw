@@ -22,7 +22,7 @@ If `$ARGUMENTS` contains `--label=<X>`, append `--label '<X>'` to the `gh pr lis
 Also fetch recently merged PRs (last 7 days) to detect superseded/conflicting work:
 
 ```
-gh pr list --state merged --search "merged:>=$(date -v-7d +%Y-%m-%d)" --limit 100 --json number,title,body,mergedAt
+gh pr list --state merged --search "merged:>=$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d"))')" --limit 100 --json number,title,body,mergedAt
 ```
 
 ## Step 2: Classify each PR by module
@@ -47,6 +47,8 @@ For each open PR, determine the primary module it touches by examining the `file
 
 If a PR touches multiple modules, assign it to the **primary** module (most files changed) but note the cross-cutting modules.
 
+Note: CI's own scope labeler (`.github/workflows/pr-label-scope.yml` + `.github/labeler.yml`) still fires a handful of non-`src/**` labels (`scope: ci` for `.github/**`, `scope: docs` for `**/*.md` and `docs/**`, `scope: dependencies` for `Cargo.toml`/`Cargo.lock`, `DB MIGRATION` for `migrations/**`), but every `src/**`-scoped label (`scope: agent`, `scope: tool*`, `scope: db*`, `scope: safety`, `scope: llm`, …) targets pre-Reborn paths that no longer exist and can never fire on a current PR — `grep -c 'src/' .github/labeler.yml` shows the extent. For unlabelled `crates/**` changes, or to classify anything the labeler doesn't cover, use this manual table; when a `scope: *` label from the list above is already present, use it instead of re-deriving.
+
 ## Step 3: Assess review state
 
 For each PR, determine its review status:
@@ -64,7 +66,25 @@ Also check:
 
 ## Step 4: Determine scope and risk
 
-Classify each PR by scope:
+CI already classifies every PR on open/sync via `.github/workflows/pr-label-classify.yml`
+(`.github/scripts/pr-labeler.sh`), which sets an exclusive `size: XS|S|M|L|XL` label (by total
+additions+deletions) and an exclusive `risk: *` label. The `size: *` label is diff-stat-based and
+safe to trust as-is; read it from the `labels` field already fetched in Step 1 instead of
+re-deriving line-count buckets — only fall back to computing size yourself (below) if the PR
+predates the labeler or its label is missing (e.g. CI hasn't run yet).
+
+**Do not trust `risk: *` at face value for `crates/**` PRs.** `classify_risk` in
+`.github/scripts/pr-labeler.sh` pattern-matches only pre-Reborn `src/**` paths (plus `Cargo.toml`
+and `.github/workflows/*`); a PR that touches only `crates/**` — including
+`crates/kernel/ironclaw_trust/`, `crates/substrates/ironclaw_secrets/`, or
+`crates/substrates/ironclaw_safety/` — always falls through to `risk: low`
+(`grep -n 'src/' .github/scripts/pr-labeler.sh` shows the exhaustive pattern list). Treat
+`risk: *` as advisory only, and always cross-check against the **Security** row of the Step 2
+table before trusting a `risk: low` PR. If the `risk: *` label is absent entirely (classifier
+hasn't run, or a transient API failure per the script's own resilience notes), mark risk as
+**unknown** and flag the PR for manual review rather than assuming low.
+
+Fallback scope table (only if `size: *` label absent):
 
 | Scope | Criteria |
 |-------|----------|

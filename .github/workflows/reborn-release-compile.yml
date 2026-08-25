@@ -69,7 +69,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Rust target
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: ./.github/actions/setup-rust
         with:
           targets: ${{ matrix.target }}
 
@@ -85,9 +85,7 @@ jobs:
       - name: Install musl toolchain
         if: matrix.musl
         shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes musl-tools binutils file
+        run: scripts/ci/install-ci-apt-packages.sh musl-tools binutils file
 
       - name: Configure musl C compiler
         if: matrix.musl

@@ -271,6 +271,25 @@ pub fn auth_required(
     safe_summary: String,
     auth_resume: Option<CapabilityAuthResume>,
 ) -> GatedResolution {
+    auth_required_with_diagnostic(
+        gate_ref,
+        credential_requirements,
+        safe_summary,
+        auth_resume,
+        None,
+    )
+}
+
+/// Auth gate constructor carrying a bounded, fully scrubbed provider
+/// diagnostic. The diagnostic lives only in the durable gate record; the
+/// resumable waypoint remains refs and tokens.
+pub fn auth_required_with_diagnostic(
+    gate_ref: LoopGateRef,
+    credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    safe_summary: String,
+    auth_resume: Option<CapabilityAuthResume>,
+    diagnostic: Option<ModelDiagnostic>,
+) -> GatedResolution {
     let minted = auth_gate_record_ref(&gate_ref);
     let waypoint = gate_waypoint(minted, &gate_ref, auth_resume_token(auth_resume));
     GatedResolution::gated(
@@ -278,6 +297,7 @@ pub fn auth_required(
         GateRecord::Auth {
             summary: safe_summary_or_placeholder(safe_summary),
             credential_requirements,
+            diagnostic,
         },
     )
 }
@@ -1421,6 +1441,7 @@ mod tests {
         }
 
         let auth_resume = CapabilityAuthResume {
+            gate_ref: auth_gate_ref(),
             resume_token: Some(CapabilityResumeToken::new("auth-resume-1").unwrap()),
             disposition: None,
             prior_approval: None,

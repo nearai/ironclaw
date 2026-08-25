@@ -96,9 +96,19 @@ impl PromptMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopInlineMessageRole {
+    /// Host instruction that must remain in the provider-cached leading block.
+    LeadingSystem,
+    /// Host-supplied task input that must precede persisted thread messages.
+    LeadingUser,
     System,
     User,
     Assistant,
+}
+
+impl LoopInlineMessageRole {
+    pub fn is_leading(self) -> bool {
+        matches!(self, Self::LeadingSystem | Self::LeadingUser)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

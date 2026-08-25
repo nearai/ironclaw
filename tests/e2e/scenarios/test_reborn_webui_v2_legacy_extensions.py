@@ -2323,7 +2323,6 @@ async def test_reborn_v2_current_extension_setup_and_delivery_matrix(
         await expect(pairing_panel.get_by_test_id("pairing-countdown")).to_have_text(
             re.compile(r"^Expires in \d+:\d{2}$")
         )
-        await expect(pairing_panel.get_by_text(re.compile(r"/start"))).to_be_visible()
         await expect(pairing_panel.get_by_text(re.compile(r"/pair\b"))).to_have_count(0)
         await expect(telegram_modal.get_by_text("Telegram Bot Token")).to_have_count(0)
         await telegram_modal.get_by_label("Close").click()

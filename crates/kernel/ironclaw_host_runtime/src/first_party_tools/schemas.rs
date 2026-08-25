@@ -941,7 +941,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "execution_contract": {
                     "type": "object",
-                    "description": "Versioned contract rendered into the frozen future-run prompt. Describe the task itself, never the act of creating or scheduling it. Referenced capabilities only narrow the scheduled surface; required skills must activate before the first model call.",
+                    "description": "Versioned contract rendered into the frozen future-run prompt. Keep it concise and outcome-focused. Describe the task itself, never the act of creating or scheduling it or a speculative sequence of tool calls. The scheduled fire discovers the capabilities and task data available when it runs; required skills must activate before the first model call.",
                     "properties": {
                         "version": { "const": 1 },
                         "goal": {
@@ -966,10 +966,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                         "policy": {
                             "type": "object",
                             "properties": {
-                                "allowed_capability_ids": {
-                                    "type": ["array", "null"], "maxItems": 64,
-                                    "items": { "type": "string" }
-                                },
                                 "required_skills": {
                                     "type": "array", "maxItems": 8,
                                     "items": { "type": "string" }
@@ -1052,6 +1048,14 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_resume.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_run.input.v1.json" => json!({
             "type": "object",
             "properties": {
                 "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
@@ -1246,6 +1250,12 @@ mod tests {
         );
         assert!(
             schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]
+                .get("allowed_capability_ids")
+                .is_none(),
+            "the model must not predict a future run's capability surface"
+        );
+        assert!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]
                 ["result_delivery"]["description"]
                 .as_str()
                 .is_some_and(|description| description.contains("otherwise use deliver")),
@@ -1261,6 +1271,16 @@ mod tests {
             ) && !goal_description.contains("unavailable to scheduled automations"),
             "the execution-contract schema must allow future scheduled loop-runs to use the owning user's linked integrations: {goal_description}"
         );
+    }
+
+    #[test]
+    fn trigger_run_requires_only_a_trigger_id() {
+        let schema = resolve_builtin_input_schema_ref("schemas/builtin/trigger_run.input.v1.json")
+            .expect("trigger_run schema is registered");
+
+        assert_eq!(schema["required"], serde_json::json!(["trigger_id"]));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["trigger_id"]["type"], "string");
     }
 
     #[test]

@@ -29,7 +29,6 @@ scenarios/test_ownership_model.py
 scenarios/test_pairing.py
 scenarios/test_pending_user_messages.py
 scenarios/test_plan_mode.py
-scenarios/test_portfolio.py
 scenarios/test_project_detail.py
 scenarios/test_provider_capability_inventory.py
 scenarios/test_provider_fault_proxy.py
