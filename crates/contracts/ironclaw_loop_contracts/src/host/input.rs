@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::turn::{LoopGateRef, LoopMessageRef, TurnRunId};
+use ironclaw_host_api::turn::{LoopGateRef, LoopMessageRef, TurnRunId, TurnScope};
 
 use super::context::LoopInputCursor;
 use super::error::AgentLoopHostError;
@@ -22,6 +22,19 @@ pub struct LoopInputBatch {
 pub struct LoopInputAck {
     pub cursor: LoopInputCursor,
     pub token: LoopInputAckToken,
+}
+
+/// Durable host effect attached to an acknowledged loop input.
+///
+/// The queue carries and retries this typed identity without interpreting it.
+/// The owning host adapter decides how acknowledgment advances the referenced
+/// process relationship. The field names and untagged object shape are kept
+/// wire-stable because this value is persisted inside durable queue documents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopInputAckEffect {
+    pub child_scope: TurnScope,
+    pub parent_run_id: TurnRunId,
+    pub child_run_id: TurnRunId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

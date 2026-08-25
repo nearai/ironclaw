@@ -50,7 +50,12 @@ const CONNECT_LINK_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 /// consumer *fails startup* on a blank value; this consumer has a working
 /// link-free fallback, so it ships dark instead — the two agree on what the
 /// variable means, and differ only in what an unusable value costs.
-fn connect_link_base_url_from_env() -> Option<String> {
+///
+/// Shared with the lifecycle surfaces' device-link guidance
+/// (`ironclaw_extension_manager::install_guidance::personal_setup_link`), which
+/// treats an unset origin the same way: keep the link-free copy rather than
+/// advertise a relative path into a conversation.
+pub(crate) fn connect_link_base_url_from_env() -> Option<String> {
     let raw = std::env::var(CONNECT_LINK_BASE_URL_ENV).ok()?; // silent-ok: optional public-origin env read; unset keeps the notice link-free
     normalize_connect_link_base_url(&raw)
 }

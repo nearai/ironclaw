@@ -1,3 +1,4 @@
+// arch-exempt: large_file, bounded dependency-query paging fields land beside the pre-existing dependency vocabulary they extend, plan #7788
 //! Durable process journal contracts.
 //!
 //! These types describe the kernel-level process lifecycle independently from
@@ -849,6 +850,25 @@ pub struct TransitionProcessDependencyRequest {
     pub transitioned_at: Timestamp,
 }
 
+/// Ordering contract: filters (`group_ref`, `include_closed`) apply BEFORE
+/// `after`/`limit` — the keyset bound walks the already-filtered, sorted
+/// sequence, never the raw unfiltered index. Sort order is the pair
+/// `(dependent_process_id, dependency_process_id)`, the same order
+/// `query_process_dependencies` already returns when `after`/`limit` are both
+/// `None`.
+///
+/// `after`/`limit` are the store's bounded-query mode (kernel charter:
+/// "Normal startup and process requests may use exact reads and bounded,
+/// partition-leading keyset queries only" — `AGENTS.md`). Both `None` is
+/// byte-for-byte identical to the pre-existing unbounded query every
+/// existing caller relies on. `after` is a keyset cursor over that same
+/// `(dependent_process_id, dependency_process_id)` sort key — the pair of
+/// the last row a prior page returned; the next page resumes strictly after
+/// it. `limit` caps the number of rows a bounded query returns. When present,
+/// `allowed_states` is evaluated before the cursor and limit; bounded
+/// multi-state reads use one exact ordered-index prefix per state and merge
+/// those streams in canonical pair order. `None` preserves the historical
+/// state-agnostic behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessDependencyQuery {
     pub scope: ResourceScope,
@@ -856,8 +876,18 @@ pub struct ProcessDependencyQuery {
     pub dependent_process_id: Option<ProcessId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_ref: Option<String>,
+    /// Restrict the query to these dependency delivery states. `None` keeps
+    /// the historical state-agnostic query behavior; an empty list matches no
+    /// rows. Bounded actionable sweeps use this field so open edges cannot
+    /// consume the batch before a deliverable edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_states: Option<Vec<ProcessDependencyState>>,
     #[serde(default)]
     pub include_closed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<(ProcessId, ProcessId)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

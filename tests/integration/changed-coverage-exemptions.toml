@@ -382,9 +382,9 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs"
-lines = [2032]
+lines = [1427]
 owner = "@nearai/reborn"
-reason = "Background subagent spawn-mode arm; base lcov shows 0 hits at the same statement (67088a426 line 2024). Only GateRef::new -> TurnGateRef::new changed."
+reason = "Background subagent spawn-mode arm; base lcov shows 0 hits at the same statement (67088a426 line 2024). Only GateRef::new -> TurnGateRef::new changed. Was line 2032 until the resolver test-move refactor shifted it."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 
@@ -538,9 +538,9 @@ review_after = "2026-10-31"
 
 [[exemption]]
 path = "crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs"
-lines = [563]
+lines = [853]
 owner = "@nearai/reborn"
-reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2."
+reason = "Type-path repoint only: `ironclaw_turns::X` -> `ironclaw_loop_contracts::X` on a declaration or expression fragment inside an instrumented span. The line's behavior, and its integration-tier coverage state, are identical before and after WS1.2. Was line 563 (handle_child_terminal_inner's return type) until the resolver test-move refactor shifted it."
 issue = "https://github.com/nearai/ironclaw/issues/6963"
 review_after = "2026-10-31"
 

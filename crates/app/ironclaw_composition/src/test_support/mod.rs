@@ -84,6 +84,29 @@ pub async fn build_runtime_with_resource_governor_for_test(
     crate::runtime::build_runtime_with_resource_governor(input).await
 }
 
+/// Test-support view of the production-composed background-delivery subsystem.
+/// The runtime owns these handles in production; this function only exposes
+/// them to caller-level composition tests without growing `RebornRuntime`'s
+/// test-only field or method surface.
+pub struct SubagentDeliveryTestParts {
+    pub turn_tree_store: std::sync::Arc<dyn ironclaw_turns::AgentTurnSpawnTreeRuntimePort>,
+    pub resolver: std::sync::Arc<
+        ironclaw_turn_runner::subagent::await_edge::resolver::AwaitEdgeResolver<
+            dyn ironclaw_threads::SessionThreadService,
+        >,
+    >,
+    pub store: std::sync::Arc<ironclaw_turn_runner::subagent::await_edge::store::AwaitEdgeStore>,
+    pub input_queue: std::sync::Arc<
+        ironclaw_loop_host::FilesystemHostInputQueue<ironclaw_filesystem::CompositeRootFilesystem>,
+    >,
+}
+
+pub async fn subagent_delivery_test_parts(
+    runtime: &crate::RebornRuntime,
+) -> SubagentDeliveryTestParts {
+    crate::runtime::subagent_delivery_test_support::parts(runtime).await
+}
+
 mod automation;
 mod budget_gateway;
 mod capability_io;

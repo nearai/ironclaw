@@ -314,6 +314,7 @@ async fn try_enqueue(
             thread_id: request.thread_id().clone(),
             message_id: request.message_id,
             input: LoopInput::Steering { message_ref },
+            ack_effect: None,
         })
         .await
     {

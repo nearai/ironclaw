@@ -10,7 +10,8 @@ import { ConfigureModal } from "./components/configure-modal";
 import { CustomMcpRegistrationModal } from "./components/custom-mcp-registration-modal";
 import { ToolsTab } from "./components/tools-tab";
 import { RegistryTab } from "./components/registry-tab";
-import { useExtensions } from "./hooks/useExtensions";
+import { configureRequest, useExtensions } from "./hooks/useExtensions";
+import { useExtensionSetupLanding } from "./hooks/useSetupLanding";
 import type { ConfigureFocusHandler } from "./lib/focus-target";
 import type { FocusTarget } from "./lib/focus-target";
 import type { FocusTargetResolver } from "./lib/focus-target";
@@ -161,8 +162,32 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     },
     [handleConfigure, install]
   );
+  // A device-link setup link (`?configure=<id>&setup=personal_account`) opens
+  // the same modal the Configure button does. Resolved against the caller's own
+  // installed channels and tools, which is where a configurable extension
+  // lives — a registry card has nothing to configure yet.
+  // Normalized here, not inside the hook: `channels`/`tools` are raw API items
+  // (`package_ref`), while everything downstream of Configure expects the
+  // `packageRef`/`displayName` shape the card builds. Normalizing at the
+  // boundary means the landing resolves and the modal opens on the same object
+  // the Configure button would have handed it.
+  const configurableExtensions = React.useMemo(
+    () => [...(channels || []), ...(tools || [])].map(configureRequest),
+    [channels, tools],
+  );
+  const { setupPath, clearSetupPath } = useExtensionSetupLanding({
+    extensions: configurableExtensions,
+    isLoading: isExtensionsLoading,
+    onConfigure: handleConfigure,
+    selected: configuring,
+  });
   const handleImport = React.useCallback((file) => importTool({ file }), [importTool]);
-  const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
+  // Closing also releases the deep link's setup path: it applies only to the
+  // modal it opened, never to whatever Configure action comes after it.
+  const handleCloseModal = React.useCallback(() => {
+    setConfiguring(null);
+    clearSetupPath();
+  }, [clearSetupPath]);
   const handleConfirmRemove = React.useCallback(() => {
     if (!extensionToRemove) return;
     remove(extensionToRemove, {
@@ -264,6 +289,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
           (
             <ConfigureModal
               extension={configuring}
+              initialConnection={setupPath}
               onClose={handleCloseModal}
               onSaved={handleSaved}
               returnFocusTo={configureTriggerRef.current}

@@ -862,12 +862,78 @@ impl ExtensionLifecycleManager {
     /// the device-link ceremony — the one connection step that can only run
     /// in the Web UI, because the card renders a scannable code that chat
     /// surfaces cannot.
-    pub fn package_declares_device_link_user_link(
+    /// **Both** device-link facets are consulted, because a manifest may declare
+    /// either or both and they vary independently (#7853):
+    ///
+    /// * the channel's own connection ceremony (`[channel.connection] strategy
+    ///   = "device_link"`), and
+    /// * a personal-account tool surface whose credentials resolve to
+    ///   [`RuntimeCredentialAccountSetup::DeviceLink`].
+    ///
+    /// Consulting only the channel facet is what broke #7853: #7766 moved one
+    /// extension's channel to `web_generated_code` while leaving its
+    /// personal-account tools on device-link, so this went silently false and
+    /// the model stopped telling users where to link. The tool facet alone
+    /// would fail the mirror case, because
+    /// [`manifest_runtime_credential_auth_requirements`] walks
+    /// `manifest.capabilities` and never `manifest.channel`.
+    ///
+    /// Returns EVERY distinct device-link requirement the package declares,
+    /// deduplicated, so callers can resolve whether *this* caller has
+    /// satisfied all of them rather than telling an already-linked user to go
+    /// link again.
+    ///
+    /// Nothing ties the channel facet's `[channel.connection]` provider to a
+    /// tool credential's `vendor` — a manifest is free to declare both facets
+    /// with distinct providers, in which case satisfying one leaves the other
+    /// outstanding. An earlier version of this method returned only the first
+    /// requirement it found (the channel facet if present, otherwise the
+    /// first manifest match), which reported `AlreadyLinked` from the
+    /// satisfied facet alone while a distinct, still-missing facet went
+    /// unreported to the model. Callers pass the whole set to the activation
+    /// gate and report `AlreadyLinked` only when the gate finds none of them
+    /// missing.
+    pub async fn device_link_user_setup_requirements(
         &self,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<bool, ProductOperationFailure> {
+    ) -> Result<Vec<RuntimeCredentialAuthRequirement>, ProductOperationFailure> {
         let (extension_id, _installation_id) = extension_ids_from_package_ref(package_ref)?;
-        Ok(self.device_link_channel_setup(&extension_id).is_some())
+        let mut requirements = Vec::new();
+        if let Some(descriptor) = self.device_link_channel_setup(&extension_id) {
+            requirements.push(descriptor.auth_requirement);
+        }
+        let package = self.lifecycle_package(&extension_id).await?;
+        // `contains` is full `RuntimeCredentialAuthRequirement` equality
+        // (provider + setup + requester_extension + provider_scopes), so it
+        // only collapses the channel-facet requirement pushed above against a
+        // tool-facet requirement that matches on every field, `provider_scopes`
+        // included. `manifest_runtime_credential_auth_requirements` already
+        // unions `provider_scopes` for duplicates *within* its own walk of
+        // `manifest.capabilities`, but that merge never sees the channel
+        // facet, so a channel requirement and a tool requirement that share
+        // provider/requester/DeviceLink identity with differing
+        // `provider_scopes` still land here as two entries instead of one
+        // merged requirement. Considered and left as-is: every requirement
+        // reaching this loop is filtered to `DeviceLink` above, and
+        // `credential_setup_requires_stored_scopes` (in
+        // `ironclaw_auth::product_auth::credentials::runtime_credentials`)
+        // returns `false` for `DeviceLink`, so account selection never gates
+        // on `provider_scopes` for this setup kind — two such near-duplicates
+        // always resolve to the same found/missing verdict. The unmerged
+        // duplicate costs one redundant credential-account lookup, not a
+        // wrong `AlreadyLinked`/`Required` result. Revisit if this loop is
+        // ever widened to a scope-sensitive setup kind (e.g. `OAuth`).
+        for requirement in manifest_runtime_credential_auth_requirements(&package.manifest)
+            .into_iter()
+            .filter(|requirement| {
+                matches!(requirement.setup, RuntimeCredentialAccountSetup::DeviceLink)
+            })
+        {
+            if !requirements.contains(&requirement) {
+                requirements.push(requirement);
+            }
+        }
+        Ok(requirements)
     }
 
     fn device_link_channel_setup(
@@ -3416,6 +3482,232 @@ mod tests {
         }
     }
 
+    /// A test-only [`ExtensionAccountSetupReader`] that declares exactly one
+    /// extension's descriptor — the CHANNEL facet `device_link_channel_setup`
+    /// reads — and nothing else. `missing_requirement` is unused by
+    /// `device_link_user_setup_requirements` (that resolver only ever calls
+    /// `descriptor`), so it always answers `Ok(None)`.
+    struct SoleExtensionAccountSetupReader(ExtensionAccountSetupDescriptor);
+
+    #[async_trait]
+    impl ExtensionAccountSetupReader for SoleExtensionAccountSetupReader {
+        fn descriptor(
+            &self,
+            extension_id: &ExtensionId,
+        ) -> Option<ExtensionAccountSetupDescriptor> {
+            (self.0.extension_id == *extension_id).then(|| self.0.clone())
+        }
+
+        async fn missing_requirement(
+            &self,
+            _extension_id: &ExtensionId,
+            _user_id: &UserId,
+        ) -> Result<Option<RuntimeCredentialAuthRequirement>, ExtensionAccountSetupError> {
+            Ok(None)
+        }
+    }
+
+    /// #7853 GAP 3: one shipped extension exercised only the TOOL-credential
+    /// half of `device_link_user_setup_requirements` (its manifest declares a
+    /// device-link runtime credential). The CHANNEL half — a package whose
+    /// `[channel.connection] strategy = "device_link"` but which declares NO
+    /// device-link tool credential at all — is the mirror shape #7853 broke
+    /// and had zero coverage anywhere. The fixture package's one capability
+    /// carries no `runtime_credentials` section, so
+    /// `manifest_runtime_credential_auth_requirements` is empty for it; the
+    /// account-setup reader below supplies only the channel facet, so a
+    /// non-empty result below can only have come from that branch, not the
+    /// manifest walk.
+    #[tokio::test]
+    async fn device_link_user_setup_requirements_resolves_from_the_channel_facet_alone() {
+        let package = fixture_extension_package();
+        let extension_id = package.package.id.clone();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("device-link-channel-facet-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store: installation_store.clone(),
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        let channel_only_setup = device_link_setup_descriptor("fixture", "fixture-vendor");
+        let manager = manager.with_account_setup_registry(Arc::new(
+            SoleExtensionAccountSetupReader(channel_only_setup.clone()),
+        ));
+
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("package ref");
+        manager
+            .install(package_ref.clone(), &owner)
+            .await
+            .expect("install succeeds");
+
+        let installed_package = manager
+            .lifecycle_package(&extension_id)
+            .await
+            .expect("lifecycle package resolves");
+        let tool_requirements =
+            manifest_runtime_credential_auth_requirements(&installed_package.manifest);
+        assert!(
+            tool_requirements
+                .iter()
+                .all(|requirement| requirement.setup != RuntimeCredentialAccountSetup::DeviceLink),
+            "the fixture manifest must declare no device-link TOOL credential, so a non-empty \
+             result below can only be the CHANNEL facet: {tool_requirements:?}"
+        );
+
+        let requirements = manager
+            .device_link_user_setup_requirements(&package_ref)
+            .await
+            .expect("device link requirements resolve");
+        assert_eq!(
+            requirements,
+            vec![channel_only_setup.auth_requirement.clone()],
+            "a package whose channel connection strategy is device-link must still report a \
+             device-link requirement even with no device-link tool credential (#7853 mirror \
+             case)"
+        );
+    }
+
+    /// #7853 follow-up: a package can declare BOTH device-link facets at
+    /// once, with distinct providers, because nothing ties a manifest's
+    /// `[channel.connection]` provider to a tool credential's `vendor`. An
+    /// earlier version of `device_link_user_setup_requirements` returned only
+    /// the CHANNEL facet whenever one existed and never consulted the
+    /// manifest at all in that case — so a caller who had linked the channel
+    /// facet but not the distinct tool facet was reported `AlreadyLinked`,
+    /// telling the model the personal-account tools would work when a
+    /// required link was still missing. Both facets must come back, and both
+    /// must be distinct entries (no accidental merge).
+    #[tokio::test]
+    async fn device_link_user_setup_requirements_reports_every_distinct_facet() {
+        let package = fixture_extension_package_with_device_link_tool_credential();
+        let extension_id = package.package.id.clone();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![package]);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let installation_store = Arc::new(
+            ExtensionInstallationStore::load_at(
+                filesystem.clone(),
+                VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+                ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+                crate::product_extension_host_api_contract_registry().expect("host contracts"),
+            )
+            .await
+            .expect("installation store"),
+        );
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let active_extensions = ActiveExtensionPublisher::new(
+            Arc::clone(&active_registry),
+            Arc::new(
+                HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                    .expect("trust policy"),
+            ),
+            Arc::new(InvalidationBus::new()),
+        );
+        let owner = UserId::new("device-link-dual-facet-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog,
+            installation_store: installation_store.clone(),
+            lifecycle_service,
+            active_extensions,
+            credential_cleanup: None,
+            tenant_operator_user_id: owner.clone(),
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+        // Channel facet: provider "fixture-vendor", the CHANNEL's own vendor.
+        let channel_setup =
+            device_link_setup_descriptor("fixture_dual_device_link", "fixture-vendor");
+        let manager = manager.with_account_setup_registry(Arc::new(
+            SoleExtensionAccountSetupReader(channel_setup.clone()),
+        ));
+
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture_dual_device_link")
+                .expect("package ref");
+        manager
+            .install(package_ref.clone(), &owner)
+            .await
+            .expect("install succeeds");
+
+        let installed_package = manager
+            .lifecycle_package(&extension_id)
+            .await
+            .expect("lifecycle package resolves");
+        let tool_requirement =
+            manifest_runtime_credential_auth_requirements(&installed_package.manifest)
+                .into_iter()
+                .find(|requirement| requirement.setup == RuntimeCredentialAccountSetup::DeviceLink)
+                .expect("fixture manifest declares a device-link TOOL credential");
+        assert_ne!(
+            tool_requirement.provider, channel_setup.auth_requirement.provider,
+            "the two facets must carry distinct providers for this test to prove anything"
+        );
+
+        let requirements = manager
+            .device_link_user_setup_requirements(&package_ref)
+            .await
+            .expect("device link requirements resolve");
+        assert_eq!(
+            requirements.len(),
+            2,
+            "both the channel facet and the distinct tool facet must be reported, not just \
+             whichever one was found first: {requirements:?}"
+        );
+        assert!(
+            requirements.contains(&channel_setup.auth_requirement),
+            "the channel facet must be present: {requirements:?}"
+        );
+        assert!(
+            requirements.contains(&tool_requirement),
+            "the distinct tool facet must ALSO be present — dropping it is exactly what let an \
+             already-linked-on-one-facet caller be reported AlreadyLinked while a required link \
+             was still missing: {requirements:?}"
+        );
+    }
+
     #[test]
     fn activation_exempts_only_the_device_link_channels_own_credential() {
         let setup = device_link_setup_descriptor("fixture", "fixture-vendor");
@@ -4701,6 +4993,104 @@ output_schema_ref = "schemas/search.output.json"
         AvailableExtensionPackage {
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
                 .expect("fixture package ref"),
+            manifest_toml: manifest_toml.to_string(),
+            resolved_manifest,
+            source: ManifestSource::HostBundled,
+            package,
+            cleanup_requirements: Vec::new(),
+            surface_kinds: Vec::new(),
+            channel_directions: None,
+            channel_presentation: None,
+            assets: vec![
+                AvailableExtensionAsset {
+                    path: "manifest.toml".to_string(),
+                    content: AvailableExtensionAssetContent::Bytes(
+                        manifest_toml.as_bytes().to_vec(),
+                    ),
+                },
+                AvailableExtensionAsset {
+                    path: "wasm/fixture.wasm".to_string(),
+                    content: AvailableExtensionAssetContent::Bytes(b"\0asm\x01\0\0\0".to_vec()),
+                },
+            ],
+            onboarding_override: None,
+            oauth_setup_override: None,
+            search_aliases: Vec::new(),
+        }
+    }
+
+    /// Like `fixture_extension_package`, but its one capability additionally
+    /// declares a device-link `runtime_credentials` entry under a DIFFERENT
+    /// provider (`fixture-tool-vendor`) than the CHANNEL facet the test wires
+    /// separately (`fixture-vendor`, via `device_link_setup_descriptor`).
+    /// Nothing ties a manifest's `[channel.connection]` provider to a tool
+    /// credential's `vendor` — the two facets can name distinct providers, so
+    /// linking one leaves the other outstanding. Exists to prove
+    /// `device_link_user_setup_requirements` returns BOTH facets rather than
+    /// collapsing to whichever one a caller happens to resolve first (#7853
+    /// follow-up).
+    fn fixture_extension_package_with_device_link_tool_credential() -> AvailableExtensionPackage {
+        let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "fixture_dual_device_link"
+name = "Fixture Extension With Two Device-Link Facets"
+version = "0.1.0"
+description = "Lifecycle fixture extension with a device-link tool credential"
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/fixture.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "fixture_dual_device_link.send"
+description = "Send as the linked personal account"
+effects = ["use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/send.input.json"
+output_schema_ref = "schemas/send.output.json"
+runtime_credentials = [
+  { handle = "fixture_tool_session", source = { type = "product_auth_account", provider = "fixture-tool-vendor", setup = { kind = "device_link" } }, audience = { scheme = "https", host_pattern = "api.fixture-tool.example" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+"#;
+        let contracts = capability_provider_contracts();
+        let manifest = ExtensionManifest::parse(
+            manifest_toml,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+            &contracts,
+        )
+        .expect("dual device-link fixture manifest");
+        let root = VirtualPath::new("/system/extensions/fixture_dual_device_link")
+            .expect("extension root");
+        let resolved_manifest = Arc::new(
+            ExtensionManifestRecord::from_toml(
+                manifest_toml,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+                None,
+                &contracts,
+                Some(root.clone()),
+            )
+            .expect("resolved dual device-link fixture manifest")
+            .resolved()
+            .clone(),
+        );
+        let package = ExtensionPackage::from_manifest_toml(manifest, root, manifest_toml)
+            .expect("dual device-link fixture package");
+        AvailableExtensionPackage {
+            package_ref: LifecyclePackageRef::new(
+                LifecyclePackageKind::Extension,
+                "fixture_dual_device_link",
+            )
+            .expect("fixture package ref"),
             manifest_toml: manifest_toml.to_string(),
             resolved_manifest,
             source: ManifestSource::HostBundled,

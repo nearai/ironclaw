@@ -115,6 +115,23 @@ where
                                 reason: "notification id conflicts with an existing event",
                             });
                         }
+                        if matches!(
+                            request.kind,
+                            crate::NotificationKind::RunFailed
+                                | crate::NotificationKind::RunCompleted
+                                | crate::NotificationKind::DeliveryFailed
+                        ) && request.initial_state == crate::NotificationInitialState::Resolved
+                            && existing.resolved_at.is_none()
+                        {
+                            // Compatibility reconciliation for terminal records
+                            // written before producers supplied initial lifecycle
+                            // state. Repair only the missing terminal fact: read,
+                            // archive, and update timestamps are user/durable state
+                            // and must survive retries and process restarts intact.
+                            existing.resolved_at = Some(existing.created_at);
+                            let record = existing.clone();
+                            return Ok(CasApply::new(snapshot, record));
+                        }
                         let record = existing.clone();
                         return Ok(CasApply::no_op(snapshot, record));
                     }
@@ -141,7 +158,9 @@ where
                         created_at: request.occurred_at,
                         updated_at: request.occurred_at,
                         read_at: None,
-                        resolved_at: None,
+                        resolved_at: (request.initial_state
+                            == crate::NotificationInitialState::Resolved)
+                            .then_some(request.occurred_at),
                         archived_at: None,
                     };
                     snapshot.notifications.push(record.clone());

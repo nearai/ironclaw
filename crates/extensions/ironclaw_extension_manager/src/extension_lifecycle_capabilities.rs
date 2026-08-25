@@ -33,6 +33,9 @@ use ironclaw_product_contracts::package_lifecycle::{
 };
 use serde::Deserialize;
 
+use crate::install_guidance::{
+    DeviceLinkGuidance, personal_setup_link, resolve_device_link_user_setup,
+};
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
 use ironclaw_extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
@@ -76,10 +79,12 @@ pub fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    setup_link_base_url: Option<String>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,
         credential_accounts,
+        setup_link_base_url,
     });
     for capability_id in EXTENSION_LIFECYCLE_HANDLER_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
@@ -210,6 +215,9 @@ fn lifecycle_origin_gate_matrix(id: &str) -> OriginGateMatrix {
 struct ExtensionLifecycleToolHandler {
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    /// Public web origin the personal-account setup link is built from, or
+    /// `None` on a deployment that published none (guidance stays link-free).
+    setup_link_base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,6 +275,35 @@ fn lifecycle_output_decode_error(error: impl std::fmt::Debug) -> FirstPartyCapab
         "extension lifecycle output serialization failed"
     );
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode)
+}
+
+impl ExtensionLifecycleToolHandler {
+    /// Whether this caller still owes `package_ref` a device link.
+    ///
+    /// Shared by the install and activate arms, which differ only in how they
+    /// map the error — mirroring
+    /// `ExtensionHostLifecycleProductService::device_link_user_setup` in the
+    /// sibling surface. Resolved only after the package is installed: the
+    /// package-shaped half reads the resolved manifest, which does not exist
+    /// before that.
+    async fn device_link_user_setup(
+        &self,
+        package_ref: &LifecyclePackageRef,
+        scope: &ironclaw_host_api::resource::ResourceScope,
+    ) -> Result<DeviceLinkGuidance, ProductOperationFailure> {
+        let setup = resolve_device_link_user_setup(
+            self.extension_management
+                .device_link_user_setup_requirements(package_ref)
+                .await?,
+            Some(&self.credential_accounts),
+            scope,
+        )
+        .await;
+        Ok(DeviceLinkGuidance::new(
+            setup,
+            personal_setup_link(self.setup_link_base_url.as_deref(), package_ref.id.as_str()),
+        ))
+    }
 }
 
 #[async_trait]
@@ -363,15 +400,15 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                         if activation_response.phase == InstallationState::Active =>
                     {
                         connection_preview_source = Some(activation_response.clone());
-                        let user_link_required = self
-                            .extension_management
-                            .package_declares_device_link_user_link(&package_ref)
+                        let device_link_setup = self
+                            .device_link_user_setup(&package_ref, &request.scope)
+                            .await
                             .map_err(install_activation_readiness_error)?;
                         Ok(install_response_with_activation(
                             install_response,
                             &activation_response,
                             caller_credentials_verified,
-                            user_link_required,
+                            device_link_setup,
                         ))
                     }
                     Ok(activation_response)
@@ -407,15 +444,37 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                     started,
                 )
                 .await?;
-                self.extension_management
+                // `LifecycleProductPayload::ExtensionActivate` carries no
+                // `next_step`, so the device-link guidance the install arm
+                // renders would be dropped entirely here (#7853). Route it
+                // through the payload-shape-independent `message` instead.
+                let mut response = self
+                    .extension_management
                     .activate_with_credential_gate(
-                        package_ref,
+                        package_ref.clone(),
                         request.scope.clone(),
                         &credential_gate,
                         &request.scope.user_id,
                     )
                     .await
-                    .map_err(lifecycle_error)
+                    .map_err(lifecycle_error)?;
+                // Resolved only once activation reached `Active`, matching the
+                // install arm: an activation that is denied, blocked, or errors
+                // has nothing to advise about, and the caller-state lookup is
+                // pure waste on that path.
+                if response.phase == InstallationState::Active {
+                    let device_link_setup = self
+                        .device_link_user_setup(&package_ref, &request.scope)
+                        .await
+                        .map_err(lifecycle_error)?;
+                    if let Some(notice) = device_link_setup.activate_notice() {
+                        response.message = Some(match response.message.take() {
+                            Some(message) => format!("{message} {notice}"),
+                            None => notice,
+                        });
+                    }
+                }
+                Ok(response)
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
@@ -539,20 +598,11 @@ const CALLER_ALREADY_CONNECTED_CONFIRMATION: &str = "The calling user's account 
      connected during this activation. Do not ask the user to connect, authorize, or complete \
      OAuth again — continue their original request.";
 
-/// `next_step` for an Active install whose channel identity is established
-/// per user by the device-link ceremony. The ceremony renders a scannable
-/// code, so it can only run in the Web UI: the model must send the user
-/// there instead of reporting the connection finished from a chat surface.
-const DEVICE_LINK_USER_SETUP_NEXT_STEP: &str = "Activation completed; model-visible extension tools are ready. Personal capabilities and \
-     chatting as the user still require each user to link their own account from this \
-     extension's card in the Web UI — that ceremony cannot run from chat, so direct the user \
-     there rather than reporting the connection complete.";
-
 fn install_response_with_activation(
     mut install_response: LifecycleProductResponse,
     activation_response: &LifecycleProductResponse,
     caller_credentials_verified: bool,
-    user_link_required: bool,
+    device_link_setup: DeviceLinkGuidance,
 ) -> LifecycleProductResponse {
     install_response.phase = activation_response.phase;
     install_response.blockers = activation_response.blockers.clone();
@@ -581,11 +631,7 @@ fn install_response_with_activation(
             *visible_capability_ids = activation_visible_capability_ids;
         }
         *next_step = if activation_response.phase == InstallationState::Active {
-            if user_link_required {
-                DEVICE_LINK_USER_SETUP_NEXT_STEP.to_string()
-            } else {
-                "Activation completed; model-visible extension tools are ready.".to_string()
-            }
+            device_link_setup.next_step()
         } else {
             "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
         };
@@ -791,6 +837,7 @@ fn lifecycle_error(error: ProductOperationFailure) -> FirstPartyCapabilityError 
 
 #[cfg(test)]
 mod tests {
+    use crate::install_guidance::DeviceLinkUserSetup;
     fn installed_response() -> LifecycleProductResponse {
         LifecycleProductResponse::projection(
             Some(
@@ -954,7 +1001,9 @@ mod tests {
 
     use super::*;
     use crate::lifecycle_test_support::{
-        ExtensionLifecycleTestServices, build_lifecycle_test_services,
+        DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID, ExtensionLifecycleTestServices,
+        build_lifecycle_test_services,
+        build_lifecycle_test_services_with_device_link_channel_fixture,
         invoke_json_with_standalone_approval, invoke_with_standalone_approval,
         lifecycle_product_context,
     };
@@ -1120,20 +1169,34 @@ mod tests {
             }),
         };
 
-        let response = install_response_with_activation(install, &activation, false, true);
+        let setup_link = "https://webui.test/extensions?configure=telegram&setup=personal_account";
+        let response = install_response_with_activation(
+            install,
+            &activation,
+            false,
+            DeviceLinkGuidance::new(DeviceLinkUserSetup::Required, Some(setup_link.to_string())),
+        );
         match response.payload {
             Some(LifecycleProductPayload::ExtensionInstall { next_step, .. }) => {
                 assert!(
-                    next_step.contains("Web UI"),
-                    "next_step must send the user to the Web UI: {next_step}"
+                    next_step.contains("web app"),
+                    "next_step must name where the link is finished: {next_step}"
                 );
                 assert!(
                     next_step.contains("cannot run from chat"),
                     "next_step must say chat cannot finish this: {next_step}"
                 );
                 assert!(
-                    next_step.contains("link their own account"),
+                    next_step.contains("link their personal account"),
                     "next_step must name the per-user link step: {next_step}"
+                );
+                // The hand-off this arm exists to close: a user reading this in
+                // a Telegram or Slack thread cannot render the device-link
+                // panel there, so prose alone leaves them to find the
+                // Extensions page unaided.
+                assert!(
+                    next_step.contains(setup_link),
+                    "next_step must hand the user the destination: {next_step}"
                 );
             }
             other => panic!("expected an install payload, got {other:?}"),
@@ -1165,7 +1228,12 @@ mod tests {
             }),
         };
 
-        let confirmed = install_response_with_activation(install(), &activation, true, false);
+        let confirmed = install_response_with_activation(
+            install(),
+            &activation,
+            true,
+            DeviceLinkGuidance::new(DeviceLinkUserSetup::NotApplicable, None),
+        );
         let message = confirmed.message.expect("message");
         assert!(
             message.starts_with("activation guidance"),
@@ -1177,7 +1245,12 @@ mod tests {
             "verified caller credentials must be confirmed to the model: {message}"
         );
 
-        let unverified = install_response_with_activation(install(), &activation, false, false);
+        let unverified = install_response_with_activation(
+            install(),
+            &activation,
+            false,
+            DeviceLinkGuidance::new(DeviceLinkUserSetup::NotApplicable, None),
+        );
         assert_eq!(
             unverified.message.as_deref(),
             Some("activation guidance"),
@@ -2330,6 +2403,104 @@ mod tests {
              Missing here means publish() ran on the pre-discovery seed package instead of \
              the live-discovered one.",
             decision.authority_ceiling.allowed_effects
+        );
+    }
+
+    /// #7853 GAP 1 (crate-tier half): `LifecycleProductPayload::ExtensionActivate`
+    /// has no `next_step` field, so the bare `builtin.extension_activate`
+    /// capability arm — unlike `builtin.extension_install` — had ZERO
+    /// coverage of its device-link guidance, which instead rides the
+    /// payload-shape-independent `message` field
+    /// (`activate_device_link_notice`). This drives the real capability
+    /// handler end to end for a package with no device-link facet at all
+    /// (web-access, zero-config), proving the notice never leaks in for a
+    /// package that never declares one.
+    ///
+    /// The positive case (a device-link package's message DOES carry the
+    /// notice on the BARE ACTIVATE arm specifically) IS reachable at this
+    /// same crate tier, direct-invoke and all — see
+    /// `standalone_extension_activate_message_carries_the_device_link_notice_for_a_device_link_package`
+    /// below. Telegram itself cannot drive it (this harness wires no native
+    /// channel adapter, so a real Telegram activation fails binding before
+    /// the notice resolver is ever reached), and
+    /// `EXTENSION_ACTIVATE_CAPABILITY_ID` is deliberately NOT model-visible
+    /// (`standalone_agent_surface_exposes_extension_lifecycle_tools` pins
+    /// `!ids.contains(&EXTENSION_ACTIVATE_CAPABILITY_ID)`), but neither fact
+    /// blocks a direct `invoke_json` call against a SYNTHETIC device-link
+    /// package built by
+    /// `lifecycle_test_support::build_lifecycle_test_services_with_device_link_channel_fixture`:
+    /// `activation_requirement_applies`
+    /// (`ironclaw_extension_host::extension_credential_requirements`) exempts
+    /// a device-link requirement from the pre-activation gate for any package
+    /// that declares a channel, regardless of vendor, and a package with no
+    /// generic host attached reaches `Active` without needing a real bound
+    /// adapter at all (`commit_activation`'s `publish_to_generic_host`
+    /// short-circuits `Ok(())` when `self.generic_host.get()` is `None` —
+    /// the same seam `ironclaw_extension_host::product_lifecycle`'s own
+    /// device-link fixtures already rely on).
+    #[tokio::test]
+    async fn standalone_extension_activate_message_does_not_carry_the_device_link_notice_for_a_non_device_link_package()
+     {
+        let services =
+            test_services("extension-tools-activate-no-device-link-owner", None, false).await;
+
+        install_inactive(&services, "web-access").await;
+        let web_access = invoke_json(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "web-access"}),
+        )
+        .await
+        .expect("web-access activation succeeds");
+        assert_eq!(web_access["phase"], "active");
+        let web_access_message = web_access
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(
+            !web_access_message.contains("cannot run from chat"),
+            "a package with no device-link facet must not carry the device-link notice: \
+             {web_access_message}"
+        );
+    }
+
+    /// #7853 positive coverage: an `Active` device-link package's bare-activate
+    /// message DOES carry the device-link guidance for a caller who has not
+    /// linked. Companion to the negative test above, which proves a
+    /// non-device-link package never carries it; this proves the flip side —
+    /// that the notice actually reaches the model when it should, not merely
+    /// that it stays absent when it should not.
+    ///
+    /// Drives the fixture built by
+    /// `build_lifecycle_test_services_with_device_link_channel_fixture` (see
+    /// its doc comment for why this reaches `Active` for an unlinked caller
+    /// without a real native channel adapter) through the exact same
+    /// `EXTENSION_ACTIVATE_CAPABILITY_ID` handler arm as the negative test.
+    #[tokio::test]
+    async fn standalone_extension_activate_message_carries_the_device_link_notice_for_a_device_link_package()
+     {
+        let services = build_lifecycle_test_services_with_device_link_channel_fixture(
+            "extension-tools-activate-device-link-owner",
+        )
+        .await;
+
+        install_inactive(&services, DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID).await;
+        let response = invoke_json(
+            &services,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID}),
+        )
+        .await
+        .expect("device-link package activation succeeds");
+        assert_eq!(response["phase"], "active");
+        let message = response
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        assert!(
+            message.contains("cannot run from chat"),
+            "an Active device-link package must carry the device-link notice for a caller who \
+             has not linked: {message}"
         );
     }
 

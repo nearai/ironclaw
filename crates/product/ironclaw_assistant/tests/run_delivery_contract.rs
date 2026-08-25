@@ -3480,11 +3480,17 @@ async fn triggered_failed_gate_fanout_still_resolves_the_inbox_after_resume() {
         approval.resolved_at.is_some(),
         "external fan-out failure must not strand the durable Inbox gate"
     );
+    let delivery_failure = inbox
+        .notifications
+        .iter()
+        .find(|notification| notification.kind == NotificationKind::DeliveryFailed)
+        .expect("failed external fan-out remains visible as a separate Inbox fact");
     assert!(
-        inbox
-            .notifications
-            .iter()
-            .any(|notification| notification.kind == NotificationKind::DeliveryFailed),
+        delivery_failure.resolved_at.is_some(),
+        "a terminal delivery failure must be born resolved so archiving can reclaim it"
+    );
+    assert!(
+        delivery_failure.archived_at.is_none(),
         "the failed external fan-out remains visible as a separate Inbox fact"
     );
     assert_eq!(

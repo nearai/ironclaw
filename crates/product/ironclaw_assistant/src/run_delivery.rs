@@ -35,8 +35,9 @@ use ironclaw_host_api::product_adapter::ProductAdapterError;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope, TurnStatus};
 use ironclaw_notifications::{
     LifecycleRef, NotificationAction, NotificationId, NotificationInboxError,
-    NotificationInboxStorePort, NotificationKind, NotificationMutationRequest,
-    NotificationRecipient, NotificationSeverity, NotificationSource, PublishNotificationRequest,
+    NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
+    PublishNotificationRequest,
 };
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundDeliveryTargetProvider,
@@ -447,6 +448,14 @@ impl RunDeliveryServices {
             | NotificationKind::AuthenticationRequired
             | NotificationKind::RunBlocked => NotificationSeverity::Warning,
         };
+        let initial_state = match kind {
+            NotificationKind::RunCompleted
+            | NotificationKind::RunFailed
+            | NotificationKind::DeliveryFailed => NotificationInitialState::Resolved,
+            NotificationKind::ApprovalRequired
+            | NotificationKind::AuthenticationRequired
+            | NotificationKind::RunBlocked => NotificationInitialState::Open,
+        };
         if let Err(error) = inbox
             .publish(PublishNotificationRequest {
                 id: notification_id,
@@ -464,6 +473,7 @@ impl RunDeliveryServices {
                 action: NotificationAction::OpenThread {
                     thread_id: scope.thread_id.clone(),
                 },
+                initial_state,
                 occurred_at: chrono::Utc::now(),
             })
             .await
