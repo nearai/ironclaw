@@ -1,7 +1,15 @@
 name: OpenSSF Scorecard
 
 on:
-  workflow_call:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "00 06 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
