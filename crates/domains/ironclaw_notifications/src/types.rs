@@ -129,6 +129,23 @@ pub enum NotificationKind {
     DeliveryFailed,
 }
 
+impl NotificationKind {
+    /// Stable producer identity segment used by durable notification ids.
+    ///
+    /// These values are persistence vocabulary, not display copy. Changing a
+    /// key would bypass idempotent replay and requires an explicit migration.
+    pub fn stable_key(self) -> &'static str {
+        match self {
+            Self::ApprovalRequired => "approval",
+            Self::AuthenticationRequired => "authentication",
+            Self::RunBlocked => "blocked",
+            Self::RunFailed => "failed",
+            Self::RunCompleted => "completed",
+            Self::DeliveryFailed => "delivery-failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationSeverity {
@@ -342,5 +359,25 @@ mod tests {
         assert!(LifecycleRef::try_from(String::new()).is_err());
         assert!(serde_json::from_str::<LifecycleRef>("\"bad\\nref\"").is_err());
         assert!(LifecycleRef::new("x".repeat(LIFECYCLE_REF_MAX_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn notification_kind_stable_keys_are_unique_and_rollout_safe() {
+        let keys = [
+            (NotificationKind::ApprovalRequired, "approval"),
+            (NotificationKind::AuthenticationRequired, "authentication"),
+            (NotificationKind::RunBlocked, "blocked"),
+            (NotificationKind::RunFailed, "failed"),
+            (NotificationKind::RunCompleted, "completed"),
+            (NotificationKind::DeliveryFailed, "delivery-failed"),
+        ];
+        let unique = keys
+            .iter()
+            .map(|(kind, expected)| {
+                assert_eq!(kind.stable_key(), *expected);
+                kind.stable_key()
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), keys.len());
     }
 }

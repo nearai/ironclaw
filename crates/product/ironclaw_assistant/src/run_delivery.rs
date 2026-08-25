@@ -709,14 +709,7 @@ pub(crate) fn run_notification_inbox_id(
     kind: NotificationKind,
     lifecycle_ref: Option<&str>,
 ) -> Result<NotificationId, NotificationInboxError> {
-    let kind = match kind {
-        NotificationKind::ApprovalRequired => "approval",
-        NotificationKind::AuthenticationRequired => "authentication",
-        NotificationKind::RunBlocked => "blocked",
-        NotificationKind::RunFailed => "failed",
-        NotificationKind::RunCompleted => "completed",
-        NotificationKind::DeliveryFailed => "delivery-failed",
-    };
+    let kind = kind.stable_key();
     let lifecycle_key = lifecycle_ref
         .map(|value| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, value.as_bytes()).to_string())
         .unwrap_or_else(|| "run".to_string());
