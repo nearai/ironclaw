@@ -782,14 +782,8 @@ mod tests {
                 "private_manifest_url",
                 "http://hub.ironclaw.com/private/manifest".to_string(),
             ),
-            (
-                "private_manifest_url",
-                "file:///etc/passwd".to_string(),
-            ),
-            (
-                "private_manifest_url",
-                "javascript:alert(1)".to_string(),
-            ),
+            ("private_manifest_url", "file:///etc/passwd".to_string()),
+            ("private_manifest_url", "javascript:alert(1)".to_string()),
         ] {
             let mut request = valid.clone();
             match field {
