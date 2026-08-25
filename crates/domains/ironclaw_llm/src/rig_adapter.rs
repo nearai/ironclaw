@@ -506,6 +506,24 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                     None => preamble = Some(msg.content.clone()),
                 }
             }
+            crate::Role::HostReminder => {
+                // Host guidance rides the conversation tail, so it lands right
+                // after the tool results of the iteration that produced it
+                // (#6985). Anthropic rejects consecutive User messages — the
+                // same constraint the Tool arm below merges for — so fold the
+                // reminder into the trailing User message instead of pushing a
+                // second one.
+                if msg.content.is_empty() {
+                    continue;
+                }
+                let reminder = UserContent::text(&msg.content);
+                match history.last_mut() {
+                    Some(RigMessage::User { content }) => content.push(reminder),
+                    _ => history.push(RigMessage::User {
+                        content: OneOrMany::one(reminder),
+                    }),
+                }
+            }
             crate::Role::User => {
                 if msg.content_parts.is_empty() {
                     // Skip empty user messages — some providers (e.g. Kimi) reject "content": ""
@@ -1738,6 +1756,62 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The tail host reminder must not create a second consecutive user
+    /// message after a tool result. This adapter serves OpenAI, Anthropic,
+    /// Ollama and Tinfoil; the Tool arm already merges for exactly this reason
+    /// ("multiple consecutive User messages (which Anthropic rejects)"), and
+    /// #6985 put a reminder at the tail of every loop iteration, landing
+    /// directly after that iteration's tool results.
+    #[test]
+    fn host_reminder_merges_into_the_trailing_user_message() {
+        use crate::provider::{ChatMessage, ToolCall};
+
+        let messages = vec![
+            ChatMessage::system("cached prefix"),
+            ChatMessage::user("fetch the page"),
+            ChatMessage::assistant_with_tool_calls(
+                Some("calling".to_string()),
+                vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "http".to_string(),
+                    arguments: serde_json::json!({}),
+                    arguments_parse_error: None,
+                    reasoning: None,
+                    signature: None,
+                }],
+            ),
+            ChatMessage::tool_result("call-1", "http", "200 OK"),
+            ChatMessage::host_reminder("Current date/time at loop start: 10:00"),
+        ];
+
+        let (preamble, history) = super::convert_messages(&messages);
+
+        assert_eq!(preamble.as_deref(), Some("cached prefix"));
+        for pair in history.windows(2) {
+            let same_role = matches!(
+                (&pair[0], &pair[1]),
+                (
+                    super::RigMessage::User { .. },
+                    super::RigMessage::User { .. }
+                )
+            );
+            assert!(!same_role, "consecutive User messages: {history:#?}");
+        }
+        // The reminder rode into the tool-result user message rather than
+        // becoming a second one.
+        let super::RigMessage::User { content } = history.last().expect("trailing user message")
+        else {
+            panic!("expected a trailing user message, got {history:#?}");
+        };
+        assert!(
+            content.iter().any(|part| matches!(
+                part,
+                super::UserContent::Text(text) if text.text.contains("Current date/time at loop start")
+            )),
+            "reminder text missing from the merged message: {content:#?}"
+        );
+    }
+
     use super::*;
     use rig::completion::CompletionError;
     use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};

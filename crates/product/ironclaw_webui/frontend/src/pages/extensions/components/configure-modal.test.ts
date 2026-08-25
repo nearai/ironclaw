@@ -164,6 +164,7 @@ function renderModal({
     hasChannelSurface,
     isWebGeneratedCodeConnection,
     resolveFocusTarget,
+    SkeletonList() {},
     window: {
       open: (url, target, features) => {
         if (blockPopup) {

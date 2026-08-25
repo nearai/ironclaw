@@ -89,7 +89,6 @@ registerPack("pt-BR", {
   "status.checking": "verificando",
 
   // Login page
-  "login.tagline": "Gateway v2",
   "login.hero": "Controle do agente local sem perder o rastro do operador.",
   "login.heroSub": "O acesso por token mantém o console do navegador ligado ao mesmo runtime do gateway, aprovações, ferramentas e estado do thread.",
   "login.bearerAuth": "Autenticação do portador",

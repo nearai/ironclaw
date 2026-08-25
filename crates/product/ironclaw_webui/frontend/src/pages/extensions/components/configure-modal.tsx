@@ -2,6 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { SkeletonList } from "../../../design-system/skeleton";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {
@@ -317,15 +318,11 @@ export function ConfigureModal({
         returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <div className="space-y-3">
-          {[1, 2].map(
-            (i) =>
-              (<div
-                key={i}
-                className="v2-skeleton h-10 w-full rounded-md"
-              />)
-          )}
-        </div>
+        <SkeletonList
+          count={2}
+          className="space-y-3"
+          itemClassName="h-10 w-full rounded-md"
+        />
       </ModalShell>
     );
   }

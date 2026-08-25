@@ -1,5 +1,6 @@
 import { Badge } from "../../../design-system/badge";
 import { Card } from "../../../design-system/card";
+import { Skeleton } from "../../../design-system/skeleton";
 import { useT } from "../../../lib/i18n";
 import { INFERENCE_FIELDS } from "../lib/settings-schema";
 import { filterSettingsSections, matchesSearch } from "../lib/settings-search";
@@ -124,27 +125,19 @@ export function InferenceTab({
   );
 }
 
-function Skeleton({ className = "" }) {
-  return (
-    <div
-      className={"rounded animate-pulse bg-[var(--v2-surface-muted)] " + className}
-    />
-  );
-}
-
 function SettingsSkeleton() {
   return (
     <div className="space-y-5">
       <Card padding="md">
-        <Skeleton className="mb-4 h-3 w-24" />
+        <Skeleton className="mb-4 h-3 w-24 rounded" />
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
-            <Skeleton className="h-3 w-16" />
-            <Skeleton className="mt-2 h-6 w-28" />
+            <Skeleton className="h-3 w-16 rounded" />
+            <Skeleton className="mt-2 h-6 w-28 rounded" />
           </div>
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
-            <Skeleton className="h-3 w-16" />
-            <Skeleton className="mt-2 h-6 w-40" />
+            <Skeleton className="h-3 w-16 rounded" />
+            <Skeleton className="mt-2 h-6 w-40 rounded" />
           </div>
         </div>
       </Card>
@@ -152,13 +145,13 @@ function SettingsSkeleton() {
         (i) =>
           (
             <Card key={i} padding="md">
-              <Skeleton className="mb-4 h-3 w-20" />
+              <Skeleton className="mb-4 h-3 w-20 rounded" />
               {[1, 2, 3].map(
                 (j) =>
                   (
                     <div key={j} className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-4 first:border-0">
-                      <Skeleton className="h-4 w-32" />
-                      <Skeleton className="h-9 w-36" />
+                      <Skeleton className="h-4 w-32 rounded" />
+                      <Skeleton className="h-9 w-36 rounded" />
                     </div>
                   )
               )}

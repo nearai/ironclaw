@@ -69,6 +69,7 @@ function createHarness(overrides = {}) {
       ModalFooter: function ModalFooter() {},
       Panel: function Panel() {},
       React,
+      SkeletonList: function SkeletonList() {},
       useT: () => translate,
     },
     import.meta.url,

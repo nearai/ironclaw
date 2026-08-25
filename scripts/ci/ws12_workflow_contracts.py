@@ -20,6 +20,18 @@ from crate_tree import (  # noqa: E402
     crate_directories,
     crate_directory,
 )
+from rust_toolchain_contracts import (  # noqa: E402
+    SETUP_RUST_ACTION,
+    validate_no_direct_dtolnay_usage,
+    validate_no_job_env_rustflags_with_setup_rust,
+    validate_no_unmanaged_rust_bootstrap,
+    validate_release_workflow_installs_rust,
+    validate_rust_jobs_reach_the_composite,
+    validate_setup_rust_action,
+    validate_single_debug_policy_owner,
+    validate_toolchain_pin_sync,
+)
+from workflow_text import STEP_HEADING, job_blocks, job_body, step_body  # noqa: E402
 
 REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
     ".github/workflows/reborn-tests.yml": (
@@ -421,9 +433,6 @@ LIBSQL_FINAL_SESSION_PROBE = re.compile(
 # pair address the process this step actually started.
 LIBSQL_SERVER_TRAP = re.compile(r"trap[ \t]+'(?P<cmd>[^']*)'[ \t]+EXIT")
 
-# Two-space job keys (`  name:` at the top level of `jobs:`). Deeper YAML
-# keys are indented further and cannot match.
-JOB_HEADING = re.compile(r"^  (?P<name>[A-Za-z0-9_-]+):[ \t]*$", re.MULTILINE)
 UPLOAD_ARTIFACT_NAME = re.compile(
     r"^[ \t]*name:[ \t]*(?P<name>[^#\n]+?)[ \t]*$", re.MULTILINE
 )
@@ -447,16 +456,13 @@ def extract_job_block(text: str, job: str) -> tuple[str | None, str]:
     fail-closed stance as `extract_scope_regex`).
     """
 
-    headings = list(JOB_HEADING.finditer(text))
-    matches = [match for match in headings if match.group("name") == job]
+    matches = [block for name, block in job_blocks(text) if name == job]
     if len(matches) != 1:
         return None, (
             f"expected exactly one {job!r} job, found {len(matches)} — the "
             "scoped libsql-scripted-memory contract cannot resolve its block"
         )
-    start = matches[0].start()
-    following = next((m for m in headings if m.start() > start), None)
-    return text[start : following.start() if following else len(text)], ""
+    return matches[0], ""
 
 def extract_continued_commands(text: str, executable: str) -> list[str]:
     """Return shell commands whose first line is `<executable> \\`.
@@ -481,7 +487,6 @@ def extract_continued_commands(text: str, executable: str) -> list[str]:
         commands.append("\n".join(command))
         index += 1
     return commands
-
 
 
 def extract_upload(body: str) -> tuple[str | None, list[str]]:
@@ -972,11 +977,6 @@ SCCACHE_INSTALL_STEP = "Install sccache"
 SCCACHE_CONFIGURE_STEP = "Configure OVH sccache"
 SCCACHE_FALLBACK_STEP = "Fall back to local compilation"
 
-# One `- name:` step heading. The scan is bounded to its own step because the
-# neighbouring `Check all-target lints` legitimately passes `--tests
-# --examples`; unbounded, this contract would blame this step for them.
-STEP_HEADING = re.compile(r"^[ \t]*- name: (?P<name>.+)$", re.MULTILINE)
-JOB_HEADING = re.compile(r"^  (?P<name>[a-zA-Z0-9_-]+):[ \t]*$", re.MULTILINE)
 
 # `${{ matrix.flags }}` is the lane's other flag channel: `clippy_matrix` is
 # defined in this same workflow and expands into the command, so a target
@@ -1016,16 +1016,6 @@ FORBIDDEN_PRODUCTION_LINT_FLAGS = tuple(
         ("--bench", "widens the lane past production targets"),
     )
 )
-
-
-def step_body(text: str, step_name: str) -> str | None:
-    """Return one workflow step's body, bounded by the next step heading."""
-    for heading in STEP_HEADING.finditer(text):
-        if heading.group("name").strip() != step_name:
-            continue
-        following = STEP_HEADING.search(text, heading.end())
-        return text[heading.end() : following.start() if following else len(text)]
-    return None
 
 
 def validate_sccache_setup_action(text: str) -> list[str]:
@@ -1075,16 +1065,6 @@ def validate_sccache_setup_action(text: str) -> list[str]:
         )
 
     return errors
-
-
-def job_body(text: str, job_name: str) -> str | None:
-    """Return one workflow job's body, bounded by the next job heading."""
-    for heading in JOB_HEADING.finditer(text):
-        if heading.group("name") != job_name:
-            continue
-        following = JOB_HEADING.search(text, heading.end())
-        return text[heading.end() : following.start() if following else len(text)]
-    return None
 
 
 def validate_windows_webui_install_shell(text: str) -> list[str]:
@@ -1209,6 +1189,12 @@ CRATE_SCOPE_FILTERS: tuple[CrateScopeFilter, ...] = (
             # exactly the diff it guards (#7797 review).
             "scripts/test-check-type-duplicates.py",
             "scripts/check-type-duplicates.py",
+            # A PR touching only the toolchain pin or the composite that must
+            # stay in sync with it has to reach fast-checks, or
+            # validate_toolchain_pin_sync's own gate never runs for the two
+            # files it exists to police.
+            "rust-toolchain.toml",
+            ".github/actions/setup-rust/action.yml",
         ),
         out_of_scope=("README.md", "docs/internal/plans/whatever.md", "openwiki/index.md"),
     ),
@@ -1791,11 +1777,23 @@ def validate_workflow_texts(
         errors.append(f"{SCCACHE_SETUP_ACTION}: could not read action: {error}")
     else:
         errors.extend(validate_sccache_setup_action(sccache_action))
+    try:
+        setup_rust_action = (root / SETUP_RUST_ACTION).read_text(encoding="utf-8")
+    except OSError:
+        setup_rust_action = None
+    errors.extend(validate_setup_rust_action(setup_rust_action))
+    errors.extend(validate_no_direct_dtolnay_usage(workflows))
+    errors.extend(validate_no_unmanaged_rust_bootstrap(workflows))
+    errors.extend(validate_release_workflow_installs_rust(workflows, root))
+    errors.extend(validate_rust_jobs_reach_the_composite(workflows))
+    errors.extend(validate_no_job_env_rustflags_with_setup_rust(workflows))
+    errors.extend(validate_toolchain_pin_sync(root))
+    errors.extend(validate_single_debug_policy_owner(root))
     return errors
 
 
 def load_workflows(root: Path) -> dict[str, str]:
-    """Every `.github/workflows/*.yml` file, repo-relative path -> text.
+    """Every `.github/workflows/*.{yml,yaml}` file, repo-relative path -> text.
 
     A handful of contracts key off one specific known path (REQUIRED_MARKERS,
     CRATE_SCOPE_FILTERS, CRATE_NAME_RESIDUE); `validate_webui_frontend_sites`
@@ -1803,13 +1801,18 @@ def load_workflows(root: Path) -> dict[str, str]:
     flat WebUI literal reappearing somewhere nobody enumerated. Loading every
     (small) workflow file eagerly costs nothing and keeps one loader for every
     consumer — a superset of the old explicit path list, so every existing
-    `workflows.get(path)` lookup keeps working unchanged.
+    `workflows.get(path)` lookup keeps working unchanged. GitHub Actions
+    accepts both `.yml` and `.yaml` for a workflow file; globbing only the
+    former would let a `.yaml` workflow escape every ws12 contract silently.
     """
 
     workflows_dir = root / ".github" / "workflows"
+    paths = sorted(
+        {*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")}
+    )
     return {
         path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
-        for path in sorted(workflows_dir.glob("*.yml"))
+        for path in paths
     }
 
 

@@ -563,9 +563,9 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             first.messages[5].content_ref.as_str().to_string(),
             first.messages[6].content_ref.as_str().to_string(),
             first.messages[7].content_ref.as_str().to_string(),
-            first.messages[8].content_ref.as_str().to_string(),
-            first.messages[9].content_ref.as_str().to_string(),
             "msg:user-message".to_string(),
+            first.messages[9].content_ref.as_str().to_string(),
+            first.messages[10].content_ref.as_str().to_string(),
         ]
     );
     assert!(
@@ -598,31 +598,32 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             .as_str()
             .starts_with("msg:snippet.skill.alpha.")
     );
-    // The memory section opens with the recall-framing guidance (#7294),
-    // ahead of the memory snippets it frames.
     assert!(
         first.messages[6]
-            .content_ref
-            .as_str()
-            .starts_with("msg:memory-guidance.memory-recall-framing.")
-    );
-    assert!(
-        first.messages[7]
-            .content_ref
-            .as_str()
-            .starts_with("msg:memory.memory.project-summary.")
-    );
-    assert!(
-        first.messages[8]
             .content_ref
             .as_str()
             .starts_with("msg:safety.safety.prompt-write.")
     );
     assert!(
-        first.messages[9]
+        first.messages[7]
             .content_ref
             .as_str()
             .starts_with("msg:surface.surface-v1.")
+    );
+    assert_eq!(first.messages[8].content_ref.as_str(), "msg:user-message");
+    // Turn-dependent recalled memory follows the persisted transcript. Its
+    // section still opens with the recall framing (#7294) before the snippets.
+    assert!(
+        first.messages[9]
+            .content_ref
+            .as_str()
+            .starts_with("msg:memory-guidance.memory-recall-framing.")
+    );
+    assert!(
+        first.messages[10]
+            .content_ref
+            .as_str()
+            .starts_with("msg:memory.memory.project-summary.")
     );
     assert_eq!(first.skill_context.len(), 1);
     assert_eq!(first.skill_context[0].source_name, "alpha");
@@ -776,7 +777,16 @@ async fn instruction_bundle_renders_runtime_context_section() {
                 safe_summary: "identity safe".to_string(),
                 compaction: None,
             }],
-            messages: Vec::new(),
+            // A thread message is REQUIRED here: without one the ordering
+            // assertions below only prove runtime context follows identity and
+            // instructions, and a regression that put it ahead of the
+            // transcript would still pass (#6985).
+            messages: vec![LoopContextMessage {
+                message_ref: Some(LoopMessageRef::new("msg:thread").unwrap()),
+                role: "user".to_string(),
+                safe_summary: "the user's question".to_string(),
+                compaction: None,
+            }],
             compaction_message_index: Vec::new(),
             recent_window_truncation: None,
             instruction_snippets: vec![LoopContextSnippet {
@@ -836,13 +846,30 @@ async fn instruction_bundle_renders_runtime_context_section() {
         .iter()
         .position(|m| m.content_ref.as_str().starts_with("msg:runtime."))
         .expect("runtime message must exist in messages list");
+    // Runtime context rides the conversation tail (#6985): it re-renders
+    // every run (the clock), so it must sit AFTER the stable identity and
+    // instruction sections that form the provider-cached prompt prefix.
     assert!(
         runtime_msg_idx > identity_idx,
         "runtime must be after last identity message"
     );
     assert!(
-        runtime_msg_idx < instruction_idx,
-        "runtime must be before first instruction snippet"
+        runtime_msg_idx > instruction_idx,
+        "runtime must be after the instruction snippets — per-run context \
+         must not sit inside the cached prompt prefix"
+    );
+    // The load-bearing boundary: runtime context must follow the THREAD
+    // messages, not merely the instruction sections. Anything emitted ahead of
+    // the transcript relocates every byte after it on each re-render.
+    let last_thread_idx = first
+        .messages
+        .iter()
+        .rposition(|m| m.content_ref.as_str() == "msg:thread")
+        .expect("thread message must exist in messages list");
+    assert!(
+        runtime_msg_idx > last_thread_idx,
+        "runtime must be after the thread messages — it re-renders every run, \
+         so ahead of the transcript it would rewrite the whole cached prefix"
     );
 }
 

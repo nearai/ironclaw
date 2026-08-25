@@ -5,12 +5,28 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-import ws12_workflow_contracts
-from ws12_workflow_contracts import (
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+
+import rust_toolchain_contracts  # noqa: E402
+import ws12_workflow_contracts  # noqa: E402
+from rust_toolchain_contracts import (  # noqa: E402
+    SETUP_RUST_ACTION,
+    validate_no_direct_dtolnay_usage,
+    validate_no_job_env_rustflags_with_setup_rust,
+    validate_no_unmanaged_rust_bootstrap,
+    validate_release_workflow_installs_rust,
+    validate_rust_jobs_reach_the_composite,
+    validate_setup_rust_action,
+    validate_single_debug_policy_owner,
+    validate_toolchain_pin_sync,
+)
+from workflow_text import JOB_HEADING, STEP_HEADING, job_body, step_body  # noqa: E402
+from ws12_workflow_contracts import (  # noqa: E402
     CODE_STYLE_WORKFLOW,
     CRATE_NAME_RESIDUE,
     CRATE_SCOPE_FILTERS,
@@ -20,16 +36,13 @@ from ws12_workflow_contracts import (
     NIGHTLY_DEEP_CI_WORKFLOW,
     PLATFORM_WORKFLOW,
     REQUIRED_MARKERS,
-    STEP_HEADING,
     STRESS_WORKFLOW,
     WEBUI_FRONTEND_CRATE,
     WEBUI_NESTED_LOCKFILE_PATTERN,
     crate_directory,
     extract_job_block,
     github_glob_to_regex,
-    job_body,
     load_workflows,
-    step_body,
     validate_crate_name_residue,
     validate_crate_scope_filters,
     validate_e2e_scope_filters,
@@ -45,6 +58,1007 @@ ROOT = Path(__file__).resolve().parents[2]
 SCCACHE_SETUP_ACTION = (
     ROOT / ".github" / "actions" / "setup-sccache-dist" / "action.yml"
 )
+
+
+class GuardBypassRegressionTests(unittest.TestCase):
+    """Three bypasses a reviewer reproduced against these guards.
+
+    Each let a workflow satisfy a contract while installing no Rust, or hid a
+    RUSTFLAGS key that shadows the composite. All three are the same species:
+    a check reading text that merely *looks* like an executable step, or
+    reading too narrow a slice of the file.
+    """
+
+    def test_release_check_ignores_a_decoy_in_an_unrelated_job(self) -> None:
+        """A commented mention elsewhere must not stand in for the real step."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                "- uses: ./.github/actions/setup-rust\n", encoding="utf-8"
+            )
+            decoyed = (
+                "jobs:\n"
+                "  build-local-artifacts:\n    steps:\n      - run: dist build\n"
+                "  docker-image:\n    steps:\n"
+                "      # uses: ./.github/actions/setup-rust\n"
+                "      - run: docker build .\n"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": decoyed}, root
+            )
+            self.assertTrue(
+                any("build-local-artifacts" in e for e in errors),
+                f"a decoy comment in another job must not satisfy the contract: {errors}",
+            )
+
+    def test_root_env_rustflags_after_jobs_is_caught(self) -> None:
+        """A top-level `env:` need not precede `jobs:` to apply to every job."""
+        text = (
+            "name: demo\non:\n  push:\n"
+            "jobs:\n"
+            "  build:\n    steps:\n"
+            "      - uses: ./.github/actions/setup-rust\n"
+            "      - run: cargo test\n"
+            "env:\n"
+            "  RUSTFLAGS: -Dwarnings\n"
+        )
+        errors = validate_no_job_env_rustflags_with_setup_rust(
+            {".github/workflows/demo.yml": text}
+        )
+        self.assertTrue(
+            any("workflow-level env" in e for e in errors),
+            f"a root env: after jobs: shadows every job identically: {errors}",
+        )
+
+    def test_an_anchor_is_not_marked_by_a_comment_in_a_sibling_node(self) -> None:
+        """Anchor scope ends at its own node, not at the next anchor or job."""
+        text = (
+            "name: demo\non:\n  push:\n"
+            "jobs:\n"
+            "  first:\n    steps:\n"
+            "      - &decoy\n"
+            "        run: echo hi\n"
+            "      - name: unrelated\n"
+            "        # uses: ./.github/actions/setup-rust\n"
+            "        run: echo bye\n"
+            "  second:\n    steps:\n"
+            "      - *decoy\n"
+            "      - run: cargo build\n"
+        )
+        errors = validate_rust_jobs_reach_the_composite(
+            {".github/workflows/demo.yml": text}
+        )
+        self.assertTrue(
+            any("'second'" in e for e in errors),
+            f"aliasing a decoy anchor must not count as installing Rust: {errors}",
+        )
+
+    def test_a_real_alias_still_passes(self) -> None:
+        """The legitimate release-plz shape must keep working."""
+        text = (
+            "name: demo\non:\n  push:\n"
+            "x-steps:\n"
+            "  - &install-rust\n"
+            "    uses: ./.github/actions/setup-rust\n"
+            "jobs:\n"
+            "  build:\n    steps:\n"
+            "      - *install-rust\n"
+            "      - run: cargo build\n"
+        )
+        self.assertEqual(
+            [],
+            validate_rust_jobs_reach_the_composite({".github/workflows/d.yml": text}),
+        )
+
+
+class SingleDebugPolicyOwnerTests(unittest.TestCase):
+    """Cargo.toml's [profile.dev] is the only writer of the debug-info value."""
+
+    def tree(self, body: str) -> Path:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / "scripts" / "ci").mkdir(parents=True)
+        (root / "scripts" / "ci" / "gate.sh").write_text(body, encoding="utf-8")
+        return root
+
+    def test_a_second_writer_is_rejected(self) -> None:
+        root = self.tree('CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"\n')
+        errors = validate_single_debug_policy_owner(root)
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("scripts/ci/gate.sh:1", errors[0])
+        self.assertIn("Cargo.toml", errors[0])
+
+    def test_the_hermetic_passthrough_allowlist_still_passes(self) -> None:
+        """A `case` pattern naming the vars is not a second writer.
+
+        run-hermetic-test-process.sh lists them so a developer's
+        `CARGO_PROFILE_DEV_DEBUG=2` override survives the hermetic barrier.
+        Matching that entry would break the documented escape hatch.
+        """
+        root = self.tree(
+            "      CARGO_INCREMENTAL|CARGO_PROFILE_DEV_DEBUG|"
+            "CARGO_PROFILE_TEST_DEBUG|CARGO_TEST_ARGS|\\\n"
+        )
+        self.assertEqual([], validate_single_debug_policy_owner(root))
+
+    def test_a_comment_mentioning_the_override_still_passes(self) -> None:
+        root = self.tree("# override per-run: CARGO_PROFILE_DEV_DEBUG=2 cargo test\n")
+        self.assertEqual([], validate_single_debug_policy_owner(root))
+
+    def test_a_workflow_job_env_second_writer_is_rejected(self) -> None:
+        """YAML `KEY: value` in a workflow job env is the shape actually deleted.
+
+        Reported independently by two review lanes. The first version of this
+        guard scanned only `scripts/**` for `KEY=value`, so it could not see
+        the 14 workflow lines this PR removed — the majority of what it exists
+        to keep removed. A future PR re-adding one would have passed clean.
+        """
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / ".github" / "workflows").mkdir(parents=True)
+        (root / ".github" / "workflows" / "demo.yml").write_text(
+            "jobs:\n  build:\n    env:\n      CARGO_PROFILE_DEV_DEBUG: 0\n",
+            encoding="utf-8",
+        )
+        errors = validate_single_debug_policy_owner(root)
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn(".github/workflows/demo.yml:4", errors[0])
+
+    def test_a_quoted_yaml_value_is_rejected(self) -> None:
+        """One deleted line was `CARGO_PROFILE_DEV_DEBUG: "0"` — quoted."""
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / ".github" / "workflows").mkdir(parents=True)
+        (root / ".github" / "workflows" / "d.yml").write_text(
+            '          CARGO_PROFILE_DEV_DEBUG: "0"\n', encoding="utf-8"
+        )
+        self.assertEqual(1, len(validate_single_debug_policy_owner(root)))
+
+    def test_the_hermetic_passthrough_survives_the_widened_syntax(self) -> None:
+        """`[:=]` must still not match the `case`-pattern allowlist.
+
+        That entry is how a developer's CARGO_PROFILE_DEV_DEBUG=2 override
+        reaches the child process; matching it would break the escape hatch
+        this contract deliberately preserves.
+        """
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (root / "scripts" / "ci").mkdir(parents=True)
+        (root / "scripts" / "ci" / "h.sh").write_text(
+            "      CARGO_INCREMENTAL|CARGO_PROFILE_DEV_DEBUG|"
+            "CARGO_PROFILE_TEST_DEBUG|CARGO_TEST_ARGS|\\\n",
+            encoding="utf-8",
+        )
+        self.assertEqual([], validate_single_debug_policy_owner(root))
+
+    def test_quoted_yaml_keys_are_rejected(self) -> None:
+        """Bare, double-quoted and single-quoted are one YAML key.
+
+        Quoting the key bypassed this guard entirely.
+        """
+        for form in (
+            'CARGO_PROFILE_DEV_DEBUG: 0',
+            '"CARGO_PROFILE_DEV_DEBUG": 0',
+            "'CARGO_PROFILE_DEV_DEBUG': 0",
+        ):
+            with self.subTest(form=form):
+                root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+                (root / ".github" / "workflows").mkdir(parents=True)
+                (root / ".github" / "workflows" / "d.yml").write_text(
+                    f"jobs:\n  b:\n    env:\n      {form}\n", encoding="utf-8"
+                )
+                self.assertEqual(
+                    1, len(validate_single_debug_policy_owner(root)), form
+                )
+
+    def test_the_live_tree_has_exactly_one_owner(self) -> None:
+        self.assertEqual([], validate_single_debug_policy_owner(ROOT))
+
+
+class RustJobsReachTheCompositeTests(unittest.TestCase):
+    """Every job that runs cargo must reach the composite, not just the release lane.
+
+    The release-lane guard was written after a workflow lost its Rust install
+    and every absence-only check called that clean — but it only covered one
+    file. Deleting the composite step from any other workflow reproduced the
+    identical bug with the suite green, because "no dtolnay, no bootstrap, no
+    shadowing RUSTFLAGS" is trivially true of a job that installs nothing.
+    """
+
+    COMPOSITE = "      - uses: ./.github/actions/setup-rust\n"
+
+    def workflow(self, *, with_composite: bool) -> str:
+        return (
+            "name: demo\n"
+            "on:\n"
+            "  push:\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            + (self.COMPOSITE if with_composite else "")
+            + "      - run: cargo test --workspace\n"
+        )
+
+    def test_a_cargo_job_without_the_composite_is_rejected(self) -> None:
+        errors = validate_rust_jobs_reach_the_composite(
+            {".github/workflows/demo.yml": self.workflow(with_composite=False)}
+        )
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("needs a Rust toolchain but never reaches", errors[0])
+        self.assertIn("'build'", errors[0])
+
+    def test_a_cargo_job_with_the_composite_passes(self) -> None:
+        self.assertEqual(
+            [],
+            validate_rust_jobs_reach_the_composite(
+                {".github/workflows/demo.yml": self.workflow(with_composite=True)}
+            ),
+        )
+
+    def test_a_hermetic_suite_job_needs_the_composite(self) -> None:
+        """The hermetic runners need rustc without naming it.
+
+        run-hermetic-test-process.sh probes `rustc --print sysroot` and exits 1
+        if it cannot resolve one, so a lane invoking it needs Rust exactly as
+        much as a literal `cargo` line does — but the workflow text only
+        mentions the script. webui-v2-test-lanes sat in that blind spot: it
+        compiles nothing, so nobody noticed it needed rustc, and rustup
+        installed the pin lazily mid-test, once per shard.
+        """
+        text = (
+            "name: e2e\non:\n  push:\n"
+            "jobs:\n"
+            "  lanes:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: scripts/ci/run-hermetic-deterministic-suite.sh command pytest\n"
+        )
+        errors = validate_rust_jobs_reach_the_composite(
+            {".github/workflows/e2e.yml": text}
+        )
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("needs a Rust toolchain", errors[0])
+
+    def test_a_hermetic_job_with_the_composite_passes(self) -> None:
+        text = (
+            "name: e2e\non:\n  push:\n"
+            "jobs:\n"
+            "  lanes:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: ./.github/actions/setup-rust\n"
+            "      - run: scripts/ci/run-hermetic-test-process.sh pytest\n"
+        )
+        self.assertEqual(
+            [],
+            validate_rust_jobs_reach_the_composite({".github/workflows/e2e.yml": text}),
+        )
+
+    def test_a_job_that_never_runs_cargo_needs_no_composite(self) -> None:
+        text = (
+            "name: docs\n"
+            "on:\n"
+            "  push:\n"
+            "jobs:\n"
+            "  lint-docs:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - run: npm run lint\n"
+        )
+        self.assertEqual(
+            [], validate_rust_jobs_reach_the_composite({".github/workflows/d.yml": text})
+        )
+
+    def test_cargo_in_a_path_filter_or_comment_is_not_an_invocation(self) -> None:
+        """`Cargo.toml` in a paths filter must not demand a Rust install."""
+        text = (
+            "name: paths\n"
+            "on:\n"
+            "  push:\n"
+            '    paths:\n      - "Cargo.toml"\n      - "**/cargo-timings/**"\n'
+            "jobs:\n"
+            "  notify:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      # we could run cargo here one day\n"
+            "      - run: echo hi\n"
+        )
+        self.assertEqual(
+            [], validate_rust_jobs_reach_the_composite({".github/workflows/p.yml": text})
+        )
+
+    def test_a_job_reaching_the_composite_by_yaml_alias_passes(self) -> None:
+        """release-plz.yml picks the composite up through an anchor alias."""
+        text = (
+            "name: alias\n"
+            "on:\n"
+            "  push:\n"
+            "x-steps:\n"
+            "  - &install-rust\n"
+            "    uses: ./.github/actions/setup-rust\n"
+            "jobs:\n"
+            "  build:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - *install-rust\n"
+            "      - run: cargo build\n"
+        )
+        self.assertEqual(
+            [], validate_rust_jobs_reach_the_composite({".github/workflows/a.yml": text})
+        )
+
+    def test_every_live_cargo_job_reaches_the_composite(self) -> None:
+        """Ships with no allowlist: an exemption would be an unpinned lane."""
+        self.assertEqual(
+            [],
+            validate_rust_jobs_reach_the_composite(
+                ws12_workflow_contracts.load_workflows(ROOT)
+            ),
+        )
+
+
+class WorkflowTextHelperTests(unittest.TestCase):
+    """The shared helpers must define each pattern exactly once.
+
+    ws12_workflow_contracts.py used to bind JOB_HEADING twice, the second
+    silently shadowing the first for every validator below it. Both patterns
+    happened to be equivalent, so nothing broke — but an edit to the dead one
+    would have had no effect and no test would have said so. Splitting the
+    helpers out is only a fix if the duplicate actually dies with it.
+    """
+
+    def test_each_pattern_is_defined_exactly_once(self) -> None:
+        source = (Path(__file__).resolve().parent / "lib" / "workflow_text.py").read_text(
+            encoding="utf-8"
+        )
+        for name in ("JOB_HEADING", "STEP_HEADING"):
+            self.assertEqual(
+                1,
+                source.count(f"{name} = re.compile"),
+                f"{name} must be bound exactly once; a second binding silently "
+                "shadows the first for every caller below it",
+            )
+
+    def test_job_heading_matches_a_two_space_job_key(self) -> None:
+        text = "jobs:\n  build-Rust_1:\n    runs-on: ubuntu-latest\n"
+        self.assertEqual(
+            ["build-Rust_1"], [m.group("name") for m in JOB_HEADING.finditer(text)]
+        )
+
+    def test_job_heading_ignores_deeper_keys(self) -> None:
+        text = "jobs:\n  build:\n    steps:\n      - name: x\n"
+        self.assertEqual(
+            ["build"], [m.group("name") for m in JOB_HEADING.finditer(text)]
+        )
+
+
+class SetupRustActionContractTests(unittest.TestCase):
+    """The setup-rust composite must actually pin RUSTUP_TOOLCHAIN and mold."""
+
+    OK = (
+        "runs:\n"
+        "  using: composite\n"
+        "  steps:\n"
+        "    - name: Install Rust\n"
+        "      id: install\n"
+        "      uses: dtolnay/rust-toolchain@abc123 # stable\n"
+        "      with:\n"
+        "        toolchain: ${{ inputs.toolchain }}\n"
+        "    - name: Pin the resolved toolchain for the rest of this job\n"
+        "      shell: bash\n"
+        "      run: |\n"
+        '        echo "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" >> "$GITHUB_ENV"\n'
+        "    - name: Install mold and clang\n"
+        "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+        "      shell: bash\n"
+        "      run: scripts/ci/install-ci-apt-packages.sh clang mold\n"
+        "    - name: Verify mold linker is active\n"
+        "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+        "      shell: bash\n"
+        "      run: rustc --version\n"
+        "    - name: Export mold RUSTFLAGS\n"
+        "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+        "      shell: bash\n"
+        "      run: |\n"
+        '        echo "RUSTFLAGS=-C linker=clang -C link-arg=--ld-path=/usr/bin/mold ${RUSTFLAGS:-}" >> "$GITHUB_ENV"\n'
+    )
+
+    def test_missing_action_file_fails(self):
+        errors = validate_setup_rust_action(None)
+        self.assertTrue(any("could not read" in e for e in errors))
+
+    def test_missing_rustup_toolchain_pin_fails(self):
+        bad = self.OK.replace(
+            'echo "RUSTUP_TOOLCHAIN=${{ steps.install.outputs.name }}" >> "$GITHUB_ENV"\n',
+            "",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(any("RUSTUP_TOOLCHAIN" in e for e in errors))
+
+    def test_missing_mold_linux_guard_fails(self):
+        bad = self.OK.replace(
+            "if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n      shell: bash\n      run: scripts/ci/install-ci-apt-packages.sh clang mold\n",
+            "shell: bash\n      run: scripts/ci/install-ci-apt-packages.sh clang mold\n",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(any("Linux" in e for e in errors))
+
+    def test_missing_mold_verify_linux_guard_fails(self):
+        """An unguarded 'Verify mold linker is active' step runs the mold
+        link check on every runner OS, not just Linux — the same
+        mold: true-is-unsafe-elsewhere failure mode the install/export steps
+        are already pinned against."""
+        bad = self.OK.replace(
+            "if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n      shell: bash\n      run: rustc --version\n",
+            "shell: bash\n      run: rustc --version\n",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(any("Verify mold linker is active" in e and "Linux" in e for e in errors), errors)
+
+    def test_missing_mold_verify_step_fails(self):
+        bad = self.OK.replace(
+            "    - name: Verify mold linker is active\n"
+            "      if: ${{ inputs.mold == 'true' && runner.os == 'Linux' }}\n"
+            "      shell: bash\n"
+            "      run: rustc --version\n",
+            "",
+        )
+        errors = validate_setup_rust_action(bad)
+        self.assertTrue(
+            any("missing the 'Verify mold linker is active' step" in e for e in errors),
+            errors,
+        )
+
+    def test_ok_passes(self):
+        self.assertEqual([], validate_setup_rust_action(self.OK))
+
+
+class DirectDtolnayUsageForbiddenTests(unittest.TestCase):
+    """Every workflow must install Rust through the setup-rust composite."""
+
+    def test_direct_dtolnay_call_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "      - uses: dtolnay/rust-toolchain@abc123 # stable\n"
+            )
+        }
+        errors = validate_no_direct_dtolnay_usage(workflows)
+        self.assertTrue(any("x.yml" in e for e in errors))
+
+    def test_composite_call_passes(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "      - uses: ./.github/actions/setup-rust\n"
+            )
+        }
+        self.assertEqual([], validate_no_direct_dtolnay_usage(workflows))
+
+    def test_bare_mold_rustflags_string_outside_composite_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                'RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"\n'
+            )
+        }
+        errors = validate_no_direct_dtolnay_usage(workflows)
+        self.assertTrue(any("mold" in e.lower() for e in errors))
+
+
+class JobEnvRustflagsShadowingTests(unittest.TestCase):
+    """A setup-rust job may not declare its own RUSTFLAGS env key.
+
+    Job env is re-applied to every step on top of $GITHUB_ENV, so such a key
+    silently shadows the composite's mold export — slower builds, never a
+    red check. The flags belong in the composite's extra_rustflags input.
+    """
+
+    SETUP_RUST_JOB = (
+        "  crate-tests:\n"
+        "    env:\n"
+        '      RUSTC_BOOTSTRAP: "1"\n'
+        "    steps:\n"
+        "      - uses: ./.github/actions/setup-rust\n"
+        "        with:\n"
+        "          mold: true\n"
+    )
+
+    def test_job_level_rustflags_alongside_setup_rust_fails(self):
+        shadowing = self.SETUP_RUST_JOB.replace(
+            '      RUSTC_BOOTSTRAP: "1"\n',
+            '      RUSTC_BOOTSTRAP: "1"\n      RUSTFLAGS: "-Zcrate-attr=x"\n',
+        )
+        errors = validate_no_job_env_rustflags_with_setup_rust(
+            {".github/workflows/x.yml": shadowing}
+        )
+        self.assertTrue(any("crate-tests" in e for e in errors), errors)
+
+    def test_extra_rustflags_input_passes(self):
+        passing = self.SETUP_RUST_JOB + '          extra_rustflags: "-Zcrate-attr=x"\n'
+        self.assertEqual(
+            [],
+            validate_no_job_env_rustflags_with_setup_rust(
+                {".github/workflows/x.yml": passing}
+            ),
+        )
+
+    def test_rustflags_in_a_job_that_does_not_use_setup_rust_is_allowed(self):
+        other = (
+            "  docs:\n"
+            "    env:\n"
+            '      RUSTFLAGS: "-Zcrate-attr=x"\n'
+            "    steps:\n"
+            "      - run: echo hi\n"
+        )
+        self.assertEqual(
+            [],
+            validate_no_job_env_rustflags_with_setup_rust(
+                {".github/workflows/x.yml": other}
+            ),
+        )
+
+    def test_sibling_job_without_setup_rust_is_allowed_in_a_multi_job_file(self):
+        """The FILE-level skip (`SETUP_RUST_USES not in text`) is already
+        covered above by a single-job file. This is the PER-JOB skip branch
+        (`SETUP_RUST_USES not in block`): a sibling job's own RUSTFLAGS must
+        stay allowed even when another job in the SAME file uses the
+        composite."""
+        workflow = (
+            "  docs:\n"
+            "    env:\n"
+            '      RUSTFLAGS: "-Zcrate-attr=docs"\n'
+            "    steps:\n"
+            "      - run: echo hi\n"
+        ) + self.SETUP_RUST_JOB
+        self.assertEqual(
+            [],
+            validate_no_job_env_rustflags_with_setup_rust(
+                {".github/workflows/x.yml": workflow}
+            ),
+        )
+
+    def test_workflow_level_rustflags_alongside_setup_rust_fails(self):
+        """A workflow-level top `env:` block applies to every job in the
+        file identically to a job-level env key, but sits before any job
+        heading at two-space indentation — invisible to a check that only
+        slices text starting at each job heading and only matches six-space
+        indentation."""
+        workflow = 'env:\n  RUSTFLAGS: "-Zcrate-attr=x"\njobs:\n' + self.SETUP_RUST_JOB
+        errors = validate_no_job_env_rustflags_with_setup_rust(
+            {".github/workflows/x.yml": workflow}
+        )
+        self.assertTrue(any("workflow-level" in e for e in errors), errors)
+
+    def test_workflow_level_rustflags_is_caught_when_an_on_block_exists(self):
+        """The fixture must carry an `on:` block or the check looks fine.
+
+        JOB_HEADING matches any two-space `key:` line, so `on:`'s children
+        (`push:`, `workflow_call:`) matched too. Taking headings[0] blindly
+        truncated the preamble at the first TRIGGER, making this check dead
+        code on every real workflow — and the original fixture passed only
+        because it happened to omit `on:`.
+        """
+        workflows = {
+            ".github/workflows/x.yml": (
+                "name: X\n"
+                "on:\n"
+                "  push:\n"
+                "    branches: [main]\n"
+                "  workflow_call:\n"
+                "env:\n"
+                '  RUSTFLAGS: "-Zcrate-attr=x"\n'
+                "jobs:\n" + self.SETUP_RUST_JOB
+            )
+        }
+        errors = validate_no_job_env_rustflags_with_setup_rust(workflows)
+        self.assertTrue(
+            any("workflow-level" in e for e in errors),
+            f"workflow-level RUSTFLAGS must be caught behind an on: block: {errors}",
+        )
+
+    def test_a_job_reaching_the_composite_by_yaml_alias_is_still_checked(self):
+        """`- *install-rust` carries no literal `uses:` line of its own.
+
+        release-plz.yml reuses the composite step through a YAML anchor, so a
+        text-only per-job scan skipped that job entirely and its job-level
+        RUSTFLAGS would have shadowed mold silently.
+        """
+        workflows = {
+            ".github/workflows/x.yml": (
+                "jobs:\n"
+                "  first:\n"
+                "    steps:\n"
+                "      - &install-rust\n"
+                "        name: Install Rust\n"
+                "        uses: ./.github/actions/setup-rust\n"
+                "  second:\n"
+                "    env:\n"
+                '      RUSTFLAGS: "-Zcrate-attr=x"\n'
+                "    steps:\n"
+                "      - *install-rust\n"
+            )
+        }
+        errors = validate_no_job_env_rustflags_with_setup_rust(workflows)
+        self.assertTrue(
+            any("'second'" in e for e in errors),
+            f"alias-reached job must be checked: {errors}",
+        )
+
+    def test_step_level_rustflags_is_also_caught(self):
+        """A step's own `env:` shadows the composite just like a job's.
+
+        The pattern pinned the exact 6-space job-env depth, so a step-level
+        key (10 spaces in this repo's workflows) slipped through — the same
+        silent mold-drop the guard exists to prevent.
+        """
+        workflows = {
+            ".github/workflows/x.yml": (
+                "jobs:\n"
+                "  build:\n"
+                "    steps:\n"
+                "      - uses: ./.github/actions/setup-rust\n"
+                "      - name: Compile\n"
+                "        env:\n"
+                '          RUSTFLAGS: "-Zcrate-attr=x"\n'
+                "        run: cargo build\n"
+            )
+        }
+        errors = validate_no_job_env_rustflags_with_setup_rust(workflows)
+        self.assertTrue(
+            any("'build'" in e for e in errors),
+            f"step-level RUSTFLAGS must be caught: {errors}",
+        )
+
+    def test_live_workflows_are_clean(self):
+        workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.assertEqual(
+            [], validate_no_job_env_rustflags_with_setup_rust(workflows)
+        )
+
+
+
+class UnmanagedRustBootstrapTests(unittest.TestCase):
+    """A curl bootstrap installs Rust as surely as the vendor action.
+
+    The dtolnay check greps one vendor string, so `curl sh.rustup.rs | sh`
+    passed it forever — unpinned, without mold, unchecked against
+    rust-toolchain.toml. cargo-dist regenerates ironclaw-release.yml, so its
+    container-only bootstrap is an accepted exception, pinned to one.
+    """
+
+    def test_bootstrap_in_a_hand_written_workflow_fails(self):
+        workflows = {
+            ".github/workflows/x.yml": (
+                "        run: curl -sSf https://sh.rustup.rs | sh -s -- -y\n"
+            )
+        }
+        errors = validate_no_unmanaged_rust_bootstrap(workflows)
+        self.assertTrue(any("x.yml" in e for e in errors), errors)
+
+    def test_rustup_init_and_toolchain_install_also_count(self):
+        for snippet in ("rustup-init -y", "rustup toolchain install 1.98.0"):
+            with self.subTest(snippet=snippet):
+                errors = validate_no_unmanaged_rust_bootstrap(
+                    {".github/workflows/x.yml": f"        run: {snippet}\n"}
+                )
+                self.assertTrue(errors, f"{snippet} should be caught")
+
+    def test_the_release_workflow_has_no_carve_out(self):
+        """The release lane is migrated, not exempted.
+
+        cargo-dist re-includes .github/dist-build-setup.yml on every
+        regeneration, so the release build jobs reach the composite there;
+        a bootstrap reappearing in the generated workflow is a regression.
+        """
+        workflows = {
+            ".github/workflows/ironclaw-release.yml": (
+                "        run: curl -sSf https://sh.rustup.rs | sh -s -- -y\n"
+            )
+        }
+        errors = validate_no_unmanaged_rust_bootstrap(workflows)
+        self.assertTrue(any("ironclaw-release" in e for e in errors), errors)
+
+    def test_a_bootstrap_is_rejected_with_no_exemption_available(self) -> None:
+        """There is no allowlist to add a lane to; the rule is unconditional.
+
+        The empty `ACCEPTED_RUST_BOOTSTRAPS` dict this replaces was an escape
+        hatch, fully built with symmetric over/under-use validation, for a
+        case the module's own comment said did not exist. Flagged by the
+        structural-discipline audit as speculative generality.
+        """
+        errors = validate_no_unmanaged_rust_bootstrap(
+            {".github/workflows/demo.yml": "      - run: curl https://sh.rustup.rs | sh\n"}
+        )
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("raw Rust bootstrap", errors[0])
+        self.assertNotIn("ACCEPTED", errors[0])
+        self.assertFalse(
+            hasattr(rust_toolchain_contracts, "ACCEPTED_RUST_BOOTSTRAPS"),
+            "the exemption mechanism should be gone, not merely empty",
+        )
+
+    def test_alternate_vendor_toolchain_actions_are_caught(self):
+        """The composite is the only sanctioned installer.
+
+        Enumerating rustup bootstraps alone left an obvious hole: a workflow
+        could reach for a different vendor action and pass every gate while
+        running an unpinned toolchain with no mold.
+        """
+        for action in (
+            "actions-rs/toolchain@v1",
+            "actions-rust-lang/setup-rust-toolchain@v1",
+            "hecrj/setup-rust-action@v1",
+        ):
+            with self.subTest(action=action):
+                errors = validate_no_unmanaged_rust_bootstrap(
+                    {".github/workflows/x.yml": f"      - uses: {action}\n"}
+                )
+                self.assertTrue(errors, f"{action} should be caught")
+
+    def test_live_workflows_hold_the_contract(self):
+        workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.assertEqual([], validate_no_unmanaged_rust_bootstrap(workflows))
+
+
+
+class ReleaseWorkflowInstallsRustTests(unittest.TestCase):
+    """The release lane must REACH the composite, not merely lack a bootstrap.
+
+    Every sibling check asserts an absence. That let a release workflow with
+    no Rust install at all pass the entire suite: the old `curl | sh` step was
+    deleted and its replacement went only into the cargo-dist fragment, which
+    reaches the generated file solely via `dist generate`. Container builds
+    would have died on `cargo: command not found`.
+    """
+
+    STEP = "uses: ./.github/actions/setup-rust"
+
+    def release(self, step: str | None) -> str:
+        """A release workflow shaped like the real one.
+
+        Job-scoped now, so the fixture has to name the job cargo-dist emits;
+        a bare `jobs:\n  build:` no longer exercises the contract.
+        """
+        body = "jobs:\n  plan:\n    steps:\n      - run: dist plan\n"
+        body += "  build-local-artifacts:\n    steps:\n"
+        if step:
+            body += "      - name: Install Rust\n"
+            body += "        if: ${{ matrix.container }}\n"
+            body += f"        {step}\n"
+        else:
+            body += "      - run: dist build\n"
+        return body
+
+
+    def test_missing_step_in_the_generated_workflow_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n",
+                encoding="utf-8",
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": "jobs:\n  build:\n"},
+                root,
+            )
+            self.assertTrue(
+                any("ironclaw-release.yml" in e for e in errors), errors
+            )
+
+    def test_missing_step_in_the_fragment_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                "- name: Something else\n", encoding="utf-8"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": self.release(self.STEP)},
+                root,
+            )
+            self.assertTrue(
+                any("dist-build-setup.yml" in e for e in errors), errors
+            )
+
+    def test_both_present_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                [],
+                validate_release_workflow_installs_rust(
+                    {".github/workflows/ironclaw-release.yml": self.release(self.STEP)},
+                    root,
+                ),
+            )
+
+    def test_a_changed_release_condition_is_rejected(self) -> None:
+        """The `if:` decides which matrix entries reach the composite at all.
+
+        Raised on review: the contract asserted the step TEXT existed and said
+        nothing about when it runs, so the condition could be narrowed,
+        widened, or dropped and nothing would notice — while the PR claimed
+        every Rust job reaches the composite.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n", encoding="utf-8"
+            )
+            wrong = (
+                "jobs:\n  build-local-artifacts:\n    steps:\n"
+                "      - name: Install Rust\n"
+                "        if: ${{ matrix.os == 'linux' }}\n"
+                f"        {self.STEP}\n"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": wrong}, root
+            )
+            self.assertTrue(
+                any("guards its Rust install with" in e for e in errors), errors
+            )
+
+    def test_an_unconditional_release_step_is_also_flagged(self) -> None:
+        """Widening is a deliberate edit too — it changes what gets built."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n", encoding="utf-8"
+            )
+            unguarded = (
+                "jobs:\n  build-local-artifacts:\n    steps:\n"
+                f"      - {self.STEP}\n"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": unguarded}, root
+            )
+            self.assertTrue(any("<unconditional>" in e for e in errors), errors)
+
+    def test_the_fragment_condition_must_match_the_generated_workflow(self) -> None:
+        """Drift between the two is what regeneration would silently apply."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.os }}}}\n  {self.STEP}\n", encoding="utf-8"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": self.release(self.STEP)},
+                root,
+            )
+            self.assertTrue(
+                any("dist-build-setup.yml" in e for e in errors), errors
+            )
+
+    def test_uses_before_if_is_still_read_as_conditional(self) -> None:
+        """YAML mapping keys are unordered; `uses:` may precede `if:`.
+
+        The first version of this check scanned only the lines ABOVE the
+        composite `uses:` line, so a step written in that order reported
+        `<unconditional>` and would have rejected a correct release workflow —
+        a false positive on the release path.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- {self.STEP}\n  if: ${{{{ matrix.container }}}}\n", encoding="utf-8"
+            )
+            reordered = (
+                "jobs:\n  build-local-artifacts:\n    steps:\n"
+                "      - name: Install Rust\n"
+                f"        {self.STEP}\n"
+                "        if: ${{ matrix.container }}\n"
+            )
+            self.assertEqual(
+                [],
+                validate_release_workflow_installs_rust(
+                    {".github/workflows/ironclaw-release.yml": reordered}, root
+                ),
+            )
+
+    def test_a_neighbouring_steps_condition_is_not_borrowed(self) -> None:
+        """Bounding matters in the other direction too."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".github").mkdir()
+            (root / ".github" / "dist-build-setup.yml").write_text(
+                f"- if: ${{{{ matrix.container }}}}\n  {self.STEP}\n", encoding="utf-8"
+            )
+            borrowed = (
+                "jobs:\n  build-local-artifacts:\n    steps:\n"
+                "      - name: Something else\n"
+                "        if: ${{ matrix.container }}\n"
+                "        run: echo hi\n"
+                f"      - {self.STEP}\n"
+            )
+            errors = validate_release_workflow_installs_rust(
+                {".github/workflows/ironclaw-release.yml": borrowed}, root
+            )
+            self.assertTrue(any("<unconditional>" in e for e in errors), errors)
+
+    def test_the_live_release_lane_reaches_the_composite(self):
+        workflows = ws12_workflow_contracts.load_workflows(ROOT)
+        self.assertEqual([], validate_release_workflow_installs_rust(workflows, ROOT))
+
+
+class ToolchainPinSyncTests(unittest.TestCase):
+    """rust-toolchain.toml and the composite's default must name one version."""
+
+    def _root(self, toolchain_text: str | None, action_text: str | None) -> Path:
+        tmp = Path(tempfile.mkdtemp())
+        if toolchain_text is not None:
+            (tmp / "rust-toolchain.toml").write_text(toolchain_text)
+        action_dir = tmp / ".github" / "actions" / "setup-rust"
+        action_dir.mkdir(parents=True)
+        if action_text is not None:
+            (action_dir / "action.yml").write_text(action_text)
+        return tmp
+
+    ACTION_OK = (
+        "inputs:\n"
+        "  toolchain:\n"
+        "    default: \"1.98.0\"\n"
+    )
+    FILE_OK = '[toolchain]\nchannel = "1.98.0"\ncomponents = ["clippy", "rustfmt"]\n'
+
+    def test_missing_file_fails(self):
+        errors = validate_toolchain_pin_sync(self._root(None, self.ACTION_OK))
+        self.assertTrue(any("rust-toolchain.toml" in e for e in errors))
+
+    def test_mismatched_default_fails(self):
+        action = self.ACTION_OK.replace("1.98.0", "1.97.0")
+        errors = validate_toolchain_pin_sync(self._root(self.FILE_OK, action))
+        self.assertTrue(any("1.97.0" in e for e in errors))
+
+    def test_matching_default_passes(self):
+        errors = validate_toolchain_pin_sync(self._root(self.FILE_OK, self.ACTION_OK))
+        self.assertEqual([], errors)
+
+    def test_a_reordered_earlier_input_with_a_non_empty_default_cannot_hide_drift(
+        self,
+    ):
+        """A whole-file `re.search` for the first `default: "..."` resolves
+        to whichever input happens to come first — today that is `toolchain`
+        only because every other input's default is empty and sits after it.
+        Add an earlier input with a non-empty default that happens to equal
+        the pinned channel while `toolchain` itself has drifted: an unscoped
+        search would find the decoy default, see it match, and report no
+        drift at all — exactly the silent-pass this contract exists to rule
+        out."""
+        action = (
+            "inputs:\n"
+            '  components:\n'
+            '    default: "1.98.0"\n'
+            "  toolchain:\n"
+            '    default: "1.97.0"\n'
+        )
+        errors = validate_toolchain_pin_sync(self._root(self.FILE_OK, action))
+        self.assertTrue(any("1.97.0" in e for e in errors), errors)
+
+
+class LoadWorkflowsTests(unittest.TestCase):
+    """Every workflow contract runs on load_workflows()'s output — a file it
+    fails to discover is invisible to every one of them, silently, since
+    nothing iterates the directory a second way to notice the gap."""
+
+    def test_discovers_both_yml_and_yaml_extensions(self):
+        tmp = Path(tempfile.mkdtemp())
+        workflows_dir = tmp / ".github" / "workflows"
+        workflows_dir.mkdir(parents=True)
+        (workflows_dir / "a.yml").write_text("name: a\n")
+        (workflows_dir / "b.yaml").write_text("name: b\n")
+        loaded = ws12_workflow_contracts.load_workflows(tmp)
+        self.assertEqual(
+            loaded,
+            {
+                ".github/workflows/a.yml": "name: a\n",
+                ".github/workflows/b.yaml": "name: b\n",
+            },
+        )
 
 
 class SccacheSetupActionContractTests(unittest.TestCase):
@@ -475,6 +1489,16 @@ class CrateScopeFilterSabotageTests(unittest.TestCase):
 
     def test_checked_in_scope_filters_pass(self) -> None:
         self.assertEqual(validate_crate_scope_filters(self.workflows, ROOT), [])
+
+    def test_has_code_covers_the_toolchain_pin_and_its_own_guard(self) -> None:
+        """validate_toolchain_pin_sync() only runs inside fast-checks, gated
+        on has_code || has_guidance. A PR touching only rust-toolchain.toml or
+        the setup-rust composite — exactly the two files the sync guard
+        exists to police — must still set has_code=true, or the guard never
+        fires for its own governed diff."""
+        has_code = next(f for f in CRATE_SCOPE_FILTERS if f.name == "has_code")
+        self.assertIn("rust-toolchain.toml", has_code.in_scope)
+        self.assertIn(".github/actions/setup-rust/action.yml", has_code.in_scope)
 
     def test_has_docs_trigger_is_pinned(self) -> None:
         """The docs publication gate rides its own trigger: docs-only PRs have

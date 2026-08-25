@@ -18,10 +18,10 @@
 
 1. **D-F5 carousel gate** ⚠ — the guard for when the carousel returns. Gate the landing carousel behind DEV / a feature flag (or an empty-projection read) so it never exposes mock "done for you" cards to real users. The earlier prototype's *ungated* mock path is exactly what got it rolled back — the first implementation PR that re-adds the carousel must ship it gated.
 2. **Contract reconciliation — ✅ done in this PR.** [AUTOMATION-TASKS-CONTRACT.md](AUTOMATION-TASKS-CONTRACT.md) now reflects the post-#6918 family-folder names: event log `ironclaw_event_log` + durable store `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `crates/product/ironclaw_assistant`; routes in `crates/product/ironclaw_webui/src/webui_v2/` (confirmed current). Docs-only.
-3. **Decision round #1** `[decision]` — close PROPOSAL §10 items 2 (suggestion producer), 4 (carousel gating), 5 (DESIGN.md pilot). One thread each.
-4. **(Optional) D-F6 seed** — land a first-draft `DESIGN.md` capturing the v2 token system + card taxonomy, if the pilot is approved. Docs-only, unblocks design review of later phases.
+3. **Decision round #1** `[decision]` — close PROPOSAL §10 items 2 (suggestion producer) and 4 (carousel gating). One thread each. *(Item 5, the DESIGN.md pilot, is settled — see below.)*
+4. **D-F6 — nothing to seed here.** `DESIGN.md` and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PROPOSAL §5.6); OOBE's contribution is its card taxonomy + a11y floors, offered into that program's `DESIGN.md` (the Phase-2 work tracked by issue #7042, under Epic #7781) rather than a local draft.
 
-*Exit criteria: the carousel-gate approach decided; contract reconciled (done); §10.2/§10.4/§10.5 decided. (Implementation is landing behind an off-by-default flag; the docs remain mergeable.)*
+*Exit criteria: the carousel-gate approach decided; contract reconciled (done); §10.2/§10.4 decided (§10.5 settled — governance owned elsewhere). (Implementation is landing behind an off-by-default flag; the docs remain mergeable.)*
 
 ## Phase F1 — Automation-task backend (D-F1) — the leverage phase
 
@@ -53,12 +53,12 @@
 - Add the **first-run onboarding CUJ** (PROPOSAL §8.4) to the regression baseline: fresh user → cards → connect → approve → card flips to done → appears in `/automations`.
 - **Milestone:** Foundational is feature-complete and demoable on a fresh account; the carousel gate (D-F5) is retired — the projection is the truth.
 
-## Phase F5 — Design track productionization (D-F6) — optional, parallel
+## Phase F5 — Design track pilot (D-F6) — optional, parallel
 
-*Runs alongside F1–F4 if the pilot is approved (§10.5).*
+*Runs alongside F1–F4. ✎ **2026-08-21:** `DESIGN.md`, tokens and the Storybook workbench are **not** built here — they are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257; Phase 1 under Epic #7038 as PR #7750 · Phases 2–3 under Epic #7781, issue #7042 tracking the Phase-2 `DESIGN.md` work). What is left in F5 is OOBE's pilot contribution (PROPOSAL §5.6).*
 
-- Finalize `DESIGN.md` (principles, theming, typography, a11y floors, card component taxonomy, REJECT list).
-- Optionally stand up a Storybook workbench for the pure Tier-2/3 card components (card, action bar, drawer, mode pill): smoke play test + token/CSS check + one story per state (PROPOSAL §8.3).
+- Contribute the OOBE card taxonomy + a11y floors **into** that program's `DESIGN.md` rather than seeding a parallel one.
+- Add stories for the pure Tier-2/3 card components (card, action bar, drawer, mode pill) to the Phase-1 catalog once it lands: smoke play test + token/CSS check + one story per state (PROPOSAL §8.3).
 - **Milestone:** the OOBE component family is the design-governance pilot; the validation gate is enforceable on future card work.
 
 ---

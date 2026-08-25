@@ -1,5 +1,6 @@
 import { useT } from "../../../lib/i18n";
 import { Panel } from "../../../design-system/primitives";
+import { Skeleton } from "../../../design-system/skeleton";
 import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 import { WorkspaceBreadcrumb } from "./workspace-breadcrumb";
 
@@ -21,8 +22,8 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
   if (isLoading) {
     return (
       <div className="space-y-4">
-        <div className="v2-skeleton h-16 rounded-xl" />
-        <div className="v2-skeleton h-[460px] rounded-xl" />
+        <Skeleton className="h-16 rounded-xl" />
+        <Skeleton className="h-[460px] rounded-xl" />
       </div>
     );
   }

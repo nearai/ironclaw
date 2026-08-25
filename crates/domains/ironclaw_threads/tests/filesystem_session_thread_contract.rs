@@ -7494,6 +7494,7 @@ fn filesystem_prepared_request(label: &str, key: &str) -> ironclaw_threads::Prep
                 max_capability_invocations: None,
                 max_wall_clock_seconds: None,
             },
+            require_no_approval: false,
         },
         idempotency_key: key.to_string(),
         thread_id: ThreadId::new(format!("unbound-{key}")).expect("thread id"),

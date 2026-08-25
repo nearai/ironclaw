@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import { SearchField } from "../../../design-system/search-field";
 import React from "react";
 import { useT } from "../../../lib/i18n";
@@ -168,15 +169,13 @@ export function SettingsToolbar({
         <div className="text-xs font-medium text-iron-400">{t("settings.manageJson")}</div>
         {message &&
         (
-          <div
-            role="status"
-            className={[
-              "mt-1 text-xs",
-              message.tone === "error" ? "text-red-200" : "text-mint",
-            ].join(" ")}
+          <InlineNotice
+            tone={message.tone === "error" ? "danger" : "success"}
+            role={message.tone === "error" ? "alert" : "status"}
+            className="mt-2"
           >
             {message.text}
-          </div>
+          </InlineNotice>
         )}
       </div>
     </div>

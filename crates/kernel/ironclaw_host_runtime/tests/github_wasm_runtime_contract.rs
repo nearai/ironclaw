@@ -820,11 +820,175 @@ async fn host_runtime_services_routes_google_docs_wasm_get_document_with_scoped_
     assert_eq!(requests[0].method, NetworkMethod::Get);
     assert_eq!(
         requests[0].url,
-        "https://docs.googleapis.com/v1/documents/doc-1"
+        "https://docs.googleapis.com/v1/documents/doc-1?includeTabsContent=true"
     );
     assert_eq!(requests[0].body, Vec::<u8>::new());
     assert_eq!(requests[0].policy, policy);
     assert_google_bearer_header(&requests[0], "ya29.fake_fixture_token");
+}
+
+#[tokio::test]
+async fn host_runtime_services_routes_google_docs_semantic_inspection_through_bundled_wasm() {
+    let capability_id = CapabilityId::new("google-docs.inspect_document").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_policy("docs.googleapis.com");
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{
+            "documentId":"doc-1",
+            "title":"Plan",
+            "revisionId":"r7",
+            "body":{"content":[
+                {"startIndex":1,"endIndex":6,"paragraph":{"elements":[{"textRun":{"content":"Plan\n"}}]}},
+                {"startIndex":6,"endIndex":15,"table":{"tableRows":[{"tableCells":[
+                    {"startIndex":7,"endIndex":11,"content":[{"startIndex":8,"paragraph":{"elements":[{"textRun":{"content":"Owner\n"}}]}}]},
+                    {"startIndex":11,"endIndex":14,"content":[{"startIndex":12,"paragraph":{"elements":[{"textRun":{"content":"Ada\n"}}]}}]}
+                ]}]}}
+            ]}
+        }"#
+        .to_vec(),
+    );
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("google_docs_inspect_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/documents.readonly".to_string()];
+    let services = google_wasm_services_for_test!(
+        "google-docs",
+        policy.clone(),
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+        required_scopes,
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.semantic_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"document_id": "doc-1"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["elements"][0]["kind"], json!("paragraph"));
+            assert_eq!(completed.output["elements"][1]["kind"], json!("table"));
+            assert_eq!(
+                completed.output["elements"][1]["rows"][0][1]["text"],
+                json!("Ada\n")
+            );
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://docs.googleapis.com/v1/documents/doc-1?includeTabsContent=true"
+    );
+    assert_eq!(requests[0].policy, policy);
+    assert_google_bearer_header(&requests[0], "ya29.semantic_fixture_token");
+}
+
+#[tokio::test]
+async fn google_docs_semantic_writes_reject_missing_revision_before_batch_update() {
+    let cases = [
+        (
+            "google-docs.apply_text_edits",
+            json!({
+                "document_id": "doc-1",
+                "edits": [{"find": "old", "replace": "new"}],
+            }),
+            "apply_text_edits",
+        ),
+        (
+            "google-docs.create_table_with_data",
+            json!({
+                "document_id": "doc-1",
+                "index": 1,
+                "table_data": [["Owner", "Status"], ["Ada", "Ready"]],
+            }),
+            "create_table_with_data",
+        ),
+    ];
+
+    for (capability_name, arguments, operation) in cases {
+        let capability_id = CapabilityId::new(capability_name).unwrap();
+        let scope = sample_scope(InvocationId::new());
+        let policy = google_policy("docs.googleapis.com");
+        let network = RecordingNetworkHttpEgress::with_body(
+            br#"{
+                "documentId":"doc-1",
+                "body":{"content":[{
+                    "startIndex":1,
+                    "endIndex":5,
+                    "paragraph":{"elements":[{"textRun":{"content":"old\n"}}]}
+                }]}
+            }"#
+            .to_vec(),
+        );
+        let secret_store = Arc::new(SecretStore::ephemeral());
+        let account_access_secret = SecretHandle::new(format!("{operation}_access")).unwrap();
+        let required_scopes = vec!["https://www.googleapis.com/auth/documents".to_string()];
+        let services = google_wasm_services_for_test!(
+            "google-docs",
+            policy.clone(),
+            network.clone(),
+            Arc::clone(&secret_store),
+            account_access_secret.clone(),
+            required_scopes,
+        );
+        secret_store
+            .put(
+                scope.clone(),
+                account_access_secret,
+                SecretMaterial::from("ya29.missing_revision_fixture_token"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let outcome = services
+            .host_runtime_for_local_testing()
+            .invoke_capability(wasm_runtime_request_for_scope(
+                capability_id,
+                scope,
+                arguments,
+            ))
+            .await
+            .unwrap();
+
+        let failure = match outcome {
+            RuntimeCapabilityOutcome::Failed(failure) => failure,
+            other => panic!("{operation}: expected failed outcome, got {other:?}"),
+        };
+        assert_eq!(failure.kind, FailureKind::OperationFailed, "{failure:?}");
+        let message = failure.message.as_deref().unwrap_or_default();
+        assert!(
+            message.contains(&format!("{operation} requires a document revision")),
+            "{failure:?}"
+        );
+
+        let requests = network.requests();
+        assert_eq!(requests.len(), 1, "{operation}: {requests:?}");
+        assert_eq!(requests[0].method, NetworkMethod::Get);
+        assert_eq!(
+            requests[0].url,
+            "https://docs.googleapis.com/v1/documents/doc-1?includeTabsContent=true"
+        );
+        assert_eq!(requests[0].policy, policy);
+    }
 }
 
 #[tokio::test]

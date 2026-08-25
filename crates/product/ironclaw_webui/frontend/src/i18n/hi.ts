@@ -89,7 +89,6 @@ registerPack("hi", {
   "status.checking": "जांच हो रही है",
 
   // Login page
-  "login.tagline": "Gateway v2",
   "login.hero": "ऑपरेटर ट्रेल खोए बिना लोकल एजेंट कंट्रोल।",
   "login.heroSub": "टोकन एक्सेस ब्राउज़र कंसोल को उसी गेटवे runtime, approvals, tools और thread state से जोड़ता है।",
   "login.bearerAuth": "बियरर ऑथ",

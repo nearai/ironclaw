@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WebUI Design System — Proposal Review</title>
+<style>
+  :root {
+    --bg: #faf9fe; --surface: #ffffff; --surface-2: #f3f1fb; --text: #16151c;
+    --text-dim: #5c5768; --border: #e6e2f2; --accent: #6b4eff; --accent-soft: #ece7ff;
+    --accent-strong: #5636e8;
+    --spark: #c9146d; --on-spark: #ffffff; --good: #0a6e4b; --good-soft: #e0f3ec;
+    --plan: #5d5869; --plan-soft: #efedf5;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --radius: 14px; --maxw: 940px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #100f15; --surface: #191822; --surface-2: #211f2c; --text: #ecebf3;
+      --text-dim: #a29cb2; --border: #2c2938; --accent: #9a86ff; --accent-soft: #241f3a;
+      --accent-strong: #b3a3ff;
+      --spark: #ff6fb0; --on-spark: #16151c; --good: #34d399; --good-soft: #123026;
+      --plan: #9a94a8; --plan-soft: #23212e;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #faf9fe; --surface: #ffffff; --surface-2: #f3f1fb; --text: #16151c;
+    --text-dim: #5c5768; --border: #e6e2f2; --accent: #6b4eff; --accent-soft: #ece7ff;
+    --accent-strong: #5636e8;
+    --spark: #c9146d; --on-spark: #ffffff; --good: #0a6e4b; --good-soft: #e0f3ec;
+    --plan: #5d5869; --plan-soft: #efedf5;
+  }
+  :root[data-theme="dark"] {
+    --bg: #100f15; --surface: #191822; --surface-2: #211f2c; --text: #ecebf3;
+    --text-dim: #a29cb2; --border: #2c2938; --accent: #9a86ff; --accent-soft: #241f3a;
+    --accent-strong: #b3a3ff;
+    --spark: #ff6fb0; --on-spark: #16151c; --good: #34d399; --good-soft: #123026;
+    --plan: #9a94a8; --plan-soft: #23212e;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.6; -webkit-font-smoothing: antialiased;
+    padding: 0 20px 72px;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; }
+
+  .eyebrow { font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 10px; }
+  h1 { font-size: clamp(28px, 5vw, 44px); line-height: 1.08; letter-spacing: -0.02em;
+    margin: 0 0 14px; text-wrap: balance; font-weight: 680; }
+  h2 { font-size: 13px; font-family: var(--mono); letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--text-dim); margin: 0 0 18px; font-weight: 600; }
+  h3 { font-size: 17px; letter-spacing: -0.01em; margin: 0 0 6px; font-weight: 640; }
+  p { margin: 0 0 14px; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-soft); }
+  a:hover { border-bottom-color: var(--accent); }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  code { font-family: var(--mono); font-size: 0.88em; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+  .lede { font-size: clamp(17px, 2.4vw, 20px); color: var(--text); max-width: 62ch; }
+
+  .topbar { display: flex; justify-content: flex-end; padding: 16px 0 0; }
+  .toggle { font-family: var(--mono); font-size: 12px; color: var(--text-dim); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 999px; padding: 6px 12px; cursor: pointer; }
+  .toggle:hover { color: var(--text); border-color: var(--accent); }
+
+  .masthead { padding: 26px 0 30px; border-bottom: 1px solid var(--border); margin-bottom: 40px; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin-top: 22px;
+    font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+  .provenance { font-variant-numeric: tabular-nums; }
+
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px;
+    letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); }
+  .pill.good { color: var(--good); background: var(--good-soft); border-color: transparent; }
+  .pill.plan { color: var(--plan); background: var(--plan-soft); border-color: transparent; }
+  .pill.plan a { color: inherit; border-bottom-color: currentColor; }
+  .pill.spark { color: var(--on-spark); background: var(--spark); border-color: transparent; }
+
+  section { padding: 34px 0; border-top: 1px solid var(--border); }
+
+  .grid-2 { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 680px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 22px; }
+  .card .src { font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 10px; }
+  .card ul { margin: 10px 0 0; padding-left: 18px; color: var(--text-dim); font-size: 14.5px; }
+  .card li { margin-bottom: 6px; }
+  .card li b { color: var(--text); font-weight: 600; }
+
+  /* ── Diagram: layer map ── */
+  .diagram { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px; overflow-x: auto; }
+  .layermap { display: grid; grid-template-columns: 1.5fr 1fr; gap: 18px; align-items: center; min-width: 520px; }
+  @media (max-width: 680px) { .layermap { grid-template-columns: 1fr; min-width: 0; } }
+  .ladder { display: flex; flex-direction: column; }
+  .rung { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 11px 15px; font-size: 14px; }
+  .rung.accent { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+  .rung.tokens { font-family: var(--mono); font-size: 12.5px; }
+  .lad-arrow { text-align: center; color: var(--text-dim); font-family: var(--mono); font-size: 11px; padding: 5px 0; }
+  .rail { display: flex; flex-direction: column; gap: 12px; }
+  .rail .note { background: var(--accent-soft); border-radius: 10px; padding: 12px 14px; font-size: 13px; color: var(--text); }
+  .rail .note b { color: var(--accent); }
+
+  /* ── Diagram: phase flow ── */
+  .phaseflow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 520px; }
+  @media (max-width: 680px) { .phaseflow { min-width: 0; } }
+  .pchip { font-family: var(--mono); font-size: 12.5px; padding: 9px 14px; border-radius: 10px;
+    background: var(--surface); border: 1px solid var(--border); }
+  .pchip.done { border-color: var(--good); color: var(--good); }
+  .pchip.next { border-color: var(--accent); color: var(--accent); }
+  .conn { color: var(--text-dim); font-family: var(--mono); }
+
+  /* ── Diagram: dependency flow ── */
+  .depflow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 520px; }
+  @media (max-width: 680px) { .depflow { min-width: 0; } }
+  .depcol { display: flex; flex-direction: column; gap: 8px; }
+  .depnode { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 14px; font-size: 13px; text-align: center; }
+  .depnode.phase { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .depflow .conn { font-size: 20px; }
+  .crosscut { margin-top: 14px; font-size: 12.5px; color: var(--text-dim); font-family: var(--mono); }
+  .caption { font-size: 13px; color: var(--text-dim); margin-top: 12px; }
+
+  .phases { display: grid; gap: 12px; margin-top: 18px; }
+  .phase { display: grid; grid-template-columns: 46px 1fr auto; gap: 16px; align-items: start;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; }
+  .phase .num { font-family: var(--mono); font-size: 22px; font-weight: 600; color: var(--accent);
+    font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .phase .body p { margin: 4px 0 0; color: var(--text-dim); font-size: 14px; }
+  .phase.done { border-left: 3px solid var(--good); }
+  .phase.next { border-left: 3px solid var(--accent); }
+  @media (max-width: 520px) { .phase { grid-template-columns: 36px 1fr; } .phase .pill { grid-column: 2; justify-self: start; } }
+
+  .dep { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; }
+  .dep-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .dep-head h3 { margin: 0; }
+  .dep .prop { font-size: 14px; color: var(--text-dim); margin: 0; }
+  .dep .prop b { color: var(--text); font-weight: 600; }
+  .gate { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-strong); white-space: nowrap; }
+
+  .dep .owner { font-size: 12.5px; color: var(--text-dim); margin: 8px 0 0; font-family: var(--mono); }
+  .dep .owner b { color: var(--text); font-weight: 600; }
+
+  .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--radius);
+    background: var(--surface); padding: 14px 18px; margin: 18px 0 0; font-size: 14px; color: var(--text-dim); }
+  .callout b { color: var(--text); font-weight: 600; }
+
+  table.docs { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  table.docs th, table.docs td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.docs th { font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
+  table.docs td.file { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
+
+  ol.review { counter-reset: step; list-style: none; padding: 0; margin: 22px 0 0; }
+  ol.review li { counter-increment: step; position: relative; padding: 6px 0 6px 40px; color: var(--text-dim); }
+  ol.review li::before { content: counter(step); position: absolute; left: 0; top: 4px; font-family: var(--mono);
+    font-size: 12px; width: 26px; height: 26px; display: grid; place-items: center; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
+  ol.review li b { color: var(--text); font-weight: 600; }
+
+  .footer { margin-top: 44px; padding-top: 22px; border-top: 1px solid var(--border);
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar"><button class="toggle" id="themeToggle" type="button" aria-label="Toggle color theme">☾ Dark</button></div>
+
+  <header class="masthead">
+    <p class="eyebrow">Proposal · Review aid · WebUI design-system program</p>
+    <h1>WebUI Design System — Storybook &amp; Catalog</h1>
+    <p class="lede">A <b>governed, catalogued</b> design system that carries IronClaw to an AI/agentic-first UX — realized natively on React&nbsp;19 + Tailwind&nbsp;v4, reviewed and regression-tested through Storybook, and delivered in <b>five predefined phases</b>.</p>
+    <div class="meta-row">
+      <span class="pill spark">Docs-only proposal</span>
+      <span class="provenance">authored against origin/main @ d3791e0f8</span>
+      <span>·</span>
+      <span>benchmarks: APDD kit (external) + PR #6918</span>
+    </div>
+    <div class="callout">
+      <b>Read this page as a review aid, not a record.</b> Phase→Epic ownership is defined once, in
+      <a href="README.md#epic-ownership-canonical">README.md</a>; the pills below only echo it.
+      And <b>Phases 1–2 are not on <code>main</code></b> — Phase 1 is in review (PR #7750), Phase 2 is prepared
+      but has no open PR (#7042), so every DESIGN.md / Storybook reference here describes what those phases land.
+    </div>
+  </header>
+
+  <section style="border-top:none;padding-top:0">
+    <h2>What this follows — the two benchmarks</h2>
+    <div class="grid-2">
+      <div class="card">
+        <div class="src">APDD governance kit — external, not vendored</div>
+        <h3>How it should be governed</h3>
+        <ul>
+          <li><b>Docs are the source of truth</b> — DESIGN.md + the catalog govern how UI is built.</li>
+          <li><b>DESIGN.md constitution</b> + a 5-tier taxonomy (Tokens → Elements → Components → Patterns → Layouts).</li>
+          <li><b>Storybook = workbench + test-harness + agent MCP.</b></li>
+          <li><b>Path-scoped agent rules</b> and a design validation / REJECT gate.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="src">PR #6918 — target architecture</div>
+        <h3>How it should be framed</h3>
+        <ul>
+          <li><b>README / PROPOSAL / PLAN / CHECKLIST</b> quartet + this interactive explorer.</li>
+          <li><b>Provenance shas</b>, phased <b>waves with milestones</b>, <b>⚠ ordering constraints</b>.</li>
+          <li><b>"Landed with #NNNN"</b> on completed checklist items.</li>
+          <li>A PR body with a <b>File → Role</b> index table.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where the design system lives</h2>
+    <p class="caption" style="margin-top:0">Every <b>rung</b> is relative to <code>crates/product/ironclaw_webui/frontend/src/</code>. The governance notes beside it are not: <code>DESIGN.md</code> lands at <code>crates/product/ironclaw_webui/frontend/DESIGN.md</code> and <code>.claude/rules/design-system.md</code> at the repository root.</p>
+    <div class="diagram">
+      <div class="layermap">
+        <div class="ladder">
+          <div class="rung">pages/ — feature views</div>
+          <div class="lad-arrow">↓ depends on</div>
+          <div class="rung">layout/ — app shell</div>
+          <div class="lad-arrow">↓</div>
+          <div class="rung">components/ — shared composites</div>
+          <div class="lad-arrow">↓</div>
+          <div class="rung accent">design-system/ — primitives + composites</div>
+          <div class="lad-arrow">↓</div>
+          <div class="rung tokens">styles/app.css — @theme + --v2-* · data-theme light/dark</div>
+        </div>
+        <aside class="rail">
+          <div class="note"><b>DESIGN.md</b> is the tool-neutral constitution — reachable from <b>AGENTS.md</b>, the repo's canonical agent contract; <b>.claude/rules/design-system.md</b> is the Claude-specific adapter that points at it, never a replacement. Together they govern the design-system + tokens <i>(lands with Phase 2 — not on <code>main</code>)</i></div>
+          <div class="note"><b>Storybook</b> catalog + story tests → catalog &amp; regression-test design-system + components <i>(lands with Phase 1 — in review)</i></div>
+        </aside>
+      </div>
+    </div>
+    <p class="caption">Native M3X: the language is applied to our own React/Tailwind primitives and <code>--v2-*</code> tokens — no Material Web <code>&lt;md-*&gt;</code> components, no parallel framework.</p>
+  </section>
+
+  <section>
+    <h2>The five phases</h2>
+    <div class="diagram">
+      <div class="phaseflow">
+        <span class="pchip next">1 · Storybook</span><span class="conn">→</span>
+        <span class="pchip next">2 · DESIGN.md</span><span class="conn">→</span>
+        <span class="pchip next">3 · Theme &amp; reskin</span><span class="conn">→</span>
+        <span class="pchip">4 · Interactions</span><span class="conn">→</span>
+        <span class="pchip">5 · IA</span>
+      </div>
+    </div>
+    <div class="phases">
+      <div class="phase next">
+        <div class="num">1</div>
+        <div class="body"><h3>Storybook integration + catalog</h3>
+          <p>Storybook 10 wired to app.css; ~33 stories in five categories; vitest split; addon-mcp.</p></div>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7038</a> · PR #7750 in review</span>
+      </div>
+      <div class="phase next">
+        <div class="num">2</div>
+        <div class="body"><h3>DESIGN.md governance &amp; guidelines</h3>
+          <p>DESIGN.md constitution + appendix, Storybook Design/Guidelines page, agent rules.</p></div>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7781</a> · #7042 · PR to follow</span>
+      </div>
+      <div class="phase next">
+        <div class="num">3</div>
+        <div class="body"><h3>Theme update &amp; UI reskin</h3>
+          <p>M3 → --v2-* token values (light + dark) + assets; primitives reskinned, validated in Storybook.</p></div>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7781</a> · Planned</span>
+      </div>
+      <div class="phase">
+        <div class="num">4</div>
+        <div class="body"><h3>Interaction &amp; component updates</h3>
+          <p>Agentic components + expressive, reduced-motion-gated interactions.</p></div>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7782</a> · Planned</span>
+      </div>
+      <div class="phase">
+        <div class="num">5</div>
+        <div class="body"><h3>Information architecture</h3>
+          <p>Navigation / routes / page structure foregrounding agentic workflows.</p></div>
+        <span class="pill plan"><a href="README.md#epic-ownership-canonical">Epic #7782</a> · Planned</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Dependencies &amp; how we meet them</h2>
+    <div class="diagram">
+      <div class="depflow">
+        <div class="depcol">
+          <div class="depnode">Dark palette</div>
+          <div class="depnode">WCAG contrast</div>
+          <div class="depnode">Fonts / licensing</div>
+        </div>
+        <span class="conn">→</span>
+        <div class="depcol"><div class="depnode phase">Phase 3<br />token values</div></div>
+        <span class="conn">→</span>
+        <div class="depcol">
+          <div class="depnode phase">Phase 4<br />agentic components</div>
+          <div class="depnode">↑ Animation + reduced-motion</div>
+        </div>
+      </div>
+      <div class="crosscut">Cross-cutting: CI Playwright/Chromium (test:storybook) · MSW for network stories</div>
+      <div class="callout"><b>Accountability rule.</b> A dependency's owner is the Epic carrying its gating phase; the accountable individual is the assignee of that Epic's dependency sub-issue, which must be cut and assigned <b>before the gating phase's first PR opens</b>. Every <b>[decision]</b> needs a named caller recorded on the owning Epic. See <a href="PROPOSAL.md#7-dependencies-and-their-implementation-proposals">PROPOSAL §7</a>.</div>
+    </div>
+    <div class="phases">
+      <div class="dep"><div class="dep-head"><h3>Dark palette derivation</h3><span class="gate">Gates Phase 3</span></div>
+        <p class="prop"><b>Proposal:</b> derive dark values per token by tonal shift (not inversion) in <code>:root[data-theme="dark"]</code>; validate in the Tokens/Colors story.</p><p class="owner"><b>Owner:</b> Epic #7781 · Phase-3a token-foundation PR author</p></div>
+      <div class="dep"><div class="dep-head"><h3>WCAG AA contrast</h3><span class="gate">Gates Phase 3</span></div>
+        <p class="prop"><b>Proposal:</b> validate every text/token pairing for the high-chroma palette; the Tokens story asserts computed contrast before adoption.</p><p class="owner"><b>Owner:</b> Epic #7781 · standing invariant, carried by the palette owner</p></div>
+      <div class="dep"><div class="dep-head"><h3>Fonts &amp; licensing</h3><span class="gate">Gates Phase 3</span></div>
+        <p class="prop"><b>Proposal:</b> vendor Roboto Flex + Roboto Mono (OFL); <b>drop Google Sans</b> (not freely redistributable) — [decision] needed on the substitute.</p><p class="owner"><b>Owner:</b> Epic #7781 · <b>[decision]</b> — substitute called on #7781 before Phase 3a</p></div>
+      <div class="dep"><div class="dep-head"><h3>Expressive motion</h3><span class="gate">Gates Phase 4</span></div>
+        <p class="prop"><b>Proposal:</b> a small spring lib or spring→bezier CSS, always opt-in and <code>prefers-reduced-motion</code>-gated — never bypassing the static-motion policy.</p><p class="owner"><b>Owner:</b> Epic #7782 · <b>[decision]</b> — mechanism called on #7782 before Phase 4a</p></div>
+      <div class="dep"><div class="dep-head"><h3>CI: Playwright/Chromium</h3><span class="gate">Cross-cutting</span></div>
+        <p class="prop"><b>Proposal:</b> an <b>optional, non-blocking</b> CI job runs <code>playwright install chromium</code> + <code>test:storybook</code>; promote to required only once stable.</p><p class="owner"><b>Owner:</b> Epic #7038 · CI-lane owner; <b>[decision]</b> to promote to required</p></div>
+      <div class="dep"><div class="dep-head"><h3>MSW for network stories</h3><span class="gate">Cross-cutting</span></div>
+        <p class="prop"><b>Proposal:</b> add msw + msw-storybook-addon for the two network-backed components' happy paths; keep deterministic cache-seeding elsewhere.</p><p class="owner"><b>Owner:</b> Epic #7782 · Phase-4 sub-issue assignee</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Ownership boundary</h2>
+    <p class="caption" style="margin-top:0">Design governance has exactly one owner. This package is it.</p>
+    <div class="callout">
+      <b>This package owns</b> <code>DESIGN.md</code>, the <code>--v2-*</code> token architecture, the Storybook
+      catalog / test-harness / MCP, and <code>.claude/rules/design-system.md</code>. Feature packages
+      <b>consume</b> that governance rather than re-proposing it — including
+      <code>docs/internal/design/oobe/</code>, whose <b>D-F6 “DESIGN.md + design tokens”</b> item is
+      <b>subsumed</b> here and keeps only its pilot role: the OOBE card family is catalogued
+      <i>through</i> this system. Full boundary, including the alternative call:
+      <a href="PROPOSAL.md#9-ownership-boundary-one-canonical-governance-record">PROPOSAL §9</a>.
+    </div>
+  </section>
+
+  <section>
+    <h2>Document map &amp; how to review</h2>
+    <div style="border:1px solid var(--border);border-radius:var(--radius);overflow-x:auto;background:var(--surface)">
+      <table class="docs">
+        <thead><tr><th>File</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td class="file"><a href="README.md">README.md</a></td><td>Executive north-star — shape, phase table, how to review.</td></tr>
+          <tr><td class="file"><a href="PROPOSAL.md">PROPOSAL.md</a></td><td>The case, invariants, alternatives, and §7 dependencies with implementation proposals.</td></tr>
+          <tr><td class="file"><a href="PLAN.md">PLAN.md</a></td><td>The five phases as waves — intent, milestones, ⚠ ordering, next PRs.</td></tr>
+          <tr><td class="file"><a href="CHECKLIST.md">CHECKLIST.md</a></td><td>Definition of done — workstreams WS1–WS7, "Landed with #NNNN", final gate.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ol class="review">
+      <li>Skim the <b>README</b> for the shape and the phase table.</li>
+      <li>Read <b>PROPOSAL §1–§4</b> (decision + alternatives) and <b>§7 (dependencies)</b> — that's where the risk lives.</li>
+      <li>Use this page for the schematics and phase map.</li>
+      <li>Challenge the <b>CHECKLIST</b> (right definition of done?) and argue <b>PLAN</b> sequencing.</li>
+    </ol>
+  </section>
+
+  <div class="footer">
+    docs/internal/reborn/design-system/ · phase→Epic ownership: <a href="README.md#epic-ownership-canonical">the canonical table in README.md</a> · Phase 1 PR #7750 (in review) · Phase 2 #7042 (prepared) · benchmarks: the APDD kit (external, not vendored — in-repo evaluation proposed on PR #7255) and docs/internal/reborn/target-architecture (PR #6918)
+  </div>
+
+</div>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var btn = document.getElementById("themeToggle");
+    function current() {
+      return root.dataset.theme
+        || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    }
+    function apply(t) {
+      root.dataset.theme = t;
+      btn.textContent = t === "dark" ? "☀ Light" : "☾ Dark";
+    }
+    apply(current());
+    btn.addEventListener("click", function () {
+      apply(current() === "dark" ? "light" : "dark");
+    });
+  })();
+</script>
+</body>
+</html>

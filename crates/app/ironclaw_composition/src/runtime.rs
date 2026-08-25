@@ -3905,6 +3905,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             lease_recovery_interval: default_runtime_config.lease_recovery_interval,
             worker_count: runner.worker_count,
             disabled_capability_ids: default_runtime_config.disabled_capability_ids,
+            unattended_denied_capability_ids: unattended_denied_capability_ids()?,
             text_only_driver: Default::default(),
             host: Default::default(),
             tool_disclosure: resolved_tool_disclosure,
@@ -5113,6 +5114,32 @@ fn validate_runtime_identity(
         source_binding_ref,
         reply_target_binding_ref,
     })
+}
+
+/// The mutating synthetic capabilities denied to an unattended run.
+///
+/// Why the list has to exist, and why it lives here rather than in the loop
+/// layer that enforces it: see
+/// `DefaultPlannedRuntimeConfig::unattended_denied_capability_ids`.
+///
+/// Derived by measurement, not inspection — with global auto-approve off these
+/// are the capabilities that survive because they bypass the surface policy.
+/// `tests/integration/suggestions.rs` pins the resulting set.
+fn unattended_denied_capability_ids() -> Result<Vec<CapabilityId>, RebornRuntimeError> {
+    [
+        ironclaw_assistant::PROJECT_CREATE_CAPABILITY_ID,
+        ironclaw_assistant::OUTBOUND_NOTIFICATION_CHANNELS_SET_CAPABILITY_ID,
+        ironclaw_loop_host::SKILL_ACTIVATE_CAPABILITY_ID,
+        ironclaw_memory::PROFILE_SET_CAPABILITY_ID,
+        ironclaw_host_runtime::TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
+    ]
+    .into_iter()
+    .map(|id| {
+        CapabilityId::new(id).map_err(|reason| RebornRuntimeError::InvalidArgument {
+            reason: format!("unattended-denied capability id: {reason}"),
+        })
+    })
+    .collect()
 }
 
 struct AllowAllCapabilitySurfaceResolver;

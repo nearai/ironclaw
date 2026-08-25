@@ -2,6 +2,8 @@ import { Navigate, useParams } from "react-router";
 import React from "react";
 import { ConfirmDialog } from "../../design-system/confirm-dialog";
 import { InlineNotice } from "../../design-system/inline-notice";
+import { Skeleton } from "../../design-system/skeleton";
+import { PageScroll, PageStack } from "../../layout/page-shell";
 import { useT } from "../../lib/i18n";
 import { ChannelsTab } from "./components/channels-tab";
 import { ConfigureModal } from "./components/configure-modal";
@@ -186,41 +188,37 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
 
   if (isLoading) {
     return (
-      <div className="flex h-full flex-col overflow-y-auto">
-        <div className="v2-page-entrance flex-1 p-4 sm:p-6">
-          <div className="space-y-5">
-            {[1, 2, 3].map(
-              (i) => (
-                <div
-                  key={i}
-                  className="flex items-center justify-between border-t border-white/[0.06] py-4 first:border-0"
-                >
-                  <div>
-                    <div className="v2-skeleton h-4 w-40 rounded" />
-                    <div className="v2-skeleton mt-2 h-3 w-56 rounded" />
-                  </div>
-                  <div className="v2-skeleton h-7 w-16 rounded-full" />
+      <PageScroll>
+        <PageStack>
+          {[1, 2, 3].map(
+            (i) => (
+              <div
+                key={i}
+                className="flex items-center justify-between border-t border-white/[0.06] py-4 first:border-0"
+              >
+                <div>
+                  <Skeleton className="h-4 w-40 rounded" />
+                  <Skeleton className="mt-2 h-3 w-56 rounded" />
                 </div>
-              )
-            )}
-          </div>
-        </div>
-      </div>
+                <Skeleton className="h-7 w-16 rounded-full" />
+              </div>
+            )
+          )}
+        </PageStack>
+      </PageScroll>
     );
   }
 
   const blockingError = tab === "registry" ? registryError : extensionsError;
   if (blockingError) {
     return (
-      <div className="flex h-full flex-col overflow-y-auto">
-        <div className="v2-page-entrance flex-1 p-4 sm:p-6">
-          <CatalogErrorBanner
-            isCatalogError={tab === "registry"}
-            isRefetching={isRefetching}
-            onRetry={refetch}
-          />
-        </div>
-      </div>
+      <PageScroll>
+        <CatalogErrorBanner
+          isCatalogError={tab === "registry"}
+          isRefetching={isRefetching}
+          onRetry={refetch}
+        />
+      </PageScroll>
     );
   }
 
@@ -259,56 +257,58 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   const secondaryError = tab === "registry" ? extensionsError : registryError;
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto">
-      <div className="v2-page-entrance flex-1 p-4 sm:p-6">
-        <div className="space-y-5">
-          <ActionNotice result={actionResult} onDismiss={clearResult} />
-          <div className="flex justify-end">
-            <button
-              type="button"
-              className="rounded-md bg-signal px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
-              onClick={() => setRegisteringCustomMcp(true)}
-            >
-              {t("extensions.addCustomMcp")}
-            </button>
-          </div>
-          {secondaryError &&
-          (<CatalogErrorBanner
+    <PageScroll
+      overlay={(
+        <>
+          {configuring &&
+          (
+            <ConfigureModal
+              extension={configuring}
+              onClose={handleCloseModal}
+              onSaved={handleSaved}
+              returnFocusTo={configureTriggerRef.current}
+            />
+          )}
+          <CustomMcpRegistrationModal
+            open={registeringCustomMcp}
+            onClose={() => setRegisteringCustomMcp(false)}
+            onRegister={registerCustomMcp}
+            isRegistering={isRegisteringCustomMcp}
+          />
+          <ConfirmDialog
+            open={Boolean(extensionToRemove)}
+            title={`${t("common.remove")}: ${
+              extensionToRemove?.displayName ||
+              extensionToRemove?.packageRef?.id ||
+              t("extensions.defaultName")
+            }`}
+            confirmLabel={t("common.remove")}
+            isConfirming={isRemoving}
+            onConfirm={handleConfirmRemove}
+            onCancel={() => setExtensionToRemove(null)}
+          />
+        </>
+      )}
+    >
+      <PageStack>
+        <ActionNotice result={actionResult} onDismiss={clearResult} />
+        <div className="flex justify-end">
+          <button
+            type="button"
+            className="rounded-md bg-signal px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+            onClick={() => setRegisteringCustomMcp(true)}
+          >
+            {t("extensions.addCustomMcp")}
+          </button>
+        </div>
+        {secondaryError &&
+        (<CatalogErrorBanner
             isCatalogError={tab !== "registry"}
             isRefetching={isRefetching}
             onRetry={refetch}
-          />)}
-          {tabContent[tab]}
-        </div>
-      </div>
-
-      {configuring &&
-      (
-        <ConfigureModal
-          extension={configuring}
-          onClose={handleCloseModal}
-          onSaved={handleSaved}
-          returnFocusTo={configureTriggerRef.current}
-        />
-      )}
-      <CustomMcpRegistrationModal
-        open={registeringCustomMcp}
-        onClose={() => setRegisteringCustomMcp(false)}
-        onRegister={registerCustomMcp}
-        isRegistering={isRegisteringCustomMcp}
-      />
-      <ConfirmDialog
-        open={Boolean(extensionToRemove)}
-        title={`${t("common.remove")}: ${
-          extensionToRemove?.displayName ||
-          extensionToRemove?.packageRef?.id ||
-          t("extensions.defaultName")
-        }`}
-        confirmLabel={t("common.remove")}
-        isConfirming={isRemoving}
-        onConfirm={handleConfirmRemove}
-        onCancel={() => setExtensionToRemove(null)}
-      />
-    </div>
+        />)}
+        {tabContent[tab]}
+      </PageStack>
+    </PageScroll>
   );
 }

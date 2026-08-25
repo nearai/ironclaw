@@ -21,7 +21,7 @@ function renderLoginPage({ providers = [], isLocalDev = true } = {}) {
     FormField: component("FormField"),
     Icon: component("Icon"),
     useInterfaceTheme: () => ({ theme: "dark", toggleTheme: () => {} }),
-    useT: () => (key) => key,
+    useT: () => (key) => (key === "login.tagline" ? "Gateway v2" : key),
     cn: (...classes) => classes.flat().filter(Boolean).join(" "),
     // A string component type remains visible in the serialized element tree,
     // allowing the layout assertion to verify the OAuth section itself.
@@ -44,6 +44,12 @@ function renderLoginPage({ providers = [], isLocalDev = true } = {}) {
   );
   return LoginPage({ onSubmit: () => {} });
 }
+
+test("login page does not render the retired Gateway v2 eyebrow", () => {
+  const serialized = JSON.stringify(renderLoginPage({ isLocalDev: false }));
+
+  assert.doesNotMatch(serialized, /Gateway v2/);
+});
 
 test("login page shows the local-dev status hint when no OAuth providers are configured on a local origin", () => {
   const rendered = renderLoginPage({ providers: [], isLocalDev: true });
