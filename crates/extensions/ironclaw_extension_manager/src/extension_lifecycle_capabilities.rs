@@ -34,8 +34,7 @@ use ironclaw_product_contracts::package_lifecycle::{
 use serde::Deserialize;
 
 use crate::install_guidance::{
-    DeviceLinkUserSetup, activate_device_link_notice, active_install_next_step,
-    resolve_device_link_user_setup,
+    DeviceLinkGuidance, personal_setup_link, resolve_device_link_user_setup,
 };
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
@@ -80,10 +79,12 @@ pub fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    setup_link_base_url: Option<String>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,
         credential_accounts,
+        setup_link_base_url,
     });
     for capability_id in EXTENSION_LIFECYCLE_HANDLER_IDS {
         registry.insert_handler(CapabilityId::new(capability_id)?, handler.clone());
@@ -214,6 +215,9 @@ fn lifecycle_origin_gate_matrix(id: &str) -> OriginGateMatrix {
 struct ExtensionLifecycleToolHandler {
     extension_management: Arc<RebornLocalExtensionManagementPort>,
     credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+    /// Public web origin the personal-account setup link is built from, or
+    /// `None` on a deployment that published none (guidance stays link-free).
+    setup_link_base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,15 +290,19 @@ impl ExtensionLifecycleToolHandler {
         &self,
         package_ref: &LifecyclePackageRef,
         scope: &ironclaw_host_api::resource::ResourceScope,
-    ) -> Result<DeviceLinkUserSetup, ProductOperationFailure> {
-        Ok(resolve_device_link_user_setup(
+    ) -> Result<DeviceLinkGuidance, ProductOperationFailure> {
+        let setup = resolve_device_link_user_setup(
             self.extension_management
                 .device_link_user_setup_requirement(package_ref)
                 .await?,
             Some(&self.credential_accounts),
             scope,
         )
-        .await)
+        .await;
+        Ok(DeviceLinkGuidance::new(
+            setup,
+            personal_setup_link(self.setup_link_base_url.as_deref(), package_ref.id.as_str()),
+        ))
     }
 }
 
@@ -459,10 +467,10 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
                         .device_link_user_setup(&package_ref, &request.scope)
                         .await
                         .map_err(lifecycle_error)?;
-                    if let Some(notice) = activate_device_link_notice(device_link_setup) {
+                    if let Some(notice) = device_link_setup.activate_notice() {
                         response.message = Some(match response.message.take() {
                             Some(message) => format!("{message} {notice}"),
-                            None => notice.to_string(),
+                            None => notice,
                         });
                     }
                 }
@@ -594,7 +602,7 @@ fn install_response_with_activation(
     mut install_response: LifecycleProductResponse,
     activation_response: &LifecycleProductResponse,
     caller_credentials_verified: bool,
-    device_link_setup: DeviceLinkUserSetup,
+    device_link_setup: DeviceLinkGuidance,
 ) -> LifecycleProductResponse {
     install_response.phase = activation_response.phase;
     install_response.blockers = activation_response.blockers.clone();
@@ -623,7 +631,7 @@ fn install_response_with_activation(
             *visible_capability_ids = activation_visible_capability_ids;
         }
         *next_step = if activation_response.phase == InstallationState::Active {
-            active_install_next_step(device_link_setup).to_string()
+            device_link_setup.next_step()
         } else {
             "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
         };
@@ -829,6 +837,7 @@ fn lifecycle_error(error: ProductOperationFailure) -> FirstPartyCapabilityError 
 
 #[cfg(test)]
 mod tests {
+    use crate::install_guidance::DeviceLinkUserSetup;
     fn installed_response() -> LifecycleProductResponse {
         LifecycleProductResponse::projection(
             Some(
@@ -1158,11 +1167,12 @@ mod tests {
             }),
         };
 
+        let setup_link = "https://webui.test/extensions?configure=telegram&setup=personal_account";
         let response = install_response_with_activation(
             install,
             &activation,
             false,
-            DeviceLinkUserSetup::Required,
+            DeviceLinkGuidance::new(DeviceLinkUserSetup::Required, Some(setup_link.to_string())),
         );
         match response.payload {
             Some(LifecycleProductPayload::ExtensionInstall { next_step, .. }) => {
@@ -1177,6 +1187,14 @@ mod tests {
                 assert!(
                     next_step.contains("link their personal account"),
                     "next_step must name the per-user link step: {next_step}"
+                );
+                // The hand-off this arm exists to close: a user reading this in
+                // a Telegram or Slack thread cannot render the device-link
+                // panel there, so prose alone leaves them to find the
+                // Extensions page unaided.
+                assert!(
+                    next_step.contains(setup_link),
+                    "next_step must hand the user the destination: {next_step}"
                 );
             }
             other => panic!("expected an install payload, got {other:?}"),
@@ -1212,7 +1230,7 @@ mod tests {
             install(),
             &activation,
             true,
-            DeviceLinkUserSetup::NotApplicable,
+            DeviceLinkGuidance::new(DeviceLinkUserSetup::NotApplicable, None),
         );
         let message = confirmed.message.expect("message");
         assert!(
@@ -1229,7 +1247,7 @@ mod tests {
             install(),
             &activation,
             false,
-            DeviceLinkUserSetup::NotApplicable,
+            DeviceLinkGuidance::new(DeviceLinkUserSetup::NotApplicable, None),
         );
         assert_eq!(
             unverified.message.as_deref(),

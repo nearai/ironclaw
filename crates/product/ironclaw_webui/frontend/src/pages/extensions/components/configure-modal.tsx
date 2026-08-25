@@ -44,6 +44,10 @@ export function ConfigureModal({
   onClose,
   onSaved,
   returnFocusTo,
+  // Preselects one of the two setup paths, so a `?setup=` deep link lands on
+  // the ceremony it named instead of the choice screen. `null` keeps the
+  // choice screen, which is what the Configure button has always shown.
+  initialConnection = null,
 }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
@@ -61,7 +65,7 @@ export function ConfigureModal({
   const [values, setValues] = React.useState({});
   const [hostedMcpAuthSelection, setHostedMcpAuthSelection] = React.useState(null);
   const [connectionChoice, setConnectionChoice] = React.useState(null);
-  const [activeConnection, setActiveConnection] = React.useState(null);
+  const [activeConnection, setActiveConnection] = React.useState(initialConnection);
   const queryClient = useQueryClient();
   const packageId =
     typeof extension?.packageRef === "string"

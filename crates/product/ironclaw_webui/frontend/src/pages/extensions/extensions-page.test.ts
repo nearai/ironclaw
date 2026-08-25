@@ -88,6 +88,9 @@ function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}
     PageStack,
     React: {
       useCallback: (fn) => fn,
+      // Identity-stable memoization is not what this harness measures; it
+      // renders once per assertion, so evaluating the factory is equivalent.
+      useMemo: (factory) => factory(),
       useEffect: (effect) => effect(),
       useRef: (initial) => {
         const index = hookCursor;
@@ -114,6 +117,10 @@ function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}
     html(strings, ...values) {
       return { strings: Array.from(strings), values };
     },
+    // The setup-link landing (`?configure=&setup=`) is covered end to end in
+    // `hooks/useSetupLanding.test.tsx`; this harness only needs the page to
+    // render when no link was followed.
+    useExtensionSetupLanding: () => ({ setupPath: null }),
     useExtensions: () => ({
       status: {},
       channels: [],

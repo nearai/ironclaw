@@ -11,6 +11,7 @@ import { CustomMcpRegistrationModal } from "./components/custom-mcp-registration
 import { ToolsTab } from "./components/tools-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
+import { useExtensionSetupLanding } from "./hooks/useSetupLanding";
 import type { ConfigureFocusHandler } from "./lib/focus-target";
 import type { FocusTarget } from "./lib/focus-target";
 import type { FocusTargetResolver } from "./lib/focus-target";
@@ -161,6 +162,19 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     },
     [handleConfigure, install]
   );
+  // A device-link setup link (`?configure=<id>&setup=personal_account`) opens
+  // the same modal the Configure button does. Resolved against the caller's own
+  // installed channels and tools, which is where a configurable extension
+  // lives — a registry card has nothing to configure yet.
+  const configurableExtensions = React.useMemo(
+    () => [...(channels || []), ...(tools || [])],
+    [channels, tools],
+  );
+  const { setupPath } = useExtensionSetupLanding({
+    extensions: configurableExtensions,
+    isLoading: isExtensionsLoading,
+    onConfigure: handleConfigure,
+  });
   const handleImport = React.useCallback((file) => importTool({ file }), [importTool]);
   const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
   const handleConfirmRemove = React.useCallback(() => {
@@ -264,6 +278,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
           (
             <ConfigureModal
               extension={configuring}
+              initialConnection={setupPath}
               onClose={handleCloseModal}
               onSaved={handleSaved}
               returnFocusTo={configureTriggerRef.current}

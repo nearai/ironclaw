@@ -78,6 +78,51 @@ pub(crate) async fn resolve_device_link_user_setup(
     }
 }
 
+/// Query-value encoding for the package id in a setup link.
+///
+/// Load-bearing, not defensive habit. `LifecyclePackageId` bounds length and
+/// rejects NUL/control characters only
+/// (`ironclaw_extension_contracts::lifecycle_id::validate_lifecycle_string`) —
+/// `&`, `#`, `=`, and spaces all pass. A hosted-MCP package carries the
+/// `desired_id` the *model* supplied at registration, so an unencoded id could
+/// append a parameter to this link or truncate it. Mirrors the sibling encoder
+/// in `channel_host::CONNECT_QUERY_VALUE`.
+const SETUP_QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// The web-app URL that opens this extension's personal-account setup, when the
+/// deployment published a public origin.
+///
+/// **Why this route and not `/chat?connect=`.** The OAuth connect link is
+/// withheld from any channel that cannot deliver a reply privately
+/// (`channel_host::connect_required_notice`) because it *auto-installs and
+/// auto-starts* a flow — landing it in a shared room pulls bystanders into
+/// someone else's setup. This link starts nothing: it opens the Extensions page
+/// with one extension's configure modal on its personal-account path. A
+/// bystander who clicks it authenticates as themselves and lands on their own
+/// page, so it is safe to sit in a group transcript and needs no privacy gate.
+///
+/// Returns `None` when no public origin is configured, which keeps the
+/// link-free copy exactly as it reads today rather than advertising a relative
+/// path into a customer conversation.
+///
+/// `package_id` is the same `LifecyclePackageRef.id` the Extensions page keys
+/// its cards on, so the landing resolves against the caller's own inventory
+/// without a second identity to keep in sync.
+pub(crate) fn personal_setup_link(base_url: Option<&str>, package_id: &str) -> Option<String> {
+    let base = base_url?.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    let package_id = percent_encoding::utf8_percent_encode(package_id, SETUP_QUERY_VALUE);
+    Some(format!(
+        "{base}/extensions?configure={package_id}&setup=personal_account"
+    ))
+}
+
 /// The sentence every surface renders when the calling user still owes a
 /// device link, defined once.
 ///
@@ -116,9 +161,49 @@ const DEVICE_LINK_ALREADY_LINKED_NOTICE: &str = "This user has already linked th
 /// What an `Active` install reports when nothing further is owed.
 const ACTIVATION_COMPLETE: &str = "Activation completed; model-visible extension tools are ready.";
 
+/// Appended to [`DEVICE_LINK_REQUIRED_NOTICE`] when the deployment published a
+/// public origin, so the user is handed the destination instead of being told
+/// to go find it.
+///
+/// "copied exactly" earns its place: the model rewrites this sentence, and a
+/// paraphrased URL is a dead one. Without a link the copy still names the
+/// destination in words, which is what every deployment without a configured
+/// origin keeps.
+const DEVICE_LINK_SETUP_LINK_PREFIX: &str = "Give them this link, copied exactly:";
+
+/// A resolved device-link answer for one caller and one package: the state, and
+/// the destination to hand them when that state owes a link.
+///
+/// The two halves travel together because either alone is a defect. A link
+/// without the state gets offered to a caller who already linked — #7853's
+/// shape with a click attached. A state without the link is the prose-only
+/// hand-off: a user reading the guidance in a Telegram or Slack thread cannot
+/// render the device-link panel there, so before this they were told to go find
+/// the Extensions page unaided.
+pub(crate) struct DeviceLinkGuidance {
+    setup: DeviceLinkUserSetup,
+    setup_link: Option<String>,
+}
+
+impl DeviceLinkGuidance {
+    pub(crate) fn new(setup: DeviceLinkUserSetup, setup_link: Option<String>) -> Self {
+        Self { setup, setup_link }
+    }
+
+    /// Guidance for an `Active` install's `next_step` field.
+    pub(crate) fn next_step(&self) -> String {
+        active_install_next_step(self.setup, self.setup_link.as_deref())
+    }
+
+    /// Guidance for a response whose payload has no `next_step` field.
+    pub(crate) fn activate_notice(&self) -> Option<String> {
+        activate_device_link_notice(self.setup, self.setup_link.as_deref())
+    }
+}
+
 /// Guidance for an `Active` install: what, if anything, the user must still do.
-pub(crate) fn active_install_next_step(setup: DeviceLinkUserSetup) -> String {
-    match device_link_notice(setup) {
+fn active_install_next_step(setup: DeviceLinkUserSetup, setup_link: Option<&str>) -> String {
+    match device_link_notice(setup, setup_link) {
         Some(notice) => format!("{ACTIVATION_COMPLETE} {notice}"),
         None => ACTIVATION_COMPLETE.to_string(),
     }
@@ -133,19 +218,35 @@ pub(crate) fn active_install_next_step(setup: DeviceLinkUserSetup) -> String {
 /// without installing still learns where to finish. `AlreadyLinked` stays
 /// silent here: an activate response is not the place to volunteer that
 /// nothing is owed.
-pub(crate) fn activate_device_link_notice(setup: DeviceLinkUserSetup) -> Option<&'static str> {
+fn activate_device_link_notice(
+    setup: DeviceLinkUserSetup,
+    setup_link: Option<&str>,
+) -> Option<String> {
     match setup {
-        DeviceLinkUserSetup::Required => Some(DEVICE_LINK_REQUIRED_NOTICE),
+        DeviceLinkUserSetup::Required => Some(required_notice(setup_link)),
         DeviceLinkUserSetup::NotApplicable | DeviceLinkUserSetup::AlreadyLinked => None,
     }
 }
 
 /// The per-state sentence appended after [`ACTIVATION_COMPLETE`], if any.
-fn device_link_notice(setup: DeviceLinkUserSetup) -> Option<&'static str> {
+fn device_link_notice(setup: DeviceLinkUserSetup, setup_link: Option<&str>) -> Option<String> {
     match setup {
         DeviceLinkUserSetup::NotApplicable => None,
-        DeviceLinkUserSetup::Required => Some(DEVICE_LINK_REQUIRED_NOTICE),
-        DeviceLinkUserSetup::AlreadyLinked => Some(DEVICE_LINK_ALREADY_LINKED_NOTICE),
+        DeviceLinkUserSetup::Required => Some(required_notice(setup_link)),
+        DeviceLinkUserSetup::AlreadyLinked => Some(DEVICE_LINK_ALREADY_LINKED_NOTICE.to_string()),
+    }
+}
+
+/// [`DEVICE_LINK_REQUIRED_NOTICE`] with the destination attached when there is
+/// one to attach. The link is additive: the prose that names the destination in
+/// words is never replaced by it, so a deployment with no public origin loses a
+/// convenience rather than the instruction.
+fn required_notice(setup_link: Option<&str>) -> String {
+    match setup_link {
+        Some(link) => {
+            format!("{DEVICE_LINK_REQUIRED_NOTICE} {DEVICE_LINK_SETUP_LINK_PREFIX} {link}")
+        }
+        None => DEVICE_LINK_REQUIRED_NOTICE.to_string(),
     }
 }
 
@@ -182,10 +283,10 @@ mod tests {
     /// this is the only place that pins it.
     #[test]
     fn each_state_renders_distinct_install_guidance() {
-        let none = active_install_next_step(DeviceLinkUserSetup::NotApplicable);
+        let none = active_install_next_step(DeviceLinkUserSetup::NotApplicable, None);
         assert_eq!(none, ACTIVATION_COMPLETE);
 
-        let required = active_install_next_step(DeviceLinkUserSetup::Required);
+        let required = active_install_next_step(DeviceLinkUserSetup::Required, None);
         assert!(required.starts_with(ACTIVATION_COMPLETE), "{required}");
         // Four properties, because a prohibition without a reason reads as a
         // non-sequitur: a code you scan on your phone sounds like something a
@@ -207,7 +308,7 @@ mod tests {
             "internal vocabulary the model would echo verbatim: {required}"
         );
 
-        let linked = active_install_next_step(DeviceLinkUserSetup::AlreadyLinked);
+        let linked = active_install_next_step(DeviceLinkUserSetup::AlreadyLinked, None);
         assert!(linked.starts_with(ACTIVATION_COMPLETE), "{linked}");
         assert!(linked.contains("already linked"), "{linked}");
         assert!(
@@ -223,15 +324,97 @@ mod tests {
     #[test]
     fn activate_notice_fires_only_when_a_link_is_owed() {
         assert_eq!(
-            activate_device_link_notice(DeviceLinkUserSetup::Required),
-            Some(DEVICE_LINK_REQUIRED_NOTICE)
+            activate_device_link_notice(DeviceLinkUserSetup::Required, None),
+            Some(DEVICE_LINK_REQUIRED_NOTICE.to_string())
         );
         assert_eq!(
-            activate_device_link_notice(DeviceLinkUserSetup::NotApplicable),
+            activate_device_link_notice(DeviceLinkUserSetup::NotApplicable, None),
             None
         );
         assert_eq!(
-            activate_device_link_notice(DeviceLinkUserSetup::AlreadyLinked),
+            activate_device_link_notice(DeviceLinkUserSetup::AlreadyLinked, None),
+            None
+        );
+    }
+
+    /// The hand-off this link exists to close: a user reading the guidance in a
+    /// Telegram or Slack thread cannot render the device-link panel there, and
+    /// before #7853's follow-up work they were handed prose and left to find
+    /// the Extensions page unaided.
+    #[test]
+    fn a_configured_origin_hands_the_user_the_destination() {
+        let link = personal_setup_link(Some("https://app.example.com"), "telegram")
+            .expect("origin configured");
+        assert_eq!(
+            link,
+            "https://app.example.com/extensions?configure=telegram&setup=personal_account"
+        );
+
+        let required = active_install_next_step(DeviceLinkUserSetup::Required, Some(&link));
+        assert!(required.contains(&link), "{required}");
+        // Additive, never a replacement: the words that name the destination
+        // survive so the sentence still reads correctly if the URL is stripped.
+        assert!(required.contains("web app"), "{required}");
+        assert!(required.contains("cannot run from chat"), "{required}");
+        // The model paraphrases this; a rewritten URL is a dead one.
+        assert!(required.contains("copied exactly"), "{required}");
+    }
+
+    /// The link is a convenience layered on copy that already works. A
+    /// deployment that published no public origin must keep the link-free
+    /// sentence rather than advertise a relative path into a conversation —
+    /// the failure `connect_link_base_url_from_env` documents for its sibling.
+    #[test]
+    fn no_configured_origin_keeps_the_link_free_copy() {
+        assert_eq!(personal_setup_link(None, "telegram"), None);
+        assert_eq!(personal_setup_link(Some(""), "telegram"), None);
+        assert_eq!(personal_setup_link(Some("   "), "telegram"), None);
+        assert_eq!(personal_setup_link(Some("/"), "telegram"), None);
+
+        assert_eq!(
+            active_install_next_step(DeviceLinkUserSetup::Required, None),
+            format!("{ACTIVATION_COMPLETE} {DEVICE_LINK_REQUIRED_NOTICE}")
+        );
+    }
+
+    /// A trailing slash on the origin must not produce `//extensions`, and an
+    /// id carrying an `&` — which `LifecyclePackageId` permits — must not be
+    /// able to append a parameter to the link or re-target it.
+    #[test]
+    fn the_link_is_built_defensively() {
+        assert_eq!(
+            personal_setup_link(Some("https://app.example.com/"), "telegram"),
+            Some(
+                "https://app.example.com/extensions?configure=telegram&setup=personal_account"
+                    .to_string()
+            )
+        );
+
+        // `LifecyclePackageId` admits this: it bounds length and rejects
+        // NUL/control characters, nothing else. A hosted-MCP registration takes
+        // its `desired_id` from the model.
+        let link = personal_setup_link(Some("https://app.example.com"), "a&setup=workspace_bot")
+            .expect("origin configured");
+        assert_eq!(
+            link,
+            "https://app.example.com/extensions?configure=a%26setup%3Dworkspace_bot&setup=personal_account"
+        );
+    }
+
+    /// Only the state that owes a link carries one. Handing a
+    /// setup URL to an already-linked caller would send them to redo a
+    /// ceremony they finished — the #7853 shape, with a click attached.
+    #[test]
+    fn only_the_owing_state_carries_the_link() {
+        let link = "https://app.example.com/extensions?configure=telegram&setup=personal_account";
+        let linked = active_install_next_step(DeviceLinkUserSetup::AlreadyLinked, Some(link));
+        assert!(!linked.contains(link), "{linked}");
+
+        let none = active_install_next_step(DeviceLinkUserSetup::NotApplicable, Some(link));
+        assert_eq!(none, ACTIVATION_COMPLETE);
+
+        assert_eq!(
+            activate_device_link_notice(DeviceLinkUserSetup::AlreadyLinked, Some(link)),
             None
         );
     }

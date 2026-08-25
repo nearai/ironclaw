@@ -27,8 +27,7 @@ use ironclaw_skills::{
 };
 
 use crate::install_guidance::{
-    DeviceLinkUserSetup, activate_device_link_notice, active_install_next_step,
-    resolve_device_link_user_setup,
+    DeviceLinkGuidance, personal_setup_link, resolve_device_link_user_setup,
 };
 use ironclaw_auth::RuntimeCredentialAccountSelectionService;
 use ironclaw_extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
@@ -42,6 +41,9 @@ pub struct ExtensionHostLifecycleProductService {
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     channel_config: Option<Arc<ironclaw_extension_host::ChannelConfigService>>,
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
+    /// Public web origin the personal-account setup link is built from, or
+    /// `None` on a deployment that published none (guidance stays link-free).
+    setup_link_base_url: Option<String>,
 }
 
 impl ExtensionHostLifecycleProductService {
@@ -51,7 +53,16 @@ impl ExtensionHostLifecycleProductService {
             extension_management: None,
             channel_config: None,
             credential_accounts: None,
+            setup_link_base_url: None,
         }
+    }
+
+    /// The deployment's public web origin, so device-link guidance can hand the
+    /// user the destination instead of describing it. Unset keeps the
+    /// link-free copy.
+    pub fn with_setup_link_base_url(mut self, base_url: Option<String>) -> Self {
+        self.setup_link_base_url = base_url;
+        self
     }
 
     pub fn with_extension_management(
@@ -230,10 +241,10 @@ impl ExtensionHostLifecycleProductService {
                     let setup = self
                         .device_link_user_setup(&context, extension_management, &package_ref)
                         .await?;
-                    if let Some(notice) = activate_device_link_notice(setup) {
+                    if let Some(notice) = setup.activate_notice() {
                         response.message = Some(match response.message.take() {
                             Some(message) => format!("{message} {notice}"),
-                            None => notice.to_string(),
+                            None => notice,
                         });
                     }
                 }
@@ -388,15 +399,19 @@ impl ExtensionHostLifecycleProductService {
         context: &LifecycleProductContext,
         extension_management: &RebornLocalExtensionManagementPort,
         package_ref: &LifecyclePackageRef,
-    ) -> Result<DeviceLinkUserSetup, ProductOperationFailure> {
-        Ok(resolve_device_link_user_setup(
+    ) -> Result<DeviceLinkGuidance, ProductOperationFailure> {
+        let setup = resolve_device_link_user_setup(
             extension_management
                 .device_link_user_setup_requirement(package_ref)
                 .await?,
             self.credential_accounts.as_ref(),
             &lifecycle_resource_scope(context)?,
         )
-        .await)
+        .await;
+        Ok(DeviceLinkGuidance::new(
+            setup,
+            personal_setup_link(self.setup_link_base_url.as_deref(), package_ref.id.as_str()),
+        ))
     }
 
     /// The one post-install and explicit-activation path. Every package uses
@@ -438,7 +453,7 @@ impl ExtensionHostLifecycleProductService {
 fn install_response_with_activation(
     mut install_response: LifecycleProductResponse,
     activation_response: LifecycleProductResponse,
-    device_link_setup: DeviceLinkUserSetup,
+    device_link_setup: DeviceLinkGuidance,
 ) -> LifecycleProductResponse {
     install_response.phase = activation_response.phase;
     install_response.blockers = activation_response.blockers;
@@ -461,7 +476,7 @@ fn install_response_with_activation(
             *visible_capability_ids = activation_visible_capability_ids;
         }
         *next_step = if install_response.phase == InstallationState::Active {
-            active_install_next_step(device_link_setup).to_string()
+            device_link_setup.next_step()
         } else {
             "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
         };
@@ -782,6 +797,7 @@ fn map_local_skill_management_error(error: ScopedSkillManagementError) -> Produc
 
 #[cfg(test)]
 mod tests {
+    use crate::install_guidance::DeviceLinkUserSetup;
     #[test]
     fn install_next_step_directs_device_link_users_to_the_web_ui() {
         // QA, 2026-08-14: installed from Slack, the model announced
@@ -813,8 +829,12 @@ mod tests {
             }),
         };
 
-        let response =
-            install_response_with_activation(install, activation, DeviceLinkUserSetup::Required);
+        let setup_link = "https://webui.test/extensions?configure=telegram&setup=personal_account";
+        let response = install_response_with_activation(
+            install,
+            activation,
+            DeviceLinkGuidance::new(DeviceLinkUserSetup::Required, Some(setup_link.to_string())),
+        );
         match response.payload {
             Some(LifecycleProductPayload::ExtensionInstall { next_step, .. }) => {
                 assert!(
@@ -828,6 +848,13 @@ mod tests {
                 assert!(
                     next_step.contains("link their personal account"),
                     "next_step must name the per-user link step: {next_step}"
+                );
+                // Prose alone leaves a user reading this in a Telegram or Slack
+                // thread to find the Extensions page unaided; the panel cannot
+                // render there.
+                assert!(
+                    next_step.contains(setup_link),
+                    "next_step must hand the user the destination: {next_step}"
                 );
             }
             other => panic!("expected an install payload, got {other:?}"),

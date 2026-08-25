@@ -58,6 +58,15 @@ use ironclaw_extension_host::{
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductContext;
 use ironclaw_skills::ScopedSkillManagementPort;
 
+/// Public web origin every lifecycle fixture reports, so device-link guidance
+/// renders its setup link deterministically.
+///
+/// Production reads this from `IRONCLAW_REBORN_WEBUI_BASE_URL`
+/// (`connect_link_base_url_from_env`). Process-global env under parallel tests
+/// is not a seam a test can own, so the fixture supplies the value directly and
+/// the env read stays covered by the composition call sites.
+pub const LIFECYCLE_TEST_SETUP_LINK_BASE_URL: &str = "https://webui.test";
+
 pub type TestApprovalRequestStore = ApprovalRequestStore<FaultInjecting<InMemoryBackend>>;
 pub type TestCapabilityLeaseStore = CapabilityLeaseStore<FaultInjecting<InMemoryBackend>>;
 
@@ -349,6 +358,7 @@ async fn build_lifecycle_test_services_over_backing(
         &mut first_party_registry,
         Arc::clone(&extension_management),
         runtime_credential_accounts,
+        Some(LIFECYCLE_TEST_SETUP_LINK_BASE_URL.to_string()),
     )
     .expect("insert lifecycle handlers");
     register_bundled_first_party_handlers_for_lifecycle_tests(&mut first_party_registry)
@@ -413,7 +423,8 @@ async fn build_lifecycle_test_services_over_backing(
             .with_extension_management(Arc::clone(&extension_management))
             .with_runtime_credential_accounts(
                 product_auth.runtime_credential_account_selection_service(),
-            );
+            )
+            .with_setup_link_base_url(Some(LIFECYCLE_TEST_SETUP_LINK_BASE_URL.to_string()));
     let lifecycle_service = Arc::new(lifecycle_service);
     let lifecycle_product_continuation = ironclaw_assistant::lifecycle_auth_continuation_dispatcher(
         Arc::clone(&lifecycle_service) as Arc<dyn LifecycleProductService>,
