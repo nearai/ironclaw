@@ -133,20 +133,27 @@ function baseAdminState(overrides = {}) {
 }
 
 function loadUsersView(harness) {
+  function Button() {}
   function ConfirmDialog() {}
+  function FormField() {}
+  function Input() {}
+  function SearchField() {}
   const module = runVmModuleForTest(
     "./users-tab.tsx",
-    ["AdminUsersTabView", "UserRow"],
+    ["AdminUsersTabView", "CreateUserForm", "UserRow"],
     {
       React: harness.React,
       useT: () => translate,
       Panel: function Panel() {},
       StatusPill: function StatusPill() {},
       EmptyPanel: function EmptyPanel() {},
-      Button: function Button() {},
+      Button,
       ConfirmDialog,
+      FormField,
       Icon: function Icon() {},
+      Input,
       InlineNotice: function InlineNotice() {},
+      SearchField,
       SelectMenu: function SelectMenu() {},
       Skeleton: function Skeleton() {},
       useAdminUsers: () => baseAdminState(),
@@ -167,7 +174,7 @@ function loadUsersView(harness) {
     },
     import.meta.url,
   );
-  return { ...module, ConfirmDialog };
+  return { ...module, Button, ConfirmDialog, FormField, Input, SearchField };
 }
 
 function loadDetailModule(harness) {
@@ -239,6 +246,102 @@ test("user detail exposes thread scraping only when the deployment gate is enabl
 
   assert.equal(findByType(harness.render(View, props), ThreadScrapingPanel), null);
   assert.ok(findByType(harness.render(View, { ...props, threadScrapingEnabled: true }), ThreadScrapingPanel));
+});
+
+test("admin users compose shared form and search controls without changing their behavior", async () => {
+  const formHarness = createReactHarness();
+  const {
+    Button,
+    CreateUserForm,
+    FormField,
+    Input,
+  } = loadUsersView(formHarness);
+  const createCalls = [];
+  const formProps = {
+    error: null,
+    isCreating: false,
+    onCreate: async (payload) => { createCalls.push(payload); },
+    resetError: () => {},
+  };
+
+  let form = formHarness.render(CreateUserForm, formProps);
+  findByType(form, Button).props.onClick();
+  form = formHarness.render(CreateUserForm, formProps);
+
+  const fields = new Set();
+  const inputs = new Set();
+  visit(form, (node) => {
+    if (node?.type === FormField) fields.add(node.props);
+    if (node?.type === Input) inputs.add(node.props);
+  });
+  assert.deepEqual([...fields].map(({ htmlFor, label, required }) => ({ htmlFor, label, required })), [
+    {
+      htmlFor: "admin-user-display-name",
+      label: "admin.users.displayName",
+      required: true,
+    },
+    {
+      htmlFor: "admin-user-email",
+      label: "admin.users.email",
+      required: undefined,
+    },
+  ]);
+  const inputProps = [...inputs];
+  assert.deepEqual(inputProps.map(({ id, required, size, type, value }) => ({ id, required, size, type, value })), [
+    {
+      id: "admin-user-display-name",
+      required: true,
+      size: "sm",
+      type: "text",
+      value: "",
+    },
+    {
+      id: "admin-user-email",
+      required: undefined,
+      size: "sm",
+      type: "email",
+      value: "",
+    },
+  ]);
+  inputProps[0].onChange({ currentTarget: { value: "  Owner  " } });
+  inputProps[1].onChange({ currentTarget: { value: " owner@example.com " } });
+  form = formHarness.render(CreateUserForm, formProps);
+  await findByType(form, "form").props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(createCalls)), [{
+    display_name: "Owner",
+    email: "owner@example.com",
+    role: "member",
+  }]);
+
+  const searchHarness = createReactHarness();
+  const {
+    AdminUsersTabView,
+    SearchField,
+  } = loadUsersView(searchHarness);
+  let rendered = searchHarness.render(AdminUsersTabView, {
+    onSelectUser: () => {},
+    adminState: baseAdminState(),
+  });
+  let search = findByType(rendered, SearchField);
+  assert.ok(search, "expected Admin Users to render the shared SearchField");
+  assert.equal(search.props.value, "");
+  assert.equal(search.props.placeholder, "admin.users.searchPlaceholder");
+  assert.equal(search.props["aria-label"], "admin.users.searchPlaceholder");
+  assert.equal(search.props.clearLabel, "settings.clearSearch");
+
+  search.props.onChange("owner");
+  rendered = searchHarness.render(AdminUsersTabView, {
+    onSelectUser: () => {},
+    adminState: baseAdminState(),
+  });
+  search = findByType(rendered, SearchField);
+  assert.equal(search.props.value, "owner");
+  search.props.onClear();
+  rendered = searchHarness.render(AdminUsersTabView, {
+    onSelectUser: () => {},
+    adminState: baseAdminState(),
+  });
+  assert.equal(findByType(rendered, SearchField).props.value, "");
 });
 
 test("users list shows activate and role failures and disables actions while pending", () => {
