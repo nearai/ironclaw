@@ -74,9 +74,6 @@ env:
   # PR #5086 measured mold linking the heaviest Reborn build in parallel with
   # no OOM, so keep Cargo's default parallelism. If runner OOMs recur, restore
   # the previous one-job Cargo build serialization as the one-line fallback.
-  RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
-  CARGO_PROFILE_DEV_DEBUG: 0
-  CARGO_PROFILE_TEST_DEBUG: 0
   # Cargo network resilience (retries, HTTP/2 multiplexing off, git-CLI fetch)
   # lives in the repo-wide .cargo/config.toml so it applies to every workflow.
 
@@ -106,7 +103,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: ./.github/actions/setup-rust
       - id: plan
         name: Build affected-area test plan
         env:
@@ -210,7 +207,6 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       RUSTC_BOOTSTRAP: "1"
-      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold -Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
       # The deep composed-runtime futures (turn -> capability -> skills script
       # mount, and the channel admission chain) overflow the 2 MiB default
       # test-thread stack on this lane's Linux codegen — first observed as a
@@ -244,10 +240,16 @@ jobs:
           df -h /
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch coverage
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly-2025-11-01
           components: llvm-tools-preview
+          mold: true
+          # Nightly crate attributes this lane compiles with. They live here,
+          # not in a job-level `env: RUSTFLAGS:`, because a job env key is
+          # re-applied to every step and would shadow the composite's
+          # $GITHUB_ENV write — silently dropping the mold linker flags.
+          extra_rustflags: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
 
       - name: Resolve bucket settings
         id: bucket-settings
@@ -324,11 +326,6 @@ jobs:
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
-
-      - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -481,28 +478,9 @@ jobs:
           df -h /
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
-
-      - name: Verify mold linker is active
-        run: |
-          clang_output="$(
-            printf 'int main(void) { return 0; }\n' \
-              | clang --ld-path=/usr/bin/mold -Wl,--version -x c - -o /tmp/clang-mold-check 2>&1
-          )"
-          printf '%s\n' "$clang_output"
-          grep -qi mold <<< "$clang_output"
-
-          printf 'fn main() { println!("mold-link-ok"); }\n' > /tmp/mold-link-check.rs
-          rustc /tmp/mold-link-check.rs \
-            -C linker=clang \
-            -C link-arg=--ld-path=/usr/bin/mold \
-            -o /tmp/mold-link-check
-          test "$(/tmp/mold-link-check)" = "mold-link-ok"
+        uses: ./.github/actions/setup-rust
+        with:
+          mold: true
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -577,28 +555,9 @@ jobs:
           df -h /
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
-
-      - name: Verify mold linker is active
-        run: |
-          clang_output="$(
-            printf 'int main(void) { return 0; }\n' \
-              | clang --ld-path=/usr/bin/mold -Wl,--version -x c - -o /tmp/clang-mold-check 2>&1
-          )"
-          printf '%s\n' "$clang_output"
-          grep -qi mold <<< "$clang_output"
-
-          printf 'fn main() { println!("mold-link-ok"); }\n' > /tmp/mold-link-check.rs
-          rustc /tmp/mold-link-check.rs \
-            -C linker=clang \
-            -C link-arg=--ld-path=/usr/bin/mold \
-            -o /tmp/mold-link-check
-          test "$(/tmp/mold-link-check)" = "mold-link-ok"
+        uses: ./.github/actions/setup-rust
+        with:
+          mold: true
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -647,12 +606,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
+        uses: ./.github/actions/setup-rust
+        with:
+          mold: true
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -699,7 +655,6 @@ jobs:
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
       RUSTC_BOOTSTRAP: "1"
-      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold -Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
       # llvm-cov instrumentation inflates stack frames; the deep channel
       # admission futures (webhook -> pairing gate -> workflow) overflow the
       # default 2 MiB test-thread stack under instrumentation only. The
@@ -733,10 +688,16 @@ jobs:
         run: docker pull postgres:16-alpine
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # branch coverage
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly-2025-11-01
           components: llvm-tools-preview
+          mold: true
+          # Nightly crate attributes this lane compiles with. They live here,
+          # not in a job-level `env: RUSTFLAGS:`, because a job env key is
+          # re-applied to every step and would shadow the composite's
+          # $GITHUB_ENV write — silently dropping the mold linker flags.
+          extra_rustflags: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
 
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm
@@ -769,11 +730,6 @@ jobs:
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
           cd "${webui_dir}/frontend"
           pnpm install --frozen-lockfile
-
-      - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -1007,13 +963,9 @@ jobs:
 
       - name: Install Rust
         if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Install mold and clang
-        if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
+        uses: ./.github/actions/setup-rust
+        with:
+          mold: true
 
       - name: Install cargo-mutants
         if: github.event_name == 'merge_group' && steps.scope.outputs.should_run == 'true'
@@ -1060,13 +1012,10 @@ jobs:
       - name: Configure isolated Corepack path
         run: echo "COREPACK_HOME=${RUNNER_TEMP}/ironclaw-corepack" >> "$GITHUB_ENV"
 
-      - name: Install mold
-        run: |
-          scripts/ci/install-ci-apt-packages.sh mold
-          test -x /usr/bin/mold
-
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: ./.github/actions/setup-rust
+        with:
+          mold: true
 
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm

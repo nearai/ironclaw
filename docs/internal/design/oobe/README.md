@@ -86,7 +86,7 @@ Every dependency has an implementation approach in [PLAN.md](PLAN.md); the full 
 - **D-F3 — Connect wiring:** route each card's connect through the shared `extension_name` resolver + existing OAuth path (no new auth path — CLAUDE.md invariant).
 - **D-F4 — Agent-mode persistence + gate semantics:** contract §7; `auto` is the typed generalization of `global_auto_approve`.
 - **D-F5 — Carousel de-risk / gating:** the current draft blocker — the landing carousel shows mock cards to *all* users; must read the real projection (empty until tasks exist).
-- **D-F6 — DESIGN.md + tokens (cross-cutting):** IronClaw has no `DESIGN.md` yet; the OOBE cards are the natural pilot to seed the APDD design track.
+- **D-F6 — DESIGN.md + tokens (cross-cutting):** ✎ *governance ownership moved (2026-08-21)* — `DESIGN.md`, tokens and the Storybook workbench belong to [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257); OOBE contributes the card family as its **pilot** and stands up none of that itself (PROPOSAL §5.6).
 
 **Vision (additional):**
 - **D-V1** cold-start queued OAuth orchestration · **D-V2** reveal-animation infra (`prefers-reduced-motion`) · **D-V3** anticipatory / "no automations yet" projection states (#6993) · **D-V4** composer-docked drawer component · **D-V5** username-derivation source (open decision).
@@ -97,7 +97,7 @@ Every dependency has an implementation approach in [PLAN.md](PLAN.md); the full 
 2. **The suggestion producer (D-F2)** — first-login trigger vs. deterministic starter set gated on connected extensions vs. an agent-driven suggester. This is the one genuinely new mechanism and the biggest open design question. (PROPOSAL §5.2)
 3. **Agent-mode gate semantics (D-F4)** — `auto` skips the per-action gate for approved task *types*; confirm the typed generalization of `global_auto_approve` and its audit-trail requirements. (PROPOSAL §7)
 4. **Carousel gating (D-F5)** — the merge blocker on PR #6994: real projection now, or DEV/flag gate first? (PROPOSAL §5.5)
-5. **DESIGN.md pilot (D-F6)** — adopt the APDD design track here (seed `DESIGN.md`, tokens, and — later — a Storybook workbench for the card components), or defer. (PROPOSAL §8.3)
+5. ~~**DESIGN.md pilot (D-F6)**~~ — *settled 2026-08-21:* design governance is owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md); OOBE's part is the pilot card family, catalogued through it. (PROPOSAL §5.6, §8.3)
 
 ## How to review
 

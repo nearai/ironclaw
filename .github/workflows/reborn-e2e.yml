@@ -131,10 +131,6 @@ jobs:
     if: needs.changes.outputs.has_e2e_scope == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    env:
-      RUSTFLAGS: "-C linker=clang -C link-arg=--ld-path=/usr/bin/mold"
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
     strategy:
       fail-fast: false
       matrix:
@@ -151,12 +147,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Install mold and clang
-        run: |
-          scripts/ci/install-ci-apt-packages.sh clang mold
-          test -x /usr/bin/mold
+        uses: ./.github/actions/setup-rust
+        with:
+          mold: true
 
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -193,7 +186,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: ./.github/actions/setup-rust
 
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm
@@ -414,6 +407,17 @@ jobs:
         with:
           ref: ${{ inputs.ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}
           persist-credentials: false
+
+      # This lane runs a prebuilt binary and compiles nothing, but
+      # run-hermetic-test-process.sh probes `rustc --print sysroot` to put the
+      # toolchain's bin on the child PATH and exits 1 if it cannot resolve one.
+      # Inside the repo that probe hits rust-toolchain.toml, so rustup installed
+      # the pinned toolchain lazily, mid-lane, once per shard — which is where
+      # `component download failed for rustfmt: could not rename 'downloaded'
+      # file` came from. Installing once, up front, as a real step removes the
+      # lazy install; every other hermetic lane already does this.
+      - name: Install Rust
+        uses: ./.github/actions/setup-rust
 
       - name: Download default Reborn E2E binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
