@@ -24,7 +24,7 @@ test("product activity is scoped and deduplicates replayed lifecycle states", ()
     runId: "run-product-activity",
     kind: ActivityKind.ToolStarted,
     activityId: "activity-a",
-    summary: "Tool invocation started",
+    summaryKey: "inspector.activity.summary.toolStarted",
     dedupeKey: "tool:activity-a:started",
   };
   publishProductInspectorActivity(started);
@@ -32,7 +32,7 @@ test("product activity is scoped and deduplicates replayed lifecycle states", ()
   publishProductInspectorActivity({
     ...started,
     kind: ActivityKind.ToolCompleted,
-    summary: "Tool invocation completed",
+    summaryKey: "inspector.activity.summary.toolCompleted",
     dedupeKey: "tool:activity-a:completed",
   });
   publishProductInspectorActivity({
@@ -61,7 +61,7 @@ test("product activity is inert when inspector mode is disabled", () => {
     threadId: "thread-disabled",
     runId: "run-disabled",
     kind: ActivityKind.Progress,
-    summary: "Run progress",
+    summaryKey: "inspector.activity.summary.progressReceived",
     dedupeKey: "progress:disabled",
   });
   unsubscribe();
@@ -87,7 +87,7 @@ test("product activity fails closed when debug query parsing throws", () => {
       threadId: "thread-query-failure",
       runId: "run-query-failure",
       kind: ActivityKind.Progress,
-      summary: "Run progress",
+      summaryKey: "inspector.activity.summary.progressReceived",
       dedupeKey: "progress:query-failure",
     });
   } finally {

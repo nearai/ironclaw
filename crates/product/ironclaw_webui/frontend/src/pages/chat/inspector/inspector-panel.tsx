@@ -577,7 +577,11 @@ function ActivityEntry({
           </p>
           {entry.summary?.content && (
             <p className="mt-1 break-words text-xs text-[var(--v2-text-muted)]">
-              {entry.summary.content}{entry.summary.truncated ? "…" : ""}
+              {entry.key.startsWith("local:")
+                && entry.summary.content.startsWith("inspector.activity.summary.")
+                ? t(entry.summary.content)
+                : entry.summary.content}
+              {entry.summary.truncated ? "…" : ""}
             </p>
           )}
         </div>
