@@ -15,6 +15,9 @@
   <a href="https://gitcgr.com/nearai/ironclaw">
     <img src="https://gitcgr.com/badge/nearai/ironclaw.svg" alt="gitcgr" />
   </a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/nearai/ironclaw">
+    <img src="https://api.scorecard.dev/projects/github.com/nearai/ironclaw/badge" alt="OpenSSF Scorecard" />
+  </a>
 </p>
 
 <p align="center">
