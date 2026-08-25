@@ -84,7 +84,16 @@ pub(crate) async fn resolve_device_link_user_setup(
 /// Worded to stop the model short of reporting success, and to be safe to
 /// quote: the model paraphrases this, so it states the benefit in the user's
 /// terms (the manifest's own "read your chats and send messages as you") and
-/// keeps the directive in its own sentence. Fusing directive into fact is how
+/// keeps the directive in its own sentence.
+///
+/// It gives the REASON chat cannot finish the link, not just the mechanic.
+/// Naming the QR alone reads as a non-sequitur — a code you scan on your phone
+/// sounds like something a chat could display. The actual constraint is that
+/// the displayed value IS a login token
+/// ([`DeviceLinkPayload`](ironclaw_extension_contracts::device_link::DeviceLinkPayload):
+/// "anything that can display it can invite a device onto the account"), so
+/// putting it in a conversation writes a bearer credential into the
+/// transcript. Fusing directive into fact is how
 /// a paraphrase becomes "I should direct you there rather than reporting the
 /// connection complete."
 ///
@@ -95,8 +104,9 @@ pub(crate) async fn resolve_device_link_user_setup(
 /// revision of this module spelled it out twice — the same drift shape the
 /// module exists to remove.
 const DEVICE_LINK_REQUIRED_NOTICE: &str = "Reading this user's own chats, or sending messages as them, additionally requires them to \
-     link their personal account from the extension's page in the web app — that step shows a QR \
-     code to scan and cannot run from chat. Tell them what is still missing and where to finish \
+     link their personal account from the extension's page in the web app. That cannot run from \
+     chat: the code it displays is itself a login credential, and later steps can ask for a \
+     one-time code or an account password. Tell them what is still missing and where to finish \
      it; do not report the connection as complete.";
 
 /// The sentence for a caller who has already finished the link.
@@ -177,7 +187,25 @@ mod tests {
 
         let required = active_install_next_step(DeviceLinkUserSetup::Required);
         assert!(required.starts_with(ACTIVATION_COMPLETE), "{required}");
-        assert!(required.contains("cannot run from chat"), "{required}");
+        // Four properties, because a prohibition without a reason reads as a
+        // non-sequitur: a code you scan on your phone sounds like something a
+        // chat could display, so the copy has to say why it cannot.
+        assert!(
+            required.contains("web app"),
+            "must name where the link is finished: {required}"
+        );
+        assert!(
+            required.contains("cannot run from chat"),
+            "must say chat cannot finish it: {required}"
+        );
+        assert!(
+            required.contains("login credential") || required.contains("account password"),
+            "must give the REASON chat cannot finish it, not just the prohibition: {required}"
+        );
+        assert!(
+            !required.contains("ceremony"),
+            "internal vocabulary the model would echo verbatim: {required}"
+        );
 
         let linked = active_install_next_step(DeviceLinkUserSetup::AlreadyLinked);
         assert!(linked.starts_with(ACTIVATION_COMPLETE), "{linked}");
