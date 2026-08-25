@@ -184,8 +184,8 @@ pub(crate) fn personal_setup_link(base_url: Option<&str>, package_id: &str) -> O
 const DEVICE_LINK_REQUIRED_NOTICE: &str = "Reading this user's own chats, or sending messages as them, additionally requires them to \
      link their personal account from the extension's page in the web app. That cannot run from \
      chat: the code it displays is itself a login credential, and later steps can ask for a \
-     one-time code or an account password. Tell them what is still missing and where to finish \
-     it; do not report the connection as complete.";
+     one-time code, or for the account's two-step verification passphrase. Tell them what is \
+     still missing and where to finish it; do not report the connection as complete.";
 
 /// The sentence for a caller who has already finished the link.
 const DEVICE_LINK_ALREADY_LINKED_NOTICE: &str = "This user has already linked their personal account, so reading their chats and sending \
@@ -331,6 +331,64 @@ mod tests {
             InvocationId::new(),
         )
         .expect("scope")
+    }
+
+    /// Every notice must survive the model-observation scrub that
+    /// `ironclaw_threads` applies to untrusted tool output
+    /// (`SENSITIVE_OBSERVATION_MARKERS` in `tool_result_reference.rs`).
+    ///
+    /// Found live, not by a test: an earlier revision said "an account
+    /// password", and the model received "an account [redacted]" — the reason
+    /// the link cannot run from chat was mangled before the LLM ever read it,
+    /// and the model dropped that half of the sentence from its reply.
+    ///
+    /// Lifecycle `next_step` deliberately rides the UNTRUSTED channel: the
+    /// trusted one is reserved for reasons built entirely from host-authored
+    /// constants, and widening it is guarded by
+    /// `model_influenced_invalid_binding_reason_never_reaches_the_trusted_channel`.
+    /// So the copy has to avoid the vocabulary, not the scan.
+    #[test]
+    fn no_notice_contains_vocabulary_the_observation_scrub_would_redact() {
+        // Mirrors `SENSITIVE_OBSERVATION_MARKERS`. Kept as a local list on
+        // purpose: `ironclaw_threads` is not a dependency of this crate, and a
+        // copy that drifts fails open here rather than silently shipping
+        // mangled guidance.
+        const MARKERS: [&str; 12] = [
+            "access token",
+            "api key",
+            "api_key",
+            "apikey",
+            "authorization:",
+            "bearer ",
+            "client_secret",
+            "password",
+            "passwd",
+            "private key",
+            "raw credential",
+            "secret",
+        ];
+        let link = "https://webui.test/extensions?configure=fixture&setup=personal_account";
+        for setup in [
+            DeviceLinkUserSetup::NotApplicable,
+            DeviceLinkUserSetup::Required,
+            DeviceLinkUserSetup::AlreadyLinked,
+            DeviceLinkUserSetup::Unverified,
+        ] {
+            for rendered in [
+                active_install_next_step(setup, Some(link)),
+                active_install_next_step(setup, None),
+                activate_device_link_notice(setup, Some(link)).unwrap_or_default(),
+            ] {
+                let lowered = rendered.to_ascii_lowercase();
+                for marker in MARKERS {
+                    assert!(
+                        !lowered.contains(marker),
+                        "{setup:?} guidance contains {marker:?}, which the model-observation \
+                         scrub replaces with [redacted] before the model reads it: {rendered}"
+                    );
+                }
+            }
+        }
     }
 
     /// The three states must stay distinguishable in the copy. Collapsing
