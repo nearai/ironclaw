@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1850,7 +1847,12 @@ fn ensure_user_accepted(
 }
 
 fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<ContextMessage> {
-    let replacement_summaries = thread
+    // A compaction summary is a projection barrier, not another transcript
+    // entry. Select the newest eligible summary itself, not merely its range:
+    // this stays deterministic even if legacy or concurrently written data
+    // contains overlapping summaries. Durable rows remain available through
+    // thread history.
+    let barrier_summary = thread
         .summary_artifacts
         .iter()
         .filter(|summary| {
@@ -1858,22 +1860,20 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
                 && !summary_covers_hidden_content(thread, summary)
         })
-        .collect::<Vec<_>>();
+        .max_by_key(|summary| summary.end_sequence);
+    let barrier_start_sequence = barrier_summary
+        .map(|summary| summary.start_sequence)
+        .unwrap_or(0);
     let mut skip_through = 0;
-    let mut emitted_summaries = HashSet::new();
     let mut context = Vec::new();
-    for message in thread
-        .messages
-        .iter()
-        .filter(|message| is_model_context_visible(message))
-    {
+    for message in thread.messages.iter().filter(|message| {
+        is_model_context_visible(message) && message.sequence >= barrier_start_sequence
+    }) {
         if message.sequence <= skip_through {
             continue;
         }
-        if let Some(summary) = replacement_summaries.iter().find(|summary| {
-            summary.start_sequence <= message.sequence
-                && message.sequence <= summary.end_sequence
-                && !emitted_summaries.contains(&summary.summary_id)
+        if let Some(summary) = barrier_summary.filter(|summary| {
+            summary.start_sequence <= message.sequence && message.sequence <= summary.end_sequence
         }) {
             context.push(ContextMessage {
                 message_id: None,
@@ -1884,7 +1884,6 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 content: summary.content.clone(),
                 image_attachments: Vec::new(),
             });
-            emitted_summaries.insert(summary.summary_id);
             skip_through = summary.end_sequence;
             continue;
         }
