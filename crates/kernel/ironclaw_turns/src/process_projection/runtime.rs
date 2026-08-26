@@ -193,6 +193,26 @@ impl AgentTurnProcessRuntime {
             })
             .await
             .map_err(profile_resolution_error_to_turn_error)?;
+        self.submit_turn_with_resolved(request, resolved).await
+    }
+
+    pub async fn submit_turn_with_resolved_profile(
+        &self,
+        request: SubmitTurnRequest,
+        resolved: ironclaw_loop_contracts::ResolvedRunProfile,
+        admission_policy: &dyn TurnAdmissionPolicy,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        admission_policy
+            .check_submit(&request)
+            .map_err(TurnError::AdmissionRejected)?;
+        self.submit_turn_with_resolved(request, resolved).await
+    }
+
+    async fn submit_turn_with_resolved(
+        &self,
+        request: SubmitTurnRequest,
+        resolved: ironclaw_loop_contracts::ResolvedRunProfile,
+    ) -> Result<SubmitTurnResponse, TurnError> {
         let profile = TurnRunProfile::from_resolved(resolved.clone());
         let run_id = request.requested_run_id.unwrap_or_default();
         let turn_id = TurnId::new();
@@ -658,6 +678,21 @@ impl crate::AgentTurnRuntimePort for AgentTurnProcessRuntime {
     ) -> Result<SubmitTurnResponse, TurnError> {
         AgentTurnProcessRuntime::submit_turn(self, request, admission_policy, run_profile_resolver)
             .await
+    }
+
+    async fn submit_turn_with_resolved_profile(
+        &self,
+        request: SubmitTurnRequest,
+        resolved_run_profile: ironclaw_loop_contracts::ResolvedRunProfile,
+        admission_policy: &dyn TurnAdmissionPolicy,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        AgentTurnProcessRuntime::submit_turn_with_resolved_profile(
+            self,
+            request,
+            resolved_run_profile,
+            admission_policy,
+        )
+        .await
     }
 
     async fn resume_turn(

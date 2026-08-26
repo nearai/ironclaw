@@ -1,3 +1,4 @@
+// arch-exempt: large_file, one match arm forced by the new Role::HostReminder variant (#6985); no new concern in this file, plan #6985
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -1039,20 +1040,10 @@ impl GeminiOauthProvider {
     /// Inject thought signatures into model functionCall parts in the active loop.
     /// This prevents 400 errors from Gemini 3.x preview APIs.
     /// Mirrors `ensureActiveLoopHasThoughtSignatures` from the official Gemini CLI.
-    fn ensure_thought_signatures(contents: &mut [serde_json::Value]) {
-        // Find the start of the active loop: the last user turn with a text part.
-        let mut active_loop_start: Option<usize> = None;
-        for (i, item) in contents.iter().enumerate().rev() {
-            if let Some(role) = item.get("role").and_then(|r| r.as_str())
-                && role == "user"
-                && let Some(parts) = item.get("parts").and_then(|p| p.as_array())
-                && parts.iter().any(|p| p.get("text").is_some())
-            {
-                active_loop_start = Some(i);
-                break;
-            }
-        }
-
+    fn ensure_thought_signatures(
+        contents: &mut [serde_json::Value],
+        active_loop_start: Option<usize>,
+    ) {
         let start = match active_loop_start {
             Some(s) => s,
             None => return,
@@ -1460,13 +1451,14 @@ impl GeminiOauthProvider {
             response_format,
         } = options;
         let mut contents = Vec::new();
+        let mut active_loop_start = None;
 
         for msg in messages {
             match msg.role {
                 Role::System => {
                     // System messages are handled via systemInstruction top-level field
                 }
-                Role::User => {
+                Role::User | Role::HostReminder => {
                     // Text part first, then any inline base64 images as
                     // `inlineData` parts so a vision model receives the pixels.
                     let mut parts = vec![serde_json::json!({ "text": msg.content })];
@@ -1479,10 +1471,17 @@ impl GeminiOauthProvider {
                             }));
                         }
                     }
+                    let content_index = contents.len();
                     contents.push(serde_json::json!({
                         "role": "user",
                         "parts": parts
                     }));
+                    // Host reminders render in the user wire shape, but must
+                    // not become the active-loop anchor. Otherwise a trailing
+                    // reminder skips signatures on the preceding tool call.
+                    if msg.role == Role::User {
+                        active_loop_start = Some(content_index);
+                    }
                 }
                 Role::Assistant => {
                     let mut parts = Vec::new();
@@ -1741,7 +1740,7 @@ impl GeminiOauthProvider {
             && let Some(contents) = req.get_mut("contents").and_then(|c| c.as_array_mut())
         {
             let mut owned = contents.clone();
-            Self::ensure_thought_signatures(&mut owned);
+            Self::ensure_thought_signatures(&mut owned, active_loop_start);
             *contents = owned;
         }
 
@@ -3212,7 +3211,7 @@ mod tests {
             }),
         ];
 
-        GeminiOauthProvider::ensure_thought_signatures(&mut contents);
+        GeminiOauthProvider::ensure_thought_signatures(&mut contents, Some(0));
 
         let parts = contents[1]
             .get("parts")
@@ -3226,6 +3225,51 @@ mod tests {
             .count();
 
         assert_eq!(signed_calls, 2); // safety: test-only assertion
+    }
+
+    #[test]
+    fn host_reminder_does_not_displace_gemini_active_loop_anchor() {
+        let messages = vec![
+            ChatMessage::user("call weather"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "weather".to_string(),
+                    arguments: serde_json::json!({}),
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
+                }],
+            ),
+            ChatMessage::tool_result("call-1", "weather", "sunny"),
+            ChatMessage::host_reminder("Current date/time at loop start: 10:00"),
+        ];
+
+        let request = GeminiOauthProvider::to_gemini_request(
+            &messages,
+            GeminiRequestOptions {
+                tools: None,
+                temperature: None,
+                max_tokens: None,
+                stop_sequences: None,
+                tool_choice: None,
+                model: "gemini-3-pro-preview",
+                thought_sigs: &HashMap::new(),
+                response_format: None,
+            },
+        );
+        let contents = request["contents"].as_array().expect("contents array");
+        let function_call = contents
+            .iter()
+            .flat_map(|content| content["parts"].as_array().into_iter().flatten())
+            .find(|part| part.get("functionCall").is_some())
+            .expect("function call part");
+
+        assert_eq!(
+            function_call["thoughtSignature"],
+            serde_json::Value::String(SYNTHETIC_THOUGHT_SIGNATURE.to_string())
+        );
     }
 
     #[test]

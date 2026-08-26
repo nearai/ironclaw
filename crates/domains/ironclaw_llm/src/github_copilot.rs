@@ -562,7 +562,7 @@ fn convert_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
                 tool_call_id: None,
                 name: None,
             },
-            Role::User => {
+            Role::User | Role::HostReminder => {
                 let content = if msg.content_parts.is_empty() {
                     Some(OpenAiContent::Text(msg.content))
                 } else {

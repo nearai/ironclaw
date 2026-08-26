@@ -4,6 +4,8 @@
 - Store metadata and typed references only; never persist message bodies,
   prompts, tool inputs/outputs, secrets, host paths, or backend diagnostics.
 - Keep read, resolved, and archived timestamps orthogonal.
+- Producers publish terminal facts initially resolved; actionable records are
+  initially open and the originating workflow resolves them when they settle.
 - Publication is idempotent by stable notification id for every record the
   snapshot still holds; conflicting reuse of a held id fails closed. That window
   is finite, not unbounded — see the bound below — so a producer must not treat

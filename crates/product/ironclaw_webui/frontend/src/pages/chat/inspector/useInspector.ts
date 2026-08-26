@@ -181,8 +181,8 @@ export function useInspector({
             activity_id: activity.activityId,
             model_call_id: null,
             summary: {
-              content: activity.summary,
-              original_bytes: activity.summary.length,
+              content: activity.summaryKey,
+              original_bytes: activity.summaryKey.length,
               truncated: false,
             },
           },

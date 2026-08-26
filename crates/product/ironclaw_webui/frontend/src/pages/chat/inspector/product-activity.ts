@@ -8,7 +8,7 @@ export interface ProductInspectorActivity {
   occurredAt: string;
   kind: ActivityKind;
   activityId: string | null;
-  summary: string;
+  summaryKey: string;
 }
 
 export interface PublishProductInspectorActivity {
@@ -16,7 +16,7 @@ export interface PublishProductInspectorActivity {
   runId: unknown;
   kind: ActivityKind;
   activityId?: unknown;
-  summary: string;
+  summaryKey: string;
   dedupeKey: string;
 }
 
@@ -80,7 +80,7 @@ export function publishProductInspectorActivity(
     occurredAt: new Date().toISOString(),
     kind: input.kind,
     activityId: typeof input.activityId === "string" ? input.activityId : null,
-    summary: input.summary,
+    summaryKey: input.summaryKey,
   };
   const entries = [...(retained.get(key) || []), activity].slice(-MAX_PRODUCT_ACTIVITY_PER_RUN);
   retained.set(key, entries);

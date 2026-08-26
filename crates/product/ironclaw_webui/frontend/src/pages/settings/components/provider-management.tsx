@@ -2,6 +2,7 @@ import { Button } from "../../../design-system/button";
 import { Card } from "../../../design-system/card";
 import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { Icon } from "../../../design-system/icons";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import { useT } from "../../../lib/i18n";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 import { ProviderCard } from "./provider-card";
@@ -67,17 +68,13 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
 
       {actions.message &&
       (
-        <div
-          className={[
-            "mb-4 rounded-md border px-3 py-2 text-sm",
-            actions.message.tone === "error"
-              ? "border-red-400/30 bg-red-500/10 text-red-200"
-              : "border-mint/30 bg-mint/10 text-mint",
-          ].join(" ")}
-          role="status"
+        <InlineNotice
+          className="mb-4"
+          tone={actions.message.tone === "error" ? "danger" : "success"}
+          role={actions.message.tone === "error" ? "alert" : "status"}
         >
           {actions.message.text}
-        </div>
+        </InlineNotice>
       )}
 
       <ProviderLoginStatus login={login} />
@@ -85,7 +82,11 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
       {state.isLoading
         ? (<div className="text-sm text-[var(--v2-text-muted)]">{t("common.loading")}</div>)
         : state.error
-        ? (<div className="text-sm text-red-200">{t("error.loadFailed", { what: t("llm.providers"), message: state.error.message })}</div>)
+        ? (
+          <InlineNotice tone="danger" role="alert">
+            {t("error.loadFailed", { what: t("llm.providers"), message: state.error.message })}
+          </InlineNotice>
+        )
         : (
             <div className="space-y-1">
               {GROUP_ORDER.flatMap((group) => {

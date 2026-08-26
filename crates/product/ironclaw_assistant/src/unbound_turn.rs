@@ -83,6 +83,13 @@ pub struct UnboundTurnSubmission {
     /// Optional visible-surface selection journaled with the declarations.
     /// Empty means no caller-selected tools.
     pub tools: Vec<ironclaw_host_api::ids::CapabilityId>,
+    /// No human is present for this run: drop capabilities whose
+    /// authorization resolves to `RequireApproval`, so the run does not park
+    /// on a gate nobody can answer. This does NOT restrict effects — the
+    /// surface can still include write-effect capabilities the caller has
+    /// auto-approved. Narrowing-only; `false` keeps the caller's normal
+    /// surface.
+    pub require_no_approval: bool,
     pub output: OutputContract,
     pub requested_model: Option<String>,
     /// Caller-owned idempotency key for the accept; the submit key derives
@@ -174,6 +181,7 @@ impl UnboundTurnService {
                     tools: submission.tools,
                     output: submission.output,
                     limits: Default::default(),
+                    require_no_approval: submission.require_no_approval,
                 },
                 idempotency_key: submission.idempotency_key.clone(),
                 thread_id: thread_id.clone(),
@@ -471,6 +479,7 @@ mod tests {
                     tools: Vec::new(),
                     output,
                     limits: Default::default(),
+                    require_no_approval: false,
                 },
                 idempotency_key: "native-readback-accept".to_string(),
                 thread_id: thread_id.clone(),
@@ -672,6 +681,7 @@ mod tests {
                 output: output.clone(),
                 requested_model: None,
                 idempotency_key: "forwarded-output-contract-key".to_string(),
+                require_no_approval: false,
             })
             .await
             .expect("unbound submission");

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, Responses API transport, conversion, and protocol tests still lack a separate ChatGPT-provider sub-owner; one match arm was forced by Role::HostReminder (#6985), plan #6985
 //! Codex ChatGPT Responses API provider.
 //!
 //! Implements `LlmProvider` by speaking the OpenAI Responses API protocol
@@ -426,7 +427,7 @@ impl CodexChatGptProvider {
         let mut items = Vec::new();
 
         match msg.role {
-            Role::User => {
+            Role::User | Role::HostReminder => {
                 // Build content array: if content_parts is populated, use it
                 // to include multimodal content (images). Otherwise fall back
                 // to the plain text content field.

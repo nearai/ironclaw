@@ -21,6 +21,10 @@ async function openPanel(container: HTMLElement) {
       .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
       ?.click();
   });
+  await waitForPanel();
+}
+
+async function waitForPanel() {
   // The dynamic import resolves over several turns of the microtask queue, so
   // settle until the panel is actually mounted rather than guessing a count.
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -38,6 +42,56 @@ afterEach(() => {
   }
   document.body.replaceChildren();
   vi.restoreAllMocks();
+});
+
+test("opening a cold notification center immediately renders a loading shell", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  await act(async () => {
+    root.render(<NotificationCenter state={{ messages: [], unreadIds: new Set() }} />);
+  });
+
+  act(() => {
+    container
+      .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
+      ?.click();
+  });
+
+  const loadingShell = document.querySelector(
+    "[data-testid='notification-panel-loading']",
+  );
+  assert.ok(loadingShell, "the lazy boundary provides immediate visual feedback");
+  assert.equal(loadingShell.getAttribute("role"), "status");
+  assert.equal(loadingShell.getAttribute("aria-busy"), "true");
+  assert.match(loadingShell.textContent || "", /notifications\.loadingTitle/);
+
+  act(() => {
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+  });
+  const bell = container.querySelector<HTMLButtonElement>(
+    "[data-testid='notification-bell']",
+  );
+  assert.equal(
+    document.querySelector("[data-testid='notification-panel-loading']"),
+    null,
+    "the loading shell preserves the panel's Escape-to-close behavior",
+  );
+  assert.equal(bell?.getAttribute("aria-expanded"), "false");
+  assert.equal(document.activeElement, bell, "closing restores focus to the bell");
+
+  act(() => bell?.click());
+
+  await waitForPanel();
+  assert.equal(
+    document.querySelector("[data-testid='notification-panel-loading']"),
+    null,
+    "the real notification panel replaces the shell once its chunk resolves",
+  );
 });
 
 test("notification center renders loading and retryable error states", async () => {
@@ -109,7 +163,7 @@ test("opening a row delegates acknowledgement policy before navigation", async (
   assert.deepEqual(navigate.mock.calls[0], ["/chat/thread-1"]);
 });
 
-test("archive is offered for durable rows only and does not open the thread", async () => {
+test("archive is offered for every inbox row and does not open the thread", async () => {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -117,22 +171,12 @@ test("archive is offered for durable rows only and does not open the thread", as
 
   const archiveMessage = vi.fn();
   const prepareMessageOpen = vi.fn();
-  const messages = [
-    {
-      id: "notification-1",
-      title: "Approval required",
-      body: "A run is waiting",
-      href: "/chat/thread-1",
-      durable: true,
-    },
-    {
-      id: "approval:thread-legacy",
-      title: "Legacy approval",
-      body: "From the compatibility read",
-      href: "/chat/thread-legacy",
-      durable: false,
-    },
-  ];
+  const messages = [{
+    id: "notification-1",
+    title: "Approval required",
+    body: "A run is waiting",
+    href: "/chat/thread-1",
+  }];
 
   await act(async () => {
     root.render(
@@ -149,7 +193,7 @@ test("archive is offered for durable rows only and does not open the thread", as
   assert.equal(
     archiveButtons.length,
     1,
-    "only the durable row has a server-side record to archive",
+    "every displayed row has a server-side Inbox record to archive",
   );
 
   await act(async () => archiveButtons[0].click());
@@ -168,7 +212,7 @@ test("load-more appears only while more pages remain", async () => {
   roots.push(root);
 
   const loadMore = vi.fn();
-  const messages = [{ id: "n-1", title: "One", body: "b", href: "/chat/t-1", durable: true }];
+  const messages = [{ id: "n-1", title: "One", body: "b", href: "/chat/t-1" }];
 
   /* Render only — the bell is a toggle, so clicking it again to "make sure the
    * panel is open" is what shuts it. Open once, below, and then re-render. */
@@ -245,7 +289,6 @@ test("Tab and Shift+Tab stay inside the notification dialog", async () => {
             title: "Finished",
             body: "The run completed",
             href: "/chat/thread-1",
-            durable: true,
           }],
           unreadIds: new Set(["notification-1"]),
           unreadCount: 1,
@@ -305,7 +348,6 @@ test("a failure while rows are on screen stays visible", async () => {
     href: "/chat/thread-1",
     timestamp: 2,
     read: false,
-    durable: true,
   }];
 
   await act(async () => {
@@ -350,7 +392,7 @@ test("shutting the panel tells the reader to stop paging", async () => {
 
   const collapsePages = vi.fn();
   const messages = [{
-    id: "n-1", title: "One", href: "/chat/t-1", timestamp: 1, durable: true,
+    id: "n-1", title: "One", href: "/chat/t-1", timestamp: 1,
   }];
   await act(async () => {
     root.render(
@@ -409,7 +451,7 @@ test("the page-limit notice stands in for a control that cannot retire", async (
   roots.push(root);
 
   const messages = [{
-    id: "n-1", title: "One", href: "/chat/t-1", timestamp: 1, durable: true,
+    id: "n-1", title: "One", href: "/chat/t-1", timestamp: 1,
   }];
   await act(async () => {
     root.render(
@@ -438,7 +480,7 @@ test("mark all read is offered only while something is unread", async () => {
 
   const markAllRead = vi.fn();
   const messages = [{
-    id: "n-1", title: "One", href: "/chat/t-1", timestamp: 1, durable: true,
+    id: "n-1", title: "One", href: "/chat/t-1", timestamp: 1,
   }];
   const selector = "[data-testid='notification-mark-all-read']";
 
@@ -505,7 +547,6 @@ test("Escape dismisses the trapped dialog and returns focus to the bell", async 
             title: "Finished",
             href: "/chat/thread-1",
             timestamp: 1,
-            durable: true,
           }],
           unreadIds: new Set(),
           collapsePages,
@@ -548,7 +589,6 @@ test("Escape from a control inside the dialog still dismisses it", async () => {
             title: "Finished",
             href: "/chat/thread-1",
             timestamp: 1,
-            durable: true,
           }],
           unreadIds: new Set(["notification-1"]),
           unreadCount: 1,

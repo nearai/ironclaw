@@ -1,5 +1,9 @@
 // arch-exempt: large_file, pre-existing size; #6263 only migrated 2 test-double lines to in_memory_agent_turn_runtime(), plan #6263
-//! Per-child/per-settle-group settle path (§2, §5.2, §5.5, §8.1) — the
+//! `§`-references in this module's doc comments cite
+//! `docs/internal/reborn/subagent-spawn/README.md`, the canonical subagent
+//! design/roadmap document.
+//!
+//! Per-child/per-settle-group settle path (§2.3, §2.6) — the
 //! direct successor to `SubagentCompletionObserver` (deleted with this
 //! module). Owner-recovery/reconstruction/framing helpers below are ported
 //! near-verbatim from `completion_observer.rs` — that logic is
@@ -13,20 +17,25 @@ use std::sync::{Arc, OnceLock, RwLock};
 #[cfg(test)]
 use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_api::ids::UserId;
-use ironclaw_host_api::turn::{IdempotencyKey, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_host_api::turn::{IdempotencyKey, LoopMessageRef, TurnRunId, TurnScope, TurnStatus};
 #[cfg(test)]
 use ironclaw_host_api::turn::{TurnActor, TurnGateRef};
-use ironclaw_loop_contracts::{AgentLoopHostError, LoopRunContext};
+use ironclaw_loop_contracts::{AgentLoopHostError, LoopInput, LoopInputAckEffect, LoopRunContext};
 #[cfg(test)]
 use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
-use ironclaw_loop_host::{AwaitEdgeSettler, ResolveOutcome};
+use ironclaw_loop_host::{
+    AwaitEdgeSettler, EnqueueQueuedMessageRequest, HostInputAckEffectHandler, HostInputEnqueuePort,
+    HostInputQueueError, ResolveOutcome, SpawnSubagentMode,
+};
 #[cfg(test)]
 use ironclaw_threads::ThreadHistoryRequest;
 use ironclaw_threads::{
-    LatestThreadMessageRequest, MessageKind, MessageStatus, SessionThreadService, ThreadScope,
-    ToolResultSafeSummary, UpdateToolResultReferenceRequest,
+    AcceptSubagentResultRequest, FramedSubagentText, LatestThreadMessageRequest, MessageKind,
+    MessageStatus, SessionThreadService, ThreadMessageId, ThreadScope, ToolResultSafeSummary,
+    UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
+    AcceptedMessageRef, ActivateThreadRequest, ActivationProvenance, AdmissionRejectionReason,
     AgentTurnSpawnTreeRuntimePort, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
     TurnCoordinator, TurnError, TurnLifecycleEvent, TurnRunRecord,
 };
@@ -55,6 +64,15 @@ pub struct AwaitEdgeResolver<S: SessionThreadService + ?Sized> {
     // below) — an extra `Arc` around each `OnceLock` was redundant
     // allocation/indirection on top of that outer `Arc`.
     result_writer: OnceLock<Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>>,
+    /// Deferred-bind for the background-mode delivery tail's attend step
+    /// (`deliver_background`, Task 5/2b) — same ordering constraint as
+    /// `result_writer` above. `None` (never bound) is a legitimate runtime
+    /// shape, not a missing-wiring bug: it means this runtime has no live
+    /// input queue at all, and the delivery tail treats that exactly like a
+    /// refused enqueue (park the edge in `ResultAppended`) rather than an
+    /// error — unlike `result_writer`, whose accessor fails closed when
+    /// unbound.
+    input_enqueue: OnceLock<Arc<dyn HostInputEnqueuePort>>,
     coordinator: OnceLock<Arc<dyn TurnCoordinator>>,
     thread_service: Arc<S>,
 }
@@ -76,6 +94,7 @@ where
             store,
             agent_turn_runtime: RwLock::new(agent_turn_runtime),
             result_writer: result_writer_cell,
+            input_enqueue: OnceLock::new(),
             coordinator: OnceLock::new(),
             thread_service,
         }
@@ -95,6 +114,7 @@ where
             store,
             agent_turn_runtime: RwLock::new(agent_turn_runtime),
             result_writer: OnceLock::new(),
+            input_enqueue: OnceLock::new(),
             coordinator: OnceLock::new(),
             thread_service,
         }
@@ -152,6 +172,81 @@ where
             .ok_or_else(|| TurnError::Unavailable {
                 reason: "await-edge resolver result writer is not bound".to_string(),
             })
+    }
+
+    pub fn bind_input_enqueue(
+        &self,
+        input_enqueue: Arc<dyn HostInputEnqueuePort>,
+    ) -> Result<(), TurnError> {
+        self.input_enqueue
+            .set(input_enqueue)
+            .map_err(|_| TurnError::InvalidRequest {
+                reason: "await-edge resolver input enqueue port already bound".to_string(),
+            })
+    }
+
+    /// Apply a queue acknowledgment effect. The queue calls this only after
+    /// the parent has durably acknowledged consumption of its
+    /// `SubagentSettled` input. Both steps are idempotent: a retry first
+    /// re-observes `AttentionScheduled` or an already-closed edge, then only
+    /// performs the missing close operation.
+    async fn handle_background_subagent_ack_inner(
+        &self,
+        effect: LoopInputAckEffect,
+    ) -> Result<(), TurnError> {
+        let Some(edge) = self
+            .store
+            .peek(
+                &effect.child_scope,
+                effect.parent_run_id,
+                effect.child_run_id,
+            )
+            .await
+            .map_err(store_error)?
+        else {
+            // A queue retry can race a successful callback's final CAS. The
+            // edge is already gone from the unclosed projection, so the
+            // durable effect is satisfied.
+            return Ok(());
+        };
+        match edge.state {
+            AwaitEdgeState::AttentionScheduled
+            | AwaitEdgeState::Drained
+            | AwaitEdgeState::Abandoned => self
+                .store
+                .close(
+                    &effect.child_scope,
+                    effect.parent_run_id,
+                    effect.child_run_id,
+                )
+                .await
+                .map_err(store_error),
+            AwaitEdgeState::ResultAppended | AwaitEdgeState::AttentionDeferredStreakCap => {
+                self.store
+                    .record_attention(
+                        &effect.child_scope,
+                        effect.parent_run_id,
+                        effect.child_run_id,
+                        super::AttentionOutcome::Queued,
+                    )
+                    .await
+                    .map_err(store_error)?;
+                self.store
+                    .close(
+                        &effect.child_scope,
+                        effect.parent_run_id,
+                        effect.child_run_id,
+                    )
+                    .await
+                    .map_err(store_error)
+            }
+            AwaitEdgeState::Open | AwaitEdgeState::Settled => Err(TurnError::Unavailable {
+                reason: format!(
+                    "background subagent acknowledgment arrived before result delivery (state: {:?})",
+                    edge.state
+                ),
+            }),
+        }
     }
 
     // ─── Owner-recovery (ported near-verbatim) ────────────────────────────
@@ -541,6 +636,252 @@ where
         Ok(())
     }
 
+    /// Background-mode delivery tail (Task 5, 2b; Task 6, 2c): append the
+    /// settled child's framed result to the parent's transcript, then either
+    /// enqueue it as steering input for a live, non-terminal parent run, or —
+    /// when there is no live run, or the live-run enqueue itself refuses —
+    /// activate the parked parent (`activate_parked_parent`) with system
+    /// provenance. Never resumes a blocked parent; that is `resume_parent`'s
+    /// job, exclusive to the blocking-mode `drain_settled_group` path.
+    ///
+    /// Re-drive entry: a peeked edge already at `AttentionScheduled` closes
+    /// without repeating append/attend/activate; one already
+    /// `AttentionDeferredStreakCap` returns untouched UNLESS `retry_deferred`
+    /// is set, in which case it falls through to the attend step exactly like
+    /// `ResultAppended` — the run-start sweep's one permitted path to drain a
+    /// streak-capped edge forward (§4.2). The reactive settle path
+    /// (`settle_and_maybe_drain`) always passes `false`: autonomous re-drive
+    /// never retries a deferred edge; only an explicit, permitted sweep entry
+    /// does.
+    pub(super) async fn deliver_background(
+        &self,
+        edge: &AwaitEdge,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        retry_deferred: bool,
+    ) -> Result<ResolveOutcome, TurnError> {
+        let owner_user_id = edge
+            .parent_run_context
+            .actor
+            .clone()
+            .map(|actor| actor.user_id);
+
+        // Step 1: append (idempotent). A re-peeked edge that already carries
+        // `appended_message_ref` means a prior attempt already landed the
+        // parent-thread row (e.g. a crash between acceptance and
+        // `record_result_appended`, or a benign re-drive) — reuse it instead
+        // of accepting a second row.
+        let message_ref = match edge.appended_message_ref.clone() {
+            Some(existing) => existing,
+            None => {
+                let status = edge
+                    .terminal_kind
+                    .map(EdgeTerminalKind::to_status)
+                    .unwrap_or(TurnStatus::Completed);
+                let output = self
+                    .child_terminal_output(
+                        edge,
+                        owner_user_id.clone(),
+                        status,
+                        edge.terminal_reason.clone(),
+                    )
+                    .await?;
+                let raw_text = output
+                    .final_text
+                    .clone()
+                    .or_else(|| output.failure_summary.clone())
+                    .unwrap_or_else(|| {
+                        format!("Subagent finished with status {}", status_label(status))
+                    });
+                let framed = FramedSubagentText::frame(raw_text);
+                let parent_scope = background_parent_thread_scope(edge, owner_user_id.clone())?;
+                let accepted = self
+                    .thread_service
+                    .accept_subagent_result(AcceptSubagentResultRequest {
+                        scope: parent_scope,
+                        thread_id: edge.parent_thread_id.clone(),
+                        source_binding_id: format!("subagent-result:{parent_run_id}"),
+                        external_event_id: child_run_id.to_string(),
+                        content: framed,
+                    })
+                    .await
+                    .map_err(|error| TurnError::Unavailable {
+                        reason: format!("subagent background result acceptance failed: {error}"),
+                    })?;
+                let message_ref = LoopMessageRef::new(format!("msg:{}", accepted.message_id))
+                    .map_err(|reason| TurnError::InvalidRequest { reason })?;
+                self.store
+                    .record_result_appended(
+                        &edge.child_scope,
+                        parent_run_id,
+                        child_run_id,
+                        message_ref.clone(),
+                    )
+                    .await
+                    .map_err(store_error)?;
+                message_ref
+            }
+        };
+
+        // Step 2: attend. A re-drive that finds the edge already past the
+        // append/attend fork (`AttentionScheduled`, or parked at
+        // `AttentionDeferredStreakCap`) must not repeat it.
+        match edge.state {
+            AwaitEdgeState::AttentionScheduled => {
+                self.store
+                    .close(&edge.child_scope, parent_run_id, child_run_id)
+                    .await
+                    .map_err(store_error)?;
+                return Ok(ResolveOutcome::Drained);
+            }
+            AwaitEdgeState::AttentionDeferredStreakCap if !retry_deferred => {
+                return Ok(ResolveOutcome::Drained);
+            }
+            _ => {}
+        }
+        let message_id = parse_appended_message_id(&message_ref)?;
+        let live_record = self
+            .agent_turn_runtime()?
+            .recent_runs_for_thread(&edge.parent_run_context.scope, 1)
+            .await?
+            .into_iter()
+            .next()
+            .filter(|record| !record.status.is_terminal());
+        let Some(record) = live_record else {
+            return self
+                .activate_parked_parent(edge, parent_run_id, child_run_id, message_id)
+                .await;
+        };
+        let Some(enqueue_port) = self.input_enqueue.get() else {
+            return self
+                .activate_parked_parent(edge, parent_run_id, child_run_id, message_id)
+                .await;
+        };
+        let parent_scope = background_parent_thread_scope(edge, owner_user_id)?;
+        let enqueue_result = enqueue_port
+            .enqueue_queued_message(EnqueueQueuedMessageRequest {
+                run_id: record.run_id,
+                turn_id: record.turn_id,
+                scope: parent_scope,
+                thread_id: edge.parent_thread_id.clone(),
+                message_id,
+                input: LoopInput::SubagentSettled {
+                    child_run_id,
+                    message_ref: message_ref.clone(),
+                },
+                ack_effect: Some(LoopInputAckEffect {
+                    child_scope: edge.child_scope.clone(),
+                    parent_run_id,
+                    child_run_id,
+                }),
+            })
+            .await;
+        match enqueue_result {
+            Ok(_) => {}
+            Err(
+                HostInputQueueError::RunClosed
+                | HostInputQueueError::CapacityExhausted
+                | HostInputQueueError::Disabled,
+            ) => {
+                return self
+                    .activate_parked_parent(edge, parent_run_id, child_run_id, message_id)
+                    .await;
+            }
+            Err(error) => {
+                return Err(TurnError::Unavailable {
+                    reason: format!("subagent background result enqueue failed: {error}"),
+                });
+            }
+        }
+        // The queue owns the durable acknowledgment boundary. The effect is
+        // retained on the queue entry until the parent loop acknowledges its
+        // consumed input; only that callback records attention and closes the
+        // await edge. Until then the edge remains `ResultAppended` and is
+        // recoverable after a crash between enqueue and consumption.
+        Ok(ResolveOutcome::Drained)
+    }
+
+    /// Parked-parent activation (Task 6, 2c): reached from `deliver_background`
+    /// step 2 when there is no live parent run, or the live-run enqueue itself
+    /// refuses (`RunClosed`/`CapacityExhausted`/`Disabled`) — the parent must
+    /// be woken, not steered. Wakes it through `TurnCoordinator::activate` with
+    /// `ActivationProvenance::System` so the derived streak caps see (and, once
+    /// spent, refuse) this wake exactly as they would a human-initiated one.
+    /// Never calls `resume_turn`/`resume_parent`: that path is exclusive to the
+    /// blocking-mode dependent-run gate, which a background parent never parks
+    /// on.
+    async fn activate_parked_parent(
+        &self,
+        edge: &AwaitEdge,
+        parent_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+        message_id: ThreadMessageId,
+    ) -> Result<ResolveOutcome, TurnError> {
+        let actor =
+            edge.parent_run_context
+                .actor
+                .clone()
+                .ok_or_else(|| TurnError::InvalidRequest {
+                    reason: "subagent parent run context missing actor for activation".to_string(),
+                })?;
+        let coordinator = self
+            .coordinator
+            .get()
+            .ok_or_else(|| TurnError::Unavailable {
+                reason: "await-edge resolver coordinator is not bound".to_string(),
+            })?;
+        let accepted_message_ref = AcceptedMessageRef::new(format!("msg:{message_id}"))
+            .map_err(|reason| TurnError::InvalidRequest { reason })?;
+        let idempotency_key =
+            IdempotencyKey::new(format!("subagent-activate:{parent_run_id}:{child_run_id}"))
+                .map_err(|reason| TurnError::InvalidRequest { reason })?;
+        let activation = coordinator
+            .activate(ActivateThreadRequest {
+                scope: edge.parent_run_context.scope.clone(),
+                actor,
+                accepted_message_ref,
+                provenance: ActivationProvenance::System,
+                idempotency_key,
+                received_at: chrono::Utc::now(),
+                requested_run_profile: None,
+                resolved_run_profile: Some(edge.parent_run_context.resolved_run_profile.clone()),
+            })
+            .await;
+
+        match activation {
+            Ok(_) => {
+                self.store
+                    .record_attention(
+                        &edge.child_scope,
+                        parent_run_id,
+                        child_run_id,
+                        super::AttentionOutcome::Activated,
+                    )
+                    .await
+                    .map_err(store_error)?;
+                self.store
+                    .close(&edge.child_scope, parent_run_id, child_run_id)
+                    .await
+                    .map_err(store_error)?;
+                Ok(ResolveOutcome::Drained)
+            }
+            Err(TurnError::AdmissionRejected(rejection))
+                if rejection.reason == AdmissionRejectionReason::SystemWakeStreak =>
+            {
+                self.store
+                    .defer_streak_capped(&edge.child_scope, parent_run_id, child_run_id)
+                    .await
+                    .map_err(store_error)?;
+                Ok(ResolveOutcome::Drained)
+            }
+            // `ThreadBusy` (the parent raced back to live) and any other
+            // refusal this tail doesn't recognize as a streak cap leave the
+            // edge parked in `ResultAppended` — the next drive re-attends;
+            // sweeps own the retry, this tail does not hard-fail on it.
+            Err(_) => Ok(ResolveOutcome::Drained),
+        }
+    }
+
     /// Drives one child terminal event through settle -> (group-ready?) ->
     /// write-result -> resume -> consume.
     pub async fn handle_child_terminal(
@@ -648,6 +989,25 @@ where
                 .map_err(store_error)?;
         }
 
+        if edge.mode == SpawnSubagentMode::Background {
+            // Re-peek: the settle write above (or an earlier settle, on a
+            // replay where `edge.state` was already past `Open`) may have
+            // moved the edge past the snapshot captured before this branch —
+            // `deliver_background` needs the settled `terminal_kind`/
+            // `terminal_reason`, not the pre-settle values.
+            let Some(settled_edge) = self
+                .store
+                .peek(child_scope, parent_run_id, child_run_id)
+                .await
+                .map_err(store_error)?
+            else {
+                return Ok(ResolveOutcome::AlreadyClosed);
+            };
+            return self
+                .deliver_background(&settled_edge, parent_run_id, child_run_id, false)
+                .await;
+        }
+
         self.drain_settled_group(child_scope, parent_run_id, child_run_id)
             .await
     }
@@ -669,7 +1029,7 @@ where
     /// between the read and the check below. Benign: every downstream
     /// effect here is idempotent (gate resume, per-member CAS overwrite,
     /// `mark_released`'s re-read-adopt) and groups are bounded (≤16
-    /// descendants, §5.1), so a racing settle just loses this round's driver
+    /// descendants, §2.6), so a racing settle just loses this round's driver
     /// election and drives the next one instead.
     pub(super) async fn drain_settled_group(
         &self,
@@ -712,7 +1072,7 @@ where
         // never the driving member's, so a mixed-status batch (one sibling
         // failed, another completed) doesn't stamp the same status onto
         // every parent result (external review finding on this PR).
-        // (Batched into one snapshot/CAS write is §8's rule for the
+        // (Batched into one snapshot/CAS write is §4.3's rule for the
         // background-mode multi-edge drain case, P2.4 — not required here;
         // blocking-mode groups are tiny, ≤4 spawns/turn, so a per-member loop
         // is the simpler, correct choice for PR1.)
@@ -761,6 +1121,69 @@ where
                 reason: error.to_string(),
             })
     }
+
+    /// Run-start sweep (§4.2): heals background await-edges left mid-delivery
+    /// on `scope`'s thread. Queries at most `MAX_QUEUED_INPUTS_PER_RUN`
+    /// background edges (`AwaitEdgeStore::list_background_for_thread`) and
+    /// drives each through `deliver_background`'s idempotent re-drive by
+    /// state:
+    ///
+    /// - `Settled` / `ResultAppended` / `AttentionScheduled` — full re-drive
+    ///   (append is a no-op replay past `Settled`; `AttentionScheduled`
+    ///   closes only, per `deliver_background`'s own re-drive contract).
+    /// - `AttentionDeferredStreakCap` — only when `human_initiated`: drained
+    ///   forward via `retry_deferred`. An autonomous (System/ParentAgent)
+    ///   start leaves it parked.
+    /// - `Open` / `Drained` / `Abandoned` — nothing to do.
+    ///
+    /// One edge's failure is logged and does not stop the sweep from trying
+    /// the rest; the caller (`RebornTurnRunExecutor::execute_claimed_run`)
+    /// treats the whole sweep as non-fatal to the run start.
+    pub async fn sweep_thread_on_run_start(
+        &self,
+        scope: &TurnScope,
+        human_initiated: bool,
+    ) -> Result<(), TurnError> {
+        // silent-ok: MAX_QUEUED_INPUTS_PER_RUN is a compile-time constant
+        // (32) that always fits u32; `unwrap_or(u32::MAX)` is unreachable
+        // dead code on any value that constant could ever hold, not a
+        // swallowed runtime error.
+        let batch_limit =
+            u32::try_from(ironclaw_loop_host::MAX_QUEUED_INPUTS_PER_RUN).unwrap_or(u32::MAX);
+        let edges = self
+            .store
+            .list_background_for_thread(scope, batch_limit, human_initiated)
+            .await
+            .map_err(store_error)?;
+        for (parent_run_id, child_run_id, edge) in edges {
+            let retry_deferred = match edge.state {
+                AwaitEdgeState::Open | AwaitEdgeState::Drained | AwaitEdgeState::Abandoned => {
+                    continue;
+                }
+                AwaitEdgeState::AttentionDeferredStreakCap => {
+                    if !human_initiated {
+                        continue;
+                    }
+                    true
+                }
+                AwaitEdgeState::Settled
+                | AwaitEdgeState::ResultAppended
+                | AwaitEdgeState::AttentionScheduled => false,
+            };
+            if let Err(error) = self
+                .deliver_background(&edge, parent_run_id, child_run_id, retry_deferred)
+                .await
+            {
+                tracing::debug!(
+                    error = %error,
+                    %parent_run_id,
+                    %child_run_id,
+                    "background await-edge run-start sweep failed for one edge"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 fn store_error(error: super::AwaitEdgeStoreError) -> TurnError {
@@ -769,7 +1192,55 @@ fn store_error(error: super::AwaitEdgeStoreError) -> TurnError {
     }
 }
 
-/// §5.2's benign already-closed set for a resume attempt pinned to
+/// The parent `ThreadScope` for background-mode delivery (Task 5, 2b),
+/// sourced from `edge.parent_run_context.scope` — the same shape
+/// `update_parent_result_reference` builds (tenant/agent/project +
+/// caller-supplied owner, no mission), but off the parent's own scope
+/// instead of the child's. The blocking-mode path derives its `ThreadScope`
+/// from `edge.child_scope` because it only ever needs the same
+/// tenant/agent/project axes the child shares; background delivery writes
+/// and reads the parent's own thread, so it anchors to the parent's own
+/// scope directly rather than assuming the two coincide.
+fn background_parent_thread_scope(
+    edge: &AwaitEdge,
+    owner_user_id: Option<UserId>,
+) -> Result<ThreadScope, TurnError> {
+    let scope = &edge.parent_run_context.scope;
+    let Some(agent_id) = scope.agent_id.clone() else {
+        return Err(TurnError::InvalidRequest {
+            reason: "parent run context scope missing agent id for subagent result delivery"
+                .to_string(),
+        });
+    };
+    Ok(ThreadScope {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id,
+        project_id: scope.project_id.clone(),
+        owner_user_id,
+        mission_id: None,
+    })
+}
+
+/// Recover the transcript `ThreadMessageId` a `LoopMessageRef` points at —
+/// the same `msg:{id}` convention `structured_finalization.rs` and
+/// `loop_exit_applier.rs` already parse.
+fn parse_appended_message_id(message_ref: &LoopMessageRef) -> Result<ThreadMessageId, TurnError> {
+    let raw =
+        message_ref
+            .as_str()
+            .strip_prefix("msg:")
+            .ok_or_else(|| TurnError::InvalidRequest {
+                reason: "subagent result message ref is not a transcript message reference"
+                    .to_string(),
+            })?;
+    ThreadMessageId::parse(raw).map_err(|error| TurnError::InvalidRequest {
+        reason: format!(
+            "subagent result message ref is not a valid transcript message id: {error}"
+        ),
+    })
+}
+
+/// §2.3's benign already-closed set for a resume attempt pinned to
 /// `ResumeTurnPrecondition::BlockedDependentRunGate`: exactly
 /// `from ∈ {Queued, Running, Completed}` — a second resume attempt
 /// (double-settle, or recovery re-driving an already-resumed parent)
@@ -792,1052 +1263,7 @@ fn is_benign_already_resumed(error: &TurnError) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn benign_already_resumed_set_is_exactly_queued_running_completed() {
-        let benign = [
-            TurnStatus::Queued,
-            TurnStatus::Running,
-            TurnStatus::Completed,
-        ];
-        for from in benign {
-            let error = TurnError::InvalidTransition {
-                from,
-                to: TurnStatus::Queued,
-            };
-            assert!(
-                is_benign_already_resumed(&error),
-                "{from:?} must be treated as benign already-resumed"
-            );
-        }
-    }
-
-    #[test]
-    fn non_benign_invalid_transition_statuses_surface_as_real_errors() {
-        // Every `TurnStatus` NOT in the benign set — including the
-        // still-blocked-on-something-else statuses that are the actual data
-        // -loss bug this discriminator guards against (a parent stuck on an
-        // unrelated approval/auth/resource/external-tool gate must not be
-        // silently treated as "already resumed").
-        let non_benign = [
-            TurnStatus::BlockedApproval,
-            TurnStatus::BlockedAuth,
-            TurnStatus::BlockedResource,
-            TurnStatus::BlockedDependentRun,
-            TurnStatus::BlockedExternalTool,
-            TurnStatus::CancelRequested,
-            TurnStatus::Cancelled,
-            TurnStatus::Failed,
-            TurnStatus::RecoveryRequired,
-        ];
-        for from in non_benign {
-            let error = TurnError::InvalidTransition {
-                from,
-                to: TurnStatus::Queued,
-            };
-            assert!(
-                !is_benign_already_resumed(&error),
-                "{from:?} must NOT be treated as benign — it indicates the parent \
-                 never actually moved past BlockedDependentRun for an unrelated reason"
-            );
-        }
-    }
-
-    #[test]
-    fn non_invalid_transition_errors_are_never_benign() {
-        // A wildcard on the *error variant* (matching `Conflict` or any
-        // other kind alongside `InvalidTransition`) is exactly the class of
-        // bug this discriminator replaced — pin that only this one error
-        // shape, with only this one `from`-set, is ever benign.
-        assert!(!is_benign_already_resumed(&TurnError::Conflict {
-            reason: "unrelated conflict".to_string()
-        }));
-        assert!(!is_benign_already_resumed(&TurnError::ScopeNotFound));
-        assert!(!is_benign_already_resumed(&TurnError::Unauthorized));
-    }
-
-    // ─── reconstruct_edge (FIX A): pure data transformation off cached
-    // `SubagentThreadMetadata`, zero `agent_turn_runtime` calls for the
-    // parent ──────────────────────────────────────────────────────────
-
-    struct ReconResultWriter;
-
-    #[async_trait::async_trait]
-    impl ironclaw_loop_host::LoopCapabilityResultWriter for ReconResultWriter {
-        async fn write_capability_result(
-            &self,
-            _write: ironclaw_loop_host::CapabilityResultWrite<'_>,
-        ) -> Result<ironclaw_loop_host::CapabilityWriteResult, AgentLoopHostError> {
-            Err(AgentLoopHostError::new(
-                ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
-                "not exercised by reconstruct_edge tests",
-            ))
-        }
-    }
-
-    fn recon_scoped_fs()
-    -> Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
-        use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
-        use ironclaw_host_api::{
-            mount::{MountGrant, MountPermissions, MountView},
-            path::{MountAlias, VirtualPath},
-        };
-        let mounts = MountView::new(vec![MountGrant::new(
-            MountAlias::new("/processes").unwrap(),
-            VirtualPath::new("/processes").unwrap(),
-            MountPermissions::read_write_list_delete(),
-        )])
-        .unwrap();
-        Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::new(InMemoryBackend::new()),
-            mounts,
-        ))
-    }
-
-    fn recon_resolver(
-        thread_service: Arc<ironclaw_threads::InMemorySessionThreadService>,
-    ) -> AwaitEdgeResolver<ironclaw_threads::InMemorySessionThreadService> {
-        let store = Arc::new(AwaitEdgeStore::new(Arc::new(
-            ironclaw_processes::ProcessJournalStore::new(recon_scoped_fs()),
-        )));
-        let agent_turn_runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort> =
-            Arc::new(ironclaw_turns::test_support::in_memory_agent_turn_runtime());
-        let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
-            Arc::new(ReconResultWriter);
-        AwaitEdgeResolver::new_unbound(store, agent_turn_runtime, result_writer, thread_service)
-    }
-
-    fn recon_child_record(
-        tenant_id: &ironclaw_host_api::ids::TenantId,
-        agent_id: &ironclaw_host_api::ids::AgentId,
-        child_thread_id: &ironclaw_host_api::ids::ThreadId,
-        child_run_id: TurnRunId,
-        parent_run_id: TurnRunId,
-        resolved_run_profile: ironclaw_loop_contracts::ResolvedRunProfile,
-    ) -> TurnRunRecord {
-        TurnRunRecord {
-            subagent_activation_provenance: None,
-            run_id: child_run_id,
-            turn_id: ironclaw_host_api::turn::TurnId::new(),
-            scope: TurnScope::new(
-                tenant_id.clone(),
-                Some(agent_id.clone()),
-                None,
-                child_thread_id.clone(),
-            ),
-            accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new("msg:child")
-                .unwrap(),
-            status: TurnStatus::Completed,
-            profile: ironclaw_turns::TurnRunProfile::from_resolved(resolved_run_profile),
-            output_contract: Default::default(),
-            resolved_model_route: None,
-            model_usage: None,
-            execution_outcome: None,
-            checkpoint_id: None,
-            gate_ref: None,
-            blocked_activity_id: None,
-            credential_requirements: Vec::new(),
-            failure: None,
-            event_cursor: ironclaw_host_api::turn::EventCursor(1),
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            last_heartbeat_at: None,
-            claim_count: 0,
-            received_at: chrono::Utc::now(),
-            parent_run_id: Some(parent_run_id),
-            subagent_depth: 1,
-            spawn_tree_root_run_id: Some(parent_run_id),
-            product_context: None,
-            resume_disposition: None,
-        }
-    }
-
-    fn recon_event(
-        child_run_id: TurnRunId,
-        scope: TurnScope,
-        owner_user_id: UserId,
-    ) -> TurnLifecycleEvent {
-        TurnLifecycleEvent {
-            cursor: ironclaw_host_api::turn::EventCursor(1),
-            scope,
-            occurred_at: None,
-            owner_user_id: Some(owner_user_id),
-            run_id: child_run_id,
-            status: TurnStatus::Completed,
-            kind: ironclaw_turns::TurnEventKind::Completed,
-            blocked_gate: None,
-            sanitized_reason: None,
-            retryable: None,
-            detail: None,
-        }
-    }
-
-    async fn recon_seed_thread(
-        thread_service: &ironclaw_threads::InMemorySessionThreadService,
-        tenant_id: &ironclaw_host_api::ids::TenantId,
-        agent_id: &ironclaw_host_api::ids::AgentId,
-        child_thread_id: &ironclaw_host_api::ids::ThreadId,
-        owner_user_id: &UserId,
-        metadata_json: Option<String>,
-    ) {
-        thread_service
-            .ensure_thread(ironclaw_threads::EnsureThreadRequest {
-                scope: ThreadScope {
-                    tenant_id: tenant_id.clone(),
-                    agent_id: agent_id.clone(),
-                    project_id: None,
-                    owner_user_id: Some(owner_user_id.clone()),
-                    mission_id: None,
-                },
-                thread_id: Some(child_thread_id.clone()),
-                created_by_actor_id: "test".to_string(),
-                title: None,
-                metadata_json,
-            })
-            .await
-            .unwrap();
-    }
-
-    // (T1) well-formed metadata -> correct AwaitEdge with gate_ref +
-    // parent_run_context sourced from metadata. Mutation: source gate_ref
-    // from a derived token instead of `metadata.gate_ref` -> RED (the
-    // shared-batch-gate assertion below fails because a derived token never
-    // matches the metadata-cached one).
-    #[tokio::test]
-    async fn reconstruct_edge_builds_edge_from_cached_metadata() {
-        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t1").unwrap();
-        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t1").unwrap();
-        let child_thread_id =
-            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t1").unwrap();
-        let parent_thread_id =
-            ironclaw_host_api::ids::ThreadId::new("recon-parent-thread-t1").unwrap();
-        let owner_user_id = UserId::new("recon-owner-t1").unwrap();
-        let parent_run_id = TurnRunId::new();
-        let child_run_id = TurnRunId::new();
-
-        let parent_context = ironclaw_agent_loop::test_support::test_run_context("recon-t1");
-        let child_record = recon_child_record(
-            &tenant_id,
-            &agent_id,
-            &child_thread_id,
-            child_run_id,
-            parent_run_id,
-            parent_context.resolved_run_profile.clone(),
-        );
-        let event = recon_event(
-            child_run_id,
-            child_record.scope.clone(),
-            owner_user_id.clone(),
-        );
-        // Distinct from the derived `gate:subagent-<child_run_id>` token so
-        // the test can tell "sourced from metadata" apart from "recomputed".
-        let metadata_gate_ref = TurnGateRef::new("gate:subagent-shared-batch").unwrap();
-        let metadata = ironclaw_loop_host::SubagentThreadMetadata {
-            kind: ironclaw_loop_host::SubagentThreadKind::Subagent,
-            parent_run_id,
-            parent_thread_id: parent_thread_id.clone(),
-            tree_root_run_id: parent_run_id,
-            child_run_id,
-            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
-            mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
-            result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:subagent.recon-t1")
-                .unwrap(),
-            spawn_provider_call_id: Some("spawn-call-recon-t1".to_string()),
-            handoff: None,
-            parent_run_context: parent_context.clone(),
-            gate_ref: metadata_gate_ref.clone(),
-        };
-
-        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
-        recon_seed_thread(
-            &thread_service,
-            &tenant_id,
-            &agent_id,
-            &child_thread_id,
-            &owner_user_id,
-            Some(serde_json::to_string(&metadata).unwrap()),
-        )
-        .await;
-        let resolver = recon_resolver(thread_service);
-
-        let edge = resolver
-            .reconstruct_edge(&child_record, parent_run_id, &event)
-            .await
-            .unwrap()
-            .expect("well-formed metadata should reconstruct an edge");
-
-        assert_eq!(edge.gate_ref, metadata_gate_ref);
-        assert_eq!(edge.parent_run_context.turn_id, parent_context.turn_id);
-        assert_eq!(
-            edge.parent_run_context.resolved_run_profile,
-            parent_context.resolved_run_profile
-        );
-        assert_eq!(edge.parent_run_context.run_id, parent_run_id);
-        assert_eq!(edge.parent_run_context.thread_id, parent_thread_id);
-        assert_eq!(
-            edge.parent_run_context.actor,
-            Some(TurnActor::new(owner_user_id))
-        );
-        assert_eq!(edge.parent_thread_id, parent_thread_id);
-        assert_eq!(edge.tree_root_run_id, parent_run_id);
-        assert_eq!(edge.mode, ironclaw_loop_host::SpawnSubagentMode::Blocking);
-    }
-
-    // (T2) identity mismatch: metadata's own `parent_run_id` disagrees with
-    // the trusted child record's `parent_run_id` argument -> fail closed to
-    // `Ok(None)`, never reconstruct against the wrong parent.
-    #[tokio::test]
-    async fn reconstruct_edge_fails_closed_on_parent_run_id_mismatch() {
-        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t2").unwrap();
-        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t2").unwrap();
-        let child_thread_id =
-            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t2").unwrap();
-        let parent_thread_id =
-            ironclaw_host_api::ids::ThreadId::new("recon-parent-thread-t2").unwrap();
-        let owner_user_id = UserId::new("recon-owner-t2").unwrap();
-        let parent_run_id = TurnRunId::new();
-        let wrong_parent_run_id = TurnRunId::new();
-        let child_run_id = TurnRunId::new();
-
-        let parent_context = ironclaw_agent_loop::test_support::test_run_context("recon-t2");
-        let child_record = recon_child_record(
-            &tenant_id,
-            &agent_id,
-            &child_thread_id,
-            child_run_id,
-            parent_run_id,
-            parent_context.resolved_run_profile.clone(),
-        );
-        let event = recon_event(
-            child_run_id,
-            child_record.scope.clone(),
-            owner_user_id.clone(),
-        );
-        let metadata = ironclaw_loop_host::SubagentThreadMetadata {
-            kind: ironclaw_loop_host::SubagentThreadKind::Subagent,
-            parent_run_id: wrong_parent_run_id,
-            parent_thread_id: parent_thread_id.clone(),
-            tree_root_run_id: wrong_parent_run_id,
-            child_run_id,
-            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
-            mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
-            result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:subagent.recon-t2")
-                .unwrap(),
-            spawn_provider_call_id: None,
-            handoff: None,
-            parent_run_context: parent_context,
-            gate_ref: TurnGateRef::new("gate:subagent-t2").unwrap(),
-        };
-
-        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
-        recon_seed_thread(
-            &thread_service,
-            &tenant_id,
-            &agent_id,
-            &child_thread_id,
-            &owner_user_id,
-            Some(serde_json::to_string(&metadata).unwrap()),
-        )
-        .await;
-        let resolver = recon_resolver(thread_service);
-
-        let result = resolver
-            .reconstruct_edge(&child_record, parent_run_id, &event)
-            .await
-            .unwrap();
-
-        assert!(
-            result.is_none(),
-            "parent_run_id mismatch must fail closed to None"
-        );
-    }
-
-    // (T3) malformed/absent metadata -> `Ok(None)`, never an error and never
-    // a fabricated edge.
-    #[tokio::test]
-    async fn reconstruct_edge_returns_none_for_absent_or_malformed_metadata() {
-        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t3").unwrap();
-        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t3").unwrap();
-        let child_thread_id =
-            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t3").unwrap();
-        let owner_user_id = UserId::new("recon-owner-t3").unwrap();
-        let parent_run_id = TurnRunId::new();
-        let child_run_id = TurnRunId::new();
-        let parent_context = ironclaw_agent_loop::test_support::test_run_context("recon-t3");
-        let child_record = recon_child_record(
-            &tenant_id,
-            &agent_id,
-            &child_thread_id,
-            child_run_id,
-            parent_run_id,
-            parent_context.resolved_run_profile.clone(),
-        );
-        let event = recon_event(
-            child_run_id,
-            child_record.scope.clone(),
-            owner_user_id.clone(),
-        );
-
-        // (a) no metadata at all on the child's thread.
-        let thread_service_absent =
-            Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
-        recon_seed_thread(
-            &thread_service_absent,
-            &tenant_id,
-            &agent_id,
-            &child_thread_id,
-            &owner_user_id,
-            None,
-        )
-        .await;
-        let resolver_absent = recon_resolver(thread_service_absent);
-        let result_absent = resolver_absent
-            .reconstruct_edge(&child_record, parent_run_id, &event)
-            .await
-            .unwrap();
-        assert!(result_absent.is_none(), "absent metadata must return None");
-
-        // (b) metadata present but not subagent-kind shaped.
-        let thread_service_malformed =
-            Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
-        recon_seed_thread(
-            &thread_service_malformed,
-            &tenant_id,
-            &agent_id,
-            &child_thread_id,
-            &owner_user_id,
-            Some("{\"kind\":\"not-a-subagent\"}".to_string()),
-        )
-        .await;
-        let resolver_malformed = recon_resolver(thread_service_malformed);
-        let result_malformed = resolver_malformed
-            .reconstruct_edge(&child_record, parent_run_id, &event)
-            .await
-            .unwrap();
-        assert!(
-            result_malformed.is_none(),
-            "malformed metadata must return None"
-        );
-    }
-
-    // (T4) ANTI-TAMPER PIN: metadata's cached `parent_run_context.scope`
-    // disagrees with the trusted anchor (different tenant) -> the resulting
-    // edge uses the anchor's scope/actor, never metadata's. Mutation: trust
-    // `metadata.parent_run_context` wholesale (skip the anchor override) ->
-    // RED (the tenant/thread_id assertions below fail against the tampered
-    // values).
-    #[tokio::test]
-    async fn reconstruct_edge_anti_tamper_pin_overrides_metadata_scope_with_trusted_anchor() {
-        let tenant_id = ironclaw_host_api::ids::TenantId::new("recon-tenant-t4").unwrap();
-        let agent_id = ironclaw_host_api::ids::AgentId::new("recon-agent-t4").unwrap();
-        let child_thread_id =
-            ironclaw_host_api::ids::ThreadId::new("recon-child-thread-t4").unwrap();
-        let parent_thread_id =
-            ironclaw_host_api::ids::ThreadId::new("recon-parent-thread-t4").unwrap();
-        let owner_user_id = UserId::new("recon-owner-t4").unwrap();
-        let parent_run_id = TurnRunId::new();
-        let child_run_id = TurnRunId::new();
-
-        let mut tampered_context = ironclaw_agent_loop::test_support::test_run_context("recon-t4");
-        // Attacker-controlled thread metadata claims a different
-        // tenant/thread than the trusted child run record — this must never
-        // win.
-        let attacker_tenant = ironclaw_host_api::ids::TenantId::new("attacker-tenant-t4").unwrap();
-        let attacker_thread = ironclaw_host_api::ids::ThreadId::new("attacker-thread-t4").unwrap();
-        tampered_context.scope =
-            TurnScope::new(attacker_tenant.clone(), None, None, attacker_thread.clone());
-
-        let child_record = recon_child_record(
-            &tenant_id,
-            &agent_id,
-            &child_thread_id,
-            child_run_id,
-            parent_run_id,
-            tampered_context.resolved_run_profile.clone(),
-        );
-        let event = recon_event(
-            child_run_id,
-            child_record.scope.clone(),
-            owner_user_id.clone(),
-        );
-        let metadata = ironclaw_loop_host::SubagentThreadMetadata {
-            kind: ironclaw_loop_host::SubagentThreadKind::Subagent,
-            parent_run_id,
-            parent_thread_id: parent_thread_id.clone(),
-            tree_root_run_id: parent_run_id,
-            child_run_id,
-            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
-            mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
-            result_ref: ironclaw_host_api::turn::LoopResultRef::new("result:subagent.recon-t4")
-                .unwrap(),
-            spawn_provider_call_id: None,
-            handoff: None,
-            parent_run_context: tampered_context,
-            gate_ref: TurnGateRef::new("gate:subagent-t4").unwrap(),
-        };
-
-        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
-        recon_seed_thread(
-            &thread_service,
-            &tenant_id,
-            &agent_id,
-            &child_thread_id,
-            &owner_user_id,
-            Some(serde_json::to_string(&metadata).unwrap()),
-        )
-        .await;
-        let resolver = recon_resolver(thread_service);
-
-        let edge = resolver
-            .reconstruct_edge(&child_record, parent_run_id, &event)
-            .await
-            .unwrap()
-            .expect("tampered-but-parseable metadata should still reconstruct");
-
-        // The anchor (built from the trusted child record + recovered
-        // owner) must win — never the attacker-controlled tenant/thread.
-        assert_eq!(edge.parent_run_context.scope.tenant_id, tenant_id);
-        assert_ne!(edge.parent_run_context.scope.tenant_id, attacker_tenant);
-        assert_eq!(edge.parent_run_context.scope.thread_id, parent_thread_id);
-        assert_ne!(edge.parent_run_context.scope.thread_id, attacker_thread);
-        assert_eq!(edge.parent_run_context.thread_id, parent_thread_id);
-        assert_eq!(
-            edge.parent_run_context.actor,
-            Some(TurnActor::new(owner_user_id))
-        );
-    }
-
-    #[derive(Default)]
-    struct RecordingResumeCoordinator {
-        resumes: std::sync::Mutex<Vec<ResumeTurnRequest>>,
-    }
-
-    impl RecordingResumeCoordinator {
-        fn resumes(&self) -> Vec<ResumeTurnRequest> {
-            self.resumes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        }
-    }
-
-    #[derive(Default)]
-    struct RecordingUpdateWriter {
-        updates: std::sync::Mutex<Vec<serde_json::Value>>,
-    }
-
-    impl RecordingUpdateWriter {
-        fn updates(&self) -> Vec<serde_json::Value> {
-            self.updates
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ironclaw_loop_host::LoopCapabilityResultWriter for RecordingUpdateWriter {
-        async fn write_capability_result(
-            &self,
-            _write: ironclaw_loop_host::CapabilityResultWrite<'_>,
-        ) -> Result<ironclaw_loop_host::CapabilityWriteResult, AgentLoopHostError> {
-            Err(AgentLoopHostError::new(
-                ironclaw_loop_contracts::AgentLoopHostErrorKind::InvalidInvocation,
-                "write is not used by await-edge update test",
-            ))
-        }
-
-        async fn update_capability_result(
-            &self,
-            _run_context: &LoopRunContext,
-            _result_ref: &ironclaw_host_api::turn::LoopResultRef,
-            output: serde_json::Value,
-        ) -> Result<u64, AgentLoopHostError> {
-            let byte_len = serde_json::to_vec(&output)
-                .map_err(|error| {
-                    AgentLoopHostError::new(
-                        ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
-                        error.to_string(),
-                    )
-                })?
-                .len() as u64;
-            self.updates
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(output);
-            Ok(byte_len)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl TurnCoordinator for RecordingResumeCoordinator {
-        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-            Ok(TurnRunId::new())
-        }
-
-        async fn submit_turn(
-            &self,
-            _request: ironclaw_turns::SubmitTurnRequest,
-        ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
-            Err(TurnError::InvalidRequest {
-                reason: "submit is not used by await-edge drain test".to_string(),
-            })
-        }
-
-        async fn resume_turn(
-            &self,
-            request: ResumeTurnRequest,
-        ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
-            let run_id = request.run_id;
-            self.resumes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(request);
-            Ok(ironclaw_turns::ResumeTurnResponse {
-                run_id,
-                status: TurnStatus::Queued,
-                event_cursor: ironclaw_host_api::turn::EventCursor(9),
-            })
-        }
-
-        async fn retry_turn(
-            &self,
-            request: ironclaw_turns::RetryTurnRequest,
-        ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
-            Err(TurnError::RunNotRetryable {
-                run_id: request.run_id,
-            })
-        }
-
-        async fn cancel_run(
-            &self,
-            _request: ironclaw_turns::CancelRunRequest,
-        ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
-            Err(TurnError::InvalidRequest {
-                reason: "cancel is not used by await-edge drain test".to_string(),
-            })
-        }
-
-        async fn get_run_state(
-            &self,
-            _request: GetRunStateRequest,
-        ) -> Result<ironclaw_turns::TurnRunState, TurnError> {
-            Err(TurnError::ScopeNotFound)
-        }
-    }
-
-    #[tokio::test]
-    async fn mixed_status_group_updates_each_result_resumes_once_and_consumes_every_edge() {
-        use chrono::Utc;
-        use ironclaw_host_api::ids::{ProcessId, ProviderToolName};
-        use ironclaw_loop_host::{AwaitedChildSetRecord, SpawnSubagentMode, SubagentKindId};
-        use ironclaw_processes::{
-            ProcessDependencyPort, ProcessDependencySubmission, ProcessJournalStore, ProcessKind,
-            ProcessOperationId, ProcessSubmissionPort, SubmitProcessRequest,
-        };
-        use ironclaw_threads::{
-            AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
-            EnsureThreadRequest, MessageContent, ProviderToolCallReferenceEnvelope,
-            SessionThreadService, ThreadHistoryRequest, ThreadScope, ToolResultReferenceEnvelope,
-            ToolResultSafeSummary,
-        };
-
-        let process_store = Arc::new(ProcessJournalStore::new(recon_scoped_fs()));
-        let dependencies = Arc::clone(&process_store)
-            as Arc<dyn ProcessDependencyPort<Error = ironclaw_processes::ProcessJournalStoreError>>;
-        let edge_store = Arc::new(AwaitEdgeStore::new(dependencies));
-        let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
-        let runtime: Arc<dyn AgentTurnSpawnTreeRuntimePort> =
-            Arc::new(ironclaw_turns::test_support::in_memory_agent_turn_runtime());
-        let recording_writer = Arc::new(RecordingUpdateWriter::default());
-        let writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
-            Arc::clone(&recording_writer)
-                as Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>;
-        let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
-            Arc::clone(&edge_store),
-            runtime,
-            writer,
-            Arc::clone(&thread_service),
-        ));
-        let coordinator = Arc::new(RecordingResumeCoordinator::default());
-        resolver
-            .bind_coordinator(Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>)
-            .expect("bind coordinator");
-
-        let tenant_id = ironclaw_host_api::ids::TenantId::new("drain-tenant").expect("tenant");
-        let user_id = UserId::new("drain-user").expect("user");
-        let agent_id = ironclaw_host_api::ids::AgentId::new("drain-agent").expect("agent");
-        let parent_thread_id =
-            ironclaw_host_api::ids::ThreadId::new("drain-parent-thread").expect("parent thread");
-        let parent_scope = TurnScope::new_with_owner(
-            tenant_id.clone(),
-            Some(agent_id.clone()),
-            None,
-            parent_thread_id.clone(),
-            Some(user_id.clone()),
-        );
-        let parent_run_id = TurnRunId::new();
-        let parent_process_id = ProcessId::from_uuid(parent_run_id.as_uuid());
-        process_store
-            .submit_process(SubmitProcessRequest {
-                process_id: parent_process_id,
-                process_kind: ProcessKind::AgentTurn,
-                scope: parent_scope.to_resource_scope(),
-                exclusive_within_scope: false,
-                operation_id: None,
-                owner_user_id: Some(user_id.clone()),
-                concurrency_class: None,
-                parent_process_id: None,
-                root_process_id: None,
-                spawn_tree_descendant_cap: None,
-                dependency: None,
-                checkpoint_ref: None,
-                input: None,
-                created_at: Utc::now(),
-                metadata: serde_json::Value::Null,
-            })
-            .await
-            .expect("submit parent process");
-
-        let parent_thread_scope = ThreadScope {
-            tenant_id: tenant_id.clone(),
-            agent_id: agent_id.clone(),
-            project_id: None,
-            owner_user_id: Some(user_id.clone()),
-            mission_id: None,
-        };
-        thread_service
-            .ensure_thread(EnsureThreadRequest {
-                scope: parent_thread_scope.clone(),
-                thread_id: Some(parent_thread_id.clone()),
-                created_by_actor_id: user_id.to_string(),
-                title: None,
-                metadata_json: None,
-            })
-            .await
-            .expect("ensure parent thread");
-
-        let mut parent_context =
-            ironclaw_agent_loop::test_support::test_run_context("drain-parent");
-        parent_context.scope = parent_scope.clone();
-        parent_context.thread_id = parent_thread_id.clone();
-        parent_context.run_id = parent_run_id;
-        parent_context.actor = Some(TurnActor::new(user_id.clone()));
-        let gate_ref = TurnGateRef::new("gate:mixed-status-group").expect("gate");
-        let child_cases = [
-            (
-                "completed",
-                EdgeTerminalKind::Completed,
-                None,
-                "completed child output",
-            ),
-            (
-                "failed",
-                EdgeTerminalKind::Failed,
-                Some("sanitized child failure".to_string()),
-                "failed child output",
-            ),
-        ];
-        let mut children = Vec::new();
-
-        for (label, terminal_kind, terminal_reason, final_text) in child_cases {
-            let child_run_id = TurnRunId::new();
-            let child_thread_id =
-                ironclaw_host_api::ids::ThreadId::new(format!("drain-child-{label}"))
-                    .expect("child thread");
-            let child_scope = TurnScope::new_with_owner(
-                tenant_id.clone(),
-                Some(agent_id.clone()),
-                None,
-                child_thread_id.clone(),
-                Some(user_id.clone()),
-            );
-            let result_ref =
-                ironclaw_host_api::turn::LoopResultRef::new(format!("result:drain-{label}"))
-                    .expect("result ref");
-            let spawn_provider_call_id = format!("spawn-call-{label}");
-            thread_service
-                .ensure_thread(EnsureThreadRequest {
-                    scope: parent_thread_scope.clone(),
-                    thread_id: Some(child_thread_id.clone()),
-                    created_by_actor_id: user_id.to_string(),
-                    title: None,
-                    metadata_json: None,
-                })
-                .await
-                .expect("ensure child thread");
-            thread_service
-                .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
-                    scope: parent_thread_scope.clone(),
-                    thread_id: child_thread_id.clone(),
-                    turn_run_id: child_run_id.to_string(),
-                    content: MessageContent::text(final_text),
-                })
-                .await
-                .expect("append child final output");
-            thread_service
-                .append_tool_result_reference(AppendToolResultReferenceRequest {
-                    intrinsic_outcome: None,
-                    scope: parent_thread_scope.clone(),
-                    thread_id: parent_thread_id.clone(),
-                    turn_run_id: parent_run_id.to_string(),
-                    result_ref: result_ref.as_str().to_string(),
-                    safe_summary: ToolResultSafeSummary::new("subagent still running")
-                        .expect("initial summary"),
-                    provider_call: Some(ProviderToolCallReferenceEnvelope {
-                        provider_id: "test-provider".to_string(),
-                        provider_model_id: "test-model".to_string(),
-                        provider_turn_id: "test-turn".to_string(),
-                        provider_call_id: spawn_provider_call_id.clone(),
-                        provider_tool_name: ProviderToolName::new("spawn_subagent")
-                            .expect("provider tool name"),
-                        capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                            .expect("capability"),
-                        arguments: serde_json::json!({"task": label}),
-                        response_reasoning: None,
-                        reasoning: None,
-                        signature: None,
-                    }),
-                    model_observation: None,
-                })
-                .await
-                .expect("append parent result placeholder");
-
-            let submitted = AwaitedChildSetRecord {
-                gate_ref: gate_ref.clone(),
-                parent_run_context: parent_context.clone(),
-                tree_root_run_id: parent_run_id,
-                child_scope: child_scope.clone(),
-                child_run_id,
-                child_thread_id: child_thread_id.clone(),
-                subagent_kind: SubagentKindId::new("general").expect("kind"),
-                spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
-                    .expect("capability"),
-                spawn_provider_call_id: Some(spawn_provider_call_id),
-                result_ref: result_ref.clone(),
-                mode: SpawnSubagentMode::Blocking,
-            };
-            process_store
-                .submit_process(SubmitProcessRequest {
-                    process_id: ProcessId::from_uuid(child_run_id.as_uuid()),
-                    process_kind: ProcessKind::AgentTurn,
-                    scope: child_scope.to_resource_scope(),
-                    exclusive_within_scope: false,
-                    operation_id: Some(ProcessOperationId::from_trusted(format!(
-                        "drain-child-{label}"
-                    ))),
-                    owner_user_id: Some(user_id.clone()),
-                    concurrency_class: None,
-                    parent_process_id: Some(parent_process_id),
-                    root_process_id: Some(parent_process_id),
-                    spawn_tree_descendant_cap: Some(2),
-                    dependency: Some(ProcessDependencySubmission {
-                        dependent_process_id: parent_process_id,
-                        root_process_id: parent_process_id,
-                        group_ref: Some(gate_ref.as_str().to_string()),
-                        metadata: serde_json::to_value(submitted).expect("edge metadata"),
-                    }),
-                    checkpoint_ref: None,
-                    input: None,
-                    created_at: Utc::now(),
-                    metadata: serde_json::Value::Null,
-                })
-                .await
-                .expect("submit child process");
-            if terminal_kind == EdgeTerminalKind::Completed {
-                edge_store
-                    .settle(
-                        &child_scope,
-                        parent_run_id,
-                        child_run_id,
-                        terminal_kind,
-                        Some(17),
-                        terminal_reason.clone(),
-                    )
-                    .await
-                    .expect("settle edge")
-                    .expect("edge exists");
-            }
-            children.push((child_scope, child_run_id, result_ref, terminal_kind));
-        }
-
-        let group = edge_store
-            .list_group(&children[0].0, parent_run_id, &gate_ref)
-            .await
-            .expect("list settle group");
-        assert_eq!(group.len(), 2);
-        assert!(
-            group
-                .iter()
-                .any(|(_, edge)| edge.state == AwaitEdgeState::Settled)
-        );
-        assert!(
-            group
-                .iter()
-                .any(|(_, edge)| edge.state == AwaitEdgeState::Open)
-        );
-        assert_eq!(
-            edge_store
-                .list_unclosed_for_scope(&children[0].0)
-                .await
-                .expect("list unclosed edges")
-                .len(),
-            2
-        );
-        let open_edge = edge_store
-            .peek(&children[1].0, parent_run_id, children[1].1)
-            .await
-            .expect("peek open edge")
-            .expect("open edge exists");
-        assert_eq!(open_edge.state, AwaitEdgeState::Open);
-        edge_store
-            .close(&children[1].0, parent_run_id, children[1].1)
-            .await
-            .expect("closing an open edge is a no-op");
-        assert!(
-            crate::loop_exit_applier::AwaitDependentRunEvidenceStore::has_awaited_child_gate(
-                edge_store.as_ref(),
-                &children[0].0,
-                parent_run_id,
-                &ironclaw_host_api::turn::LoopGateRef::new(gate_ref.as_str())
-                    .expect("loop gate ref"),
-            )
-            .await
-            .expect("query blocking gate evidence")
-        );
-        let partial_recovery = crate::subagent::await_edge::boot_recovery::recover_scope(
-            &resolver,
-            edge_store.as_ref(),
-            &children[0].0,
-        )
-        .await;
-        assert_eq!(partial_recovery.failed, 0);
-        assert_eq!(partial_recovery.resumed, 0);
-        assert_eq!(partial_recovery.drained, 0);
-        assert_eq!(
-            edge_store
-                .peek(&children[0].0, parent_run_id, children[0].1)
-                .await
-                .expect("peek recovery-settled edge")
-                .expect("settled edge remains while sibling is open")
-                .state,
-            AwaitEdgeState::Settled
-        );
-
-        let failed = &children[1];
-        let outcome = resolver
-            .settle_and_maybe_drain(
-                &failed.0,
-                parent_run_id,
-                failed.1,
-                EdgeTerminalKind::Failed,
-                &TurnLifecycleEvent {
-                    cursor: ironclaw_host_api::turn::EventCursor(8),
-                    scope: failed.0.clone(),
-                    occurred_at: Some(Utc::now()),
-                    owner_user_id: Some(user_id.clone()),
-                    run_id: failed.1,
-                    status: TurnStatus::Failed,
-                    kind: ironclaw_turns::TurnEventKind::Failed,
-                    blocked_gate: None,
-                    sanitized_reason: Some("sanitized child failure".to_string()),
-                    retryable: Some(false),
-                    detail: None,
-                },
-            )
-            .await
-            .expect("settle and drain group");
-        assert_eq!(outcome, ResolveOutcome::Resumed);
-        let updates = recording_writer.updates();
-        assert_eq!(updates.len(), 1, "only the open child result is staged");
-        assert!(
-            updates[0].to_string().contains("\"failed\""),
-            "staged terminal payload records the child's failed status: {updates:?}"
-        );
-        let resumes = coordinator.resumes();
-        assert_eq!(resumes.len(), 1);
-        assert_eq!(resumes[0].scope, parent_scope);
-        assert_eq!(
-            resumes[0].precondition,
-            ResumeTurnPrecondition::BlockedDependentRunGate
-        );
-        assert_eq!(resumes[0].gate_resolution_ref, gate_ref);
-
-        for (child_scope, child_run_id, _, _) in &children {
-            assert!(
-                edge_store
-                    .peek(child_scope, parent_run_id, *child_run_id)
-                    .await
-                    .expect("peek consumed edge")
-                    .is_none(),
-                "every edge must be consumed after one group drain"
-            );
-            edge_store
-                .close(child_scope, parent_run_id, *child_run_id)
-                .await
-                .expect("closing an already consumed edge is idempotent");
-        }
-        edge_store
-            .abandon(&children[0].0, parent_run_id, children[0].1)
-            .await
-            .expect("abandon replay is idempotent");
-        let recovery = crate::subagent::await_edge::boot_recovery::recover_scope(
-            &resolver,
-            edge_store.as_ref(),
-            &children[0].0,
-        )
-        .await;
-        assert_eq!(recovery.failed, 0);
-        assert_eq!(recovery.resumed, 0);
-        let recovery_driver = crate::subagent::await_edge::boot_recovery::ScopeRecoveryDriver::new(
-            Arc::clone(&resolver),
-            Arc::clone(&edge_store),
-        );
-        ironclaw_loop_host::AwaitEdgeWriter::check_scope_recovered(
-            &recovery_driver,
-            &children[0].0,
-        )
-        .await
-        .expect("scope recovery driver completes");
-        ironclaw_loop_host::AwaitEdgeWriter::abandon_awaited_child(
-            &recovery_driver,
-            &children[0].0,
-            parent_run_id,
-            children[0].1,
-        )
-        .await
-        .expect("scope recovery driver abandon replay");
-
-        let parent_thread = thread_service
-            .list_thread_history(ThreadHistoryRequest {
-                scope: parent_thread_scope,
-                thread_id: parent_thread_id,
-            })
-            .await
-            .expect("read parent thread");
-        let summaries = parent_thread
-            .messages
-            .iter()
-            .filter_map(|message| message.content.as_deref())
-            .filter_map(|content| ToolResultReferenceEnvelope::from_json_str(content).ok())
-            .map(|envelope| envelope.safe_summary.as_str().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(summaries.len(), 2);
-        assert!(
-            summaries
-                .iter()
-                .any(|summary| summary.contains("completed")),
-            "completed child keeps its own terminal status: {summaries:?}"
-        );
-        assert!(
-            summaries.iter().any(|summary| summary.contains("failed")),
-            "failed child keeps its own terminal status: {summaries:?}"
-        );
-    }
-}
+mod tests;
 
 #[async_trait::async_trait]
 impl<S> AwaitEdgeSettler for AwaitEdgeResolver<S>
@@ -1849,6 +1275,21 @@ where
         event: &TurnLifecycleEvent,
     ) -> Result<ResolveOutcome, AgentLoopHostError> {
         self.handle_child_terminal(event).await
+    }
+
+    async fn sweep_thread_on_run_start(
+        &self,
+        scope: &TurnScope,
+        human_initiated: bool,
+    ) -> Result<(), AgentLoopHostError> {
+        AwaitEdgeResolver::sweep_thread_on_run_start(self, scope, human_initiated)
+            .await
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    ironclaw_loop_contracts::AgentLoopHostErrorKind::Unavailable,
+                    error.to_string(),
+                )
+            })
     }
 
     fn bind_coordinator(&self, coordinator: Arc<dyn TurnCoordinator>) -> Result<(), TurnError> {
@@ -1872,10 +1313,31 @@ where
         AwaitEdgeResolver::bind_result_writer(self, result_writer)
     }
 
+    fn bind_input_enqueue(&self, port: Arc<dyn HostInputEnqueuePort>) -> Result<(), TurnError> {
+        AwaitEdgeResolver::bind_input_enqueue(self, port)
+    }
+
     fn as_turn_committed_event_observer(
         self: Arc<Self>,
     ) -> Arc<dyn ironclaw_turns::TurnCommittedEventObserver> {
         self
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> HostInputAckEffectHandler for AwaitEdgeResolver<S>
+where
+    S: SessionThreadService + ?Sized + 'static,
+{
+    async fn handle_ack_effect(
+        &self,
+        effect: LoopInputAckEffect,
+    ) -> Result<(), HostInputQueueError> {
+        self.handle_background_subagent_ack_inner(effect)
+            .await
+            .map_err(|error| HostInputQueueError::Unavailable {
+                reason: error.to_string(),
+            })
     }
 }
 

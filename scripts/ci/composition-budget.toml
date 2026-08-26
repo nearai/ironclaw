@@ -236,7 +236,27 @@ observed_date = "2026-08-08"
 # delta is the #7681 connect-link notice wiring in extension_host_assembly.rs
 # (~11 lines), predating that growth. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh --print`, not summed.
-loc_ceiling = 42198
+#
+# Re-seeded 42198 -> 42371 on 2026-08-24 for #7833 (unattended-safe suggestion
+# tools). Between 08-19 and this branch's base, unrelated main-side growth had
+# already consumed all but 7 lines of the 150-line tolerance window (base
+# a1e3ca5bf5 measures 42341), so a modest addition tipped it.
+#
+# This branch's delta is `unattended_denied_capability_ids()` in
+# crates/app/ironclaw_composition/src/runtime.rs: the cross-crate list of
+# mutating synthetic capabilities denied to an unattended run. It stays in
+# composition deliberately — the ids are owned by ironclaw_assistant,
+# ironclaw_loop_host, ironclaw_memory and ironclaw_host_runtime, and composition
+# is the only layer allowed to depend on all four at once; the loop layer that
+# enforces the deny-list (ironclaw_turn_runner) cannot. Assembly of a config
+# value from constants owned elsewhere, not new domain policy.
+#
+# The first measurement was 42380. Nine of those lines were a rationale comment
+# duplicating the one on `DefaultPlannedRuntimeConfig::unattended_denied_capability_ids`;
+# that explanation now has one home and composition points at it, which is why
+# the seed is 42371 rather than 42380. Measured with
+# `bash scripts/ci/check-composition-budget.sh --print`, not padded.
+loc_ceiling = 42371
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -247,8 +267,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42198
-loc_observed_date = "2026-08-19"
+loc_observed = 42371
+loc_observed_date = "2026-08-24"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

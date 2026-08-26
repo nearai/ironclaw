@@ -476,6 +476,15 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "WS12 contract modules split into scripts/ci/lib stay reborn-scoped" \
+  "scripts/ci/lib/rust_toolchain_contracts.py
+scripts/ci/lib/workflow_text.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "test suite boundaries checker script" \
   "scripts/ci/check-test-suite-boundaries.sh" \
   "docs_only=false

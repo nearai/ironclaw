@@ -1,3 +1,14 @@
+- name: Install Rust through the repo's single setup path
+  # cargo-dist re-includes this fragment on every regeneration
+  # (github-build-setup in [workspace.metadata.dist]), so unlike an inline
+  # step it survives `dist generate` — which is why the bootstrap belongs
+  # here rather than as a hand-edited `curl | sh` in the generated workflow.
+  # Container images ship without cargo; hosted runners already have it and
+  # resolve rust-toolchain.toml themselves, so this mirrors the previous
+  # step's condition exactly rather than changing release behaviour.
+  if: ${{ matrix.container }}
+  uses: ./.github/actions/setup-rust
+
 - name: Install Node.js for the embedded WebUI
   uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
   with:

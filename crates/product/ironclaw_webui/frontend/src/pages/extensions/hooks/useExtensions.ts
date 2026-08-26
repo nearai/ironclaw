@@ -73,7 +73,12 @@ function displayName(item) {
   return item?.display_name || packageId(item) || "";
 }
 
-function configureRequest(extension) {
+// The shape `ConfigureModal` reads: the API's snake_case `package_ref` lifted
+// to `packageRef`, plus a resolved display name. Exported because the
+// setup-link landing must hand the modal exactly what the Configure button
+// does — a second copy of this mapping is how the deep link silently opened
+// nothing (it matched on a field the raw list items do not carry).
+export function configureRequest(extension) {
   return {
     ...extension,
     packageRef: extension.package_ref,

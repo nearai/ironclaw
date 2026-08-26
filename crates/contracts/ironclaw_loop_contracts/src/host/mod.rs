@@ -37,7 +37,8 @@ pub use context::{
 };
 pub use error::{AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind};
 pub use input::{
-    LoopCancelReasonKind, LoopInput, LoopInputAck, LoopInputBatch, LoopInputPort, LoopInterruptKind,
+    LoopCancelReasonKind, LoopInput, LoopInputAck, LoopInputAckEffect, LoopInputBatch,
+    LoopInputPort, LoopInterruptKind,
 };
 pub use model::{
     AssistantReply, CapabilityCallCandidate, LoopInlineMessage, LoopInlineMessageRole,

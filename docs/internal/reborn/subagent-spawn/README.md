@@ -17,10 +17,9 @@ its gates win and this file gets a dated correction
 authority (which crate owns the await-edge seam, layer rulings) belongs to
 `docs/internal/reborn/target-architecture/` and the family `AGENTS.md`
 files — this document links to those rulings and never overrides them.
-Surviving source comments in `await_edge/{mod,store,resolver,boot_recovery}.rs`
-and `await_edge_port.rs` still cite `thread-harness-design.md` §-numbers from
-before its deletion; those get repointed at this README's sections in the
-same PR that touches those files anyway (§9, Task 9).
+Source comments in `await_edge/{mod,store,resolver,boot_recovery}.rs` and
+`await_edge_port.rs` cite this README's own §-numbers (repointed off the
+deleted `thread-harness-design.md` in the R2 closeout PR — §9).
 
 **Structure:** Part I (§1–§8) is the stable record — expected experience,
 current architecture, design rationale, scenario behavior, decisions,
@@ -111,14 +110,20 @@ sequenceDiagram
 ### 2.1 Spawn path
 
 `crates/loop/ironclaw_loop_host/src/subagent_spawn_port.rs` owns the
-capability surface: `SpawnSubagentArgs { subagent_kind, task, handoff? }`,
-argument codec, per-kind descriptors, spawn admission, and
-`SubagentSpawnDeps` (which carries `Arc<dyn AwaitEdgeWriter>`). Today the
-codec **rejects** `mode: "background"` (`background_subagents_disabled()`),
-the parameters schema does not advertise `mode`, and `finish_spawn`
-hard-codes `Blocking`. Child creation reserves spawn-tree capacity against
-`spawn_tree_descendant_cap` (from `limits.max_tree_descendants`, journaled on
-the run record).
+capability surface: `SpawnSubagentArgs { subagent_kind, task, handoff?,
+mode }`, argument codec, per-kind descriptors, spawn admission, and
+`SubagentSpawnDeps` (which carries `Arc<dyn AwaitEdgeWriter>`). The
+parameters schema now advertises `mode` (enum `["blocking", "background"]`,
+default `"blocking"`). For historical direct callers, the decoder also accepts
+the legacy `run_in_background: true` alias, but that alias is intentionally not
+advertised by the strict model-facing schema. The decoder **rejects** the
+contradictory combination `mode: "blocking"` + `run_in_background: true`.
+`finish_spawn` is mode-driven — it threads `args.mode` through instead of
+hard-coding `Blocking` (§4.3's "what changes where" table). None of this is
+model-reachable yet: `builtin.spawn_subagent` stays in
+`disabled_capability_ids` until R9 (§7's first invariant). Child creation
+reserves spawn-tree capacity against `spawn_tree_descendant_cap` (from
+`limits.max_tree_descendants`, journaled on the run record).
 
 ### 2.2 The await edge
 
@@ -168,9 +173,12 @@ generic is unnameable after erasure. This is type-placement category 2
 `subagent/await_edge/boot_recovery.rs` (`ScopeRecoveryDriver`) re-drives
 `drain_settled_group` for settled-but-unclosed edges in a scope, but only
 **lazily**: `check_scope_recovered` is invoked from the spawn port before a
-*later* spawn into that scope, and from two lazy resolver paths
-(`resolver.rs:1709`, `:1785`). There is no startup caller today — recovery
-is not a boot pass. A parent blocked on a settled-but-undrained edge in a
+*later* spawn into that scope (`subagent_spawn_port.rs`'s `finish_spawn`) —
+the only production caller (correction, 2026-08-21 — this row previously
+claimed two additional lazy resolver call sites at specific `resolver.rs`
+line numbers; both were test-module lines, not production callers). There is
+no startup caller today — recovery is not a boot pass. A parent blocked on a
+settled-but-undrained edge in a
 scope nothing else touches stays blocked until some later spawn happens to
 touch that scope. A true startup/boot pass for background edges (which need
 one regardless, since they have no gate to block on) is new work owned by
@@ -365,7 +373,7 @@ intentionally suppressed.
 | `ironclaw_loop_contracts` (`host/input.rs`) | new variant `LoopInput::SubagentSettled { … }` carrying **references only** (child run id + result/message refs — never content; kernel guardrail). Serde round-trip pinned. **Rolling-upgrade hazard, not absent** (correction, 2026-08-21 — this row previously claimed the queue was in-memory and therefore compat-free; it is not, see §4.1 and D13): production composes `FilesystemHostInputQueue` (`crates/app/ironclaw_composition/src/runtime.rs`), and the queue document is deserialized whole (`load`, `crates/loop/ironclaw_loop_host/src/durable_input_queue.rs`) — an old binary meeting a persisted `subagent_settled` entry fails the **entire run's queue** with "durable input queue is corrupt", not just that one entry. Mitigated by sequencing, not a tolerant reader: this slice (2a) lands the variant with zero producers, so no old binary can ever meet a persisted instance of it; producers land in slice 2b only once every reader in the fleet understands the variant. |
 | `ironclaw_agent_loop` (`executor/input.rs`) | the variant drains **steering-like**: prompt-visible content input, not a control barrier. The `PostCapabilityStage::drain_settled` stub and its stale `LoopBackgroundChildPort` comment are **deleted** — the input path is the drain. |
 | `ironclaw_turn_runner` (resolver) | background tail: settle → idempotent append (`ResultAppended{message_ref}` on the edge) → schedule attention (enqueue or activate) → `AttentionScheduled` → close. Reuses `child_terminal_output` / summary framing from the blocking tail. Writes are per-edge (append, transition, enqueue are separate operations on existing interfaces); coalescing attention across simultaneous settles is an optional later optimization, not a normative claim. One typed input per child either way (D6). |
-| `ironclaw_loop_host` (spawn port) | delete both codec rejections and `background_subagents_disabled()`; advertise `mode` in the parameters schema (enum `["blocking","background"]`, default `blocking`); thread `args.mode` through `finish_spawn`; background spawns return the immediate receipt payload instead of `await_dependent_run`, and write their edge with `group_ref = "bg:{parent_thread_id}"` (the thread-indexed recovery key, §4.2). |
+| `ironclaw_loop_host` (spawn port) | delete both codec rejections and `background_subagents_disabled()`; advertise `mode` in the parameters schema (enum `["blocking","background"]`, default `blocking`); thread `args.mode` through `finish_spawn`; background spawns return the immediate receipt payload instead of `await_dependent_run`, and write their edge with `group_ref = "bg:{parent_thread_id}"` (the thread-indexed recovery key, §4.2) — shipped, slice 2b (§2.1). |
 | `ironclaw_processes` (dependency journal) | expected-state/metadata CAS transition on the dependency port, carrying the `ResultAppended`/`AttentionDeferred` substates and payloads; every journal implementation, decorator, and test double enumerated in the same change. |
 | `ironclaw_threads` | typed, idempotent subagent-result acceptance (system-class row, dedupe on the acceptance identity tuple — §4.1) — shipped, slice 2a. Plus, in 2b: `mark_message_submitted` returns an already-`Finalized` row unchanged in **both** backends (`filesystem_service.rs`, `in_memory.rs`), beside the existing idempotent-resubmit early return. **The result row is never marked `Queued`** (correction, 2026-08-21 — this row previously inherited §4.1's steering-ladder claim; `ensure_user_accepted` refuses it and `Queued` is not model-visible, see D14). `ensure_user_accepted` is **not** widened. Refusal pinned today by `crates/domains/ironclaw_threads/tests/subagent_result_acceptance.rs`. |
 | model-facing description | the spawn descriptor text in `subagent_spawn_port.rs` gains background wording (moves to a `prompts/*.md` file if it goes multi-line, per the repo prompt rule). |
@@ -729,451 +737,28 @@ change.
 
 ---
 
-## 9. Part II — pending work: R2 background core, implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use
-> superpowers:subagent-driven-development (recommended) or
-> superpowers:executing-plans to implement this plan task-by-task. Steps use
-> checkbox (`- [ ]`) syntax for tracking. **Spec: Part I of this document**
-> (§4 is the design being implemented; §5 the decisions; §7 the invariants).
-> This section is pruned when R2 ships and replaced by R3's plan.
+## 9. Part II — pending work: R3 gate escalation walk
 
-**Goal:** background subagent spawns return an immediate receipt, and each
-child's result is delivered per-child via a typed loop input, with
-`activate()` waking parked/completed parents.
+**R2 (background core) shipped as three slices (D13): the inert surface in
+PR #7788 (slice 2a); slice 2b, which makes background spawn return a receipt
+and deliver to a live parent; and slice 2c, which adds parked-parent
+activation, streak-cap deferral, the healing sweeps, and the
+failure-injection matrix — 2b and 2c both land in the slices-2b/2c PR that
+landed this paragraph.** Its implementation plan —
+receipt semantics, the durable delivery-chain state machine, the resolver's
+background tail, the run-start sweep, and the five integration scenarios
+pinning them (`tests/integration/subagent_await_edge.rs`) — is retired from
+this document; the shipped mechanism is Part I (§2, §4) and the code itself.
 
-**Architecture:** one settlement engine, two tails (§4.4). New surface is
-exactly: one `LoopInput` variant, one codec/schema change, one resolver
-tail, one deleted stub. No new ports, no new crate edges.
-
-**Tech stack:** existing workspace only — no new dependencies.
-
-**Shipped so far (slice 2a, landed 2026-08-21):** every new surface below is
-inert — zero producers, per D13. Done: Task 1 (`LoopInput::SubagentSettled`,
-`crates/contracts/ironclaw_loop_contracts/src/host/input.rs`), Task 2 (the
-variant drains steering-like and the dead `drain_settled` stub is deleted,
-`crates/loop/ironclaw_agent_loop/src/executor/input.rs`), Task 5 (the three
-kernel substates plus the expected-state CAS transition,
-`crates/kernel/ironclaw_processes/src/journal.rs` +
-`journal_store.rs`, and the await-edge projection's three store methods
-`record_result_appended` / `record_attention` / `defer_streak_capped`,
-`crates/loop/ironclaw_turn_runner/src/subagent/await_edge/store.rs`), and the
-thread-service half of Task 6 (the typed, idempotent
-`SessionThreadService::accept_subagent_result`,
-`crates/domains/ironclaw_threads/src/service.rs`,
-`crates/domains/ironclaw_threads/tests/subagent_result_acceptance.rs`).
-Still pending, and still producer work belonging to 2b/2c: Task 3 and 4
-(codec/schema accepting `mode: "background"`, and the receipt-returning spawn
-path — today the codec still rejects background mode), the resolver half of
-Task 6 (`deliver_background`, `bind_input_enqueue`, composition wiring), and
-Tasks 7–9 (healing sweeps, integration scenarios, prompt/doc closeout).
-
-**One item found during 2a and deliberately left for 2b** (open, not
-fixed — track it in whichever task lands the resolver tail):
-- `AwaitEdgeStore::close` returns `Ok(())` for an edge still in
-  `ResultAppended` (same file) — a silent success that leaves the
-  descendant reservation held. This is correct while nothing produces
-  `ResultAppended` outside tests; once 2b's resolver tail exists it should
-  become a typed error instead of a quiet no-op.
-
-The predecessor-selector wildcard previously listed here was retired rather
-than deferred: `record_attention`'s `peek`-then-CAS existed only to
-reconstruct an `expected` state the kernel now derives itself from
-`ProcessDependencyState::legal_predecessors`, so both the peek and its
-wildcard arm were deleted (PR #7788, correcting the entry this list carried).
-
-A separate charter item, recorded here so 2b's sweeps do not inherit it
-silently: `query_indexed_collection` drains every page and
-`dependencies_for_scope` is unbounded, with `group_ref` and closed-state
-filtered in memory. That predates this work, but it already violates the
-`crates/kernel/ironclaw_processes/AGENTS.md` rule that normal request and
-startup paths use bounded, partition-leading keyset queries only — so §4.2's
-`limit`/continuation work is a charter fix, not an optimisation.
-
-### Global constraints
-
-- Deny filter stays on (§7): nothing in R2 changes `disabled_capability_ids`.
-- Test-first (repo rule): every task's failing test precedes its
-  implementation; integration tier for cross-crate behavior.
-- Structural and behavioral changes commit separately.
-- No `.unwrap()`/`.expect()` in production code; errors carry cause.
-- Run per-crate tests + `cargo test -p ironclaw_architecture_tests` (a
-  contracts enum changes) + `cargo clippy --all-targets --all-features -- -D warnings`
-  on touched crates before any PR.
-- Update `tests/AGENTS.md` rows in the same commit as any
-  `tests/integration/` scenario change.
-
-### Task 1: `LoopInput::SubagentSettled` variant — shipped, slice 2a
-
-**Files:**
-- Modify: `crates/contracts/ironclaw_loop_contracts/src/host/input.rs`
-- Compile-driven fallout (exhaustive matches, fix in this task):
-  `crates/loop/ironclaw_agent_loop/src/executor/input.rs` (temporary barrier
-  arm; Task 2 makes it drainable), plus whatever `cargo check --workspace`
-  surfaces — enumerate every site in the commit message.
-
-**Interfaces — produces:**
-```rust
-LoopInput::SubagentSettled {
-    child_run_id: TurnRunId,        // correlates with the spawn receipt
-    message_ref: LoopMessageRef,    // the framed durable thread row (§4.1)
-}
-```
-(refs only — D4). Correction, 2026-08-21: `TurnRunId` was **not** previously
-imported by this file — the file's existing `ironclaw_host_api::turn` import
-carried only `LoopGateRef`/`LoopMessageRef`; `TurnRunId` had to be added to
-it. `TurnRunId` itself is defined at
-`crates/contracts/ironclaw_host_api/src/turn.rs`.
-
-- [ ] **Step 1: failing test** — append to the file's test module:
-```rust
-#[test]
-fn subagent_settled_round_trips_snake_case() {
-    let input = LoopInput::SubagentSettled {
-        child_run_id: TurnRunId::new(),
-        message_ref: LoopMessageRef::new("msg:child-result-1").unwrap(),
-    };
-    let value = serde_json::to_value(&input).unwrap();
-    assert!(value.get("subagent_settled").is_some(), "snake_case tag");
-    assert_eq!(serde_json::from_value::<LoopInput>(value).unwrap(), input);
-}
-```
-- [ ] **Step 2:** `cargo test -p ironclaw_loop_contracts subagent_settled` →
-  FAIL (no variant).
-- [ ] **Step 3:** add the variant to `enum LoopInput` (after `Steering`).
-- [ ] **Step 4:** `cargo check --workspace` — fix every non-exhaustive match
-  it reports; in `executor/input.rs` add `SubagentSettled` to the
-  `GateResolved | CapabilitySurfaceChanged` barrier arm *for now*.
-- [ ] **Step 5:** test passes; commit
-  (`feat(loop-contracts): typed subagent-settled loop input`).
-
-### Task 2: drain the variant steering-like; delete the dead stub — shipped, slice 2a
-
-**Files:**
-- Modify: `crates/loop/ironclaw_agent_loop/src/executor/input.rs`
-- Modify: `crates/loop/ironclaw_agent_loop/src/executor/post_capability.rs`
-  (delete `drain_settled`, its `let _drained` call site at the `Continue`
-  arm, and the stale R2/`LoopBackgroundChildPort` doc paragraphs — the
-  never-built port exists only in these comments; the consolidation PR
-  deliberately left source untouched to stay docs-only, so the comment
-  cleanup lands here with the deletion)
-
-**Interfaces — consumes:** Task 1's variant.
-
-- [ ] **Step 1: failing test** (same file's tests):
-```rust
-#[test]
-fn subagent_settled_drains_in_both_user_facing_modes() {
-    for mode in [UserFacingInputDrainMode::Steering, UserFacingInputDrainMode::FollowUp] {
-        assert!(user_facing_input_matches_drain_mode(
-            &LoopInput::SubagentSettled {
-                child_run_id: TurnRunId::new(),
-                message_ref: LoopMessageRef::new("msg:child-result-1").unwrap(),
-            },
-            mode,
-        ));
-    }
-}
-```
-- [ ] **Step 2:** run → FAIL (barrier arm from Task 1).
-- [ ] **Step 3:** move `SubagentSettled` into the `UserMessage | Steering`
-  matches in `user_facing_input_matches_drain_mode` (both mode arms — a
-  result landing during the final model call must force one more iteration,
-  same rationale as the existing FollowUp comment) and remove it from the
-  barrier arm in `consume_drainable_inputs`.
-- [ ] **Step 4:** delete the stub: `drain_settled` fn, its call line, its
-  doc paragraph. `cargo test -p ironclaw_agent_loop` green.
-- [ ] **Step 5:** two commits — behavioral (drain arms), structural (stub
-  deletion).
-
-### Task 3: codec + schema accept `mode: "background"`
-
-**Files:**
-- Modify: `crates/loop/ironclaw_loop_host/src/subagent_spawn_port.rs` —
-  `SpawnSubagentArgs` gains
-  `#[serde(default)] pub mode: SpawnSubagentMode` (add
-  `impl Default for SpawnSubagentMode { fn default() -> Self { Self::Blocking } }`
-  next to the enum); delete both `TryFrom` rejections (~:218–227) and
-  `background_subagents_disabled()` (~:1500); advertise `mode` in
-  `build_spawn_subagent_parameters_schema` (~:62) as
-  `"mode": {"type": "string", "enum": ["blocking", "background"], "default": "blocking"}`.
-- Modify: `crates/loop/ironclaw_loop_host/src/subagent_spawn_port/tests.rs` —
-  the two rejection-pinning tests become acceptance tests; add a schema
-  test asserting the `mode` property + default.
-
-- [ ] **Step 1:** rewrite the rejection tests to assert
-  `args.mode == SpawnSubagentMode::Background` parses, and add the schema
-  assertion → run → FAIL.
-- [ ] **Step 2:** make the three production edits above.
-- [ ] **Step 3:** `cargo test -p ironclaw_loop_host` green; commit.
-
-### Task 4: background spawn returns the receipt, no gate
-
-**Files:**
-- Modify: `crates/loop/ironclaw_loop_host/src/subagent_spawn_port.rs`
-  (`finish_spawn`): replace `let mode = SpawnSubagentMode::Blocking;`
-  (~:908) with `let mode = args.mode;`. The receipt payload + edge write +
-  child-run submission are mode-agnostic and already happen before the park;
-  at the terminal `Ok(resolution::await_dependent_run(…))` (~:1102), branch:
-  `Background` returns the already-written result as a completed resolution
-  instead. Correction, 2026-08-21: the success constructor is not in
-  `ironclaw_loop_host` — it lives at
-  `crates/contracts/ironclaw_loop_contracts/src/resolution.rs`, and
-  `spawned_child_run()` (`:213`) already exists there, purpose-built for a
-  non-suspending child spawn whose result the executor appends before
-  continuing; use it directly rather than adding a new constructor (the
-  receipt row was written at ~:962 via `write_capability_result`, so this
-  arm only skips the suspension).
-- Background gate-token format for the edge's `gate_ref`:
-  `gate:subagent-bg-{child_run_id}` (the resolver already emits this format
-  for background terminal payloads); `group_ref: Some("bg:{parent_thread_id}")`
-  — the deterministic thread key the recovery sweeps query by (§4.2).
-
-- [ ] **Step 1: failing test** in `subagent_spawn_port/tests.rs`: spawn with
-  `mode: background` through the port fixture → assert the resolution is
-  **not** `Resolution::Suspended(Suspension::DependentRun { .. })` and the
-  written payload has `"status": "spawned"`, `"output_available": false`.
-- [ ] **Step 2:** implement the branch; run → PASS.
-- [ ] **Step 3:** `cargo test -p ironclaw_loop_host` full; commit.
-
-### Task 5: durable substates in the owning journal — shipped, slice 2a
-
-The await-edge store is a **projection**: `edge_from_record` reconstructs
-`AwaitEdge.state` from `ProcessDependencyRecord.state`, and the dependency
-port owns only `open`/`settle`/`consume`/`abandon`/query. The substates
-therefore land in the kernel record, not in projection metadata.
-
-**Files:**
-- Modify: `crates/kernel/ironclaw_processes/src/journal.rs` — the
-  dependency port gains one domain-neutral operation:
-  `transition_process_dependency(scope, dependent, dependency, expected: ProcessDependencyState, next: ProcessDependencyState, metadata: Option<Value>)`
-  — an expected-state/metadata CAS; `ProcessDependencyState` gains
-  `ResultAppended`, `AttentionScheduled`, and `AttentionDeferred`
-  (domain-neutral names; three variants, not two — see D12 in §5 for why —
-  the streak-cap meaning lives in the edge metadata).
-- Modify: every implementation and double of the port. Correction,
-  2026-08-21: this is a small, enumerable set, not a large fan-out — the
-  `ProcessDependencyPort` trait (`crates/kernel/ironclaw_processes/src/journal.rs`)
-  has exactly **one** implementation workspace-wide
-  (`crates/kernel/ironclaw_processes/src/journal_store.rs`,
-  `impl<F> ProcessDependencyPort for ProcessJournalStore<F>`), zero
-  decorators, and zero test doubles; every other reference is an
-  `Arc<dyn ProcessDependencyPort<...>>` consumer, not an implementer.
-- Modify: `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/mod.rs`
-  (`AwaitEdgeState` gains `ResultAppended`, `AttentionDeferredStreakCap`;
-  edge carries `appended_message_ref: Option<LoopMessageRef>` and
-  `attention_outcome: Option<AttentionOutcome>` with
-  `enum AttentionOutcome { Queued, Activated }`, snake_case serde) and
-  `store.rs` (`edge_from_record` maps the new kernel states; store methods
-  `record_result_appended(...)` / `record_attention(...)` /
-  `defer_streak_capped(...)` wrap the CAS).
-
-**Interfaces — produces:** the store methods above; the kernel CAS.
-
-- [ ] **Step 1: failing store test** — drive
-  `Open → Settled → ResultAppended → AttentionScheduled → close` and
-  `ResultAppended → AttentionDeferredStreakCap` (stays unclosed; returned
-  by the unclosed queries); assert payload round-trips through the journal
-  and `record_result_appended` on an edge already carrying a ref returns
-  it unchanged.
-- [ ] **Step 2:** implement kernel op + state variants + projection
-  mapping; rolling-compat: absent metadata deserializes as before
-  (`run_metadata_compat` pattern).
-- [ ] **Step 3:** `cargo test -p ironclaw_processes -p ironclaw_turn_runner`
-  and `cargo test -p ironclaw_architecture_tests` (kernel trait changed);
-  commit (structural).
-
-### Task 6: typed idempotent acceptance + resolver tail — acceptance half shipped, slice 2a
-
-The typed acceptance below is landed: `SessionThreadService::accept_subagent_result`
-is implemented (`crates/domains/ironclaw_threads/src/service.rs`,
-`filesystem_service.rs`, `in_memory.rs`), with the acceptance test in
-`crates/domains/ironclaw_threads/tests/subagent_result_acceptance.rs`. The
-resolver tail (`deliver_background`, `bind_input_enqueue`, and the
-composition/runtime bind wiring below) is still pending — it is producer
-work and belongs to 2b.
-
-**Files:**
-- Modify: `crates/domains/ironclaw_threads/src/service.rs` +
-  `filesystem_service.rs` — `accept_subagent_result(...)`: persists a
-  **system-class** row (never `MessageKind::User`), idempotent on the
-  acceptance identity tuple
-  (`source_binding_id = "subagent-result:{parent_run_id}"`,
-  `external_event_id = {child_run_id}`); replay returns the same accepted
-  ref. Correction, 2026-08-21: the trait lives in `service.rs`, not
-  `contract.rs` — `contract.rs` holds request/response DTOs only
-  (`SessionThreadService` is declared in `service.rs`).
-- Modify (2b): `crates/domains/ironclaw_threads/src/filesystem_service.rs` +
-  `in_memory.rs` — `mark_message_submitted` returns an already-`Finalized`
-  row unchanged (the queue's best-effort flip has nothing to flip on a
-  terminal row). Not a widening of `ensure_user_accepted` — D14.
-- Modify: `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs`
-- Modify: `crates/loop/ironclaw_loop_host/src/await_edge_port.rs`
-  (`AwaitEdgeSettler` gains `bind_input_enqueue(&self, Arc<dyn HostInputEnqueuePort>) -> Result<(), TurnError>`)
-- Modify: `crates/app/ironclaw_composition/src/runtime.rs` +
-  `crates/loop/ironclaw_turn_runner/src/runtime.rs` (bind wiring beside
-  `bind_coordinator`, ~:751)
-
-**Interfaces — consumes:** Tasks 1 and 5;
-`HostInputEnqueuePort::enqueue_queued_message`;
-`TurnCoordinator::activate(ActivateThreadRequest)`.
-
-`deliver_background` (new, resolver), each step durable before the next:
-1. **Append (idempotent):** frame via `child_terminal_output` + the
-   untrusted wrappers; `accept_subagent_result` with the identity tuple
-   (replay-safe even when the edge recorded nothing); then
-   `record_result_appended`.
-2. **Attend:** live parent run (via the bound
-   `AgentTurnSpawnTreeRuntimePort`) → `enqueue_queued_message` **only**
-   (correction, 2026-08-21: never `mark_message_queued` — the appended row is
-   `System`/`Finalized`, `ensure_user_accepted` refuses it, and `Queued` is not
-   model-visible; §4.1, D14). Land the terminal-row no-op on
-   `mark_message_submitted` in both thread backends first, or the queue's
-   best-effort flip wedges the parent's input queue; the red test is already in
-   the tree (`crates/domains/ironclaw_threads/tests/subagent_result_acceptance.rs`,
-   `a_result_row_is_refused_by_the_steering_ladder`). Accepted →
-   `record_attention(Queued)`.
-   `RunClosed` → re-query, fall through to parked (transition signal).
-   No live run → `coordinator.activate(ActivateThreadRequest {
-   scope/actor from edge.parent_run_context, accepted_message_ref: the
-   appended ref, provenance: ActivationProvenance::System,
-   idempotency_key: derived from child_run_id, received_at: now,
-   requested_run_profile: Some(request preserving
-   edge.parent_run_context.resolved_run_profile — id + version; the
-   authority-continuity invariant §7 as an enforced property, not prose)
-   })`; accepted → `record_attention(Activated)`; streak-cap refusal →
-   `defer_streak_capped` (edge stays unclosed); `ThreadBusy`/transient →
-   return with the edge in `ResultAppended` (sweeps own the retry). Never
-   `resume_parent`.
-3. **Close** only from `AttentionScheduled`.
-
-- [ ] **Step 1: failing test** — parked parent: framed row appended once,
-  edge `Settled → ResultAppended → AttentionScheduled(Activated) → closed`,
-  recording coordinator saw `activate` with `provenance == System` **and**
-  the parent's restricted profile preserved (fixture parent uses a
-  non-default profile), no `resume_turn`.
-- [ ] **Step 2:** implement; green.
-- [ ] **Step 3: failure-injection, one per side effect:** (a) crash after
-  acceptance, before `record_result_appended` → replay returns the SAME
-  message ref (tuple dedupe — the proof, not the edge); (b) crash after
-  enqueue, before `record_attention` → replay does not double-enqueue
-  (queue identity dedupe — proof obligation); (c) `RunClosed` → edge stays
-  `ResultAppended`, next drive activates; (d) `CapacityExhausted` → edge
-  stays `ResultAppended`; (e) activation transient failure → same; (f)
-  streak-cap refusal → `AttentionDeferredStreakCap`, no autonomous retry
-  on re-drive; (g) crash after `record_attention`, before `close` → edge
-  stays `AttentionScheduled`; the sweep (§4.2) closes it directly without
-  re-enqueuing or re-activating — the attention outcome was already
-  durably accepted.
-- [ ] **Step 4:** live-run path: recording enqueue port captured
-  `SubagentSettled { child_run_id, message_ref }`; closed via
-  `AttentionScheduled(Queued)`; no `activate`.
-- [ ] **Step 5:** `cargo test -p ironclaw_threads -p ironclaw_turn_runner
-  -p ironclaw_loop_host` green; behavioral commit;
-  `cargo test -p ironclaw_architecture_tests`.
-
-### Task 7: the healing sweeps on real hooks
-
-**Files:**
-- Modify: `crates/loop/ironclaw_turn_runner/src/turn_run_executor.rs` —
-  the **run-start sweep** in `RebornTurnRunExecutor::execute_claimed_run`
-  (trait declared in `turn_scheduler.rs`): before driving the parent's
-  loop, fetch `ResultAppended` and `AttentionScheduled` edges — plus
-  `AttentionDeferredStreakCap` when the starting run's provenance is
-  human/permitted — by the deterministic `group_ref =
-  "bg:{parent_thread_id}"` (existing group-ref dependency query; batch
-  capped at `MAX_QUEUED_INPUTS_PER_RUN`); `ResultAppended` enqueues into
-  the starting run then closes, `AttentionScheduled` simply closes (the
-  attention outcome is already durable — no re-enqueue).
-- Modify: `crates/kernel/ironclaw_processes/src/journal.rs` (+ impls) —
-  the unclosed-dependency query gains `limit`/continuation (the bounded
-  scan §4.2 requires).
-- Add a startup boot pass, wired through
-  `crates/loop/ironclaw_turn_runner/src/subagent/await_edge/boot_recovery.rs`
-  — re-drives `Settled`/`ResultAppended` background edges through
-  `deliver_background` (idempotent by Task 6), activation included, and
-  closes any edge caught in `AttentionScheduled` directly, using the
-  bounded query. Correction, 2026-08-21: this is new wiring, not an edit
-  to an existing pass — `unresolved_process_dependencies()` has zero
-  production callers today (only tests call it), and the only recovery
-  that runs today is lazy and spawn-time only, via `check_scope_recovered`
-  (`crates/loop/ironclaw_loop_host/src/subagent_spawn_port.rs`, called
-  from `finish_spawn` before a *later* spawn into the same scope — see
-  §2.5). There is no boot-time caller to modify; the boot pass has to be
-  created and wired to a startup hook.
-
-- [ ] **Step 1: failing test** (executor tests): run start with one
-  `ResultAppended` edge → enqueued + closed; `MAX_QUEUED_INPUTS_PER_RUN + 1`
-  pending → capped, remainder stays for the next start; an
-  `AttentionDeferredStreakCap` edge drains only on a human-provenance
-  start; an `AttentionScheduled` edge is closed without a re-enqueue.
-- [ ] **Step 2: failing test** (boot_recovery): edges in `Settled` and
-  `ResultAppended` → both delivered; parked parent activated with `System`
-  provenance and preserved profile; an `AttentionScheduled` edge is closed
-  with no duplicate delivery; re-run is a no-op.
-- [ ] **Step 3:** implement; green; commit.
-
-### Task 8: integration scenarios
-
-**Files:**
-- Modify: `tests/integration/subagent_await_edge.rs` (extend — same seam)
-- Modify: `tests/AGENTS.md` (rows, same commit); `Cargo.toml` untouched
-  (binary exists: `reborn_integration_subagent_await_edge`)
-
-Scenarios (harness-side capability enablement; production filter untouched):
-- [ ] `background_child_result_is_delivered_per_child_while_parent_runs` —
-  two background children, staggered terminals → two distinct framed rows,
-  order matches settle order (D6).
-- [ ] `run_closed_race_is_healed_by_activation` — parent terminalizes
-  between live-run query and enqueue → delivered via activate (§4.6 row).
-- [ ] `parked_parent_is_activated_with_system_provenance` — assert via the
-  run record's journaled `subagent_activation_provenance`.
-- [ ] `background_delivery_replay_is_idempotent` — re-drive
-  `deliver_background` across every state boundary → exactly one row, one
-  attention outcome.
-- [ ] `streak_capped_result_waits_for_human` — cap exhausted → edge
-  `AttentionDeferredStreakCap` (unclosed); a human-provenance turn on the
-  thread drains and closes it at run start.
-- [ ] Commit with `tests/AGENTS.md` rows updated.
-
-### Task 9: prompt + doc closeout
-
-- [ ] Update the spawn capability's model-facing description — it lives
-  inline with the descriptor in
-  `crates/loop/ironclaw_loop_host/src/subagent_spawn_port.rs` (there is no
-  prompts/*.md file for it today; if the background wording makes it
-  multi-line, move it to `crates/loop/ironclaw_loop_host/prompts/` per the
-  repo prompt-file rule): receipt semantics, per-child arrival, "results
-  appear as tagged inputs; do not poll".
-- [ ] Repoint every stale §-reference in
-  `await_edge/{mod,store,resolver,boot_recovery}.rs` and
-  `await_edge_port.rs` comments — they currently cite the deleted
-  `thread-harness-design.md`'s §2, §4.1, §4.2, §5.4, §5.5, §5.6 — at the
-  corresponding sections of this README, in this same task since these
-  files are already being touched by T5–T7.
-- [ ] Prune this §9 to a one-line "R2 shipped in PR #NNNN" pointer and
-  promote R3 to the pending slot; move anything §4 got wrong during
-  implementation into a dated correction. Commit.
-
-### Self-review (ran 2026-08-20)
-
-Spec coverage: every §4.3 row maps to a task (variant→T1, drain+stub→T2,
-codec/schema→T3, receipt+group_ref→T4, journal substates→T5, typed
-acceptance + resolver tail→T6, sweeps + bounded queries→T7,
-integration→T8, prompt→T9); every §4.1 state and §4.6 crash row has a
-named failure-injection test (T6 step 3, T7, T8), including the
-crash-after-`record_attention`-before-`close` window that leaves an edge
-in `AttentionScheduled` (T6 step 3(g), T7 steps 1–2 — the sweeps close it
-directly since the attention outcome is already durable). Placeholder scan: the
-two deliberately-unpinned points are named as read-steps with a single
-named file each (`resolution.rs` success constructor, T4; live-run query
-method on the runtime port, T6) — bounded, not vague. Type consistency:
-`SubagentSettled { child_run_id, message_ref }` identical in T1/T2/T6;
-`AttentionOutcome { Queued, Activated }` identical in T5/T6/T7 (streak
-deferral is a state, not an outcome). Revised twice 2026-08-20 after the
-#7763 design reviews: first for the durable attention obligation, then to
-land the substates in the owning kernel journal (the await-edge store is a
-projection), rest append idempotency on the thread service's acceptance
-identity tuple, keep streak-deferred edges unclosed, bound the recovery
-queries via the deterministic background `group_ref`, and make activation
-preserve the parent's resolved run profile.
+**R3 (§6): a blocked child's own approval/auth gate escalates to its
+parent, plus the prod-enable gate that clears `builtin.spawn_subagent`'s
+deny-filter (§7's first invariant).** Today a child blocked on its own gate
+is silent from the parent's side (§4.6's closing paragraph): the edge stays
+`Open`, a blocking parent keeps waiting on its dependent-run gate, and a
+background parent keeps working with no visibility at all. R3's plan is not
+yet written — start from the §6 roadmap row, the §4.6 child-gate paragraph,
+and this document's own maintenance rule (§ "Replaces", top of file) when
+drafting it: task-by-task under `superpowers:subagent-driven-development` or
+`superpowers:executing-plans`, spec-first against Part I, pruned in turn when
+R3 ships.

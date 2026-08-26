@@ -275,6 +275,156 @@ test("inspector chrome follows the active locale", async () => {
   assert.match(document.querySelector("[data-testid='inspector-panel']")?.textContent || "", /提示词/);
 });
 
+test("product activity summaries resolve their translation key in the active locale", async () => {
+  localStorage.setItem("ironclaw_language", "zh-CN");
+  inspectorState.updates = [{
+    local_id: "product-localized",
+    update: {
+      type: "activity",
+      data: {
+        occurred_at: "2026-08-06T10:00:00Z",
+        kind: "tool_started",
+        iteration: null,
+        activity_id: "activity-localized",
+        model_call_id: null,
+        summary: {
+          content: "inspector.activity.summary.toolStarted",
+          original_bytes: 38,
+          truncated: false,
+        },
+      },
+    },
+  }];
+
+  await act(async () => root?.render(
+    <I18nProvider>
+      <InspectorPanel threadId="thread-a" runId="run-localized" />
+    </I18nProvider>,
+  ));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+
+  const activity = document.querySelector("[data-testid='inspector-activity-content']");
+  assert.match(activity?.textContent || "", /工具调用已开始/);
+  assert.doesNotMatch(activity?.textContent || "", /inspector\.activity\.summary|Tool invocation/);
+});
+
+test("authoritative activity replacement keeps known summaries localized", async () => {
+  localStorage.setItem("ironclaw_language", "zh-CN");
+  inspectorState.snapshot = { stream_id: "stream-authoritative", activity: [] };
+  inspectorState.updates = [
+    {
+      local_id: "product-turn",
+      update: {
+        type: "activity",
+        data: {
+          occurred_at: "2026-08-06T09:59:58Z",
+          kind: "turn_started",
+          iteration: null,
+          activity_id: null,
+          model_call_id: null,
+          summary: {
+            content: "inspector.activity.summary.turnRunning",
+            original_bytes: 38,
+            truncated: false,
+          },
+        },
+      },
+    },
+    {
+      local_id: "product-completed",
+      update: {
+        type: "activity",
+        data: {
+          occurred_at: "2026-08-06T10:00:00Z",
+          kind: "tool_completed",
+          iteration: null,
+          activity_id: "activity-completed",
+          model_call_id: null,
+          summary: {
+            content: "inspector.activity.summary.toolCompleted",
+            original_bytes: 40,
+            truncated: false,
+          },
+        },
+      },
+    },
+    {
+      stream_id: "stream-authoritative",
+      sequence: 1,
+      update: {
+        type: "activity",
+        data: {
+          occurred_at: "2026-08-06T09:59:59Z",
+          kind: "turn_started",
+          iteration: null,
+          activity_id: null,
+          model_call_id: null,
+          summary: {
+            content: "Turn started",
+            original_bytes: 12,
+            truncated: false,
+          },
+        },
+      },
+    },
+    {
+      stream_id: "stream-authoritative",
+      sequence: 2,
+      update: {
+        type: "activity",
+        data: {
+          occurred_at: "2026-08-06T10:00:01Z",
+          kind: "tool_completed",
+          iteration: null,
+          activity_id: "activity-completed",
+          model_call_id: null,
+          summary: {
+            content: "Tool invocation completed",
+            original_bytes: 25,
+            truncated: false,
+          },
+        },
+      },
+    },
+    {
+      stream_id: "stream-authoritative",
+      sequence: 3,
+      update: {
+        type: "activity",
+        data: {
+          occurred_at: "2026-08-06T10:00:02Z",
+          kind: "tool_failed",
+          iteration: null,
+          activity_id: "activity-failed",
+          model_call_id: null,
+          summary: {
+            content: "Provider returned code 42",
+            original_bytes: 25,
+            truncated: false,
+          },
+        },
+      },
+    },
+  ];
+
+  await act(async () => root?.render(
+    <I18nProvider>
+      <InspectorPanel threadId="thread-a" runId="run-authoritative" />
+    </I18nProvider>,
+  ));
+  await act(async () =>
+    document.querySelector<HTMLButtonElement>("[data-testid='inspector-tab-activity']")?.click(),
+  );
+
+  const activity = document.querySelector("[data-testid='inspector-activity-content']");
+  assert.match(activity?.textContent || "", /轮次已开始/);
+  assert.match(activity?.textContent || "", /工具调用已完成/);
+  assert.doesNotMatch(activity?.textContent || "", /Turn started|Tool invocation completed/);
+  assert.match(activity?.textContent || "", /Provider returned code 42/);
+});
+
 test("tool activity loads bounded verbose details from the dedicated endpoint", async () => {
   inspectorState.snapshot = {
     stream_id: "stream-tool",

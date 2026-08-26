@@ -2,9 +2,11 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, DiskFilesystem, Entry, Fault, FaultInjecting, FaultKind, FilesystemError,
-    FilesystemOperation, Filter, InMemoryBackend, IndexKey, LibSqlRootFilesystem, Page,
-    PostgresRootFilesystem, RootFilesystem, ScopedFilesystem,
+    AtomicSubtreeEntry, BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry,
+    EventRecord, Fault, FaultInjecting, FaultKind, FileStat, FilesystemError, FilesystemOperation,
+    Filter, InMemoryBackend, IndexKey, IndexSpec, LibSqlRootFilesystem, OrderedPage, Page,
+    PostgresRootFilesystem, RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo, StorageTxn,
+    VersionedEntry,
 };
 use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
@@ -42,10 +44,11 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
+use uuid::Uuid;
 
 #[derive(Default)]
 struct RecordingProcessObserver {
@@ -3047,11 +3050,966 @@ async fn explicit_dependency_open_is_idempotent_scope_bound_and_abandonable() {
                 scope: root_scope,
                 dependent_process_id: Some(root_id),
                 group_ref: Some("gate:explicit-open".to_string()),
+                allowed_states: None,
                 include_closed: false,
+                after: None,
+                limit: None,
             })
             .await
             .expect("query open dependencies")
             .is_empty()
+    );
+}
+
+/// Task 7 (2c) bounded query: `ProcessDependencyQuery::after`/`limit` page the
+/// filtered, canonically-sorted `(dependent_process_id, dependency_process_id)`
+/// sequence — noise dependencies under a different `group_ref` prove the
+/// filter applies before the bound, a `limit` page proves the canonical
+/// order, resuming from the last returned pair proves the keyset cursor, and
+/// an unbounded (`None`, `None`) query proves today's behavior is untouched.
+///
+/// PR #7818 review finding 2: `.claude/rules/database.md` "Backend parity"
+/// wants changed persistence behavior exercised on the durable backends too,
+/// not only the in-memory one. Shared body mirrors the established pattern
+/// (`assert_recent_agent_turn_window_parity` below) — one generic assertion
+/// driven by an in-memory test and dedicated libSQL/Postgres legs.
+async fn assert_bounded_dependency_query_pages_the_filtered_canonical_order<F>(
+    store: ProcessJournalStore<F>,
+) where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    let root_scope = scope();
+    let dependent_a = ProcessId::new();
+    let dependent_b = ProcessId::new();
+    submit_internal_process(&store, &root_scope, dependent_a).await;
+    submit_internal_process(&store, &root_scope, dependent_b).await;
+
+    let mut expected: Vec<ProcessDependencyRecord> = Vec::new();
+    for dependent in [dependent_a, dependent_b] {
+        for _ in 0..3 {
+            let record = store
+                .open_process_dependency(OpenProcessDependencyRequest {
+                    dependent_process_id: dependent,
+                    dependency_process_id: ProcessId::new(),
+                    root_process_id: dependent,
+                    scope: root_scope.clone(),
+                    group_ref: Some("paging-test".to_string()),
+                    created_at: Utc::now(),
+                    metadata: serde_json::Value::Null,
+                })
+                .await
+                .expect("open paged dependency");
+            expected.push(record);
+        }
+        // Noise sharing the dependent but a different group_ref: the bound
+        // must skip it via the filter, not miscount it against `limit`.
+        store
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: ProcessId::new(),
+                root_process_id: dependent,
+                scope: root_scope.clone(),
+                group_ref: Some("other-group".to_string()),
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("open noise dependency");
+    }
+    expected.sort_by_key(|record| {
+        (
+            record.dependent_process_id.as_uuid(),
+            record.dependency_process_id.as_uuid(),
+        )
+    });
+    assert_eq!(expected.len(), 6);
+
+    let base_query = ProcessDependencyQuery {
+        scope: root_scope.clone(),
+        dependent_process_id: None,
+        group_ref: Some("paging-test".to_string()),
+        allowed_states: None,
+        include_closed: false,
+        after: None,
+        limit: None,
+    };
+
+    // Unbounded (None, None): byte-for-byte the pre-existing full-drain output.
+    let unbounded = store
+        .query_process_dependencies(base_query.clone())
+        .await
+        .expect("unbounded query");
+    assert_eq!(unbounded, expected);
+
+    // Bounded: a limited page returns exactly N in canonical order.
+    let first_page = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            limit: Some(4),
+            ..base_query.clone()
+        })
+        .await
+        .expect("first bounded page");
+    assert_eq!(first_page, expected[..4]);
+
+    // The last pair from the first page resumes to exactly the rest.
+    let cursor = (
+        first_page[3].dependent_process_id,
+        first_page[3].dependency_process_id,
+    );
+    let second_page = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            after: Some(cursor),
+            limit: Some(10),
+            ..base_query
+        })
+        .await
+        .expect("second bounded page");
+    assert_eq!(second_page, expected[4..]);
+}
+
+#[tokio::test]
+async fn query_process_dependencies_bounded_mode_pages_the_filtered_canonical_order() {
+    assert_bounded_dependency_query_pages_the_filtered_canonical_order(ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ))
+    .await;
+}
+
+async fn assert_actionable_dependency_query_does_not_starve_behind_open_rows<F>(
+    store: ProcessJournalStore<F>,
+) where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    let root_scope = scope();
+    let dependent = ProcessId::from_uuid(Uuid::from_u128(0x100));
+    submit_internal_process(&store, &root_scope, dependent).await;
+
+    for value in 1..=33_u128 {
+        store
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: ProcessId::from_uuid(Uuid::from_u128(value)),
+                root_process_id: dependent,
+                scope: root_scope.clone(),
+                group_ref: Some("bg:starvation".to_string()),
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("open dependency");
+    }
+    let actionable_dependency = ProcessId::from_uuid(Uuid::from_u128(34));
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: actionable_dependency,
+            root_process_id: dependent,
+            scope: root_scope.clone(),
+            group_ref: Some("bg:starvation".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open actionable dependency");
+    store
+        .settle_process_dependency(SettleProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: actionable_dependency,
+            scope: root_scope.clone(),
+            terminal: ProcessTerminalEvidence {
+                status: ProcessLifecycleStatus::Completed,
+                output_bytes: None,
+                sanitized_reason: None,
+            },
+            settled_at: Utc::now(),
+        })
+        .await
+        .expect("settle actionable dependency")
+        .expect("actionable dependency exists");
+
+    let rows = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: root_scope,
+            dependent_process_id: None,
+            group_ref: Some("bg:starvation".to_string()),
+            allowed_states: Some(vec![ProcessDependencyState::Settled]),
+            include_closed: false,
+            after: None,
+            limit: Some(1),
+        })
+        .await
+        .expect("actionable dependency query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dependency_process_id, actionable_dependency);
+    assert_eq!(rows[0].state, ProcessDependencyState::Settled);
+}
+
+#[tokio::test]
+async fn actionable_dependency_query_does_not_starve_behind_open_rows() {
+    assert_actionable_dependency_query_does_not_starve_behind_open_rows(ProcessJournalStore::new(
+        in_memory_backed_processes_filesystem(),
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn actionable_dependency_query_merges_states_with_one_pair_cursor() {
+    assert_actionable_dependency_query_merges_states_with_one_pair_cursor(
+        ProcessJournalStore::new(in_memory_backed_processes_filesystem()),
+    )
+    .await;
+}
+
+async fn assert_actionable_dependency_query_merges_states_with_one_pair_cursor<F>(
+    store: ProcessJournalStore<F>,
+) where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    let root_scope = scope();
+    let dependent = ProcessId::from_uuid(Uuid::from_u128(0x200));
+    submit_internal_process(&store, &root_scope, dependent).await;
+
+    let mut open = Vec::new();
+    for value in 1..=3_u128 {
+        let dependency = ProcessId::from_uuid(Uuid::from_u128(value));
+        store
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: dependency,
+                root_process_id: dependent,
+                scope: root_scope.clone(),
+                group_ref: Some("bg:cursor".to_string()),
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("open dependency");
+        open.push(dependency);
+    }
+    for dependency in &open {
+        store
+            .settle_process_dependency(SettleProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: *dependency,
+                scope: root_scope.clone(),
+                terminal: ProcessTerminalEvidence {
+                    status: ProcessLifecycleStatus::Completed,
+                    output_bytes: None,
+                    sanitized_reason: None,
+                },
+                settled_at: Utc::now(),
+            })
+            .await
+            .expect("settle dependency")
+            .expect("dependency exists");
+    }
+    store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: open[1],
+            scope: root_scope.clone(),
+            next: ProcessDependencyState::ResultAppended,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect("append result")
+        .expect("dependency exists");
+
+    let allowed_states = Some(vec![
+        ProcessDependencyState::Settled,
+        ProcessDependencyState::ResultAppended,
+        ProcessDependencyState::Settled,
+    ]);
+    let first = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: root_scope.clone(),
+            dependent_process_id: None,
+            group_ref: Some("bg:cursor".to_string()),
+            allowed_states: allowed_states.clone(),
+            include_closed: false,
+            after: None,
+            limit: Some(2),
+        })
+        .await
+        .expect("first multi-state page");
+    assert_eq!(
+        first
+            .iter()
+            .map(|record| record.dependency_process_id)
+            .collect::<Vec<_>>(),
+        vec![open[0], open[1]]
+    );
+    let cursor = (
+        first[1].dependent_process_id,
+        first[1].dependency_process_id,
+    );
+    let second = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: root_scope,
+            dependent_process_id: None,
+            group_ref: Some("bg:cursor".to_string()),
+            allowed_states,
+            include_closed: false,
+            after: Some(cursor),
+            limit: Some(2),
+        })
+        .await
+        .expect("second multi-state page");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].dependency_process_id, open[2]);
+    assert_eq!(second[0].state, ProcessDependencyState::Settled);
+}
+
+#[tokio::test]
+async fn actionable_dependency_query_pages_each_state_after_dependent_filter() {
+    assert_actionable_dependency_query_pages_each_state_after_dependent_filter(
+        ProcessJournalStore::new(in_memory_backed_processes_filesystem()),
+    )
+    .await;
+}
+
+async fn assert_actionable_dependency_query_pages_each_state_after_dependent_filter<F>(
+    store: ProcessJournalStore<F>,
+) where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
+    let root_scope = scope();
+    let dependent = ProcessId::from_uuid(Uuid::from_u128(0x500));
+    submit_internal_process(&store, &root_scope, dependent).await;
+
+    let settled_dependency = ProcessId::from_uuid(Uuid::from_u128(0x300));
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: settled_dependency,
+            root_process_id: dependent,
+            scope: root_scope.clone(),
+            group_ref: Some("bg:filter-page".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open settled dependency");
+    store
+        .settle_process_dependency(SettleProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: settled_dependency,
+            scope: root_scope.clone(),
+            terminal: ProcessTerminalEvidence {
+                status: ProcessLifecycleStatus::Completed,
+                output_bytes: None,
+                sanitized_reason: None,
+            },
+            settled_at: Utc::now(),
+        })
+        .await
+        .expect("settle dependency")
+        .expect("dependency exists");
+
+    // `limit = 1` makes each state query request four rows. These five
+    // lower-ordered dependents force the target ResultAppended row onto the
+    // second page after the dependent_process_id filter is applied.
+    for value in 1..=5_u128 {
+        let noise_dependent = ProcessId::from_uuid(Uuid::from_u128(value));
+        submit_internal_process(&store, &root_scope, noise_dependent).await;
+        let noise_dependency = ProcessId::from_uuid(Uuid::from_u128(0x1000 + value));
+        store
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: noise_dependent,
+                dependency_process_id: noise_dependency,
+                root_process_id: noise_dependent,
+                scope: root_scope.clone(),
+                group_ref: Some("bg:filter-page".to_string()),
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("open noise dependency");
+        store
+            .settle_process_dependency(SettleProcessDependencyRequest {
+                dependent_process_id: noise_dependent,
+                dependency_process_id: noise_dependency,
+                scope: root_scope.clone(),
+                terminal: ProcessTerminalEvidence {
+                    status: ProcessLifecycleStatus::Completed,
+                    output_bytes: None,
+                    sanitized_reason: None,
+                },
+                settled_at: Utc::now(),
+            })
+            .await
+            .expect("settle noise dependency")
+            .expect("noise dependency exists");
+        store
+            .transition_process_dependency(TransitionProcessDependencyRequest {
+                dependent_process_id: noise_dependent,
+                dependency_process_id: noise_dependency,
+                scope: root_scope.clone(),
+                next: ProcessDependencyState::ResultAppended,
+                metadata: None,
+                transitioned_at: Utc::now(),
+            })
+            .await
+            .expect("append noise result")
+            .expect("noise dependency exists");
+    }
+
+    let result_dependency = ProcessId::from_uuid(Uuid::from_u128(0x200));
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: result_dependency,
+            root_process_id: dependent,
+            scope: root_scope.clone(),
+            group_ref: Some("bg:filter-page".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open result dependency");
+    store
+        .settle_process_dependency(SettleProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: result_dependency,
+            scope: root_scope.clone(),
+            terminal: ProcessTerminalEvidence {
+                status: ProcessLifecycleStatus::Completed,
+                output_bytes: None,
+                sanitized_reason: None,
+            },
+            settled_at: Utc::now(),
+        })
+        .await
+        .expect("settle result dependency")
+        .expect("dependency exists");
+    store
+        .transition_process_dependency(TransitionProcessDependencyRequest {
+            dependent_process_id: dependent,
+            dependency_process_id: result_dependency,
+            scope: root_scope.clone(),
+            next: ProcessDependencyState::ResultAppended,
+            metadata: None,
+            transitioned_at: Utc::now(),
+        })
+        .await
+        .expect("append result")
+        .expect("dependency exists");
+
+    let rows = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: root_scope,
+            dependent_process_id: Some(dependent),
+            group_ref: Some("bg:filter-page".to_string()),
+            allowed_states: Some(vec![
+                ProcessDependencyState::Settled,
+                ProcessDependencyState::ResultAppended,
+            ]),
+            include_closed: false,
+            after: None,
+            limit: Some(1),
+        })
+        .await
+        .expect("dependent-filtered multi-state query");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].dependency_process_id, result_dependency);
+    assert_eq!(rows[0].state, ProcessDependencyState::ResultAppended);
+}
+
+#[tokio::test]
+async fn actionable_dependency_query_requires_group_ref() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let error = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: scope(),
+            dependent_process_id: None,
+            group_ref: None,
+            allowed_states: Some(vec![ProcessDependencyState::Settled]),
+            include_closed: false,
+            after: None,
+            limit: Some(1),
+        })
+        .await
+        .expect_err("state projection requires an exact group prefix");
+    assert!(matches!(
+        error,
+        ProcessJournalStoreError::InvalidRequest(message)
+            if message.contains("allowed_states require group_ref")
+    ));
+}
+
+#[tokio::test]
+async fn query_process_dependencies_rejects_cursor_without_finite_limit() {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let error = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: scope(),
+            dependent_process_id: None,
+            group_ref: None,
+            allowed_states: None,
+            include_closed: false,
+            after: Some((ProcessId::new(), ProcessId::new())),
+            limit: None,
+        })
+        .await
+        .expect_err("a cursor query must not fall back to an unbounded canonical scan");
+    assert!(matches!(
+        error,
+        ProcessJournalStoreError::InvalidRequest(message)
+            if message.contains("finite limit")
+    ));
+}
+
+#[tokio::test]
+async fn query_process_dependencies_bounded_mode_holds_on_libsql() {
+    let storage = tempfile::tempdir().expect("temporary process journal database");
+    let database = Arc::new(
+        libsql::Builder::new_local(storage.path().join("dependency-bounded.db"))
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let backend = Arc::new(LibSqlRootFilesystem::new(database).expect("libSQL filesystem runtime"));
+    backend
+        .run_migrations()
+        .await
+        .expect("migrate libsql filesystem");
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        backend,
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    assert_bounded_dependency_query_pages_the_filtered_canonical_order(ProcessJournalStore::new(
+        Arc::clone(&filesystem),
+    ))
+    .await;
+    assert_actionable_dependency_query_merges_states_with_one_pair_cursor(
+        ProcessJournalStore::new(Arc::clone(&filesystem)),
+    )
+    .await;
+    assert_actionable_dependency_query_pages_each_state_after_dependent_filter(
+        ProcessJournalStore::new(Arc::clone(&filesystem)),
+    )
+    .await;
+    assert_actionable_dependency_query_does_not_starve_behind_open_rows(ProcessJournalStore::new(
+        filesystem,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn query_process_dependencies_bounded_mode_holds_on_postgres() {
+    let Some(backend) = postgres_backend().await else {
+        return;
+    };
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    assert_bounded_dependency_query_pages_the_filtered_canonical_order(ProcessJournalStore::new(
+        Arc::clone(&filesystem),
+    ))
+    .await;
+    assert_actionable_dependency_query_merges_states_with_one_pair_cursor(
+        ProcessJournalStore::new(Arc::clone(&filesystem)),
+    )
+    .await;
+    assert_actionable_dependency_query_pages_each_state_after_dependent_filter(
+        ProcessJournalStore::new(Arc::clone(&filesystem)),
+    )
+    .await;
+    assert_actionable_dependency_query_does_not_starve_behind_open_rows(ProcessJournalStore::new(
+        filesystem,
+    ))
+    .await;
+}
+
+/// PR #7818 review finding 3: bounded-mode branches the paging test above
+/// never reaches — `limit == 0`, `dependent_process_id: Some(..)`, and
+/// `include_closed: true`.
+///
+/// `limit == 0` currently returns `Ok(vec![])` immediately
+/// (`dependencies_for_scope_canonical_order`, rows.rs: `if limit == 0 {
+/// return Ok(Vec::new()); }`), before building any filter or touching the
+/// index — verified here as the correct behavior (zero rows requested, zero
+/// rows returned, no wasted query), not merely pinned as-is.
+#[tokio::test]
+async fn query_process_dependencies_bounded_mode_covers_zero_limit_dependent_filter_and_closed_rows()
+ {
+    let store = ProcessJournalStore::new(in_memory_backed_processes_filesystem());
+    let root_scope = scope();
+    let dependent_a = ProcessId::new();
+    let dependent_b = ProcessId::new();
+    submit_internal_process(&store, &root_scope, dependent_a).await;
+    submit_internal_process(&store, &root_scope, dependent_b).await;
+
+    let open_dependency = store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent_a,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: dependent_a,
+            scope: root_scope.clone(),
+            group_ref: Some("branch-coverage".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open dependency");
+
+    let dependency_to_close = store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent_a,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: dependent_a,
+            scope: root_scope.clone(),
+            group_ref: Some("branch-coverage".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open dependency to close");
+    let closed_dependency = store
+        .abandon_process_dependency(CloseProcessDependencyRequest {
+            dependent_process_id: dependent_a,
+            dependency_process_id: dependency_to_close.dependency_process_id,
+            scope: root_scope.clone(),
+            closed_at: Utc::now(),
+        })
+        .await
+        .expect("abandon dependency")
+        .expect("dependency existed");
+    assert_eq!(closed_dependency.state, ProcessDependencyState::Abandoned);
+
+    // A dependent_b dependency, same group_ref: must never appear once
+    // `dependent_process_id` narrows the query to dependent_a.
+    store
+        .open_process_dependency(OpenProcessDependencyRequest {
+            dependent_process_id: dependent_b,
+            dependency_process_id: ProcessId::new(),
+            root_process_id: dependent_b,
+            scope: root_scope.clone(),
+            group_ref: Some("branch-coverage".to_string()),
+            created_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        })
+        .await
+        .expect("open dependent_b dependency");
+
+    let base_query = ProcessDependencyQuery {
+        scope: root_scope.clone(),
+        dependent_process_id: Some(dependent_a),
+        group_ref: Some("branch-coverage".to_string()),
+        allowed_states: None,
+        include_closed: false,
+        after: None,
+        limit: Some(10),
+    };
+
+    // `limit == 0`: no rows, even though matching rows exist.
+    let zero_limit = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            limit: Some(0),
+            ..base_query.clone()
+        })
+        .await
+        .expect("zero-limit bounded query");
+    assert!(zero_limit.is_empty(), "limit == 0 must return no rows");
+
+    // `dependent_process_id: Some(dependent_a)`: dependent_b's dependency is
+    // excluded even though it shares the same group_ref.
+    let scoped_to_dependent_a = store
+        .query_process_dependencies(base_query.clone())
+        .await
+        .expect("dependent-scoped query");
+    assert_eq!(scoped_to_dependent_a, vec![open_dependency.clone()]);
+
+    // `include_closed: true`: the abandoned row must surface alongside the
+    // open one.
+    let mut with_closed = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            include_closed: true,
+            ..base_query
+        })
+        .await
+        .expect("include_closed bounded query");
+    with_closed.sort_by_key(|record| {
+        (
+            record.dependent_process_id.as_uuid(),
+            record.dependency_process_id.as_uuid(),
+        )
+    });
+    let mut expected_with_closed = vec![open_dependency, closed_dependency];
+    expected_with_closed.sort_by_key(|record| {
+        (
+            record.dependent_process_id.as_uuid(),
+            record.dependency_process_id.as_uuid(),
+        )
+    });
+    assert_eq!(with_closed, expected_with_closed);
+}
+
+/// Test-only decorator that, once [`armed`](Self::arm), strips one named
+/// index key from the last row of every `query_ordered` page. Reproduces the
+/// corrupted-row shape `query_indexed_collection`'s existing fail-loud
+/// contract already guards against (rows.rs ~L1409-1413): a row present in
+/// an ordered page whose canonical-order pagination keys are missing. No
+/// real backend can produce that shape through its own write path — the
+/// in-memory backend keeps a row's materialized index entry atomically in
+/// sync with its stored fields (removing an indexed field from a row's
+/// storage removes the row from the index entirely, it does not leave a
+/// dangling entry) — so this decorator is the only way to exercise the
+/// store's defensive handling of it. Delegates every other operation
+/// unmodified so setup writes/reads through the store are unaffected; only
+/// armed after setup completes, so only the query under test is corrupted.
+struct StripLastPaginationKey {
+    inner: Arc<InMemoryBackend>,
+    strip_key: IndexKey,
+    armed: AtomicBool,
+}
+
+impl StripLastPaginationKey {
+    fn new(inner: Arc<InMemoryBackend>, strip_key: IndexKey) -> Self {
+        Self {
+            inner,
+            strip_key,
+            armed: AtomicBool::new(false),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for StripLastPaginationKey {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn list_dir_bounded(
+        &self,
+        path: &VirtualPath,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir_bounded(path, max_entries).await
+    }
+
+    async fn list_dir_page(
+        &self,
+        path: &VirtualPath,
+        after: Option<&str>,
+        max_entries: usize,
+    ) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir_page(path, after, max_entries).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn query_ordered(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: &OrderedPage,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let mut batch = self.inner.query_ordered(path, filter, page).await?;
+        if self.armed.load(Ordering::SeqCst)
+            && let Some(last) = batch.last_mut()
+        {
+            last.entry.indexed.remove(&self.strip_key);
+        }
+        Ok(batch)
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        self.inner.read_file_bounded(path, max_bytes).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        self.inner.delete_if_version(path, expected_version).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.inner.begin(path).await
+    }
+
+    async fn create_subtree_atomic(
+        &self,
+        path: &VirtualPath,
+        entries: Vec<AtomicSubtreeEntry>,
+    ) -> Result<Vec<RecordVersion>, FilesystemError> {
+        self.inner.create_subtree_atomic(path, entries).await
+    }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        self.inner.append(path, payload).await
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.inner.append_batch(path, payloads).await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.inner.tail(path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.inner.tail_bounded(path, from, max_records).await
+    }
+
+    async fn head_seq(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        self.inner.head_seq(path, from).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
+    }
+}
+
+/// PR #7818 review finding 1: a full bounded page whose last row is missing
+/// its canonical-order pagination keys must fail loud, not silently
+/// truncate. `dependencies_for_scope_canonical_order`'s unbounded sibling
+/// `query_indexed_collection` already errors on this shape (rows.rs
+/// ~L1409-1413: a full page with no derivable cursor is
+/// `ProcessJournalStoreError::Deserialization`); the bounded path must match
+/// it instead of breaking the loop silently.
+///
+/// The raw page must be *full* (`batch.len() == page_limit`, so
+/// `exhausted == false`) while the *filtered* `collected` count stays below
+/// `limit`, so the loop reaches the bottom-of-loop cursor check instead of
+/// returning early from inside the `for` loop. `limit = 2` gives
+/// `page_limit = 8`; eight rows share the scope so the raw page is exactly
+/// full, and only one carries the matching `group_ref` so post-filter
+/// `collected.len() == 1 < limit`.
+#[tokio::test]
+async fn bounded_dependency_query_fails_loud_when_a_full_page_yields_no_cursor() {
+    let backend = Arc::new(StripLastPaginationKey::new(
+        Arc::new(InMemoryBackend::new()),
+        IndexKey::new("dependency_id").expect("dependency_id key"),
+    ));
+    let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/processes").expect("mount alias"),
+            VirtualPath::new("/engine/processes").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ));
+    let store = ProcessJournalStore::new(Arc::clone(&filesystem));
+    let root_scope = scope();
+    let dependent = ProcessId::new();
+    submit_internal_process(&store, &root_scope, dependent).await;
+
+    for index in 0..8 {
+        store
+            .open_process_dependency(OpenProcessDependencyRequest {
+                dependent_process_id: dependent,
+                dependency_process_id: ProcessId::new(),
+                root_process_id: dependent,
+                scope: root_scope.clone(),
+                group_ref: Some(if index == 0 { "matching" } else { "other" }.to_string()),
+                created_at: Utc::now(),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .expect("open dependency");
+    }
+
+    // Arm the corruption only now: the raw page is full (all eight rows share
+    // the scope), so the last row in canonical order loses its tie-breaker
+    // key at read time — a shape setup writes never produce.
+    backend.arm();
+
+    let error = store
+        .query_process_dependencies(ProcessDependencyQuery {
+            scope: root_scope,
+            dependent_process_id: None,
+            group_ref: Some("matching".to_string()),
+            allowed_states: None,
+            include_closed: false,
+            after: None,
+            limit: Some(2),
+        })
+        .await
+        .expect_err("a full page with no cursor must fail loud, not truncate");
+    assert!(
+        matches!(error, ProcessJournalStoreError::Deserialization(_)),
+        "expected Deserialization, got {error:?}"
     );
 }
 
@@ -3129,7 +4087,10 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
                 scope: rejected_scope,
                 dependent_process_id: Some(root_id),
                 group_ref: Some("gate:rejected".to_string()),
+                allowed_states: None,
                 include_closed: true,
+                after: None,
+                limit: None,
             })
             .await
             .expect("query rejected dependency")
@@ -3176,7 +4137,10 @@ async fn consuming_dependency_atomically_releases_tree_capacity() {
             scope: child_scope.clone(),
             dependent_process_id: Some(root_id),
             group_ref: Some("gate:batch".to_string()),
+            allowed_states: None,
             include_closed: true,
+            after: None,
+            limit: None,
         })
         .await
         .expect("query closed dependency");
@@ -3272,7 +4236,10 @@ where
             scope: scope(),
             dependent_process_id: Some(dependent),
             group_ref: None,
+            allowed_states: None,
             include_closed: true,
+            after: None,
+            limit: None,
         })
         .await
         .expect("query dependencies")
@@ -3646,7 +4613,10 @@ async fn consume_closes_a_delivered_edge_only_once_attention_is_scheduled() {
                 scope: scope(),
                 dependent_process_id: Some(dependent),
                 group_ref: None,
+                allowed_states: None,
                 include_closed: false,
+                after: None,
+                limit: None,
             })
             .await
             .expect("query succeeds");
@@ -3749,7 +4719,10 @@ async fn new_substates_are_not_treated_as_closed() {
                 scope: scope(),
                 dependent_process_id: Some(dependent),
                 group_ref: None,
+                allowed_states: None,
                 include_closed: false,
+                after: None,
+                limit: None,
             })
             .await
             .expect("query succeeds");

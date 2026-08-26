@@ -1,6 +1,8 @@
 import { Badge } from "../../../design-system/badge";
 import { Card } from "../../../design-system/card";
 import { Icon } from "../../../design-system/icons";
+import { InlineNotice } from "../../../design-system/inline-notice";
+import { Skeleton } from "../../../design-system/skeleton";
 import {
   SelectMenu,
   type SelectMenuOption,
@@ -179,15 +181,15 @@ export function ToolsTab({
           isLoading={isLoading}
         />
         <Card padding="md">
-          <div className="mb-4 h-3 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+          <Skeleton className="mb-4 h-3 w-28 rounded" />
           {[1, 2, 3, 4, 5].map(
             (i) => (
               <div
                 key={i}
                 className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3.5 first:border-0"
               >
-                <div className="h-4 w-36 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-                <div className="h-8 w-28 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+                <Skeleton className="h-4 w-36 rounded" />
+                <Skeleton className="h-8 w-28 rounded" />
               </div>
             )
           )}
@@ -205,11 +207,9 @@ export function ToolsTab({
           savedKeys={savedKeys}
           isLoading={isLoading}
         />
-        <Card padding="md">
-          <p className="text-sm text-[var(--v2-danger-text)]">
-            {t("tools.failedLoad", { message: query.error.message })}
-          </p>
-        </Card>
+        <InlineNotice tone="danger" role="alert">
+          {t("tools.failedLoad", { message: query.error.message })}
+        </InlineNotice>
       </div>
     );
   }
@@ -238,12 +238,9 @@ export function ToolsTab({
 
       {permissionError &&
       (
-        <div
-          className="rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
-          role="alert"
-        >
+        <InlineNotice tone="danger" role="alert">
           {t("error.saveFailed", { message: permissionError.message })}
-        </div>
+        </InlineNotice>
       )}
 
       {searchQuery &&

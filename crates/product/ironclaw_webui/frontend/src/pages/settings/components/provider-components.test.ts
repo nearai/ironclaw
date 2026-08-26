@@ -158,6 +158,7 @@ function renderProviderManagement({
     Card: "Card",
     ConfirmDialog,
     Icon: "Icon",
+    InlineNotice: "InlineNotice",
     ProviderCard,
     ProviderDialog: "ProviderDialog",
     ProviderLoginStatus: "ProviderLoginStatus",

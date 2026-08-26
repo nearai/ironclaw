@@ -126,13 +126,16 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
-      - name: Install Rust non-interactively if not already installed
+      - name: Install Rust through the repo's single setup path
+        # Mirrors .github/dist-build-setup.yml, which cargo-dist re-inlines
+        # here on `dist generate`. Both must carry it: the fragment so a
+        # regeneration keeps it, this file because the checked-in workflow is
+        # what actually runs. validate_release_workflow_installs_rust asserts
+        # the presence here, since the absence-only bootstrap checks happily
+        # passed a version of this file with no Rust install at all.
         if: ${{ matrix.container }}
-        run: |
-          if ! command -v cargo > /dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 --max-time 120 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          fi
+        uses: ./.github/actions/setup-rust
+
       - name: "Install Node.js for the embedded WebUI"
         uses: "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
         with:

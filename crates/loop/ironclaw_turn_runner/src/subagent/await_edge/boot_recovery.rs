@@ -29,19 +29,40 @@ where
     for (parent_run_id, child_run_id, edge) in unclosed {
         let outcome = match edge.state {
             super::AwaitEdgeState::Open => continue,
+            // Blocking-mode `Settled` keeps its pre-existing group drain
+            // (resumes the blocked parent once every group member has
+            // settled). Background-mode `Settled` never reaches
+            // `drain_settled_group` — `resume_parent` is exclusive to the
+            // blocking dependent-run gate, which a background parent never
+            // parks on (`deliver_background`'s own doc comment) — so it takes
+            // the same `deliver_background` re-drive path as the other
+            // background delivery substates below.
+            super::AwaitEdgeState::Settled
+                if edge.mode == ironclaw_loop_host::SpawnSubagentMode::Background =>
+            {
+                resolver
+                    .deliver_background(&edge, parent_run_id, child_run_id, false)
+                    .await
+            }
             super::AwaitEdgeState::Settled => {
                 resolver
                     .drain_settled_group(scope, parent_run_id, child_run_id)
                     .await
             }
-            // ponytail: the background delivery substates are recovery-inert.
-            // Nothing writes them yet (this slice lands the surface only), and
-            // the sweep that resumes a half-delivered background result — a
-            // re-append, or making a streak-capped parent attentive — lands
-            // with the producer that first writes them.
-            super::AwaitEdgeState::ResultAppended
-            | super::AwaitEdgeState::AttentionScheduled
-            | super::AwaitEdgeState::AttentionDeferredStreakCap => continue,
+            // Crash-recovery re-drive of a half-delivered background result
+            // (System provenance — boot recovery is not a human/permitted
+            // start): `ResultAppended` re-attends (append is a no-op
+            // replay); `AttentionScheduled` closes only, both through
+            // `deliver_background`'s existing idempotent re-drive contract.
+            super::AwaitEdgeState::ResultAppended | super::AwaitEdgeState::AttentionScheduled => {
+                resolver
+                    .deliver_background(&edge, parent_run_id, child_run_id, false)
+                    .await
+            }
+            // A streak-capped edge stays parked at boot — boot recovery is
+            // never a human-initiated start, so it must not drain this
+            // forward; a later permitted/human run-start sweep does.
+            super::AwaitEdgeState::AttentionDeferredStreakCap => continue,
             super::AwaitEdgeState::Drained | super::AwaitEdgeState::Abandoned => continue,
         };
         match outcome {
@@ -86,7 +107,12 @@ where
         &self,
         scope: &TurnScope,
     ) -> Result<(), ironclaw_loop_host::ScopeRecoveryInProgress> {
-        let _ = recover_scope(&self.resolver, &self.store, scope).await;
+        let report = recover_scope(&self.resolver, &self.store, scope).await;
+        if report.failed > 0 {
+            return Err(ironclaw_loop_host::ScopeRecoveryInProgress {
+                retry_after_hint: std::time::Duration::from_millis(50),
+            });
+        }
         Ok(())
     }
 
@@ -101,3 +127,6 @@ where
             .await
     }
 }
+
+#[cfg(test)]
+mod tests;

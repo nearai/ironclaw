@@ -173,7 +173,8 @@ use ironclaw_product_contracts::lifecycle_service::{
 };
 use ironclaw_product_contracts::notification_inbox::{
     NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID, NOTIFICATIONS_MARK_READ_COMMAND_ID, NOTIFICATIONS_VIEW,
-    ProductNotificationMutationRequest, ProductNotificationMutationResponse,
+    ProductListNotificationsResponse, ProductNotificationKind, ProductNotificationMutationRequest,
+    ProductNotificationMutationResponse,
 };
 use ironclaw_product_contracts::operator_llm::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
@@ -981,6 +982,38 @@ struct ActorFallbackApprovalInteractionService {
     project_id: Option<ProjectId>,
 }
 
+struct FixedLegacyApprovalInteractionService {
+    pending: PendingApprovalInteractionView,
+}
+
+#[async_trait]
+impl ApprovalInteractionService for FixedLegacyApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ProductSurfaceFailure> {
+        if request.scope.thread_id != self.pending.scope.thread_id
+            || request.scope.tenant_id != self.pending.scope.tenant_id
+            || request.scope.agent_id != self.pending.scope.agent_id
+            || request.scope.project_id != self.pending.scope.project_id
+            || request.scope.has_explicit_thread_owner()
+            || request.actor.user_id != self.pending.scope.user_id
+        {
+            return Ok(ListPendingApprovalsResponse { approvals: vec![] });
+        }
+        Ok(ListPendingApprovalsResponse {
+            approvals: vec![self.pending.clone()],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        _request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ProductSurfaceFailure> {
+        panic!("resolve is not used by legacy notification migration tests")
+    }
+}
+
 #[async_trait]
 impl ApprovalInteractionService for ActorFallbackApprovalInteractionService {
     async fn list_pending(
@@ -1560,6 +1593,7 @@ impl AutomationProductService for RecordingAutomationService {
 #[derive(Clone)]
 struct StaticAutomationService {
     output: Vec<RebornAutomationInfo>,
+    list_error: Option<ProductSurfaceError>,
     scheduler_enabled: bool,
     list_calls: Arc<Mutex<Vec<ListAutomationCall>>>,
     /// Scopes returned by `resolve_run_thread_scope`, keyed by the queried
@@ -1573,6 +1607,7 @@ impl StaticAutomationService {
     fn new(output: Vec<RebornAutomationInfo>) -> Self {
         Self {
             output,
+            list_error: None,
             scheduler_enabled: true,
             list_calls: Arc::new(Mutex::new(Vec::new())),
             resolve_scopes: HashMap::new(),
@@ -1582,6 +1617,11 @@ impl StaticAutomationService {
 
     fn with_scheduler_enabled(mut self, scheduler_enabled: bool) -> Self {
         self.scheduler_enabled = scheduler_enabled;
+        self
+    }
+
+    fn with_list_error(mut self, error: ProductSurfaceError) -> Self {
+        self.list_error = Some(error);
         self
     }
 
@@ -1605,6 +1645,10 @@ impl StaticAutomationService {
 
 #[async_trait]
 impl AutomationProductService for StaticAutomationService {
+    fn supports_legacy_approval_notification_backfill(&self) -> bool {
+        true
+    }
+
     fn scheduler_enabled(&self) -> bool {
         self.scheduler_enabled
     }
@@ -1623,6 +1667,9 @@ impl AutomationProductService for StaticAutomationService {
                 run_limit: request.run_limit,
                 include_completed: request.include_completed,
             });
+        if let Some(error) = &self.list_error {
+            return Err(error.clone());
+        }
         Ok(self.output.clone())
     }
 
@@ -14530,8 +14577,8 @@ async fn a_repeated_notification_mutation_reports_that_nothing_changed() {
     use ironclaw_host_api::path::{MountAlias, VirtualPath};
     use ironclaw_notifications::{
         NotificationAction, NotificationId, NotificationInboxStore, NotificationInboxStorePort,
-        NotificationKind, NotificationRecipient, NotificationSeverity, NotificationSource,
-        PublishNotificationRequest,
+        NotificationInitialState, NotificationKind, NotificationRecipient, NotificationSeverity,
+        NotificationSource, PublishNotificationRequest,
     };
 
     let mounts = MountView::new(vec![MountGrant::new(
@@ -14565,6 +14612,7 @@ async fn a_repeated_notification_mutation_reports_that_nothing_changed() {
                 lifecycle_ref: None,
             },
             action: NotificationAction::OpenThread { thread_id },
+            initial_state: NotificationInitialState::Open,
             occurred_at: Utc::now(),
         })
         .await
@@ -14915,6 +14963,259 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
         thread_ids,
         vec![automation_pending_thread_id],
         "notification approval lookup must include legacy ownerless automation run threads",
+    );
+}
+
+#[tokio::test]
+async fn notifications_backfill_open_legacy_automation_approval_once() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_notifications::{
+        ListNotificationsRequest, NotificationId, NotificationInboxStore,
+        NotificationInboxStorePort, NotificationMutationRequest, NotificationRecipient,
+    };
+
+    let caller = caller();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let thread_id =
+        setup_ownerless_trigger_thread(&thread_service, &caller, "thread-legacy-gate-backfill")
+            .await;
+    let trigger_scope = trigger_run_thread_scope_for(&caller);
+    let run_id = automation_run_id();
+    let approval_request_id = ApprovalRequestId::new();
+    let gate_ref = approval_gate_ref(approval_request_id).expect("approval gate ref");
+    let approval_turn_scope = TurnScope::new(
+        caller.tenant_id.clone(),
+        caller.agent_id.clone(),
+        caller.project_id.clone(),
+        thread_id.clone(),
+    );
+    let approval_service = Arc::new(FixedLegacyApprovalInteractionService {
+        pending: PendingApprovalInteractionView {
+            scope: ApprovalInteractionScope::from_turn(
+                &approval_turn_scope,
+                &TurnActor::new(trigger_scope.creator_user_id.clone()),
+            ),
+            run_id,
+            gate_ref: gate_ref.clone(),
+            approval_request_id,
+            summary: "Approval required".to_string(),
+            action: ApprovalInteractionActionView::Dispatch {
+                capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+            },
+        },
+    });
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/notifications").expect("alias"),
+        VirtualPath::new("/engine/test/legacy-gate-backfill").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let inbox = Arc::new(NotificationInboxStore::new(
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        )),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    ));
+    let services = session_services(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_service(automation_service_with_trigger_thread(
+        thread_id.clone(),
+        &caller,
+    ))
+    .with_approval_interactions(approval_service.clone())
+    .with_notification_inbox(inbox.clone());
+
+    async fn query_notifications(
+        services: &RebornServices,
+        caller: ProductSurfaceCaller,
+    ) -> ProductListNotificationsResponse {
+        let page = ProductSurface::query(
+            services,
+            caller,
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
+                view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                input: json!({}),
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect("list notifications");
+        let payload = page.items.into_iter().next().expect("notification payload");
+        serde_json::from_value(payload).expect("notification response")
+    }
+
+    let first = query_notifications(&services, caller.clone()).await;
+    let second = query_notifications(&services, caller.clone()).await;
+    assert_eq!(first.notifications.len(), 1);
+    assert_eq!(second.notifications.len(), 1, "backfill is idempotent");
+    let notification = &second.notifications[0];
+    let lifecycle_key =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, gate_ref.as_str().as_bytes());
+    assert_eq!(
+        notification.id,
+        format!("run:{run_id}:approval:{lifecycle_key}"),
+        "the migration must use the producer's stable id so normal gate resolution settles it",
+    );
+    assert_eq!(notification.kind, ProductNotificationKind::ApprovalRequired);
+    assert_eq!(notification.thread_id, thread_id.to_string());
+    assert_eq!(notification.turn_run_id, Some(run_id.to_string()));
+    assert!(notification.read_at.is_none());
+    assert!(notification.resolved_at.is_none());
+
+    let read_at = "2030-01-01T00:00:00Z".parse().expect("read time");
+    inbox
+        .mark_read(NotificationMutationRequest {
+            recipient: NotificationRecipient {
+                tenant_id: caller.tenant_id.clone(),
+                user_id: caller.user_id.clone(),
+            },
+            notification_id: NotificationId::new(notification.id.clone()).expect("notification id"),
+            occurred_at: read_at,
+        })
+        .await
+        .expect("mark migrated notification read");
+    let before_restart = inbox
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: caller.tenant_id.clone(),
+                user_id: caller.user_id.clone(),
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("read durable state before restart")
+        .notifications
+        .into_iter()
+        .next()
+        .expect("migrated notification before restart");
+
+    let restarted = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_automation_product_service(automation_service_with_trigger_thread(thread_id, &caller))
+        .with_approval_interactions(approval_service)
+        .with_notification_inbox(inbox.clone());
+    let after_restart_page = query_notifications(&restarted, caller.clone()).await;
+    assert_eq!(
+        after_restart_page.notifications.len(),
+        1,
+        "a restart backfill must not duplicate the stable notification id",
+    );
+    let after_restart = inbox
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: caller.tenant_id,
+                user_id: caller.user_id,
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("read durable state after restart")
+        .notifications
+        .into_iter()
+        .next()
+        .expect("migrated notification after restart");
+    assert_eq!(after_restart.read_at, Some(read_at));
+    assert_eq!(after_restart.resolved_at, before_restart.resolved_at);
+    assert_eq!(after_restart.archived_at, before_restart.archived_at);
+    assert_eq!(after_restart.updated_at, before_restart.updated_at);
+}
+
+#[tokio::test]
+async fn notification_list_survives_a_failed_legacy_approval_backfill_once() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_notifications::{
+        NotificationAction, NotificationId, NotificationInboxStore, NotificationInboxStorePort,
+        NotificationInitialState, NotificationKind, NotificationRecipient, NotificationSeverity,
+        NotificationSource, PublishNotificationRequest,
+    };
+
+    let caller = caller();
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/notifications").expect("alias"),
+        VirtualPath::new("/engine/test/legacy-backfill-failure").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let inbox = Arc::new(NotificationInboxStore::new(
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        )),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    ));
+    let thread_id = ThreadId::new("thread-existing-notification").expect("thread");
+    inbox
+        .publish(PublishNotificationRequest {
+            id: NotificationId::new("notification-existing").expect("notification id"),
+            recipient: NotificationRecipient {
+                tenant_id: caller.tenant_id.clone(),
+                user_id: caller.user_id.clone(),
+            },
+            kind: NotificationKind::RunCompleted,
+            severity: NotificationSeverity::Success,
+            source: NotificationSource {
+                thread_id: thread_id.clone(),
+                turn_run_id: None,
+                lifecycle_ref: None,
+            },
+            action: NotificationAction::OpenThread { thread_id },
+            initial_state: NotificationInitialState::Resolved,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .expect("seed healthy durable inbox");
+
+    let automation_service = Arc::new(StaticAutomationService::new(vec![]).with_list_error(
+        ProductSurfaceError {
+            code: ProductSurfaceErrorCode::Unavailable,
+            kind: ProductSurfaceErrorKind::ServiceUnavailable,
+            status_code: 503,
+            retryable: true,
+            field: None,
+            validation_code: None,
+        },
+    ));
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_service(automation_service.clone())
+    .with_notification_inbox(inbox);
+
+    for _ in 0..2 {
+        let page = ProductSurface::query(
+            &services,
+            caller.clone(),
+            ironclaw_product_contracts::surface::ProductSurfaceQueryRequest {
+                view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                input: json!({}),
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect("a migration failure must not hide the healthy durable inbox");
+        let response: ProductListNotificationsResponse =
+            serde_json::from_value(page.items.into_iter().next().expect("notification payload"))
+                .expect("notification response");
+        assert_eq!(response.notifications.len(), 1);
+        assert_eq!(response.notifications[0].id, "notification-existing");
+    }
+    assert_eq!(
+        automation_service.list_calls().len(),
+        1,
+        "a failed best-effort migration is attempted once per process scope",
     );
 }
 
