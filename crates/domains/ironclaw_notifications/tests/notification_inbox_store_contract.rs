@@ -19,9 +19,9 @@ use ironclaw_notifications::{
     LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
     NOTIFICATION_INBOX_MAX_RECORDS, NOTIFICATION_PAGE_LIMIT_MAX, NoopNotificationInboxStore,
     NotificationAction, NotificationId, NotificationInboxError, NotificationInboxStore,
-    NotificationInboxStorePort, NotificationKind, NotificationMutationOutcome,
-    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
-    PublishNotificationRequest,
+    NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+    NotificationMutationOutcome, NotificationMutationRequest, NotificationRecipient,
+    NotificationSeverity, NotificationSource, PublishNotificationRequest,
 };
 use tokio::sync::Mutex;
 
@@ -63,6 +63,7 @@ fn request(id: &str, timestamp: i64) -> PublishNotificationRequest {
             lifecycle_ref: Some(LifecycleRef::new(format!("gate-{id}")).expect("lifecycle ref")),
         },
         action: NotificationAction::OpenThread { thread_id },
+        initial_state: NotificationInitialState::Open,
         occurred_at: Utc.timestamp_opt(timestamp, 0).single().expect("time"),
     }
 }
@@ -77,6 +78,17 @@ async fn notification_inbox_is_durable_paginated_and_idempotent() {
         .publish(first_request.clone())
         .await
         .expect("publish first");
+
+    let mut actionable_state_change = first_request.clone();
+    actionable_state_change.initial_state = NotificationInitialState::Resolved;
+    let actionable_retry = first
+        .publish(actionable_state_change)
+        .await
+        .expect("actionable retry remains idempotent");
+    assert!(
+        actionable_retry.resolved_at.is_none(),
+        "an actionable producer retry cannot bypass workflow resolution",
+    );
 
     let mut severity_conflict = first_request.clone();
     severity_conflict.severity = NotificationSeverity::Error;
@@ -157,6 +169,74 @@ async fn notification_inbox_is_durable_paginated_and_idempotent() {
         .await
         .expect("resume after archived anchor");
     assert_eq!(second_page.notifications[0].id.as_str(), "notification-1");
+}
+
+#[tokio::test]
+async fn terminal_retry_repairs_legacy_open_state_without_reopening_lifecycle() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let first = NotificationInboxStore::new(scoped(Arc::clone(&backend)), 1);
+    let mut terminal = request("legacy-terminal", 1_700_000_001);
+    terminal.kind = NotificationKind::RunCompleted;
+    terminal.severity = NotificationSeverity::Success;
+    // This is the pre-initial-state persisted shape: terminal producers used
+    // to create records without stamping `resolved_at`.
+    terminal.initial_state = NotificationInitialState::Open;
+    first
+        .publish(terminal.clone())
+        .await
+        .expect("publish legacy terminal record");
+
+    let read_at = Utc.timestamp_opt(1_700_000_010, 0).single().expect("time");
+    let archived_at = Utc.timestamp_opt(1_700_000_020, 0).single().expect("time");
+    let notification_id = terminal.id.clone();
+    first
+        .mark_read(NotificationMutationRequest {
+            recipient: recipient(),
+            notification_id: notification_id.clone(),
+            occurred_at: read_at,
+        })
+        .await
+        .expect("mark legacy record read");
+    first
+        .archive(NotificationMutationRequest {
+            recipient: recipient(),
+            notification_id,
+            occurred_at: archived_at,
+        })
+        .await
+        .expect("archive legacy record");
+
+    let reopened = NotificationInboxStore::new(scoped(Arc::clone(&backend)), 1);
+    let before = reopened
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("read legacy record before reconciliation")
+        .notifications
+        .into_iter()
+        .next()
+        .expect("legacy record");
+    assert!(before.resolved_at.is_none());
+
+    terminal.initial_state = NotificationInitialState::Resolved;
+    terminal.occurred_at = Utc.timestamp_opt(1_700_000_030, 0).single().expect("time");
+    let reconciled = reopened
+        .publish(terminal)
+        .await
+        .expect("terminal retry reconciles legacy state");
+    assert_eq!(reconciled.resolved_at, Some(before.created_at));
+    assert_eq!(reconciled.read_at, before.read_at);
+    assert_eq!(reconciled.archived_at, before.archived_at);
+    assert_eq!(reconciled.updated_at, before.updated_at);
+
+    reopened
+        .publish(request("gate-after-legacy-terminal", 1_700_000_040))
+        .await
+        .expect("reconciled terminal record is reclaimable");
 }
 
 #[tokio::test]
@@ -534,12 +614,16 @@ async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
     let backend = Arc::new(InMemoryBackend::new());
     let store = NotificationInboxStore::new(scoped(Arc::clone(&backend)), TEST_CAPACITY);
 
-    // Fill to capacity, then close every record the way a user who worked
-    // through the inbox would: resolved by the producer, archived by the user.
+    // Terminal outcomes are resolved when published. Archiving them must make
+    // them reclaimable without requiring a second producer lifecycle event.
     for index in 0..TEST_CAPACITY {
         let id = format!("closed-{index}");
+        let mut terminal = request(&id, 1_700_000_000 + index as i64);
+        terminal.kind = NotificationKind::RunCompleted;
+        terminal.severity = NotificationSeverity::Success;
+        terminal.initial_state = NotificationInitialState::Resolved;
         store
-            .publish(request(&id, 1_700_000_000 + index as i64))
+            .publish(terminal)
             .await
             .expect("publish within capacity");
         let mutation = NotificationMutationRequest {
@@ -550,7 +634,6 @@ async fn a_full_inbox_evicts_closed_records_so_a_new_gate_still_arrives() {
                 .single()
                 .expect("time"),
         };
-        store.resolve(mutation.clone()).await.expect("resolve");
         store.archive(mutation).await.expect("archive");
     }
 

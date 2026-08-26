@@ -16,17 +16,30 @@
  *
  * Approve starts the suggestion's own thread/run server-side and reports the
  * returned `thread_id` upward so the app can navigate to it — no prompt
- * injection through the composer. Cards are tool-agnostic: connect is a
- * separate surface (§3.1), so there is no connect state here.
+ * injection through the composer. Cards stay tool-agnostic: connect remains a
+ * separate surface (§3.1), so the drawer offers an *entry* into `/extensions`
+ * rather than a per-card connect state.
+ *
+ * Two controls beyond the shipped set (issue #7815, F1/F2):
+ *   refresh → re-runs `generate` on a ready set. The backend is replace-only
+ *             (a new `client_action_id` hides the prior generation), so this
+ *             is honestly a refresh, not "more"; it becomes additive when the
+ *             backend gains a top-up transition.
+ *   connect → the first leg of the flow (connect tools -> ask for
+ *             suggestions), routed to the existing extensions surface.
  */
 import React from "react";
 import type { ReactNode } from "react";
+import { Link } from "react-router";
 
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { useSuggestions } from "../hooks/useSuggestions";
 import { SuggestedTaskCard } from "./suggested-task-card";
+
+// The shipped connect surface (extensions catalog + per-extension setup).
+const EXTENSIONS_ROUTE = "/extensions";
 
 export function SuggestedTaskSurface({
   onOpenThread,
@@ -85,14 +98,40 @@ export function SuggestedTaskSurface({
             <span className="text-[11px] text-[var(--v2-text-faint)]">
               {t("chat.oobe.subtitle")}
             </span>
-            <button
-              type="button"
-              onClick={() => onClose?.()}
-              aria-label={t("chat.oobe.hideSuggestions")}
-              className="ml-auto -my-0.5 grid h-6 w-6 shrink-0 place-items-center self-start rounded-[6px] text-[var(--v2-text-faint)] transition-colors hover:text-[var(--v2-text-strong)]"
-            >
-              <Icon name="close" className="h-4 w-4" />
-            </button>
+            <div className="ml-auto -my-0.5 flex shrink-0 items-center gap-1 self-start">
+              <Link
+                to={EXTENSIONS_ROUTE}
+                aria-label={t("chat.oobe.action.connect")}
+                title={t("chat.oobe.action.connect")}
+                className="flex h-6 items-center gap-1 rounded-[6px] px-1.5 text-[11px] font-medium text-[var(--v2-text-faint)] transition-colors hover:text-[var(--v2-text-strong)]"
+              >
+                <Icon name="plug" className="h-3.5 w-3.5" />
+                {/* Label drops below `sm`: three controls plus the label wrap
+                    the heading onto a second line at 375px. The icon keeps its
+                    accessible name via aria-label/title. */}
+                <span className="hidden sm:inline">
+                  {t("chat.oobe.action.connect")}
+                </span>
+              </Link>
+              <button
+                type="button"
+                onClick={() => generate()}
+                disabled={generating}
+                aria-label={t("chat.oobe.action.refresh")}
+                title={t("chat.oobe.action.refresh")}
+                className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--v2-text-faint)] transition-colors hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Icon name="retry" className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onClose?.()}
+                aria-label={t("chat.oobe.hideSuggestions")}
+                className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--v2-text-faint)] transition-colors hover:text-[var(--v2-text-strong)]"
+              >
+                <Icon name="close" className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           {hasCards ? renderCards() : renderSkeleton()}
         </div>
@@ -162,6 +201,18 @@ export function SuggestedTaskSurface({
     );
   }
 
+  // Route entry into the connect surface, for the CTA rows. Rendered after the
+  // generate/retry action so generation stays the primary action of the empty
+  // state. (The framed drawer carries its own compact header entry.)
+  function renderConnectAction() {
+    return (
+      <Button as={Link} to={EXTENSIONS_ROUTE} variant="ghost" size="sm">
+        <Icon name="plug" className="mr-1 h-3.5 w-3.5" />
+        {t("chat.oobe.action.connect")}
+      </Button>
+    );
+  }
+
   function renderCta() {
     if (status === "failed") {
       return (
@@ -174,15 +225,19 @@ export function SuggestedTaskSurface({
             <Icon name="retry" className="mr-1 h-3.5 w-3.5" />
             {t("chat.oobe.action.tryAgain")}
           </Button>
+          {renderConnectAction()}
         </div>
       );
     }
     // `empty`, or a `ready` set the user has dismissed down to nothing.
     return (
-      <Button variant="secondary" size="sm" onClick={() => generate()}>
-        <Icon name="spark" className="mr-1 h-3.5 w-3.5" />
-        {t("chat.oobe.action.generate")}
-      </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="secondary" size="sm" onClick={() => generate()}>
+          <Icon name="spark" className="mr-1 h-3.5 w-3.5" />
+          {t("chat.oobe.action.generate")}
+        </Button>
+        {renderConnectAction()}
+      </div>
     );
   }
 }

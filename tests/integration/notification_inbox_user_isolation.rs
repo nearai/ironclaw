@@ -18,8 +18,8 @@ use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
 use ironclaw_notifications::{
     ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_INBOX_MAX_RECORDS,
     NotificationAction, NotificationId, NotificationInboxStore, NotificationInboxStorePort,
-    NotificationKind, NotificationMutationRequest, NotificationRecipient, NotificationSeverity,
-    NotificationSource, PublishNotificationRequest,
+    NotificationInitialState, NotificationKind, NotificationMutationRequest, NotificationRecipient,
+    NotificationSeverity, NotificationSource, PublishNotificationRequest,
 };
 
 const TENANT: &str = "notification-isolation-tenant";
@@ -52,6 +52,7 @@ fn seed_in(tenant_id: &str, user: &str, id: &str) -> PublishNotificationRequest 
             lifecycle_ref: None,
         },
         action: NotificationAction::OpenThread { thread_id },
+        initial_state: NotificationInitialState::Open,
         occurred_at: Utc.timestamp_opt(1_700_000_001, 0).single().expect("time"),
     }
 }

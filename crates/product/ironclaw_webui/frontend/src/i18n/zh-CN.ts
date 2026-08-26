@@ -109,13 +109,7 @@ registerPack("zh-CN", {
   "chat.heroDesc": "可以从一个目标、仓库问题、审查请求，或需要处理的文件开始。",
   "chat.emptyTitle": "从一个具体的操作任务开始。",
   "chat.emptyDesc": "发送消息、附加文件或请求网关检查。工作区会在执行过程中显示审批和运行时活动。",
-  "chat.suggestion1": "映射当前网关状态",
-  "chat.suggestion1Desc": "检查运行时状态、渠道、工具和未完成工作。",
-  "chat.suggestion2": "查看最近的线程活动",
-  "chat.suggestion2Desc": "查找正确性风险、被阻塞的审批和后续事项。",
-  "chat.suggestion3": "草拟扩展就绪检查",
-  "chat.suggestion3Desc": "验证设置、认证、配对和可用能力。",
-  // Chat — OOBE suggestion cards
+  // Chat — OOBE suggestion cards (feature-gated first-run surface)
   "chat.oobe.heading": "为你推荐",
   "chat.oobe.subtitle": "批准后运行",
   "chat.oobe.showSuggestions": "显示建议",
@@ -126,6 +120,8 @@ registerPack("zh-CN", {
   "chat.oobe.action.openThread": "在线程中查看",
   "chat.oobe.action.generate": "为我推荐一些内容",
   "chat.oobe.action.tryAgain": "重试",
+  "chat.oobe.action.refresh": "刷新建议",
+  "chat.oobe.action.connect": "连接工具",
   "chat.oobe.status.starting": "正在启动\u2026",
   "chat.oobe.status.generating": "正在查找我可以为你完成的事项\u2026",
   "chat.oobe.status.generateFailed": "无法生成建议",

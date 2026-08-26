@@ -27,7 +27,7 @@
 //! unnecessary for correctness or isolation, so it is intentionally left out
 //! here.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
@@ -40,10 +40,10 @@ use ironclaw_threads::{SessionThreadService, ThreadMessageId};
 use ironclaw_turns::TurnRunId;
 
 use crate::input_queue::{
-    EnqueueDisposition, EnqueueQueuedMessageRequest, HostInputBatch, HostInputEnqueuePort,
-    HostInputEnvelope, HostInputQueue, HostInputQueueError, HostInputQueueReconcile,
-    QueuedMessageStatusUpdate, RunQueueModel, cursor_sequence, envelope_for, flip_rejected_busy,
-    flip_submitted,
+    EnqueueDisposition, EnqueueQueuedMessageRequest, HostInputAckEffectHandler, HostInputBatch,
+    HostInputEnqueuePort, HostInputEnvelope, HostInputQueue, HostInputQueueError,
+    HostInputQueueReconcile, QueuedMessageStatusUpdate, RunQueueModel, cursor_sequence,
+    envelope_for, flip_rejected_busy, flip_submitted,
 };
 
 /// Bounds the CAS retry loop so persistent contention surfaces as a host error
@@ -59,6 +59,7 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     owner_scope: ResourceScope,
     thread_service: Arc<dyn SessionThreadService>,
+    ack_effect_handler: OnceLock<Arc<dyn HostInputAckEffectHandler>>,
 }
 
 impl<F> std::fmt::Debug for FilesystemHostInputQueue<F>
@@ -96,7 +97,27 @@ where
             filesystem,
             owner_scope,
             thread_service,
+            ack_effect_handler: OnceLock::new(),
         }
+    }
+
+    /// Bind the callback used for deferred queue acknowledgment effects.
+    /// Composition performs this once after both the queue and resolver exist.
+    pub fn bind_ack_effect_handler(
+        &self,
+        handler: Arc<dyn HostInputAckEffectHandler>,
+    ) -> Result<(), HostInputQueueError> {
+        self.ack_effect_handler
+            .set(handler)
+            .map_err(|rejected_handler| {
+                tracing::debug!(
+                    handler_type = std::any::type_name_of_val(rejected_handler.as_ref()),
+                    "input queue ack effect handler already bound"
+                );
+                HostInputQueueError::Unavailable {
+                    reason: "input queue ack effect handler already bound".to_string(),
+                }
+            })
     }
 
     async fn load(
@@ -157,8 +178,9 @@ where
         run_id: TurnRunId,
         submitted: &[u64],
         rejected: &[ThreadMessageId],
+        ack_effects: &[u64],
     ) {
-        if submitted.is_empty() && rejected.is_empty() {
+        if submitted.is_empty() && rejected.is_empty() && ack_effects.is_empty() {
             return;
         }
         for _ in 0..MAX_CAS_RETRIES {
@@ -181,6 +203,7 @@ where
             };
             model.confirm_submit_flips(submitted);
             model.confirm_reject_flips(rejected);
+            model.confirm_ack_effects(ack_effects);
             let result = if model.is_settled() {
                 let path = match queue_path(run_id) {
                     Ok(path) => path,
@@ -221,6 +244,39 @@ where
             "durable queue flip confirmation exhausted CAS retries"
         );
     }
+
+    async fn retry_pending_ack_effects(&self, run_id: TurnRunId) {
+        let Some(handler) = self.ack_effect_handler.get().cloned() else {
+            return;
+        };
+        let pending = match self.load(run_id).await {
+            Ok((model, _)) => model.due_ack_effects(),
+            Err(error) => {
+                tracing::debug!(
+                    component = "host_input_queue",
+                    operation = "retry_ack_effects",
+                    %run_id,
+                    %error,
+                    "failed to load pending background acknowledgment effects"
+                );
+                return;
+            }
+        };
+        let mut confirmed = Vec::new();
+        for pending in pending {
+            match handler.handle_ack_effect(pending.effect.clone()).await {
+                Ok(()) => confirmed.push(pending.sequence),
+                Err(error) => tracing::debug!(
+                    component = "host_input_queue",
+                    operation = "retry_ack_effects",
+                    %run_id,
+                    %error,
+                    "input acknowledgment effect failed; retaining it for retry"
+                ),
+            }
+        }
+        self.confirm_flips(run_id, &[], &[], &confirmed).await;
+    }
 }
 
 #[async_trait]
@@ -242,15 +298,22 @@ where
             let (mut model, version) = self.load(request.run_id).await?;
             match model.enqueue_dedup(request.input.clone(), status.clone())? {
                 EnqueueDisposition::Inserted { sequence } => {
+                    model.attach_ack_effect(sequence, request.ack_effect.clone())?;
                     match self.store(request.run_id, &model, version).await {
-                        Ok(()) => return envelope_for(sequence, request.input),
+                        Ok(()) => {
+                            let envelope = envelope_for(sequence, request.input)?;
+                            self.retry_pending_ack_effects(request.run_id).await;
+                            return Ok(envelope);
+                        }
                         Err(StorePutError::Conflict) => continue,
                         Err(StorePutError::Fatal(error)) => return Err(error),
                     }
                 }
                 EnqueueDisposition::Duplicate { sequence } => {
                     // Nothing changed: no write, no CAS.
-                    return envelope_for(sequence, request.input);
+                    let envelope = envelope_for(sequence, request.input)?;
+                    self.retry_pending_ack_effects(request.run_id).await;
+                    return Ok(envelope);
                 }
                 EnqueueDisposition::AlreadyConsumed { flip } => {
                     // Idempotent replay of a consumed message whose
@@ -260,8 +323,10 @@ where
                     let flipped =
                         flip_submitted(self.thread_service.as_ref(), request.run_id, vec![flip])
                             .await;
-                    self.confirm_flips(request.run_id, &flipped, &[]).await;
-                    return envelope_for(sequence, request.input);
+                    self.confirm_flips(request.run_id, &flipped, &[], &[]).await;
+                    let envelope = envelope_for(sequence, request.input)?;
+                    self.retry_pending_ack_effects(request.run_id).await;
+                    return Ok(envelope);
                 }
             }
         }
@@ -328,13 +393,11 @@ where
         if !committed {
             return Err(cas_exhausted("ack_consumed"));
         }
-        if due_flips.is_empty() {
-            return Ok(());
-        }
         // Phase 2: best-effort transcript flip (see the shared helper's doc);
         // confirmed flips are pruned from the pending-retry state.
         let flipped = flip_submitted(self.thread_service.as_ref(), run_id, due_flips).await;
-        self.confirm_flips(run_id, &flipped, &[]).await;
+        self.confirm_flips(run_id, &flipped, &[], &[]).await;
+        self.retry_pending_ack_effects(run_id).await;
         Ok(())
     }
 }
@@ -400,8 +463,9 @@ where
         let submitted = flip_submitted(self.thread_service.as_ref(), run_id, submit_flips).await;
         let reject_outcome =
             flip_rejected_busy(self.thread_service.as_ref(), run_id, reject_flips).await;
-        self.confirm_flips(run_id, &submitted, &reject_outcome.confirmable())
+        self.confirm_flips(run_id, &submitted, &reject_outcome.confirmable(), &[])
             .await;
+        self.retry_pending_ack_effects(run_id).await;
         Ok(reject_outcome.flipped)
     }
 }

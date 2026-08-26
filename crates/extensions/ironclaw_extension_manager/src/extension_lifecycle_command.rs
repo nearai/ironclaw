@@ -110,11 +110,16 @@ async fn execute_install_with_activation(
         if let Some(activation_visible_capability_ids) = activation_visible_capability_ids {
             *visible_capability_ids = activation_visible_capability_ids;
         }
-        *next_step = if install_response.phase == InstallationState::Active {
-            "Activation completed; model-visible extension tools are ready.".to_string()
-        } else {
-            "Activation did not complete; inspect the lifecycle phase and blockers.".to_string()
-        };
+        // Only the failure text is written here. On success the service has
+        // already composed `next_step` from the caller's device-link state, and
+        // a literal in this wrapper would be a third copy of guidance that
+        // `install_guidance` exists to own — the drift shape #7853 came from.
+        // Overwriting it dropped the per-user link direction for every CLI
+        // user, leaving it only in `message`, which this renderer never prints.
+        if install_response.phase != InstallationState::Active {
+            *next_step = "Activation did not complete; inspect the lifecycle phase and blockers."
+                .to_string();
+        }
     }
     Ok(install_response)
 }
@@ -241,6 +246,53 @@ fn extension_source_label(source: LifecycleExtensionSource) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// The CLI install wrapper re-runs activation and rewrites the install
+    /// payload. It used to rewrite `next_step` unconditionally with a literal,
+    /// which threw away the per-caller device-link direction the service had
+    /// just composed — leaving it only on `message`, a field this renderer
+    /// never prints. A terminal user was told "ready" while a personal link
+    /// was still owed, which is #7853 on the default CLI path.
+    #[tokio::test]
+    async fn cli_install_keeps_the_device_link_direction_in_next_step() {
+        use crate::lifecycle_test_support::{
+            DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID,
+            build_lifecycle_test_services_with_device_link_channel_fixture,
+        };
+
+        let services =
+            build_lifecycle_test_services_with_device_link_channel_fixture("owner-cli-device-link")
+                .await;
+        let scope = crate::lifecycle_test_support::webui_gate_resource_scope_for_owner(
+            "owner-cli-device-link",
+        );
+
+        let response = execute_reborn_extension_lifecycle_service_command(
+            &services.lifecycle_service,
+            crate::lifecycle_test_support::lifecycle_product_context(scope),
+            RebornExtensionLifecycleCommand::Install {
+                id: DEVICE_LINK_CHANNEL_FIXTURE_EXTENSION_ID.to_string(),
+            },
+        )
+        .await
+        .expect("install the device-link fixture through the CLI command path");
+
+        let Some(LifecycleProductPayload::ExtensionInstall { next_step, .. }) =
+            response.payload.as_ref()
+        else {
+            panic!("expected an install payload, got {:?}", response.payload);
+        };
+        assert!(
+            next_step.contains("cannot run from chat"),
+            "the CLI must keep the device-link direction the service composed: {next_step}"
+        );
+        // And it must survive all the way into what the terminal actually shows.
+        let rendered = render_reborn_extension_lifecycle_response("install", &response);
+        assert!(
+            rendered.contains("cannot run from chat"),
+            "the rendered CLI output must carry it too: {rendered}"
+        );
+    }
+
     use ironclaw_auth::{
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };

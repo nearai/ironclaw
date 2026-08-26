@@ -109,13 +109,7 @@ registerPack("fr", {
   "chat.heroDesc": "Commencez par un objectif, une question sur le depot, une demande de revue ou des fichiers a traiter.",
   "chat.emptyTitle": "Commencez par une tâche opérateur concrète.",
   "chat.emptyDesc": "Envoyez un message, joignez des fichiers ou demandez un check du gateway. L’espace de travail garde visibles validations et activité runtime pendant le tour.",
-  "chat.suggestion1": "Cartographier l’état actuel du gateway",
-  "chat.suggestion1Desc": "Inspecter l'etat du runtime, les canaux, les outils et le travail ouvert.",
-  "chat.suggestion2": "Revoir l’activité récente des threads",
-  "chat.suggestion2Desc": "Rechercher les risques de justesse, les approbations bloquees et les suivis.",
-  "chat.suggestion3": "Rédiger un check de readiness d’extension",
-  "chat.suggestion3Desc": "Verifier la configuration, l'authentification, l'appairage et les capacites disponibles.",
-  // Chat — OOBE suggestion cards
+  // Chat — OOBE suggestion cards (feature-gated first-run surface)
   "chat.oobe.heading": "Suggestions pour vous",
   "chat.oobe.subtitle": "Approuvez pour exécuter",
   "chat.oobe.showSuggestions": "Afficher les suggestions",
@@ -126,6 +120,8 @@ registerPack("fr", {
   "chat.oobe.action.openThread": "Voir dans la conversation",
   "chat.oobe.action.generate": "Suggérer quelque chose",
   "chat.oobe.action.tryAgain": "Réessayer",
+  "chat.oobe.action.refresh": "Actualiser les suggestions",
+  "chat.oobe.action.connect": "Connecter des outils",
   "chat.oobe.status.starting": "Démarrage\u2026",
   "chat.oobe.status.generating": "Recherche d’actions que je peux effectuer pour vous\u2026",
   "chat.oobe.status.generateFailed": "Impossible de générer des suggestions",

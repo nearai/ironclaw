@@ -109,13 +109,7 @@ registerPack("hi", {
   "chat.heroDesc": "किसी लक्ष्य, रेपो प्रश्न, समीक्षा अनुरोध या काम की जरूरत वाली फाइलों से शुरू करें.",
   "chat.emptyTitle": "एक ठोस ऑपरेटर कार्य से शुरू करें।",
   "chat.emptyDesc": "संदेश भेजें, फ़ाइलें जोड़ें, या गेटवे चेक माँगें। वर्कस्पेस टर्न के दौरान approvals और runtime activity दिखाता है।",
-  "chat.suggestion1": "वर्तमान गेटवे स्टेट मैप करें",
-  "chat.suggestion1Desc": "रनटाइम स्थिति, चैनल, टूल और खुले काम की जांच करें.",
-  "chat.suggestion2": "हाल की थ्रेड गतिविधि देखें",
-  "chat.suggestion2Desc": "सहीपन के जोखिम, रुकी हुई स्वीकृतियां और फॉलो-अप देखें.",
-  "chat.suggestion3": "एक्सटेंशन readiness check ड्राफ्ट करें",
-  "chat.suggestion3Desc": "सेटअप, ऑथ, पेयरिंग और उपलब्ध क्षमताओं की पुष्टि करें.",
-  // Chat — OOBE suggestion cards
+  // Chat — OOBE suggestion cards (feature-gated first-run surface)
   "chat.oobe.heading": "आपके लिए सुझाव",
   "chat.oobe.subtitle": "चलाने के लिए स्वीकृत करें",
   "chat.oobe.showSuggestions": "सुझाव दिखाएँ",
@@ -126,6 +120,8 @@ registerPack("hi", {
   "chat.oobe.action.openThread": "थ्रेड में देखें",
   "chat.oobe.action.generate": "मेरे लिए कुछ सुझाएँ",
   "chat.oobe.action.tryAgain": "फिर से कोशिश करें",
+  "chat.oobe.action.refresh": "सुझाव रीफ़्रेश करें",
+  "chat.oobe.action.connect": "टूल कनेक्ट करें",
   "chat.oobe.status.starting": "शुरू हो रहा है\u2026",
   "chat.oobe.status.generating": "आपके लिए किए जा सकने वाले काम खोजे जा रहे हैं\u2026",
   "chat.oobe.status.generateFailed": "सुझाव जनरेट नहीं किए जा सके",

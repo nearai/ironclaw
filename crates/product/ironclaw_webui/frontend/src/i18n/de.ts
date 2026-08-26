@@ -109,13 +109,7 @@ registerPack("de", {
   "chat.heroDesc": "Beginne mit einem Ziel, einer Repo-Frage, einer Review-Anfrage oder Dateien, die bearbeitet werden muessen.",
   "chat.emptyTitle": "Starte mit einer konkreten Operator‑Aufgabe.",
   "chat.emptyDesc": "Sende eine Nachricht, hänge Dateien an oder fordere einen Gateway‑Check an. Der Arbeitsbereich zeigt Freigaben und Runtime‑Aktivität während des Turns.",
-  "chat.suggestion1": "Aktuellen Gateway‑Status kartieren",
-  "chat.suggestion1Desc": "Runtime-Zustand, Kanaele, Tools und offene Arbeit pruefen.",
-  "chat.suggestion2": "Letzte Thread‑Aktivität prüfen",
-  "chat.suggestion2Desc": "Nach Korrektheitsrisiken, blockierten Freigaben und Follow-ups suchen.",
-  "chat.suggestion3": "Extension‑Readiness‑Check entwerfen",
-  "chat.suggestion3Desc": "Setup, Authentifizierung, Pairing und verfuegbare Funktionen pruefen.",
-  // Chat — OOBE suggestion cards
+  // Chat — OOBE suggestion cards (feature-gated first-run surface)
   "chat.oobe.heading": "Vorschläge für dich",
   "chat.oobe.subtitle": "Zum Ausführen genehmigen",
   "chat.oobe.showSuggestions": "Vorschläge anzeigen",
@@ -126,6 +120,8 @@ registerPack("de", {
   "chat.oobe.action.openThread": "Im Chat anzeigen",
   "chat.oobe.action.generate": "Schlag mir etwas vor",
   "chat.oobe.action.tryAgain": "Erneut versuchen",
+  "chat.oobe.action.refresh": "Vorschläge aktualisieren",
+  "chat.oobe.action.connect": "Tools verbinden",
   "chat.oobe.status.starting": "Wird gestartet\u2026",
   "chat.oobe.status.generating": "Ich suche nach Aufgaben, die ich für dich erledigen kann\u2026",
   "chat.oobe.status.generateFailed": "Vorschläge konnten nicht erstellt werden",

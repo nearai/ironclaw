@@ -1,3 +1,4 @@
+// arch-exempt: large_file, the run-start sweep settler is wired beside the other await-edge settler bindings it joins, plan #7788
 //! Default Reborn runtime-loop composition.
 
 use std::{collections::HashMap, error::Error, fmt, sync::Arc};
@@ -940,6 +941,7 @@ where
         Arc::clone(&driver_registry),
         host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
         parts.gate_record_store.clone(),
+        Arc::clone(&subagent_await_edge_settler),
     );
     if let Some(recorder) = after_turn_memory_recorder {
         executor = executor.with_after_turn_memory_recorder(recorder);

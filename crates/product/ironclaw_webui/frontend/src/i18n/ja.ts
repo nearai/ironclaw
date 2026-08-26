@@ -109,13 +109,7 @@ registerPack("ja", {
   "chat.heroDesc": "目標、リポジトリの質問、レビュー依頼、作業が必要なファイルから始められます。",
   "chat.emptyTitle": "具体的なオペレータータスクから始めましょう。",
   "chat.emptyDesc": "メッセージ送信、ファイル添付、またはゲートウェイチェックを依頼できます。ワークスペースは承認とランタイム活動をターン中に可視化します。",
-  "chat.suggestion1": "現在のゲートウェイ状態を把握する",
-  "chat.suggestion1Desc": "ランタイムの状態、チャネル、ツール、未完了の作業を確認します。",
-  "chat.suggestion2": "最近のスレッド活動を確認する",
-  "chat.suggestion2Desc": "正確性のリスク、ブロックされた承認、フォローアップを探します。",
-  "chat.suggestion3": "拡張の準備状況チェックを下書きする",
-  "chat.suggestion3Desc": "セットアップ、認証、ペアリング、利用可能な機能を確認します。",
-  // Chat — OOBE suggestion cards
+  // Chat — OOBE suggestion cards (feature-gated first-run surface)
   "chat.oobe.heading": "おすすめ",
   "chat.oobe.subtitle": "承認して実行",
   "chat.oobe.showSuggestions": "提案を表示",
@@ -126,6 +120,8 @@ registerPack("ja", {
   "chat.oobe.action.openThread": "スレッドで表示",
   "chat.oobe.action.generate": "何か提案して",
   "chat.oobe.action.tryAgain": "再試行",
+  "chat.oobe.action.refresh": "提案を更新",
+  "chat.oobe.action.connect": "ツールを接続",
   "chat.oobe.status.starting": "開始中\u2026",
   "chat.oobe.status.generating": "実行できることを探しています\u2026",
   "chat.oobe.status.generateFailed": "提案を生成できませんでした",

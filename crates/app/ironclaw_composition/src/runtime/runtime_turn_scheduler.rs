@@ -66,7 +66,7 @@ impl RuntimeTurnScheduler {
 
     /// Test-only: stop the scheduler for manual turn-state manipulation without
     /// consuming `self` (so `send_user_message` can still be called after).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) async fn stop_for_test(&self) {
         if let Some(scheduler) = self.handle.lock().await.take() {
             tokio::time::timeout(std::time::Duration::from_secs(2), scheduler.shutdown())

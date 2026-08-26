@@ -9,8 +9,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_notifications::{
     LifecycleRef, NotificationAction, NotificationId, NotificationInboxError,
-    NotificationInboxStorePort, NotificationKind, NotificationMutationRequest,
-    NotificationRecipient, NotificationSeverity, NotificationSource, PublishNotificationRequest,
+    NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
+    PublishNotificationRequest,
 };
 use ironclaw_processes::{
     JournaledProcessSnapshot, ProcessJournalCommit, ProcessJournalCommitObserver,
@@ -78,6 +79,7 @@ impl RunOutcomeProcessCommitObserver {
                     lifecycle_ref: Some(outcome_lifecycle_ref("process-terminal")?),
                 },
                 action: NotificationAction::OpenThread { thread_id },
+                initial_state: NotificationInitialState::Resolved,
                 occurred_at,
             })
             .await
@@ -318,8 +320,9 @@ mod tests {
     };
     use ironclaw_notifications::{
         LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInboxStore,
-        NotificationInboxStorePort, NotificationKind, NotificationRecipient, NotificationSeverity,
-        NotificationSource, PublishNotificationRequest,
+        NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+        NotificationRecipient, NotificationSeverity, NotificationSource,
+        PublishNotificationRequest,
     };
     use ironclaw_processes::{
         ClaimProcessesRequest, JournaledProcessSnapshot, ProcessJournalCommit,
@@ -533,6 +536,7 @@ mod tests {
                     action: NotificationAction::OpenThread {
                         thread_id: thread(),
                     },
+                    initial_state: NotificationInitialState::Open,
                     occurred_at: Utc::now(),
                 })
                 .await
@@ -647,6 +651,7 @@ mod tests {
             .expect("list completion notification");
         assert_eq!(page.notifications.len(), 1);
         assert_eq!(page.notifications[0].kind, NotificationKind::RunCompleted);
+        assert_eq!(page.notifications[0].resolved_at, Some(committed_at));
         assert_eq!(
             page.notifications[0].created_at, committed_at,
             "completion ordering uses the committed journal transition timestamp"
@@ -785,6 +790,7 @@ mod tests {
         assert_eq!(page.notifications.len(), 1);
         assert_eq!(page.notifications[0].kind, NotificationKind::RunCompleted);
         assert_eq!(page.notifications[0].created_at, committed_at);
+        assert_eq!(page.notifications[0].resolved_at, Some(committed_at));
     }
 
     #[tokio::test]

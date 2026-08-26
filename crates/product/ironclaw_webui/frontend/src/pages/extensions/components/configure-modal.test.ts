@@ -77,6 +77,7 @@ function renderModal({
   initialState = [],
   runEffects = false,
   blockPopup = false,
+  initialConnection = null,
 } = {}) {
   const calls = [];
   const invalidations = [];
@@ -192,6 +193,7 @@ function renderModal({
     },
     onClose,
     onSaved,
+    initialConnection,
   });
   return {
     calls,
@@ -1234,6 +1236,48 @@ test("ConfigureModal starts personal-account linking only after Continue", () =>
     "the personal DeviceLinkPanel renders only after Continue",
   );
   assert.equal(renderedContainsComponent(linking.rendered, linking.PairingWebCodePanel), false);
+});
+
+test("ConfigureModal opens on the setup path a deep link named", () => {
+  // #7853: `?configure=telegram&setup=personal_account` exists so a user handed
+  // the link in a Telegram or Slack thread lands ON the device-link panel.
+  // Dropping them on the two-path choice screen would leave the last unaided
+  // step exactly where it was.
+  //
+  // Only indices 0-2 are pinned, so `activeConnection` (index 3) falls through
+  // to the component's real initializer — which is the prop under test.
+  const linking = renderModal({
+    surfaces: botAndPersonalSurfaces,
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+    installationState: "setup_needed",
+    setupResult: {
+      secrets: [
+        {
+          name: "telegram_linked_session",
+          provider: "telegram",
+          prompt: "Link your Telegram account",
+          provided: false,
+          setup: { kind: "device_link" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+    initialState: [undefined, undefined, undefined],
+    initialConnection: "personal_account",
+  });
+
+  assert.equal(
+    renderedContainsComponent(linking.rendered, linking.DeviceLinkPanel),
+    true,
+    "a personal_account deep link skips the choice screen",
+  );
+  assert.equal(
+    renderedContainsComponent(linking.rendered, linking.PairingWebCodePanel),
+    false,
+  );
 });
 
 test("ConfigureModal starts workspace-bot pairing without personal device linking", () => {

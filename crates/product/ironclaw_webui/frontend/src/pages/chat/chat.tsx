@@ -479,7 +479,6 @@ export function Chat({
         {showLanding &&
         (
           <EmptyState
-            onSuggestion={handleSuggestion}
             onSend={handleSend}
             onOpenThread={handleOpenSuggestionThread}
             commands={activeThreadId ? chatCommands : []}

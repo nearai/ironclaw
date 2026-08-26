@@ -42,7 +42,7 @@ function renderSurface({
   const generateCalls = [];
   const startCalls = [];
   const dismissCalls = [];
-  const components = { SuggestedTaskCard() {}, Button() {}, Icon() {} };
+  const components = { SuggestedTaskCard() {}, Button() {}, Icon() {}, Link() {} };
   const context = {
     ...components,
     globalThis: {},
@@ -230,4 +230,114 @@ test("dismiss reports the suggestion id to the backend-backed hook", () => {
     components.SuggestedTaskCard,
   ).onDismiss();
   assert.deepEqual(dismissCalls, [CARD.id]);
+});
+
+// Refresh + connect (issue #7815 F1/F2). The synthetic-JSX factory records
+// `{ type, props }` on every element node, so walking for the design-system
+// `Button` reference and reading its props is enough to assert which control
+// is which without depending on markup order.
+function findAllByType(node, type, found = []) {
+  if (Array.isArray(node)) {
+    node.forEach((entry) => findAllByType(entry, type, found));
+    return found;
+  }
+  if (!node || typeof node !== "object") return found;
+  if (node.type === type) found.push(node);
+  (Array.isArray(node.values) ? node.values : []).forEach((value) =>
+    findAllByType(value, type, found),
+  );
+  return found;
+}
+
+const EXTENSIONS_ROUTE = "/extensions";
+
+function refreshControl(tree) {
+  // The compact drawer header uses raw controls (the design-system Button
+  // applies its size class through a plain string join, so a height override
+  // in className would lose to it) — so match the element, not the component.
+  return findAllByType(tree, "button").find(
+    (button) => button.props["aria-label"] === "chat.oobe.action.refresh",
+  );
+}
+
+test("a ready set can be refreshed in place", () => {
+  // Before this, the generate CTA only existed at zero cards, so a user
+  // holding a stale set had no way to ask for another one short of dismissing
+  // every card. Refresh reuses the same `generate` mutation.
+  const { tree, generateCalls } = renderSurface();
+  const refresh = refreshControl(tree);
+  assert.ok(refresh, "the drawer header exposes a refresh control");
+  assert.equal(refresh.props.disabled, false, "refresh is live on a ready set");
+
+  refresh.props.onClick();
+  assert.deepEqual(generateCalls, [true], "refresh re-generates");
+});
+
+test("refresh is inert while a generation is already in flight", () => {
+  // `generate` is idempotent per client_action_id, but a live control during
+  // generation reads as "nothing happened" — the request is claimed, not
+  // queued. Disable it instead.
+  const { tree } = renderSurface({
+    status: "generating",
+    isGenerating: true,
+    suggestions: [CARD],
+  });
+  const refresh = refreshControl(tree);
+  assert.ok(refresh, "the refresh control stays mounted during regeneration");
+  assert.equal(refresh.props.disabled, true);
+});
+
+test("the drawer offers a connect entry into the extensions surface", () => {
+  // First leg of the flow (connect tools -> ask for suggestions). Connect is a
+  // separate surface, so this is a route entry, not an in-drawer OAuth panel.
+  const { tree, components } = renderSurface();
+  const connect = findAllByType(tree, components.Link).find(
+    (link) => link.props.to === EXTENSIONS_ROUTE,
+  );
+  assert.ok(connect, "the drawer links to the connect surface client-side");
+  assert.ok(JSON.stringify(tree).includes("chat.oobe.action.connect"));
+  // The header label is hidden below `sm` (three controls plus the label wrap
+  // the heading at 375px), so the accessible name has to come from the
+  // attribute rather than the text node.
+  assert.equal(connect.props["aria-label"], "chat.oobe.action.connect");
+  const connectLabel = findAllByType(connect, "span").find(
+    (span) => span.props.className === "hidden sm:inline",
+  );
+  assert.ok(
+    connectLabel,
+    "the header label stays hidden below sm, or the 375px wrap returns",
+  );
+});
+
+test("the empty CTA pairs generate with the connect entry, generate first", () => {
+  // Ordering is load-bearing: generate stays the primary action of the empty
+  // state, and the existing CTA tests read the first Button.
+  const { tree, components, generateCalls } = renderSurface({
+    status: "empty",
+    suggestions: [],
+  });
+  const buttons = findAllByType(tree, components.Button);
+  assert.equal(buttons.length, 2, "generate + connect");
+
+  buttons[0].props.onClick();
+  assert.deepEqual(generateCalls, [true], "the first CTA is generate");
+  assert.equal(buttons[1].props.to, EXTENSIONS_ROUTE, "the second is connect");
+  assert.equal(
+    buttons[1].props.as,
+    components.Link,
+    "connect navigates client-side rather than rendering a plain button",
+  );
+});
+
+test("the failed CTA keeps the connect entry alongside retry", () => {
+  // A failed generation is one of the likeliest moments to go connect
+  // something, and retry must stay the first Button for the retry test.
+  const { tree, components } = renderSurface({
+    status: "failed",
+    suggestions: [],
+  });
+  const buttons = findAllByType(tree, components.Button);
+  assert.equal(buttons.length, 2);
+  assert.equal(buttons[1].props.to, EXTENSIONS_ROUTE);
+  assert.equal(buttons[1].props.as, components.Link);
 });

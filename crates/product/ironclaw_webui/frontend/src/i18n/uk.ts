@@ -109,13 +109,7 @@ registerPack("uk", {
   "chat.heroDesc": "Почніть з цілі, питання про репозиторій, запиту на ревʼю або файлів, які потребують роботи.",
   "chat.emptyTitle": "Почніть із конкретного операторського завдання.",
   "chat.emptyDesc": "Надішліть повідомлення, прикріпіть файли або попросіть перевірити шлюз. Робочий простір показує затвердження й runtime-активність у процесі виконання.",
-  "chat.suggestion1": "Зіставити поточний стан шлюзу",
-  "chat.suggestion1Desc": "Перевірити стан runtime, канали, інструменти та відкриту роботу.",
-  "chat.suggestion2": "Переглянути нещодавню активність тредів",
-  "chat.suggestion2Desc": "Знайти ризики коректності, заблоковані погодження та подальші дії.",
-  "chat.suggestion3": "Чернетка перевірки готовності розширень",
-  "chat.suggestion3Desc": "Перевірити налаштування, автентифікацію, спарювання та доступні можливості.",
-  // Chat — OOBE suggestion cards
+  // Chat — OOBE suggestion cards (feature-gated first-run surface)
   "chat.oobe.heading": "Пропозиції для вас",
   "chat.oobe.subtitle": "Схваліть, щоб запустити",
   "chat.oobe.showSuggestions": "Показати пропозиції",
@@ -126,6 +120,8 @@ registerPack("uk", {
   "chat.oobe.action.openThread": "Переглянути в розмові",
   "chat.oobe.action.generate": "Запропонувати щось для мене",
   "chat.oobe.action.tryAgain": "Спробувати знову",
+  "chat.oobe.action.refresh": "Оновити пропозиції",
+  "chat.oobe.action.connect": "Підключити інструменти",
   "chat.oobe.status.starting": "Запуск\u2026",
   "chat.oobe.status.generating": "Пошук завдань, які я можу виконати для вас\u2026",
   "chat.oobe.status.generateFailed": "Не вдалося створити пропозиції",

@@ -2346,6 +2346,34 @@ class RebornPrTestPlanTests(unittest.TestCase):
             workflow,
         )
 
+    def test_scope_checkouts_minimize_transfer_without_losing_pr_ancestry(
+        self,
+    ) -> None:
+        """Scope jobs keep merge-base semantics without downloading history blobs."""
+        reborn_tests = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        reborn_scope = reborn_tests.split("\n  changes:\n", 1)[1].split(
+            "\n  crate-tests:\n", 1
+        )[0]
+        self.assertIn(
+            "fetch-depth: "
+            "${{ github.event_name == 'pull_request' && '0' || '1' }}",
+            reborn_scope,
+        )
+        self.assertIn("filter: blob:none", reborn_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', reborn_scope)
+
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        style_scope = code_style.split("\n  changes:\n", 1)[1].split(
+            "\n  fast-checks:\n", 1
+        )[0]
+        self.assertIn("fetch-depth: 0", style_scope)
+        self.assertIn("filter: blob:none", style_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', style_scope)
+
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
             encoding="utf-8"

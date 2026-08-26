@@ -109,13 +109,7 @@ registerPack("pt-BR", {
   "chat.heroDesc": "Comece com uma meta, uma pergunta sobre o repositorio, um pedido de revisao ou arquivos que precisam de trabalho.",
   "chat.emptyTitle": "Comece com uma tarefa concreta de operador.",
   "chat.emptyDesc": "Envie uma mensagem, anexe arquivos ou peça uma checagem do gateway. O workspace mantém aprovações e atividade de runtime visíveis conforme o turno avança.",
-  "chat.suggestion1": "Mapear o estado atual do gateway",
-  "chat.suggestion1Desc": "Inspecionar a saude do runtime, canais, ferramentas e trabalho aberto.",
-  "chat.suggestion2": "Revisar atividade recente do thread",
-  "chat.suggestion2Desc": "Procurar riscos de correcao, aprovacoes bloqueadas e acompanhamentos.",
-  "chat.suggestion3": "Rascunhar uma checagem de prontidão de extensões",
-  "chat.suggestion3Desc": "Verificar configuracao, autenticacao, pareamento e capacidades disponiveis.",
-  // Chat — OOBE suggestion cards
+  // Chat — OOBE suggestion cards (feature-gated first-run surface)
   "chat.oobe.heading": "Sugestões para você",
   "chat.oobe.subtitle": "Aprove para executar",
   "chat.oobe.showSuggestions": "Mostrar sugestões",
@@ -126,6 +120,8 @@ registerPack("pt-BR", {
   "chat.oobe.action.openThread": "Ver na conversa",
   "chat.oobe.action.generate": "Sugerir algo para mim",
   "chat.oobe.action.tryAgain": "Tentar novamente",
+  "chat.oobe.action.refresh": "Atualizar sugestões",
+  "chat.oobe.action.connect": "Conectar ferramentas",
   "chat.oobe.status.starting": "Iniciando\u2026",
   "chat.oobe.status.generating": "Procurando coisas que posso fazer por você\u2026",
   "chat.oobe.status.generateFailed": "Não foi possível gerar sugestões",

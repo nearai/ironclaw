@@ -7,11 +7,18 @@ thread and timeline scopes in one tenant.
 """
 
 import json
+import uuid
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 
 from helpers import sse_stream, wait_for_sse_line
+from notification_e2e_helpers import (
+    create_notification_automation,
+    delete_notification_automation,
+    run_notification_automation,
+    wait_for_notification,
+)
 from reborn_webui_harness import create_thread, reborn_bearer_headers
 
 pytest_plugins = ["reborn_webui_harness"]
@@ -193,6 +200,45 @@ async def test_reborn_v2_sso_login_logout_and_multi_user_scope_isolation(
             alice_thread,
             bob_token,
         )
+
+        # Production-wired scheduled notifications remain scoped to their
+        # authenticated recipient even when both users share one tenant.
+        label = uuid.uuid4().hex[:10]
+        automation = await create_notification_automation(
+            alice,
+            base_url,
+            "completed",
+            label,
+        )
+        automation_id = automation["automation_id"]
+        try:
+            run = await run_notification_automation(
+                alice,
+                base_url,
+                automation_id,
+            )
+            alice_notification = await wait_for_notification(
+                alice,
+                base_url,
+                kind="run_completed",
+                run_id=run["run_id"],
+            )
+            bob_notifications = await bob.get(
+                f"{base_url}/api/webchat/v2/notifications",
+                params={"limit": 100},
+                timeout=15,
+            )
+            bob_notifications.raise_for_status()
+            assert alice_notification["id"] not in {
+                item["id"]
+                for item in bob_notifications.json().get("notifications", [])
+            }
+        finally:
+            await delete_notification_automation(
+                alice,
+                base_url,
+                automation_id,
+            )
 
         logout = await alice.post(f"{base_url}/auth/logout", timeout=15)
         assert logout.status_code == 204

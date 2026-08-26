@@ -1,4 +1,8 @@
 //! Agent-specific child-result projection over generic process dependencies.
+//!
+//! `§`-references in this module's doc comments cite
+//! `docs/internal/reborn/subagent-spawn/README.md`, the canonical subagent
+//! design/roadmap document.
 
 pub mod boot_recovery;
 pub mod resolver;
@@ -10,7 +14,7 @@ use ironclaw_host_api::turn::{LoopMessageRef, LoopResultRef, TurnGateRef, TurnRu
 use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use serde::{Deserialize, Serialize};
 
-/// CAS state machine (§2): `Open -> Settled -> Drained`; abandon reaches any
+/// CAS state machine (§2.2): `Open -> Settled -> Drained`; abandon reaches any
 /// non-terminal state, not just `Open` — the kernel's close-dependency guard
 /// only gates the `consume` door.
 /// A background child's result also walks the delivery chain in between:
@@ -18,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// `ResultAppended -> AttentionDeferredStreakCap -> AttentionScheduled` when a
 /// streak cap parks it. Only `AttentionScheduled` rejoins the closing path, so
 /// the parked state is a detour, never a terminus.
-/// `Drained`/`Abandoned`-final edges are deleted (§2) — these states are
+/// `Drained`/`Abandoned`-final edges are deleted (§2.2) — these states are
 /// therefore transient on disk, never the long-lived resting state.
 ///
 /// This enum is a *projection* of the kernel's `ProcessDependencyState`, which
@@ -56,7 +60,7 @@ pub enum AttentionOutcome {
     Activated,
 }
 
-/// Descendant-reservation release tri-state (§5.5), living on the same edge
+/// Descendant-reservation release tri-state (§2.2), living on the same edge
 /// file as `AwaitEdgeState` — one more CAS'd field, not a second file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,7 +70,7 @@ pub enum ReservationReleaseState {
 }
 
 /// The child run's terminal outcome, set in the same CAS write that
-/// transitions the edge `Open -> Settled` (§5.4's `terminal_byte_len` sits
+/// transitions the edge `Open -> Settled` (§2.2's `terminal_byte_len` sits
 /// alongside it in that same write).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,7 +104,7 @@ impl EdgeTerminalKind {
     }
 }
 
-/// One await-edge: parent-awaits-child bookkeeping, §5.6 assembled — plus
+/// One await-edge: parent-awaits-child bookkeeping, §2.6 assembled — plus
 /// additive fields beyond the design doc's exact list (`gate_ref`,
 /// `parent_run_context`, `spawn_provider_call_id`, and `terminal_reason`),
 /// each named as a spec deviation in the PR:
@@ -116,7 +120,7 @@ impl EdgeTerminalKind {
 /// - `spawn_provider_call_id`: pins settlement updates to the original spawn
 ///   transcript row when later `result_read` calls share its result reference.
 ///
-/// Identity (`parent_run_id`, `child_run_id`) lives in the path (§4.2), not
+/// Identity (`parent_run_id`, `child_run_id`) lives in the path (§2.2), not
 /// here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AwaitEdge {
@@ -125,7 +129,7 @@ pub struct AwaitEdge {
     pub parent_thread_id: ThreadId,
     /// The parent's `LoopRunContext`, captured once at open time (from
     /// `AwaitedChildSetRecord.parent_run_context`, spawn-time-fresh) — a
-    /// third additive field beyond §5.6's list, and a deviation found only
+    /// third additive field beyond §2.6's list, and a deviation found only
     /// at implementation/test time (not caught in review): re-fetching the
     /// parent's `TurnRunRecord` from `agent_turn_runtime` at settle time, from
     /// *inside* the synchronous `TurnCommittedEventObserver` callback the
@@ -179,6 +183,8 @@ pub struct AwaitEdge {
 pub enum AwaitEdgeStoreError {
     #[error("await-edge store backend failed: {reason}")]
     Backend { reason: String },
+    #[error("await edge close refused: undelivered result still on the edge (state: {state:?})")]
+    UndeliveredResult { state: AwaitEdgeState },
 }
 
 pub(crate) fn map_await_edge_error(

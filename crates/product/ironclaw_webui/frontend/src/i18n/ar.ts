@@ -109,13 +109,7 @@ registerPack("ar", {
   "chat.heroDesc": "ابدأ بهدف، أو سؤال عن المستودع، أو طلب مراجعة، أو ملفات تحتاج إلى عمل.",
   "chat.emptyTitle": "ابدأ بمهمة تشغيل واضحة.",
   "chat.emptyDesc": "أرسل رسالة أو أرفق ملفات أو اطلب فحص البوابة. تُظهر مساحة العمل الموافقات ونشاط التشغيل أثناء تقدم الدور.",
-  "chat.suggestion1": "تخطيط حالة البوابة الحالية",
-  "chat.suggestion1Desc": "افحص حالة وقت التشغيل والقنوات والأدوات والعمل المفتوح.",
-  "chat.suggestion2": "مراجعة نشاط الخيوط الأخير",
-  "chat.suggestion2Desc": "ابحث عن مخاطر الصحة والموافقات المحظورة والمتابعات.",
-  "chat.suggestion3": "صياغة فحص جاهزية الملحقات",
-  "chat.suggestion3Desc": "تحقق من الإعداد والمصادقة والإقران والقدرات المتاحة.",
-  // Chat — OOBE suggestion cards
+  // Chat — OOBE suggestion cards (feature-gated first-run surface)
   "chat.oobe.heading": "مقترحات لك",
   "chat.oobe.subtitle": "وافق للتشغيل",
   "chat.oobe.showSuggestions": "إظهار الاقتراحات",
@@ -126,6 +120,8 @@ registerPack("ar", {
   "chat.oobe.action.openThread": "عرض في المحادثة",
   "chat.oobe.action.generate": "اقترح شيئًا لي",
   "chat.oobe.action.tryAgain": "حاول مرة أخرى",
+  "chat.oobe.action.refresh": "تحديث الاقتراحات",
+  "chat.oobe.action.connect": "ربط الأدوات",
   "chat.oobe.status.starting": "جارٍ البدء\u2026",
   "chat.oobe.status.generating": "جارٍ البحث عن أشياء يمكنني تنفيذها لك\u2026",
   "chat.oobe.status.generateFailed": "تعذر إنشاء الاقتراحات",
