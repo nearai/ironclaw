@@ -62,9 +62,9 @@ class ChangedWorkspacePackagesTests(unittest.TestCase):
     def run_cli(
         self, changed_paths: list[str], event: str
     ) -> subprocess.CompletedProcess[str]:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as changed_files:
-            changed_files.write("\n".join(changed_paths))
-            changed_files.flush()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            changed_files = Path(temp_dir) / "changed-files.txt"
+            changed_files.write_text("\n".join(changed_paths), encoding="utf-8")
             return subprocess.run(
                 [
                     sys.executable,
@@ -72,7 +72,7 @@ class ChangedWorkspacePackagesTests(unittest.TestCase):
                     "--event",
                     event,
                     "--changed-files",
-                    changed_files.name,
+                    str(changed_files),
                 ],
                 cwd=ROOT,
                 capture_output=True,
