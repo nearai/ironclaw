@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -56,6 +59,59 @@ def metadata_with_renamed_workspace_dependency() -> dict:
 
 
 class ChangedWorkspacePackagesTests(unittest.TestCase):
+    def run_cli(
+        self, changed_paths: list[str], event: str
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as changed_files:
+            changed_files.write("\n".join(changed_paths))
+            changed_files.flush()
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE),
+                    "--event",
+                    event,
+                    "--changed-files",
+                    changed_files.name,
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_cli_prints_exact_scope_schema(self) -> None:
+        scenarios = (
+            (
+                "selected",
+                "pull_request",
+                ["crates/contracts/ironclaw_common/src/lib.rs"],
+                {"mode": "selected", "packages": ["ironclaw_common"]},
+            ),
+            (
+                "full",
+                "merge_group",
+                ["Cargo.lock"],
+                {"mode": "full", "packages": []},
+            ),
+            (
+                "none",
+                "pull_request",
+                ["docs/using/cli.mdx"],
+                {"mode": "none", "packages": []},
+            ),
+        )
+        for name, event, changed_paths, expected in scenarios:
+            with self.subTest(name=name):
+                result = self.run_cli(changed_paths, event)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), expected)
+
+    def test_cli_fails_fast_for_empty_merge_group_diff(self) -> None:
+        result = self.run_cli([], "merge_group")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("empty merge-group diff", result.stderr)
+
     def test_selects_direct_production_packages(self) -> None:
         self.assertEqual(
             selector.changed_production_packages(

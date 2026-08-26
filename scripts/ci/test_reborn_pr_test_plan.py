@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
+import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -394,6 +397,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
             canonical,
         )
         self.assertIn("without omitting packages", plan["reasons"][-1])
+
+        merge_group_plan = planner.build_plan(
+            event="merge_group",
+            changed_paths=["crates/alpha/src/lib.rs"],
+            metadata=wide,
+            canonical_packages=canonical,
+        )
+        self.assertEqual(len(merge_group_plan["crate_buckets"]), len(canonical))
+        self.assertEqual(
+            sorted(
+                package
+                for bucket in merge_group_plan["crate_buckets"]
+                for package in bucket["packages"]
+            ),
+            canonical,
+        )
+        self.assertFalse(
+            any("coalesced" in reason for reason in merge_group_plan["reasons"])
+        )
 
     def test_bounded_jobs_do_not_split_canonical_buckets(self) -> None:
         source = [
@@ -2496,6 +2518,78 @@ class RebornPrTestPlanTests(unittest.TestCase):
             style_scope.count('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"'),
             1,
         )
+
+    def test_scope_diff_branches_execute_the_event_specific_revision_range(self) -> None:
+        """Execute each workflow's branch and inspect the git arguments it uses."""
+
+        workflows = (
+            (
+                ROOT / ".github/workflows/reborn-tests.yml",
+                '            if [[ "${{ github.event_name }}" == "merge_group" ]]; then',
+                "            changed_args=(--changed-files",
+                12,
+            ),
+            (
+                ROOT / ".github/workflows/code_style.yml",
+                '          if [[ "${{ github.event_name }}" == "merge_group" ]]; then',
+                '          printf \'%s\\n\' "$CHANGED_FILES" >',
+                10,
+            ),
+        )
+        expected_ranges = {
+            "merge_group": ["base-sha", "head-sha"],
+            "pull_request": ["base-sha...head-sha"],
+        }
+
+        for workflow_path, start, end, indentation in workflows:
+            workflow = workflow_path.read_text(encoding="utf-8")
+            block_start = workflow.index(start)
+            block_end = workflow.index(end, block_start)
+            block = workflow[block_start:block_end]
+            shell = "\n".join(
+                line[indentation:] if line else ""
+                for line in block.splitlines()
+            )
+            for event, expected_range in expected_ranges.items():
+                with self.subTest(workflow=workflow_path.name, event=event):
+                    rendered = shell.replace("${{ github.event_name }}", event)
+                    with tempfile.TemporaryDirectory() as temp:
+                        temp_path = Path(temp)
+                        bin_path = temp_path / "bin"
+                        bin_path.mkdir()
+                        git_log = temp_path / "git-args.txt"
+                        git_stub = bin_path / "git"
+                        git_stub.write_text(
+                            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$GIT_LOG\"\n",
+                            encoding="utf-8",
+                        )
+                        git_stub.chmod(0o755)
+                        environment = os.environ.copy()
+                        environment.update(
+                            {
+                                "BASE_SHA": "base-sha",
+                                "HEAD_SHA": "head-sha",
+                                "GIT_LOG": str(git_log),
+                                "PATH": f"{bin_path}{os.pathsep}{environment['PATH']}",
+                                "RUNNER_TEMP": str(temp_path),
+                            }
+                        )
+                        result = subprocess.run(
+                            ["bash", "-c", rendered],
+                            cwd=ROOT,
+                            env=environment,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(
+                            result.returncode,
+                            0,
+                            result.stderr,
+                        )
+                        self.assertEqual(
+                            git_log.read_text(encoding="utf-8").splitlines(),
+                            ["diff", "--name-only", *expected_range],
+                        )
 
     def test_windows_push_clippy_keeps_tests_and_examples_scope(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(

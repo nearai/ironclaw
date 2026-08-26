@@ -1395,7 +1395,9 @@ def build_plan(
             for package in sorted(bucket_packages)
             for kind, name in sorted(exact_test_targets[package])
         ]
-    if len(buckets) > MAX_PR_CRATE_BUCKETS:
+    # PR feedback is latency-bounded; merge-group coverage stays exhaustive
+    # and preserves every canonical bucket boundary.
+    if event == "pull_request" and len(buckets) > MAX_PR_CRATE_BUCKETS:
         original_bucket_count = len(buckets)
         buckets = _bound_pr_buckets(buckets)
         reasons.append(
