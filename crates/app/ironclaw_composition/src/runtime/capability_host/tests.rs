@@ -260,6 +260,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn visible_capability_request_grants_shell_manifest_credential_handles() {
+        let run_context = run_context("shell-credential-grant").await;
+        let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
+        let policy = crate::builtin_capability_policy::builtin_capability_policy()
+            .expect("policy parses")
+            .for_process_backend(ironclaw_host_api::runtime_policy::ProcessBackendKind::UserSandbox)
+            .expect("user-sandbox policy projects");
+        let handle =
+            ironclaw_host_api::ids::SecretHandle::new("github_token").expect("secret handle");
+        let extension_surface = ExtensionCapabilitySurface::from_active_capabilities(vec![
+            ironclaw_extension_host::ActiveExtensionCapability {
+                id: CapabilityId::new("github.repo_list").expect("capability id"),
+                provider: ExtensionId::new("github").expect("provider id"),
+                effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+                default_permission: ironclaw_host_api::capability::PermissionMode::Allow,
+                runtime_credentials: vec![
+                    ironclaw_host_api::capability::RuntimeCredentialRequirement {
+                        handle: handle.clone(),
+                        source: ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle,
+                        provider_scopes: Vec::new(),
+                        audience: ironclaw_host_api::action::NetworkTargetPattern {
+                            scheme: Some(ironclaw_host_api::action::NetworkScheme::Https),
+                            host_pattern: "api.github.com".to_string(),
+                            port: None,
+                        },
+                        target: ironclaw_host_api::http::RuntimeCredentialTarget::Header {
+                            name: "authorization".to_string(),
+                            prefix: Some("Bearer ".to_string()),
+                        },
+                        placeholder_env: Some("GH_TOKEN".to_string()),
+                        required: true,
+                    },
+                ],
+                network_targets: Vec::new(),
+                max_egress_bytes: None,
+                owner: ironclaw_extension_registry::InstallationOwner::Tenant,
+            },
+        ]);
+        let empty_mounts = MountView::default();
+
+        let request = visible_capability_request(
+            &run_context,
+            &fallback_user_id,
+            VisibleCapabilityInputs {
+                workspace_mounts: &empty_mounts,
+                skill_mounts: &empty_mounts,
+                memory_mounts: &empty_mounts,
+                system_extensions_lifecycle_mounts: &empty_mounts,
+                policy: &policy,
+                surface_policy: &CapabilitySurfacePolicy::allow_all(),
+                extension_surface: &extension_surface,
+            },
+        )
+        .expect("visible request");
+        let shell_grant = request
+            .context
+            .grants
+            .grants
+            .iter()
+            .find(|grant| grant.capability.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell grant");
+
+        assert_eq!(shell_grant.constraints.secrets, vec![handle]);
+    }
+
     /// `thread_scope_for_run` resolves the run's user for durable thread I/O:
     /// an explicit-owner run (host/trigger creator) uses its explicit owner, a
     /// multi-user WebChat run (actor, no explicit owner) uses its actor, and an
