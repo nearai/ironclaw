@@ -26,6 +26,22 @@ pub enum TriggerCapabilityCallStatus {
     Killed,
 }
 
+/// Whether a facts read is known to contain every call for the selected run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerCapabilityCallFactsCompleteness {
+    Complete,
+    /// The source can return observed facts but cannot prove that none were
+    /// lost before they reached durable storage.
+    Incomplete,
+}
+
+/// One bounded read of exact-run capability-call facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerCapabilityCallFactsRead {
+    pub facts: Vec<TriggerCapabilityCallFact>,
+    pub completeness: TriggerCapabilityCallFactsCompleteness,
+}
+
 /// Owner scope for reading facts from a trigger run's thread.
 ///
 /// The asking conversation's thread is deliberately excluded: a scheduled
@@ -58,12 +74,13 @@ pub enum TriggerCapabilityCallFactsError {
 
 #[async_trait]
 pub trait TriggerCapabilityCallFactsSource: Send + Sync {
-    /// Return bounded, metadata-only facts for exactly `run_id`.
+    /// Return bounded, metadata-only facts for exactly `run_id`, together
+    /// with whether the source can prove the observation is exhaustive.
     async fn capability_calls_for_run(
         &self,
         scope: &TriggerCapabilityCallFactsScope,
         run_id: TurnRunId,
-    ) -> Result<Vec<TriggerCapabilityCallFact>, TriggerCapabilityCallFactsError>;
+    ) -> Result<TriggerCapabilityCallFactsRead, TriggerCapabilityCallFactsError>;
 }
 
 #[derive(Debug, Default)]
@@ -75,7 +92,7 @@ impl TriggerCapabilityCallFactsSource for MissingTriggerCapabilityCallFactsSourc
         &self,
         _scope: &TriggerCapabilityCallFactsScope,
         _run_id: TurnRunId,
-    ) -> Result<Vec<TriggerCapabilityCallFact>, TriggerCapabilityCallFactsError> {
+    ) -> Result<TriggerCapabilityCallFactsRead, TriggerCapabilityCallFactsError> {
         Err(TriggerCapabilityCallFactsError::Unavailable)
     }
 }

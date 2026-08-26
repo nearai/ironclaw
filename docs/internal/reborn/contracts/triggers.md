@@ -582,7 +582,11 @@ capabilities.
   lifecycle status, and sanitized `error_kind`) from the durable runtime-event
   projection. These facts are informational: they do not replace run-history
   status, grade semantic quality, prove an external side effect, retry a run,
-  or mutate trigger state. An unavailable or truncated projection is reported
+  or mutate trigger state. Production runtime events pass through an
+  intentionally lossy write-behind sink, so a successful replay is reported as
+  `incomplete`: its items are observed facts, not proof that no other call
+  occurred. A source may report `available` only when it can prove the bounded
+  read is exhaustive. An unavailable or truncated projection is reported
   explicitly and must not be represented as an empty successful call list.
 - `trigger_remove` is caller-scoped delete.
 - `trigger_pause` and `trigger_resume` are caller-scoped state transitions

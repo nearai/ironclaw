@@ -43,7 +43,8 @@ mod worker;
 pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
 pub use capability_facts::{
     MissingTriggerCapabilityCallFactsSource, TriggerCapabilityCallFact,
-    TriggerCapabilityCallFactsError, TriggerCapabilityCallFactsScope,
+    TriggerCapabilityCallFactsCompleteness, TriggerCapabilityCallFactsError,
+    TriggerCapabilityCallFactsRead, TriggerCapabilityCallFactsScope,
     TriggerCapabilityCallFactsSource, TriggerCapabilityCallStatus,
 };
 pub use execution_spec::TriggerExecutionSpec;

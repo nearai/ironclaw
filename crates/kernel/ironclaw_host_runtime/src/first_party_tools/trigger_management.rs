@@ -25,7 +25,8 @@ use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
     MAX_TRIGGER_RUN_HISTORY_LIMIT, MissingTriggerActiveRunLookup,
     MissingTriggerCapabilityCallFactsSource, MissingTriggerManualFireRunner,
-    TriggerActiveRunLookup, TriggerCapabilityCallFact, TriggerCapabilityCallFactsError,
+    TriggerActiveRunLookup, TriggerCapabilityCallFact, TriggerCapabilityCallFactsCompleteness,
+    TriggerCapabilityCallFactsError, TriggerCapabilityCallFactsRead,
     TriggerCapabilityCallFactsScope, TriggerCapabilityCallFactsSource, TriggerCapabilityCallStatus,
     TriggerError, TriggerExecutionSpec, TriggerId, TriggerManualFireOutcome,
     TriggerManualFireRunner, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
@@ -81,7 +82,7 @@ impl TriggerCapabilityCallFactsSource for ProjectedTriggerCapabilityCallFactsSou
         &self,
         scope: &TriggerCapabilityCallFactsScope,
         run_id: TurnRunId,
-    ) -> Result<Vec<TriggerCapabilityCallFact>, TriggerCapabilityCallFactsError> {
+    ) -> Result<TriggerCapabilityCallFactsRead, TriggerCapabilityCallFactsError> {
         let projection_scope = ProjectionScope::from_resource_scope(&ResourceScope {
             tenant_id: scope.tenant_id.clone(),
             user_id: scope.user_id.clone(),
@@ -101,30 +102,38 @@ impl TriggerCapabilityCallFactsSource for ProjectedTriggerCapabilityCallFactsSou
             )
             .await
             .map_err(|error| {
-                tracing::warn!(%error, %run_id, "trigger capability-call projection failed");
+                tracing::debug!(%error, %run_id, "trigger capability-call projection failed");
                 TriggerCapabilityCallFactsError::Unavailable
             })?;
         if window.truncated {
-            tracing::warn!(%run_id, "trigger capability-call projection was truncated");
+            tracing::debug!(%run_id, "trigger capability-call projection was truncated");
             return Err(TriggerCapabilityCallFactsError::Unavailable);
         }
-        Ok(window
-            .activities
-            .into_iter()
-            .map(|activity| TriggerCapabilityCallFact {
-                invocation_id: activity.invocation_id,
-                run_id,
-                capability_id: activity.capability_id,
-                status: match activity.status {
-                    CapabilityActivityStatus::Started => TriggerCapabilityCallStatus::Started,
-                    CapabilityActivityStatus::Running => TriggerCapabilityCallStatus::Running,
-                    CapabilityActivityStatus::Completed => TriggerCapabilityCallStatus::Completed,
-                    CapabilityActivityStatus::Failed => TriggerCapabilityCallStatus::Failed,
-                    CapabilityActivityStatus::Killed => TriggerCapabilityCallStatus::Killed,
-                },
-                error_kind: activity.error_kind,
-            })
-            .collect())
+        Ok(TriggerCapabilityCallFactsRead {
+            facts: window
+                .activities
+                .into_iter()
+                .map(|activity| TriggerCapabilityCallFact {
+                    invocation_id: activity.invocation_id,
+                    run_id,
+                    capability_id: activity.capability_id,
+                    status: match activity.status {
+                        CapabilityActivityStatus::Started => TriggerCapabilityCallStatus::Started,
+                        CapabilityActivityStatus::Running => TriggerCapabilityCallStatus::Running,
+                        CapabilityActivityStatus::Completed => {
+                            TriggerCapabilityCallStatus::Completed
+                        }
+                        CapabilityActivityStatus::Failed => TriggerCapabilityCallStatus::Failed,
+                        CapabilityActivityStatus::Killed => TriggerCapabilityCallStatus::Killed,
+                    },
+                    error_kind: activity.error_kind,
+                })
+                .collect(),
+            // Production runtime events use a bounded, intentionally lossy
+            // write-behind sink. Durable replay proves what was observed, but
+            // cannot prove that no event was dropped before persistence.
+            completeness: TriggerCapabilityCallFactsCompleteness::Incomplete,
+        })
     }
 }
 
@@ -137,7 +146,7 @@ impl TriggerCapabilityCallFactsSource for ProjectedTriggerCapabilityCallFactsSou
 /// this trigger capability.
 const TRIGGER_LIST_DESCRIPTION: &str = "List the caller's scheduled routines \u{2014} the automations shown on the Automations page \u{2014} with each routine's state (scheduled, paused, or completed), schedule, next and last fire times, recent run history, and any active hold. This listing is the authoritative current state. Call this before answering any question about which routines or automations exist, and before saying one is running, paused, already set up, delivering results, or missing \u{2014} never report routine or automation status from conversation history or memory. An empty list means the caller has no routines: say exactly that instead of guessing.";
 
-const TRIGGER_STATUS_DESCRIPTION: &str = "Read one caller-scoped scheduled routine and one exact run (or its latest run), including the run's authoritative status and observed capability-call metadata. Capability calls are runtime facts only: they do not grade semantic quality, prove an external side effect, retry the run, or change routine state. Use trigger_list first to discover a trigger id.";
+const TRIGGER_STATUS_DESCRIPTION: &str = "Read one caller-scoped scheduled routine and one exact run (or its latest run), including the run's authoritative status and observed capability-call metadata. Capability-call availability is explicit: incomplete items are observed facts from the best-effort runtime event stream, not proof that no other call occurred. Capability calls do not grade semantic quality, prove an external side effect, retry the run, or change routine state. Use trigger_list first to discover a trigger id.";
 
 const TRIGGER_CREATE_DESCRIPTION: &str = "Create a scheduled routine from a structured execution contract. Keep the contract concise and outcome-focused: describe the full task each fire performs in execution_contract.goal, written for a future run with no memory of this conversation, and make completion observable with explicit success criteria, output instructions, and no-result text. Do not inspect or enumerate future-work data while authoring the routine, and do not prescribe a speculative tool-call sequence; each fire discovers the capabilities and task data available then. Call trigger_create once when the user-requested schedule, task, and any explicitly named delivery destination are known. A successful response means the routine is durably persisted: stop authoring, report the returned state, and do not call trigger_create again or pause, remove, or replace the routine unless the user explicitly asks. Derive execution_contract.policy.result_delivery from the user's wording: use suppress_when_nothing_to_report when the user says to notify only on a match, change, or actionable result; otherwise use deliver. A scheduled fire runs as the routine's owning user and may use the linked integration capabilities available to the owning user, subject to the user's current connection and permission settings. Write requested integration reads or user-authorized actions into execution_contract.goal explicitly. Where results go: a bare \"send me\" or \"notify me\" means the surface the user is asking from — never ask which channel. From a channel conversation, default to the channel this conversation is on: pick its target id from builtin__outbound_delivery_targets_list while the user is present and write delivery as an explicit goal step naming the destination by pinned id (e.g. \"then deliver the summary with builtin__outbound_deliver to chat:team-dm\" — never a description like \"my DM\" that a fire would have to look up). From the web app with no external destination named, there is no delivery step to write: the fire's final reply IS the delivery — it lands in the routine's own run thread automatically — so make output_instructions describe that reply and write no delivery step. Only when the user explicitly asks to be notified in the browser or on their devices does the catalog's browser-push target apply: pin its target id like any other destination. When the user names an external destination (\"send me this in my messaging app\", \"post it to the team channel\"), that IS a delivery step even from the web app: pin its target id the same way — reaching the user or anyone else on an external surface always goes through builtin__outbound_deliver with a pinned target id, never through integration messaging tools, which act as the user toward other people. Several destinations mean one delivery step each; a fire that makes no delivery call delivers nothing externally.";
 
@@ -794,14 +803,20 @@ async fn trigger_status(
     scope: &ResourceScope,
     input: Value,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let input: TriggerStatusInput = serde_json::from_value(input).map_err(|_| input_error())?;
+    let input: TriggerStatusInput = serde_json::from_value(input).map_err(|error| {
+        tracing::debug!(%error, "trigger_status input validation failed");
+        input_error()
+    })?;
     let trigger_id = TriggerId::parse(&input.trigger_id).map_err(trigger_input_error)?;
     let requested_run_id = input
         .run_id
         .as_deref()
         .map(TurnRunId::parse)
         .transpose()
-        .map_err(|_| input_error())?;
+        .map_err(|error| {
+            tracing::debug!(%error, "trigger_status received an invalid run id");
+            input_error()
+        })?;
     let record = repository
         .get_trigger(scope.tenant_id.clone(), trigger_id)
         .await
@@ -861,20 +876,23 @@ async fn capability_calls_output(
     )
     .await
     {
-        Ok(Ok(facts)) => json!({
-            "availability": "available",
-            "items": facts
+        Ok(Ok(read)) => json!({
+            "availability": match read.completeness {
+                TriggerCapabilityCallFactsCompleteness::Complete => "available",
+                TriggerCapabilityCallFactsCompleteness::Incomplete => "incomplete",
+            },
+            "items": read.facts
                 .into_iter()
                 .filter(|fact| fact.run_id == run_id)
                 .map(capability_call_output)
                 .collect::<Vec<_>>(),
         }),
         Ok(Err(error)) => {
-            tracing::warn!(%error, %run_id, "trigger capability-call facts unavailable");
+            tracing::debug!(%error, %run_id, "trigger capability-call facts unavailable");
             json!({ "availability": "unavailable" })
         }
         Err(_) => {
-            tracing::warn!(%run_id, "trigger capability-call facts lookup timed out");
+            tracing::debug!(%run_id, "trigger capability-call facts lookup timed out");
             json!({ "availability": "unavailable" })
         }
     }

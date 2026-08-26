@@ -626,15 +626,19 @@ fn trigger_output_includes_active_hold_when_present() {
 // caller" rule. The guard runs before input parsing, so the mutation-denial
 // cases pass an empty body deliberately.
 
+use ironclaw_event_log::{DurableEventLog, InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
-    ids::{InvocationId, ProductKind, RoutineId, RunId, UserId},
+    ids::{ExtensionId, InvocationId, ProductKind, RoutineId, RunId, UserId},
     invocation::InvocationOrigin,
+    runtime::RuntimeKind,
 };
 use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_triggers::{
     ClaimDueFireOutcome, ClaimManualFireRequest, ClearActiveFireRequest, FireAcceptedRequest,
-    TriggerCapabilityCallFact, TriggerCapabilityCallFactsError, TriggerCapabilityCallFactsScope,
-    TriggerCapabilityCallFactsSource, TriggerCapabilityCallStatus, TriggerRunHistoryStatus,
+    TriggerCapabilityCallFact, TriggerCapabilityCallFactsCompleteness,
+    TriggerCapabilityCallFactsError, TriggerCapabilityCallFactsRead,
+    TriggerCapabilityCallFactsScope, TriggerCapabilityCallFactsSource, TriggerCapabilityCallStatus,
+    TriggerRunHistoryStatus,
 };
 
 const MUTATION_CAPABILITIES: &[&str] = &[
@@ -678,9 +682,12 @@ impl TriggerCapabilityCallFactsSource for CountingCapabilityCallFactsSource {
         &self,
         _scope: &TriggerCapabilityCallFactsScope,
         _run_id: TurnRunId,
-    ) -> Result<Vec<TriggerCapabilityCallFact>, TriggerCapabilityCallFactsError> {
+    ) -> Result<TriggerCapabilityCallFactsRead, TriggerCapabilityCallFactsError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Vec::new())
+        Ok(TriggerCapabilityCallFactsRead {
+            facts: Vec::new(),
+            completeness: TriggerCapabilityCallFactsCompleteness::Complete,
+        })
     }
 }
 
@@ -690,47 +697,24 @@ impl TriggerCapabilityCallFactsSource for StaticCapabilityCallFactsSource {
         &self,
         _scope: &TriggerCapabilityCallFactsScope,
         _run_id: TurnRunId,
-    ) -> Result<Vec<TriggerCapabilityCallFact>, TriggerCapabilityCallFactsError> {
-        Ok(self.facts.clone())
+    ) -> Result<TriggerCapabilityCallFactsRead, TriggerCapabilityCallFactsError> {
+        Ok(TriggerCapabilityCallFactsRead {
+            facts: self.facts.clone(),
+            completeness: TriggerCapabilityCallFactsCompleteness::Complete,
+        })
     }
 }
 
-#[tokio::test]
-async fn trigger_status_reports_exact_call_facts_without_grading_the_run() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let run_id = TurnRunId::new();
-    let first_call_id = InvocationId::new();
-    let second_call_id = InvocationId::new();
-    let handler = TriggerManagementToolHandler {
-        repository: repository.clone(),
-        create_hook: Arc::new(NoopTriggerCreateHook),
-        clock: Arc::new(SystemTriggerManagementClock),
-        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
-        capability_call_facts: Arc::new(StaticCapabilityCallFactsSource {
-            facts: vec![
-                TriggerCapabilityCallFact {
-                    invocation_id: first_call_id,
-                    run_id,
-                    capability_id: CapabilityId::new("gmail.search").expect("capability id"),
-                    status: TriggerCapabilityCallStatus::Completed,
-                    error_kind: None,
-                },
-                TriggerCapabilityCallFact {
-                    invocation_id: second_call_id,
-                    run_id,
-                    capability_id: CapabilityId::new("slack.send").expect("capability id"),
-                    status: TriggerCapabilityCallStatus::Failed,
-                    error_kind: Some("provider_error".to_string()),
-                },
-            ],
-        }),
-        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
-    };
+async fn seed_completed_trigger_run(
+    handler: &TriggerManagementToolHandler,
+    repository: &InMemoryTriggerRepository,
+    run_id: TurnRunId,
+) -> TriggerId {
     let created = dispatch_with_origin(
-        &handler,
+        handler,
         Some(InvocationOrigin::LoopRun(RunId::new())),
         TRIGGER_CREATE_CAPABILITY_ID,
-        once_create_input("fact-reporting-routine"),
+        once_create_input("projected-facts-routine"),
     )
     .await
     .expect("seed routine");
@@ -775,6 +759,49 @@ async fn trigger_status_reports_exact_call_facts_without_grading_the_run() {
         })
         .await
         .expect("complete fire");
+    trigger_id
+}
+
+#[tokio::test]
+async fn trigger_status_reports_exact_call_facts_without_grading_the_run() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let run_id = TurnRunId::new();
+    let first_call_id = InvocationId::new();
+    let second_call_id = InvocationId::new();
+    let neighboring_call_id = InvocationId::new();
+    let handler = TriggerManagementToolHandler {
+        repository: repository.clone(),
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        capability_call_facts: Arc::new(StaticCapabilityCallFactsSource {
+            facts: vec![
+                TriggerCapabilityCallFact {
+                    invocation_id: first_call_id,
+                    run_id,
+                    capability_id: CapabilityId::new("gmail.search").expect("capability id"),
+                    status: TriggerCapabilityCallStatus::Completed,
+                    error_kind: None,
+                },
+                TriggerCapabilityCallFact {
+                    invocation_id: second_call_id,
+                    run_id,
+                    capability_id: CapabilityId::new("slack.send").expect("capability id"),
+                    status: TriggerCapabilityCallStatus::Failed,
+                    error_kind: Some("provider_error".to_string()),
+                },
+                TriggerCapabilityCallFact {
+                    invocation_id: neighboring_call_id,
+                    run_id: TurnRunId::new(),
+                    capability_id: CapabilityId::new("calendar.list").expect("capability id"),
+                    status: TriggerCapabilityCallStatus::Completed,
+                    error_kind: None,
+                },
+            ],
+        }),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
+    };
+    let trigger_id = seed_completed_trigger_run(&handler, &repository, run_id).await;
 
     let result = dispatch_with_origin(
         &handler,
@@ -808,6 +835,90 @@ async fn trigger_status_reports_exact_call_facts_without_grading_the_run() {
     );
     assert!(result.output.get("assessment").is_none());
     assert!(result.output["run"].get("assessment").is_none());
+    assert!(
+        !result.output["run"]["capability_calls"]["items"]
+            .to_string()
+            .contains(&neighboring_call_id.to_string()),
+        "facts from a neighboring run must be excluded"
+    );
+}
+
+#[tokio::test]
+async fn projected_facts_flow_through_trigger_status_without_claiming_completeness() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let run_id = TurnRunId::new();
+    let selected_call_id = InvocationId::new();
+    let mut event_scope = created_scope();
+    event_scope.invocation_id = selected_call_id;
+    let mut selected_event = RuntimeEvent::capability_activity_succeeded(
+        event_scope.clone(),
+        CapabilityId::new("gmail.search").expect("capability id"),
+        ExtensionId::new("google").expect("provider id"),
+        RuntimeKind::Script,
+        42,
+    );
+    selected_event.parent_invocation_id = Some(InvocationId::from_uuid(run_id.as_uuid()));
+    event_log
+        .append(selected_event)
+        .await
+        .expect("append selected-run event");
+
+    let handler = TriggerManagementToolHandler {
+        repository: repository.clone(),
+        create_hook: Arc::new(NoopTriggerCreateHook),
+        clock: Arc::new(SystemTriggerManagementClock),
+        active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
+        capability_call_facts: projected_trigger_capability_call_facts_source(event_log.clone()),
+        manual_fire_runner: Arc::new(MissingTriggerManualFireRunner),
+    };
+    let trigger_id = seed_completed_trigger_run(&handler, &repository, run_id).await;
+
+    let observed = dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(RunId::new())),
+        TRIGGER_STATUS_CAPABILITY_ID,
+        json!({"trigger_id": trigger_id.to_string(), "run_id": run_id.to_string()}),
+    )
+    .await
+    .expect("read projected facts through trigger-status handler");
+    assert_eq!(
+        observed.output["run"]["capability_calls"]["availability"],
+        "incomplete"
+    );
+    assert_eq!(
+        observed.output["run"]["capability_calls"]["items"][0]["invocation_id"],
+        selected_call_id.to_string()
+    );
+
+    for _ in 0..ironclaw_event_projections::MAX_PROJECTION_PAGE_LIMIT {
+        event_scope.invocation_id = InvocationId::new();
+        let mut event = RuntimeEvent::capability_activity_succeeded(
+            event_scope.clone(),
+            CapabilityId::new("gmail.search").expect("capability id"),
+            ExtensionId::new("google").expect("provider id"),
+            RuntimeKind::Script,
+            1,
+        );
+        event.parent_invocation_id = Some(InvocationId::from_uuid(run_id.as_uuid()));
+        event_log
+            .append(event)
+            .await
+            .expect("append overflow event");
+    }
+
+    let truncated = dispatch_with_origin(
+        &handler,
+        Some(InvocationOrigin::LoopRun(RunId::new())),
+        TRIGGER_STATUS_CAPABILITY_ID,
+        json!({"trigger_id": trigger_id.to_string(), "run_id": run_id.to_string()}),
+    )
+    .await
+    .expect("read truncated projection through trigger-status handler");
+    assert_eq!(
+        truncated.output["run"]["capability_calls"],
+        json!({"availability": "unavailable"})
+    );
 }
 
 fn created_scope() -> ResourceScope {
