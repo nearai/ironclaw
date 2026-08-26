@@ -1,25 +1,24 @@
-use std::cmp::Reverse;
-
 use crate::{
     CreateSummaryArtifactRequest, SessionThreadError, SummaryArtifact, SummaryKind,
     SummaryModelContextPolicy,
 };
 
-pub(crate) fn select_context_barrier(
+pub(crate) fn sorted_context_summaries(
     summaries: &[SummaryArtifact],
     mut eligible: impl FnMut(&SummaryArtifact) -> bool,
-) -> Option<&SummaryArtifact> {
-    summaries
+) -> Vec<&SummaryArtifact> {
+    let mut selected = summaries
         .iter()
         .filter(|summary| eligible(summary))
-        .max_by_key(|summary| {
-            (
-                summary.end_sequence,
-                Reverse(summary.start_sequence),
-                summary.content.as_str(),
-                summary.summary_id.as_uuid(),
-            )
-        })
+        .collect::<Vec<_>>();
+    selected.sort_unstable_by(|left, right| {
+        left.start_sequence
+            .cmp(&right.start_sequence)
+            .then_with(|| left.end_sequence.cmp(&right.end_sequence))
+            .then_with(|| left.content.cmp(&right.content))
+            .then_with(|| left.summary_id.as_uuid().cmp(&right.summary_id.as_uuid()))
+    });
+    selected
 }
 pub(crate) fn is_exact_compaction_summary_replay(
     summary: &SummaryArtifact,
@@ -135,16 +134,23 @@ mod tests {
     }
 
     #[test]
-    fn context_barrier_selection_is_stable_for_equal_end_sequences() {
-        let left = summary_with(2, 10, "same content");
-        let right = summary_with(2, 10, "same content");
-        let forward = vec![left.clone(), right.clone()];
-        let reverse = vec![right, left];
+    fn context_summaries_sort_stably_by_persisted_coordinates() {
+        let older = summary_with(1, 5, "older");
+        let left = summary_with(6, 10, "same content");
+        let right = summary_with(6, 10, "same content");
+        let forward = vec![older.clone(), left.clone(), right.clone()];
+        let reverse = vec![right, left, older];
 
-        let selected_forward = select_context_barrier(&forward, |_| true).unwrap();
-        let selected_reverse = select_context_barrier(&reverse, |_| true).unwrap();
+        let selected_forward = sorted_context_summaries(&forward, |_| true)
+            .into_iter()
+            .map(|summary| summary.summary_id)
+            .collect::<Vec<_>>();
+        let selected_reverse = sorted_context_summaries(&reverse, |_| true)
+            .into_iter()
+            .map(|summary| summary.summary_id)
+            .collect::<Vec<_>>();
 
-        assert_eq!(selected_reverse.summary_id, selected_forward.summary_id);
+        assert_eq!(selected_reverse, selected_forward);
     }
     #[test]
     fn exact_compaction_summary_replay_matches_on_coordinates_and_content() {

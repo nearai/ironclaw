@@ -184,12 +184,12 @@ async fn long_tool_run_keeps_the_original_task_after_raw_history_exceeds_window_
 }
 
 #[tokio::test]
-async fn newest_compaction_summary_is_a_context_barrier() {
-    const OLDEST_TURN: &str = "oldest transcript marker before the context barrier";
+async fn compaction_summary_chain_preserves_earlier_compacted_history() {
+    const OLDEST_TURN: &str = "oldest transcript marker before compaction";
     const MIDDLE_TURN: &str = "middle transcript marker before the newest summary";
     const RETAINED_TAIL: &str = "retained transcript tail after the newest summary";
-    const OLDER_SUMMARY: &str = "older summary that must stay behind the barrier";
-    const NEWEST_SUMMARY: &str = "newest summary that establishes the context barrier";
+    const OLDER_SUMMARY: &str = "older summary preserving earlier compacted history";
+    const NEWEST_SUMMARY: &str = "newest incremental compaction summary";
 
     let harness = RebornIntegrationHarness::test_default()
         .script([
@@ -248,17 +248,17 @@ async fn newest_compaction_summary_is_a_context_barrier() {
         .await
         .expect("tail after the barrier remains visible");
     harness
-        .assert_last_model_message_content_not_contains(OLDER_SUMMARY)
+        .assert_last_model_message_content_contains(OLDER_SUMMARY)
         .await
-        .expect("older summary stays behind the barrier");
+        .expect("earlier compacted history remains represented");
     harness
         .assert_last_model_message_content_not_contains(OLDEST_TURN)
         .await
-        .expect("original history stays behind the barrier");
+        .expect("raw history covered by a summary stays out of the prompt");
     harness
         .assert_conversation_history_contains(OLDEST_TURN)
         .await
-        .expect("the barrier does not delete durable history");
+        .expect("summary projection does not delete durable history");
 }
 
 #[tokio::test]

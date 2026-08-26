@@ -66,7 +66,7 @@ use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::stored_message::serialize_stored_thread_message;
-use crate::summary_artifacts::{find_overlapping_summary, select_context_barrier};
+use crate::summary_artifacts::{find_overlapping_summary, sorted_context_summaries};
 use crate::title::derive_title_from_message;
 use crate::tool_result_records::{
     tool_result_record_chunk, validate_tool_result_record_content,
@@ -1099,21 +1099,11 @@ where
                             && summary.start_sequence < oldest_loaded_sequence
                     })
                 });
-            let validated_barrier_loaded = context
-                .iter()
-                .filter_map(|message| message.summary_id)
-                .find_map(|summary_id| {
-                    summaries
-                        .iter()
-                        .find(|summary| summary.summary_id == summary_id)
-                })
-                .is_some_and(|summary| summary.start_sequence >= oldest_loaded_sequence);
             // A replacement summary inside the retained suffix can move the
             // exact truncation watermark. Do not stop until its whole durable
             // range has been read, otherwise an older Draft/redaction can be
             // missed and a synthetic summary sequence reported as the boundary.
-            if validated_barrier_loaded
-                || (context.len() > max_messages && !tail_has_unvalidated_summary)
+            if (context.len() > max_messages && !tail_has_unvalidated_summary)
                 || entry_count < limit as usize
             {
                 return Ok(context);
@@ -4499,28 +4489,24 @@ fn context_messages_with_summary_replacements(
     messages: &[ThreadMessageRecord],
     summaries: &[SummaryArtifact],
 ) -> Vec<ContextMessage> {
-    // A compaction summary is a projection barrier, not another transcript
-    // entry. Select the newest eligible summary itself, not merely its range:
-    // this stays deterministic even if legacy or concurrently written data
-    // contains overlapping summaries. Durable rows remain available through
-    // thread history.
-    let barrier_summary = select_context_barrier(summaries, |summary| {
+    let replacement_summaries = sorted_context_summaries(summaries, |summary| {
         summary.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
             && !summary_covers_hidden_content(messages, summary)
     });
-    let barrier_start_sequence = barrier_summary
-        .map(|summary| summary.start_sequence)
-        .unwrap_or(0);
     let mut skip_through = 0u64;
+    let mut emitted_summaries: std::collections::HashSet<_> = std::collections::HashSet::new();
     let mut context = Vec::new();
-    for message in messages.iter().filter(|message| {
-        is_model_context_visible(message) && message.sequence >= barrier_start_sequence
-    }) {
+    for message in messages
+        .iter()
+        .filter(|message| is_model_context_visible(message))
+    {
         if message.sequence <= skip_through {
             continue;
         }
-        if let Some(summary) = barrier_summary.filter(|summary| {
-            summary.start_sequence <= message.sequence && message.sequence <= summary.end_sequence
+        if let Some(summary) = replacement_summaries.iter().find(|summary| {
+            summary.start_sequence <= message.sequence
+                && message.sequence <= summary.end_sequence
+                && !emitted_summaries.contains(&summary.summary_id)
         }) {
             context.push(ContextMessage {
                 message_id: None,
@@ -4531,6 +4517,7 @@ fn context_messages_with_summary_replacements(
                 content: summary.content.clone(),
                 image_attachments: Vec::new(),
             });
+            emitted_summaries.insert(summary.summary_id);
             skip_through = summary.end_sequence;
             continue;
         }
