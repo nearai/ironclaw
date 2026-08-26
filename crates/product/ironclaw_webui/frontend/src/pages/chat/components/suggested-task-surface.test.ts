@@ -11,9 +11,6 @@ import {
 // Same vm-harness convention: the surface's free variables are `useT`, the
 // child card, Button/Icon, and the `useSuggestions` data hook — so we stub the
 // hook and assert what the surface renders for each backend generation status.
-// Feature-flag gating happens in the eager parent (empty-state.tsx) before this
-// lazy chunk is requested — see empty-state.test.ts — so the surface itself is
-// unconditional.
 function surfaceSourceForTest() {
   return componentSourceForTest(
     new URL("./suggested-task-surface.tsx", import.meta.url),
