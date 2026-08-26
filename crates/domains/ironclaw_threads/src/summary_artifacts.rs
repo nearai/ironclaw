@@ -1,8 +1,25 @@
+use std::cmp::Reverse;
+
 use crate::{
     CreateSummaryArtifactRequest, SessionThreadError, SummaryArtifact, SummaryKind,
     SummaryModelContextPolicy,
 };
 
+pub(crate) fn select_context_barrier(
+    summaries: &[SummaryArtifact],
+    mut eligible: impl FnMut(&SummaryArtifact) -> bool,
+) -> Option<&SummaryArtifact> {
+    summaries
+        .iter()
+        .filter(|summary| eligible(summary))
+        .max_by_key(|summary| {
+            (
+                summary.end_sequence,
+                Reverse(summary.start_sequence),
+                summary.content.as_str(),
+            )
+        })
+}
 pub(crate) fn is_exact_compaction_summary_replay(
     summary: &SummaryArtifact,
     request: &CreateSummaryArtifactRequest,
@@ -116,6 +133,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn context_barrier_selection_is_stable_for_equal_end_sequences() {
+        let left = summary_with(2, 10, "alpha");
+        let right = summary_with(2, 10, "zeta");
+        let forward = vec![left.clone(), right.clone()];
+        let reverse = vec![right, left];
+
+        let selected_forward = select_context_barrier(&forward, |_| true).unwrap();
+        let selected_reverse = select_context_barrier(&reverse, |_| true).unwrap();
+
+        assert_eq!(selected_forward.content, "zeta");
+        assert_eq!(selected_reverse.content, selected_forward.content);
+        assert_eq!(
+            selected_reverse.start_sequence,
+            selected_forward.start_sequence
+        );
+    }
     #[test]
     fn exact_compaction_summary_replay_matches_on_coordinates_and_content() {
         let request = request();

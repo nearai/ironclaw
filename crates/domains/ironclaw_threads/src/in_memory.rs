@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::stored_message::serialize_stored_thread_message;
-use crate::summary_artifacts::find_overlapping_summary;
+use crate::summary_artifacts::{find_overlapping_summary, select_context_barrier};
 use crate::title::derive_thread_title;
 use crate::tool_result_records::{
     tool_result_record_chunk, validate_tool_result_record_content,
@@ -1852,15 +1852,10 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
     // this stays deterministic even if legacy or concurrently written data
     // contains overlapping summaries. Durable rows remain available through
     // thread history.
-    let barrier_summary = thread
-        .summary_artifacts
-        .iter()
-        .filter(|summary| {
-            summary.model_context_policy
-                == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-                && !summary_covers_hidden_content(thread, summary)
-        })
-        .max_by_key(|summary| summary.end_sequence);
+    let barrier_summary = select_context_barrier(&thread.summary_artifacts, |summary| {
+        summary.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+            && !summary_covers_hidden_content(thread, summary)
+    });
     let barrier_start_sequence = barrier_summary
         .map(|summary| summary.start_sequence)
         .unwrap_or(0);

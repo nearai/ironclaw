@@ -19,10 +19,10 @@ use ironclaw_host_api::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest, BoundedThreadMessages,
     BoundedThreadMessagesRequest, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, InMemorySessionThreadService, MessageContent, MessageStatus,
-    RedactMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRangeRequest,
-    ThreadScope,
+    FilesystemSessionThreadService, InMemorySessionThreadService, LoadContextWindowRequest,
+    MessageContent, MessageKind, MessageStatus, RedactMessageRequest, SessionThreadError,
+    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRangeRequest, ThreadScope,
 };
 
 #[tokio::test]
@@ -70,6 +70,70 @@ async fn filesystem_store_bounded_read_uses_capped_query_page() {
         backend.ordered_query_limits(),
         vec![3],
         "bounded reads must request only max_messages + 1 ordered rows",
+    );
+}
+
+#[tokio::test]
+async fn filesystem_context_paging_stops_after_validated_barrier() {
+    let backend = Arc::new(QueryTrackingBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-context-barrier", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("context-barrier");
+    let thread_id = ThreadId::new("thread-context-barrier").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for sequence in 1..=100 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: Some(format!("barrier-{sequence}")),
+                content: MessageContent::text(format!("message {sequence}")),
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            start_sequence: 91,
+            end_sequence: 95,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("validated barrier"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+    backend.reset_query_observations();
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope,
+            thread_id,
+            max_messages: 8,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(context.messages.len(), 6);
+    assert_eq!(context.messages[0].kind, MessageKind::Summary);
+    assert_eq!(context.messages[0].content, "validated barrier");
+    assert_eq!(
+        backend.ordered_query_limits(),
+        vec![1024, 9, 9],
+        "paging must stop once the selected summary range is fully validated",
     );
 }
 
