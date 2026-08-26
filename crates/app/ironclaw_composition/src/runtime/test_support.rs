@@ -84,6 +84,7 @@ impl RebornRuntime {
             self.product_auth.as_ref(),
             Arc::clone(&self._process_gate_query_source),
             turn_coordinator,
+            Arc::clone(&self.notification_inbox),
         ))
     }
 
@@ -125,6 +126,7 @@ impl RebornRuntime {
             self.product_auth.as_ref(),
             process_gates,
             turn_coordinator,
+            Arc::clone(&self.notification_inbox),
         ))
     }
 }

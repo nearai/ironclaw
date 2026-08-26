@@ -15,7 +15,7 @@ use ironclaw_notifications::{
 };
 use ironclaw_processes::{
     JournaledProcessSnapshot, ProcessJournalCommit, ProcessJournalCommitObserver,
-    ProcessJournalKind, ProcessKind, ProcessLifecycleStatus,
+    ProcessJournalKind, ProcessKind, ProcessLifecycleStatus, ProcessSuspensionKind,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use serde::Deserialize;
@@ -86,6 +86,64 @@ impl RunOutcomeProcessCommitObserver {
             .map_err(|error| format!("publish run outcome notification failed: {error}"))?;
         Ok(())
     }
+
+    async fn publish_authentication_required(
+        &self,
+        snapshot: &JournaledProcessSnapshot,
+        run_id: TurnRunId,
+        occurred_at: Timestamp,
+    ) -> Result<(), String> {
+        let Some(suspension) = snapshot.suspension.as_ref() else {
+            return Ok(());
+        };
+        if suspension.kind != ProcessSuspensionKind::Authorization {
+            return Ok(());
+        }
+        let Some(gate_ref) = suspension.gate_ref.as_ref() else {
+            // A gate-less auth suspension cannot be resumed from the product
+            // surface, so publishing an actionable notification would strand
+            // an item the user cannot complete.
+            return Ok(());
+        };
+        let thread_id = snapshot
+            .scope
+            .thread_id
+            .clone()
+            .ok_or_else(|| "eligible auth suspension has no thread id".to_string())?;
+        let owner_user_id = snapshot
+            .owner_user_id
+            .clone()
+            .ok_or_else(|| "eligible auth suspension has no owner".to_string())?;
+        let lifecycle_ref = LifecycleRef::new(gate_ref.as_str())
+            .map_err(|error| format!("build auth lifecycle reference failed: {error}"))?;
+        let notification_id = crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::AuthenticationRequired,
+            Some(gate_ref.as_str()),
+        )
+        .map_err(|error| format!("build auth notification id failed: {error}"))?;
+        self.inbox
+            .publish(PublishNotificationRequest {
+                id: notification_id,
+                recipient: NotificationRecipient {
+                    tenant_id: snapshot.scope.tenant_id.clone(),
+                    user_id: owner_user_id,
+                },
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: thread_id.clone(),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(lifecycle_ref),
+                },
+                action: NotificationAction::OpenThread { thread_id },
+                initial_state: NotificationInitialState::Open,
+                occurred_at,
+            })
+            .await
+            .map_err(|error| format!("publish auth notification failed: {error}"))?;
+        Ok(())
+    }
 }
 
 impl RunOutcomeProcessCommitObserver {
@@ -136,11 +194,20 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
     }
 
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
-        let Some(metadata) = eligible_background_run(&commit.state) else {
+        let Some(metadata) = eligible_user_run(&commit.state) else {
             return Ok(());
         };
         let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        if commit.kind == ProcessJournalKind::Suspended
+            && commit.state.status == ProcessLifecycleStatus::Suspended
+        {
+            self.publish_authentication_required(&commit.state, run_id, occurred_at)
+                .await?;
+        }
+        if !is_background_run(&metadata) {
+            return Ok(());
+        }
         if commit.state.status.is_terminal() {
             self.resolve_timed_out_block(&commit.state, run_id, occurred_at)
                 .await?;
@@ -239,7 +306,7 @@ struct OutcomeProductContext {
     execution_policy: Option<TurnExecutionPolicy>,
 }
 
-fn eligible_background_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
+fn eligible_user_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
     if snapshot.process_kind != ProcessKind::AgentTurn
         || snapshot.parent_process_id.is_some()
         || snapshot.owner_user_id.is_none()
@@ -262,16 +329,17 @@ fn eligible_background_run(snapshot: &JournaledProcessSnapshot) -> Option<Outcom
         })
         .ok()?;
     let metadata = envelope.agent_turn;
-    if metadata.subagent_depth != 0
-        || metadata.ownerless_thread
-        || metadata
-            .product_context
-            .as_ref()
-            .is_none_or(|context| context.origin != TurnOriginKind::ScheduledTrigger)
-    {
+    if metadata.subagent_depth != 0 || metadata.ownerless_thread {
         return None;
     }
     Some(metadata)
+}
+
+fn is_background_run(metadata: &OutcomeMetadata) -> bool {
+    metadata
+        .product_context
+        .as_ref()
+        .is_some_and(|context| context.origin == TurnOriginKind::ScheduledTrigger)
 }
 
 fn thread_scope_for_snapshot(snapshot: &JournaledProcessSnapshot) -> Option<ThreadScope> {
@@ -316,7 +384,7 @@ mod tests {
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
-        turn::TurnRunId,
+        turn::{TurnGateRef, TurnRunId},
     };
     use ironclaw_notifications::{
         LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInboxStore,
@@ -329,7 +397,8 @@ mod tests {
         ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalKind,
         ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore, ProcessKind,
         ProcessLeaseRequest, ProcessLifecycleStatus, ProcessStateTransitionRequest,
-        ProcessSubmissionPort, ProcessTransitionPort, ProcessWorkerId, SubmitProcessRequest,
+        ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTransitionPort,
+        ProcessWorkerId, SubmitProcessRequest,
     };
     use ironclaw_threads::{
         AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
@@ -484,6 +553,72 @@ mod tests {
             .into_iter()
             .map(|record| record.kind)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_webui_auth_gate_publishes_one_actionable_notification() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:webui-extension-auth").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref.clone()),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+
+        observer
+            .observe_process_commit(suspended.clone())
+            .await
+            .expect("publish auth notification");
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("replayed auth suspension is idempotent");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: false,
+            })
+            .await
+            .expect("list auth notification");
+        assert_eq!(page.notifications.len(), 1);
+        let notification = &page.notifications[0];
+        assert_eq!(notification.kind, NotificationKind::AuthenticationRequired);
+        assert_eq!(notification.source.thread_id, thread());
+        assert_eq!(notification.source.turn_run_id, Some(run_id));
+        assert_eq!(
+            notification
+                .source
+                .lifecycle_ref
+                .as_ref()
+                .map(LifecycleRef::as_str),
+            Some(gate_ref.as_str())
+        );
+        assert!(notification.resolved_at.is_none());
+        assert_eq!(
+            notification.action,
+            NotificationAction::OpenThread {
+                thread_id: thread()
+            }
+        );
     }
 
     /// A timed-out fire publishes an actionable block and the delivery watcher
