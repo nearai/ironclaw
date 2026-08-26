@@ -131,6 +131,10 @@ jobs:
     if: needs.changes.outputs.has_e2e_scope == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      # Full-runtime debug futures exceed libtest's default thread stack in
+      # merged-state runs. Match the root Reborn lane's measured headroom.
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       matrix:

@@ -696,6 +696,11 @@ mod tests {
         );
         assert_trigger_grant(
             &policy,
+            "builtin.trigger_status",
+            &[EffectKind::DispatchCapability],
+        );
+        assert_trigger_grant(
+            &policy,
             "builtin.trigger_pause",
             &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         );
