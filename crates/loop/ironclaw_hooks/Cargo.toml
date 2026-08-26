@@ -57,7 +57,9 @@ uuid = { version = "1", features = ["v4"] }
 wasmtime = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+# `test-util` powers `#[tokio::test(start_paused = true)]`, so the 5s
+# after_turn dispatch budget is exercised without 5s of wall clock.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util", "time"] }
 tempfile = "3"
 toml = "1.1"
 wat = "1"

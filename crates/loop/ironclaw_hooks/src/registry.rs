@@ -138,7 +138,36 @@ fn point_has_capability_context(point: HookPointSpec) -> bool {
         | HookPointSpec::EventTriggered => true,
         HookPointSpec::BeforePrompt
         | HookPointSpec::AfterModel
-        | HookPointSpec::AfterCheckpoint => false,
+        | HookPointSpec::AfterCheckpoint
+        // `AfterTurn` fires once for a whole turn run; no capability is
+        // resolved at that point, so there is no provider to compare against.
+        | HookPointSpec::AfterTurn => false,
+    }
+}
+
+/// Returns `true` if `trust_class` may register a binding at `point`.
+///
+/// [`HookPointSpec::AfterTurn`] is act-capable — a hook there may start
+/// follow-on work with the run's authority — so only the privileged tiers
+/// may bind to it. The tier-split installers
+/// (`HookDispatcher::install_builtin_after_turn` /
+/// `install_trusted_after_turn`) already encode this, but raw bindings reach
+/// the registry through [`HookRegistry::from_bindings`] and the public
+/// builder's `insert_binding`, which bypass those installers. Enforcing here
+/// makes the restriction a construction-time rejection at every entry point
+/// instead of a malformed-binding report at dispatch.
+fn point_permits_trust(point: HookPointSpec, trust_class: HookTrustClass) -> bool {
+    match point {
+        HookPointSpec::AfterTurn => matches!(
+            trust_class,
+            HookTrustClass::Builtin | HookTrustClass::Trusted
+        ),
+        HookPointSpec::BeforeCapability
+        | HookPointSpec::BeforePrompt
+        | HookPointSpec::AfterModel
+        | HookPointSpec::AfterCapability
+        | HookPointSpec::AfterCheckpoint
+        | HookPointSpec::EventTriggered => true,
     }
 }
 
@@ -151,6 +180,13 @@ pub enum HookPointSpec {
     AfterModel,
     AfterCapability,
     AfterCheckpoint,
+    /// Fires once after a turn's run reaches a terminal state. This is the
+    /// seam for work about the turn *as a whole* rather than about one model
+    /// call, capability invocation, or checkpoint. Privileged-only
+    /// (`Builtin` / `Trusted`): the point is act-capable — an `AfterTurn`
+    /// hook may start follow-on work — so `Installed` and `SelfAuthored`
+    /// hooks are refused at install time.
+    AfterTurn,
     EventTriggered,
 }
 
@@ -197,6 +233,20 @@ impl HookRegistry {
             return Err(HookError::RegistryConstruction(format!(
                 "{:?}-tier hook cannot register at phase {:?}",
                 binding.trust_class, binding.phase
+            )));
+        }
+        // Point-vs-trust gate. `AfterTurn` is privileged-only: the point is
+        // act-capable, so an `Installed` or `SelfAuthored` binding there
+        // would carry run authority it was never granted. The tier-split
+        // installers refuse it already; this catches the raw-binding paths
+        // (`from_bindings`, the builder's `insert_binding`) so the refusal
+        // happens at construction rather than surfacing as a malformed
+        // binding mid-dispatch.
+        if !point_permits_trust(binding.point, binding.trust_class) {
+            return Err(HookError::RegistryConstruction(format!(
+                "{:?}-tier hook cannot register at point {:?}: this point is \
+                 privileged-only (Builtin / Trusted)",
+                binding.trust_class, binding.point
             )));
         }
         // Scope-vs-point compatibility (serrrfirat finding #2). Some hook
@@ -462,6 +512,64 @@ mod tests {
             scope: HookBindingScope::Global,
             poisoned: false,
         }
+    }
+
+    fn binding_with_trust(
+        local: &str,
+        trust_class: HookTrustClass,
+        point: HookPointSpec,
+    ) -> HookBinding {
+        let mut binding = installed_binding(local, HookPhase::Telemetry, point);
+        binding.trust_class = trust_class;
+        binding
+    }
+
+    #[test]
+    fn rejects_installed_raw_binding_at_after_turn() {
+        // `AfterTurn` is act-capable, so only Builtin/Trusted may bind to it.
+        // The tier-split installers enforce that, but raw bindings reach the
+        // registry through `from_bindings` / the builder's `insert_binding`;
+        // the refusal must happen there too, at construction time.
+        let result = HookRegistry::from_bindings([binding_with_trust(
+            "alpha",
+            HookTrustClass::Installed,
+            HookPointSpec::AfterTurn,
+        )]);
+        match result {
+            Err(HookError::RegistryConstruction(msg)) => {
+                assert!(msg.contains("AfterTurn"), "unexpected msg: {msg}");
+                assert!(msg.contains("Installed"), "unexpected msg: {msg}");
+            }
+            other => panic!("expected AfterTurn tier rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_self_authored_raw_binding_at_after_turn() {
+        let result = HookRegistry::from_bindings([binding_with_trust(
+            "alpha",
+            HookTrustClass::SelfAuthored,
+            HookPointSpec::AfterTurn,
+        )]);
+        match result {
+            Err(HookError::RegistryConstruction(msg)) => {
+                assert!(msg.contains("AfterTurn"), "unexpected msg: {msg}");
+                assert!(msg.contains("SelfAuthored"), "unexpected msg: {msg}");
+            }
+            other => panic!("expected AfterTurn tier rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepts_privileged_raw_bindings_at_after_turn() {
+        // The gate must not close the point to the tiers that legitimately
+        // own it — the installers build exactly these bindings.
+        let registry = HookRegistry::from_bindings([
+            binding_with_trust("alpha", HookTrustClass::Builtin, HookPointSpec::AfterTurn),
+            binding_with_trust("beta", HookTrustClass::Trusted, HookPointSpec::AfterTurn),
+        ])
+        .expect("Builtin and Trusted bindings are permitted at AfterTurn");
+        assert_eq!(registry.active_at(HookPointSpec::AfterTurn).count(), 2);
     }
 
     #[test]

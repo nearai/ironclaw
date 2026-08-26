@@ -29,6 +29,23 @@ lifecycle = ["read_long_term", "read_short_term", "record_interaction", "profile
 # rather than living in the loop tier.
 guidance_doc = "prompts/memory-guidance.md"
 
+# Recurring upkeep this provider declares for itself (#7664): every tenth
+# completed turn per owner, run the curation pass — re-read the standing
+# document, merge what says the same thing, resolve what has been superseded.
+# It is declared here because the work is this provider's: the prompt describes
+# this provider's document shape and selects this provider's own tools. The
+# host owns the clock, the invocation envelope, and the authority; the tool ids
+# below are SELECTION from the [[tools]] this same manifest declares, and each
+# call still crosses normal capability authorization at invocation time.
+#
+# `max_model_calls = 10` is this pass's own budget, under the host ceiling: the
+# #7770 live test showed a real model spends extra calls (a fumbled read, an
+# extra write) and needs headroom to still emit its report.
+[[memory.scheduled_ops]]
+trigger = "after_turn"
+interval_turns = 10
+pass = { prompt = "prompts/memory_curation.md", tools = ["ironclaw.memory.read", "ironclaw.memory.search", "ironclaw.memory.write"], max_model_calls = 10 }
+
 # read/write model tools + native-only search/tree conveniences. All four are
 # routed to the bound MemoryService by the host; their input/output schemas are
 # served inline from the bundled asset files (the single source of truth).

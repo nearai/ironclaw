@@ -53,7 +53,13 @@ impl FailureCategory {
     pub fn disposition_for(self, kind: DecisionKind) -> FailureDisposition {
         match kind {
             DecisionKind::Gate | DecisionKind::Mutator => FailureDisposition::FailClosed,
-            DecisionKind::Observer | DecisionKind::Effect => FailureDisposition::FailIsolated,
+            // `Lifecycle` runs after its stage already reached a terminal
+            // state, so there is nothing left to fail closed *onto* — drop
+            // the misbehaving hook's work and audit it, exactly as for
+            // observers.
+            DecisionKind::Observer | DecisionKind::Effect | DecisionKind::Lifecycle => {
+                FailureDisposition::FailIsolated
+            }
         }
     }
 }
@@ -94,6 +100,10 @@ mod tests {
             );
             assert_eq!(
                 category.disposition_for(DecisionKind::Effect),
+                FailureDisposition::FailIsolated
+            );
+            assert_eq!(
+                category.disposition_for(DecisionKind::Lifecycle),
                 FailureDisposition::FailIsolated
             );
         }

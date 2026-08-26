@@ -341,6 +341,13 @@ pub(crate) struct RebornRuntimeStores {
     /// resolved from its bundle at the same point `memory_lifecycle` is.
     /// `None` when unbound or the provider declares no `guidance_doc`.
     pub(crate) memory_guidance: Option<String>,
+    /// Prompt text for each scheduled pass op the bound memory provider
+    /// declares (#7664), by trigger, resolved from its bundle at the same
+    /// point `memory_lifecycle` is. Empty when it schedules nothing.
+    pub(crate) memory_scheduled_pass_prompts: Vec<(
+        ironclaw_extension_contracts::memory::MemoryScheduledTrigger,
+        String,
+    )>,
     /// The deployment's single workspace scoping decision, read by every
     /// workspace write lane (grants, approval leases, attachment handles).
     pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
