@@ -115,8 +115,9 @@ pub use first_party_tools::{
     builtin_first_party_package, builtin_first_party_package_for_process_backend,
     ensure_memory_mount, finish_memory_tool_result, map_memory_service_error,
     memory_invocation_for_request, memory_tool_profiles, normalize_memory_tool_input,
-    register_memory_tool_handler, register_native_memory_tools,
-    register_outbound_deliver_first_party_handler, register_reply_attachment_first_party_handler,
+    projected_trigger_capability_call_facts_source, register_memory_tool_handler,
+    register_native_memory_tools, register_outbound_deliver_first_party_handler,
+    register_reply_attachment_first_party_handler,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use first_party_tools::{

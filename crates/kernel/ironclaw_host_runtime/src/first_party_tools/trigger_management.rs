@@ -6,6 +6,10 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use ironclaw_event_log::DurableEventLog;
+use ironclaw_event_projections::{
+    CapabilityActivityStatus, ProjectionScope, ReplayEventProjectionService,
+};
 use ironclaw_extension_registry::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     capability::{EffectKind, PermissionMode},
@@ -21,11 +25,12 @@ use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
     MAX_TRIGGER_RUN_HISTORY_LIMIT, MissingTriggerActiveRunLookup,
     MissingTriggerCapabilityCallFactsSource, MissingTriggerManualFireRunner,
-    TriggerActiveRunLookup, TriggerCapabilityCallFact, TriggerCapabilityCallFactsScope,
-    TriggerCapabilityCallFactsSource, TriggerError, TriggerExecutionSpec, TriggerId,
-    TriggerManualFireOutcome, TriggerManualFireRunner, TriggerRecord, TriggerRecordValidationKind,
-    TriggerRepository, TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind,
-    TriggerSourceKind, TriggerState, active_holds_for_records,
+    TriggerActiveRunLookup, TriggerCapabilityCallFact, TriggerCapabilityCallFactsError,
+    TriggerCapabilityCallFactsScope, TriggerCapabilityCallFactsSource, TriggerCapabilityCallStatus,
+    TriggerError, TriggerExecutionSpec, TriggerId, TriggerManualFireOutcome,
+    TriggerManualFireRunner, TriggerRecord, TriggerRecordValidationKind, TriggerRepository,
+    TriggerRunRecord, TriggerSchedule, TriggerScheduleValidationKind, TriggerSourceKind,
+    TriggerState, active_holds_for_records,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -53,6 +58,75 @@ pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
 pub const TRIGGER_RUN_CAPABILITY_ID: &str = "builtin.trigger_run";
 pub const TRIGGER_STATUS_CAPABILITY_ID: &str = "builtin.trigger_status";
+
+struct ProjectedTriggerCapabilityCallFactsSource {
+    projection: ReplayEventProjectionService,
+}
+
+/// Build the production exact-run facts source over the durable runtime log.
+///
+/// The host-runtime owns this adapter because it translates the event
+/// projection read model into the contract consumed by its trigger tool.
+pub fn projected_trigger_capability_call_facts_source(
+    event_log: Arc<dyn DurableEventLog>,
+) -> Arc<dyn TriggerCapabilityCallFactsSource> {
+    Arc::new(ProjectedTriggerCapabilityCallFactsSource {
+        projection: ReplayEventProjectionService::from_runtime_log(event_log),
+    })
+}
+
+#[async_trait]
+impl TriggerCapabilityCallFactsSource for ProjectedTriggerCapabilityCallFactsSource {
+    async fn capability_calls_for_run(
+        &self,
+        scope: &TriggerCapabilityCallFactsScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TriggerCapabilityCallFact>, TriggerCapabilityCallFactsError> {
+        let projection_scope = ProjectionScope::from_resource_scope(&ResourceScope {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+        });
+        let parent_run_id = ironclaw_host_api::ids::InvocationId::from_uuid(run_id.as_uuid());
+        let window = self
+            .projection
+            .capability_activities_for_run(
+                projection_scope,
+                parent_run_id,
+                ironclaw_event_projections::MAX_PROJECTION_PAGE_LIMIT,
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, %run_id, "trigger capability-call projection failed");
+                TriggerCapabilityCallFactsError::Unavailable
+            })?;
+        if window.truncated {
+            tracing::warn!(%run_id, "trigger capability-call projection was truncated");
+            return Err(TriggerCapabilityCallFactsError::Unavailable);
+        }
+        Ok(window
+            .activities
+            .into_iter()
+            .map(|activity| TriggerCapabilityCallFact {
+                invocation_id: activity.invocation_id,
+                run_id,
+                capability_id: activity.capability_id,
+                status: match activity.status {
+                    CapabilityActivityStatus::Started => TriggerCapabilityCallStatus::Started,
+                    CapabilityActivityStatus::Running => TriggerCapabilityCallStatus::Running,
+                    CapabilityActivityStatus::Completed => TriggerCapabilityCallStatus::Completed,
+                    CapabilityActivityStatus::Failed => TriggerCapabilityCallStatus::Failed,
+                    CapabilityActivityStatus::Killed => TriggerCapabilityCallStatus::Killed,
+                },
+                error_kind: activity.error_kind,
+            })
+            .collect())
+    }
+}
 
 /// Grounding description for the read path (issue #7246): the model was
 /// observed fabricating automation status ("your digest routine is running")
