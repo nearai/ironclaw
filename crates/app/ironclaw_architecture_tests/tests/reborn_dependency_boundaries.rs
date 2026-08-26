@@ -811,7 +811,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // ToolAdapter auth errors carry the neutral bounded provider diagnostic
         // through the extension ABI. Parsing and model-safety behavior remain
         // in runtime lanes and loop_host.
-        ("ironclaw_extension_contracts", 10_841),
+        // 10_841 -> 11_451 (2026-08-22, `[[memory.scheduled_ops]]`): the
+        // scheduled-op declaration family on the `[memory]` surface — the
+        // closed trigger vocabulary, the tagged op kind and its pass shape,
+        // two host-owned bounds (interval floor, model-call ceiling), the
+        // wire/parsed split that makes an invalid entry unrepresentable, and
+        // the inline test module this ratchet also counts. Declaration and
+        // shape validation only: the two rules needing the manifest-wide view
+        // live in `ironclaw_extension_registry::v3`, asset resolution stays
+        // host-side like `guidance_doc`'s, and nothing here schedules,
+        // dispatches, or invokes anything. Count read from this test's own
+        // failure message.
+        ("ironclaw_extension_contracts", 11_451),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

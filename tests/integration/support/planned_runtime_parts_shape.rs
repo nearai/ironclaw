@@ -17,7 +17,7 @@
 use ironclaw_loop_host::HostManagedModelGateway;
 use ironclaw_turn_runner::runtime::DefaultPlannedRuntimeParts;
 
-/// Some/None shape of `DefaultPlannedRuntimeParts`'s 19 `Option`-typed
+/// Some/None shape of `DefaultPlannedRuntimeParts`'s 20 `Option`-typed
 /// fields. Field VALUES are out of scope by design (see
 /// `tests/integration/wiring_parity.rs`'s module doc) — only whether each
 /// optional wiring seam is populated.
@@ -40,13 +40,14 @@ pub struct DefaultPlannedRuntimePartsShape {
     pub hook_security_audit_sink: bool,
     pub turn_event_sink: bool,
     pub hook_dispatcher_builder_factory: bool,
+    pub after_turn_hook_wiring: bool,
     pub communication_context_provider: bool,
     pub scheduler_wake_wiring: bool,
 }
 
 /// Exhaustive, no-`..` destructure of `parts` into its Option-field shape.
 ///
-/// Every one of the 38 fields is named explicitly here (the 19 required
+/// Every one of the 39 fields is named explicitly here (the 19 required
 /// fields bound to `_`), so this function FAILS TO COMPILE the moment a
 /// field is added to or removed from `DefaultPlannedRuntimeParts` — the
 /// tripwire `wiring_parity.rs` relies on. Match ergonomics on `&parts` bind
@@ -94,6 +95,7 @@ where
         hook_security_audit_sink,
         turn_event_sink,
         hook_dispatcher_builder_factory,
+        after_turn_hook_wiring,
         communication_context_provider,
         scheduler_wake_wiring,
     } = parts;
@@ -115,6 +117,7 @@ where
         hook_security_audit_sink: hook_security_audit_sink.is_some(),
         turn_event_sink: turn_event_sink.is_some(),
         hook_dispatcher_builder_factory: hook_dispatcher_builder_factory.is_some(),
+        after_turn_hook_wiring: after_turn_hook_wiring.is_some(),
         communication_context_provider: communication_context_provider.is_some(),
         scheduler_wake_wiring: scheduler_wake_wiring.is_some(),
     }

@@ -39,8 +39,13 @@ composition and `ironclaw_loop_host`'s kernel-facing base.
   `ironclaw_wasm_limiter`. Plus direct `libsql` / `tokio-postgres` drivers for
   the predicate backends — the documented second exception to the filesystem
   persistence idiom (`docs/internal/adr/0004-hooks-keeps-its-predicate-state-backends.md`).
-- **Consumed by (2):** `ironclaw_turn_runner` (installs the middleware into
-  each claimed run's host) and `ironclaw_composition` (loads/wires).
+- **Consumed by (3):** `ironclaw_turn_runner` (installs the middleware into
+  each claimed run's host, and mints one `after_turn` dispatcher per terminal
+  run), `ironclaw_composition` (loads/wires), and `ironclaw_assistant` — a
+  direct consumer of the public dispatcher/builder for the `Lifecycle`
+  `after_turn` point: it assembles the memory-curation hook itself (which hook,
+  which phase, which trust tier is the owning crate's decision) and hands
+  composition a per-run dispatcher factory to wire.
 - **Never depends on:** `ironclaw_turns` — the dependency direction is the
   point: nothing in the turn-admission kernel depends on hooks, and hooks no
   longer names the kernel at all.
