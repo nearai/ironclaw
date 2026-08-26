@@ -36,7 +36,7 @@ them in the same commit; re-derive any of them with:
   | wc -l`.
 - Top-level Rust bins: `ls tests/*.rs | wc -l`.
 - E2E files: `ls tests/e2e/scenarios/test_*.py | wc -l`.
-- E2E test *functions* (the §2 "885" figure — every `test_*` function or
+- E2E test *functions* (the §2 "889" figure — every `test_*` function or
   method, top-level or in a class, across all 103 files; this is an exhaustive
   syntactic count, not filtered by active/legacy status):
   ```
@@ -50,7 +50,7 @@ them in the same commit; re-derive any of them with:
   print(n)
   "
   ```
-- E2E collected pytest items (the §6 "1175 top-level tests" figure — pytest's
+- E2E collected pytest items (the §6 "1180 top-level tests" figure — pytest's
   own collection count, which differs from the syntactic function count above
   when a function is parametrized, skipped at collection, or a class groups
   several `test_*` methods under one node): `cd tests/e2e && python3 -m pytest
@@ -102,7 +102,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 
 Totals: **59** group scenarios · **62** flat integration bins (55 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**103** Python scenario files (**885** test functions) registered in the active
+**103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
 
@@ -403,7 +403,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1175 top-level tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1180 top-level tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -458,7 +458,7 @@ entries.
 | Cancel mid-auth, submit an empty/invalid token, and recover | `test_v2_engine_auth_cancel.py`, `test_v2_engine_auth_flow.py` (19) |
 | Trust OAuth URLs are well-formed and identical across channels (bug #992) | `test_oauth_url_parameters.py` (8) |
 | Have credentials stay per-user and per-thread scoped | `test_v2_kernel_auth_gateway_flow.py` (3), `test_skill_oauth_flow.py` (6), `test_oauth_credential_fallback.py` |
-| Sign in with Google-shaped SSO and have two users keep separate threads | `test_reborn_webui_v2_sso.py` |
+| Sign in with Google-shaped SSO and have two users keep separate threads and notification inboxes | `test_reborn_webui_v2_sso.py` |
 
 ### 6.4 Extensions & MCP (UI + API)
 | The user can… | Evidence |
@@ -495,7 +495,7 @@ entries.
 | Use the Missions tab instead of the removed Routines tab and activity strip | `test_v2_activity_shell.py` (2; pending legacy migration #6369) |
 | See routines created in one surface from another (owner scope) | `test_owner_scope.py` (3) |
 | Browse projects, create one, open a scoped chat, list and download workspace files | `test_reborn_webui_v2_legacy_projects.py` (6), `test_project_detail.py` (3), `test_reborn_v2_file_download.py` (4) |
-| Open notifications with immediate feedback while its lazy chunk loads, then read generic server-backed notifications, mark one or all as read, wait for a matching final reply before acknowledging completion, and open the source thread | `test_reborn_webui_v2_notifications.py` (7) |
+| Open notifications with immediate feedback while its lazy chunk loads; read approval, authentication, completed, and failed notifications from the generic server-backed Inbox; drive real scheduled approval/auth gates through resolution; persist read state across a fresh client; mark one or all as read; wait for a matching final reply before acknowledging completion; and open the source thread | `test_reborn_webui_v2_notifications.py` (12) |
 
 ### 6.7 Settings, skills & admin
 | The user can… | Evidence |

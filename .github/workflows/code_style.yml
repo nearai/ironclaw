@@ -62,6 +62,9 @@ jobs:
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           fetch-depth: 0
+          # The scope calculation needs merge-base ancestry for its three-dot
+          # diff, but no historical file contents.
+          filter: blob:none
           persist-credentials: false
       - id: diff
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'

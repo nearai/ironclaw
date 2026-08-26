@@ -114,6 +114,10 @@ impl RebornAutomationProductService {
 
 #[async_trait::async_trait]
 impl AutomationProductService for RebornAutomationProductService {
+    fn supports_legacy_approval_notification_backfill(&self) -> bool {
+        true
+    }
+
     fn scheduler_enabled(&self) -> bool {
         self.scheduler_enabled
     }

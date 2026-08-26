@@ -99,9 +99,10 @@ use crate::{
     CommandResultView, DecodeInboundAttachments, IntoProductInboundCommand,
     ListPendingApprovalsRequest, PRODUCT_LIFECYCLE_COMMAND_OPERATION_ID,
     PRODUCT_MODEL_COMMAND_OPERATION_ID, PRODUCT_NEW_COMMAND_OPERATION_ID,
-    PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID, ProductCommand,
-    ProductCommandDescriptor, ProductInboundCommand, ProductLifecycleCommandInput,
-    ProductModelCommand, ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
+    PRODUCT_STATUS_COMMAND_OPERATION_ID, PRODUCT_STOP_COMMAND_OPERATION_ID,
+    PendingApprovalInteractionView, ProductCommand, ProductCommandDescriptor,
+    ProductInboundCommand, ProductLifecycleCommandInput, ProductModelCommand,
+    ProductModelCommandInput, ProductNewCommandInput, ProductNewCommandOutput,
     ProductStatusCommandInput, ProductStopCommandInput, ProductStopInvocation,
     ProductSurfaceFailure, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
@@ -209,9 +210,11 @@ pub use fs_browse::{
     RebornFsStatResponse,
 };
 use ironclaw_notifications::{
-    ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_PAGE_LIMIT_MAX,
-    NoopNotificationInboxStore, NotificationAction, NotificationInboxStorePort, NotificationKind,
-    NotificationMutationRequest, NotificationRecipient, NotificationSeverity,
+    LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
+    NOTIFICATION_PAGE_LIMIT_MAX, NoopNotificationInboxStore, NotificationAction,
+    NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
+    PublishNotificationRequest,
 };
 pub use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
@@ -1155,8 +1158,28 @@ struct AutomationApprovalThreadCandidate {
     title: Option<AutomationNotificationTitle>,
 }
 
+struct AutomationApprovalThread {
+    record: SessionThreadRecord,
+    approvals: Vec<PendingApprovalInteractionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LegacyApprovalBackfillKey {
+    tenant_id: String,
+    user_id: String,
+    agent_id: Option<String>,
+    project_id: Option<String>,
+}
+
 #[async_trait]
 pub trait AutomationProductService: Send + Sync {
+    /// Whether this service can enumerate caller-scoped historical runs for
+    /// the one-release migration of approval gates created before durable
+    /// Inbox publishing existed.
+    fn supports_legacy_approval_notification_backfill(&self) -> bool {
+        false
+    }
+
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
@@ -2499,6 +2522,7 @@ pub struct RebornServices<
     outbound_preferences_service: Arc<dyn OutboundPreferencesProductService>,
     notification_setup_service: Arc<dyn ChannelNotificationSetupService>,
     notification_inbox: Arc<dyn NotificationInboxStorePort>,
+    legacy_approval_backfill_attempted: Arc<StdMutex<HashSet<LegacyApprovalBackfillKey>>>,
     session_inbound_ledger: Arc<dyn crate::ledger::IdempotencyLedger>,
     /// The session lane's product surface, built once. Every input is an
     /// immutable builder-wired `Arc`, so rebuilding it per `submit_turn`
@@ -2601,6 +2625,7 @@ where
             ),
             notification_setup_service: Arc::new(UnsupportedChannelNotificationSetupService),
             notification_inbox: Arc::new(NoopNotificationInboxStore),
+            legacy_approval_backfill_attempted: Arc::new(StdMutex::new(HashSet::new())),
             session_inbound_ledger: Arc::new(
                 crate::in_memory_ledger::InMemoryIdempotencyLedger::new(),
             ),
@@ -3006,6 +3031,15 @@ where
                 "limit",
                 ProductSurfaceValidationCode::InvalidValue,
             ));
+        }
+        if cursor.is_none() {
+            // best-effort-ok: one-release legacy approval discovery must never
+            // gate the authoritative durable Inbox read. The attempt guard
+            // prevents a failing compatibility backend from being hammered on
+            // every browser poll; a process restart creates a fresh retry.
+            if let Err(error) = self.backfill_legacy_approval_notifications(&caller).await {
+                tracing::warn!(?error, "legacy approval notification backfill failed");
+            }
         }
         let page = self
             .notification_inbox
@@ -5871,6 +5905,164 @@ where
                 false,
             ));
         };
+        let candidates = self
+            .automation_approval_thread_candidates(&bound_caller)
+            .await?;
+
+        let mut seen = HashSet::new();
+        let mut threads = Vec::with_capacity(visible_limit);
+        if let Some(candidate_thread_id) = candidate_thread_id {
+            let thread_id = parse_thread_id_field("candidate_thread_id", candidate_thread_id)?;
+            if seen.insert(thread_id.clone()) {
+                let listed_candidate = candidates
+                    .iter()
+                    .find(|candidate| candidate.thread_id == thread_id)
+                    .cloned();
+                let approval_thread = if let Some(candidate) = listed_candidate {
+                    self.automation_run_thread_record(
+                        &caller,
+                        &bound_caller,
+                        candidate.thread_id,
+                        candidate.title,
+                    )
+                    .await?
+                } else {
+                    self.automation_run_thread_record(&caller, &bound_caller, thread_id, None)
+                        .await?
+                };
+                if let Some(approval_thread) = approval_thread {
+                    threads.push(approval_thread.record);
+                }
+            }
+        }
+        for candidate in candidates {
+            if threads.len() >= visible_limit {
+                break;
+            }
+            if !seen.insert(candidate.thread_id.clone()) {
+                continue;
+            }
+            let Some(approval_thread) = self
+                .automation_run_thread_record(
+                    &caller,
+                    &bound_caller,
+                    candidate.thread_id,
+                    candidate.title,
+                )
+                .await?
+            else {
+                continue;
+            };
+            threads.push(approval_thread.record);
+        }
+
+        Ok(RebornListThreadsResponse {
+            threads,
+            next_cursor: None,
+        })
+    }
+
+    async fn backfill_legacy_approval_notifications(
+        &self,
+        caller: &ProductSurfaceCaller,
+    ) -> Result<(), ProductSurfaceError> {
+        if !self
+            .automation_service
+            .supports_legacy_approval_notification_backfill()
+        {
+            return Ok(());
+        }
+        let Some(bound_caller) = product_agent_bound_caller_from_webui(caller.clone()) else {
+            return Ok(());
+        };
+        let migration_key = LegacyApprovalBackfillKey {
+            tenant_id: caller.tenant_id.as_str().to_string(),
+            user_id: caller.user_id.as_str().to_string(),
+            agent_id: caller
+                .agent_id
+                .as_ref()
+                .map(|agent_id| agent_id.as_str().to_string()),
+            project_id: caller
+                .project_id
+                .as_ref()
+                .map(|project_id| project_id.as_str().to_string()),
+        };
+        if !self
+            .legacy_approval_backfill_attempted
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(migration_key)
+        {
+            return Ok(());
+        }
+
+        let migrate = async {
+            let candidates = self
+                .automation_approval_thread_candidates(&bound_caller)
+                .await?;
+            for candidate in candidates {
+                let Some(approval_thread) = self
+                    .automation_run_thread_record(
+                        caller,
+                        &bound_caller,
+                        candidate.thread_id,
+                        candidate.title,
+                    )
+                    .await?
+                else {
+                    continue;
+                };
+                let occurred_at = approval_thread
+                    .record
+                    .updated_at
+                    .or(approval_thread.record.created_at)
+                    .unwrap_or_else(Utc::now);
+                for approval in approval_thread.approvals {
+                    let lifecycle_ref = LifecycleRef::new(approval.gate_ref.as_str())
+                        .map_err(map_notification_inbox_error)?;
+                    let id = crate::run_delivery::run_notification_inbox_id(
+                        approval.run_id,
+                        NotificationKind::ApprovalRequired,
+                        Some(lifecycle_ref.as_str()),
+                    )
+                    .map_err(map_notification_inbox_error)?;
+                    self.notification_inbox
+                        .publish(PublishNotificationRequest {
+                            id,
+                            recipient: notification_recipient(caller),
+                            kind: NotificationKind::ApprovalRequired,
+                            severity: NotificationSeverity::Warning,
+                            source: NotificationSource {
+                                thread_id: approval.scope.thread_id.clone(),
+                                turn_run_id: Some(approval.run_id),
+                                lifecycle_ref: Some(lifecycle_ref),
+                            },
+                            action: NotificationAction::OpenThread {
+                                thread_id: approval.scope.thread_id,
+                            },
+                            initial_state: NotificationInitialState::Open,
+                            occurred_at,
+                        })
+                        .await
+                        .map_err(map_notification_inbox_error)?;
+                }
+            }
+            Ok::<(), ProductSurfaceError>(())
+        };
+
+        tokio::time::timeout(NOTIFICATION_APPROVAL_QUERY_TIMEOUT, migrate)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "legacy approval notification backfill timed out");
+                ProductSurfaceError::service_unavailable(true)
+            })??;
+        Ok(())
+    }
+
+    async fn automation_approval_thread_candidates(
+        &self,
+        bound_caller: &ProductAgentBoundCaller,
+    ) -> Result<Vec<AutomationApprovalThreadCandidate>, ProductSurfaceError> {
         let automations = self
             .automation_service
             .list_automations(
@@ -5904,58 +6096,7 @@ where
                 break;
             }
         }
-
-        let mut seen = HashSet::new();
-        let mut threads = Vec::with_capacity(visible_limit);
-        if let Some(candidate_thread_id) = candidate_thread_id {
-            let thread_id = parse_thread_id_field("candidate_thread_id", candidate_thread_id)?;
-            if seen.insert(thread_id.clone()) {
-                let listed_candidate = candidates
-                    .iter()
-                    .find(|candidate| candidate.thread_id == thread_id)
-                    .cloned();
-                let record = if let Some(candidate) = listed_candidate {
-                    self.automation_run_thread_record(
-                        &caller,
-                        &bound_caller,
-                        candidate.thread_id,
-                        candidate.title,
-                    )
-                    .await?
-                } else {
-                    self.automation_run_thread_record(&caller, &bound_caller, thread_id, None)
-                        .await?
-                };
-                if let Some(record) = record {
-                    threads.push(record);
-                }
-            }
-        }
-        for candidate in candidates {
-            if threads.len() >= visible_limit {
-                break;
-            }
-            if !seen.insert(candidate.thread_id.clone()) {
-                continue;
-            }
-            let Some(record) = self
-                .automation_run_thread_record(
-                    &caller,
-                    &bound_caller,
-                    candidate.thread_id,
-                    candidate.title,
-                )
-                .await?
-            else {
-                continue;
-            };
-            threads.push(record);
-        }
-
-        Ok(RebornListThreadsResponse {
-            threads,
-            next_cursor: None,
-        })
+        Ok(candidates)
     }
 
     async fn automation_run_thread_record(
@@ -5964,7 +6105,7 @@ where
         bound_caller: &ProductAgentBoundCaller,
         thread_id: ThreadId,
         automation_title: Option<AutomationNotificationTitle>,
-    ) -> Result<Option<SessionThreadRecord>, ProductSurfaceError> {
+    ) -> Result<Option<AutomationApprovalThread>, ProductSurfaceError> {
         let Some(trigger_scope) = self
             .automation_service
             .resolve_run_thread_scope(bound_caller.clone(), &thread_id)
@@ -5989,7 +6130,7 @@ where
         thread_id: ThreadId,
         trigger_scope: TriggerRunThreadScope,
         title: Option<AutomationNotificationTitle>,
-    ) -> Result<Option<SessionThreadRecord>, ProductSurfaceError> {
+    ) -> Result<Option<AutomationApprovalThread>, ProductSurfaceError> {
         let true_agent_id = trigger_scope
             .agent_id
             .clone()
@@ -6003,10 +6144,10 @@ where
             thread_id.clone(),
         );
         let run_actor = TurnActor::new(creator_user_id.clone());
-        if !self
-            .thread_scope_has_pending_approval(&approval_turn_scope, &run_actor)
-            .await?
-        {
+        let approvals = self
+            .pending_approvals_for_thread_scope(&approval_turn_scope, &run_actor)
+            .await?;
+        if approvals.is_empty() {
             return Ok(None);
         }
 
@@ -6053,14 +6194,14 @@ where
         {
             record.title = Some(title.as_str().to_string());
         }
-        Ok(Some(record))
+        Ok(Some(AutomationApprovalThread { record, approvals }))
     }
 
-    async fn thread_scope_has_pending_approval(
+    async fn pending_approvals_for_thread_scope(
         &self,
         scope: &TurnScope,
         actor: &TurnActor,
-    ) -> Result<bool, ProductSurfaceError> {
+    ) -> Result<Vec<PendingApprovalInteractionView>, ProductSurfaceError> {
         let pending = self
             .approval_interactions
             .list_pending(ListPendingApprovalsRequest {
@@ -6069,7 +6210,7 @@ where
             })
             .await
             .map_err(|error| map_adapter_error(error.into()))?;
-        Ok(!pending.approvals.is_empty())
+        Ok(pending.approvals)
     }
 
     fn thread_operation_lock(&self, scope: &TurnScope) -> Arc<AsyncMutex<()>> {

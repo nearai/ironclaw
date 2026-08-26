@@ -1,6 +1,5 @@
 import React from "react";
 import { useOobeSuggestionsEnabled } from "../../../app/auth";
-import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { ChatInput } from "./chat-input";
 import { NearProcessIndicator } from "./near-process-indicator";
@@ -37,7 +36,6 @@ function renderRunningIndicator(label: string) {
 }
 
 export function EmptyState({
-  onSuggestion,
   onSend,
   onOpenThread,
   commands = [],
@@ -60,23 +58,6 @@ export function EmptyState({
     "open" | "dismissed" | "gone"
   >("open");
   const showRestorePill = oobeSuggestionsEnabled && drawerState === "dismissed";
-  const suggestions = [
-    {
-      icon: "tool",
-      title: t("chat.suggestion1"),
-      detail: t("chat.suggestion1Desc"),
-    },
-    {
-      icon: "shield",
-      title: t("chat.suggestion2"),
-      detail: t("chat.suggestion2Desc"),
-    },
-    {
-      icon: "plug",
-      title: t("chat.suggestion3"),
-      detail: t("chat.suggestion3Desc"),
-    },
-  ];
 
   return (
     <div
@@ -131,33 +112,6 @@ export function EmptyState({
               onDismiss={() => setDrawerState("gone")}
             />
           </React.Suspense>
-        )}
-      </div>
-
-      <div className="mt-8 grid w-full max-w-5xl gap-2">
-        {suggestions.map(
-          (item) => (
-            <button
-              type="button"
-              key={item.title}
-              onClick={() => onSuggestion(item.title)}
-              className="v2-button group grid grid-cols-[auto_1fr_auto] items-center gap-3 border-t border-white/10 px-2 py-4 text-left hover:border-signal/35"
-            >
-              <span
-                className="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.035] text-iron-300 group-hover:border-signal/35 group-hover:text-signal"
-              >
-                <Icon name={item.icon} className="h-4 w-4" />
-              </span>
-              <span className="min-w-0">
-                <span className="block text-sm font-semibold text-iron-100">
-                  {item.title}
-                </span>
-                <span className="mt-0.5 block text-sm text-iron-300">
-                  {item.detail}
-                </span>
-              </span>
-            </button>
-          )
         )}
       </div>
     </div>

@@ -226,6 +226,13 @@ pub(crate) fn build_product_surface_with_channel_connection(
                 .product_auth
                 .runtime_credential_account_selection_service(),
         );
+        // Device-link guidance hands the user the Extensions page rather than
+        // describing it, when the deployment published a public origin. Same
+        // env read as the channel connect notice, and the same fallback: no
+        // origin keeps the link-free copy.
+        lifecycle_service = lifecycle_service.with_setup_link_base_url(
+            crate::extension_host_assembly::connect_link_base_url_from_env(),
+        );
         api = api.with_lifecycle_product_service(Arc::new(lifecycle_service));
     }
     // The generic channel-config configure port: the setup service renders
