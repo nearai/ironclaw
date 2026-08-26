@@ -76,6 +76,7 @@ use ironclaw_turns::{TurnId, TurnRunId, TurnScope};
 struct StubHostRuntime {
     invocation_contexts: StdMutex<Vec<ironclaw_host_api::scope::ExecutionContext>>,
     visible_provider_trust: StdMutex<Vec<BTreeMap<ExtensionId, ironclaw_trust::TrustDecision>>>,
+    visible_contexts: StdMutex<Vec<ironclaw_host_api::scope::ExecutionContext>>,
 }
 
 impl StubHostRuntime {
@@ -83,6 +84,7 @@ impl StubHostRuntime {
         Self {
             invocation_contexts: StdMutex::new(Vec::new()),
             visible_provider_trust: StdMutex::new(Vec::new()),
+            visible_contexts: StdMutex::new(Vec::new()),
         }
     }
 
@@ -97,6 +99,13 @@ impl StubHostRuntime {
         self.visible_provider_trust
             .lock()
             .expect("visible provider trust lock")
+            .clone()
+    }
+
+    fn visible_contexts(&self) -> Vec<ironclaw_host_api::scope::ExecutionContext> {
+        self.visible_contexts
+            .lock()
+            .expect("visible contexts lock")
             .clone()
     }
 }
@@ -138,6 +147,10 @@ impl HostRuntime for StubHostRuntime {
             .lock()
             .expect("visible provider trust lock")
             .push(request.provider_trust.clone());
+        self.visible_contexts
+            .lock()
+            .expect("visible contexts lock")
+            .push(request.context.clone());
         let capabilities = request
             .context
             .grants
@@ -418,6 +431,7 @@ fn test_parts(
 ) -> RefreshingCapabilityPortTestParts {
     RefreshingCapabilityPortTestParts {
         runtime,
+        process_backend: ironclaw_host_api::runtime_policy::ProcessBackendKind::LocalHost,
         run_context,
         surface_policy: ironclaw_host_api::capability_surface::CapabilitySurfacePolicy::allow_all(),
         fallback_user_id: UserId::new("user-stub").expect("user id"),
@@ -455,6 +469,7 @@ fn test_parts(
         // Extension-lane seams (harness-port-seam P1 Change 3): None/empty =
         // the no-op surface this stub-runtime suite always ran with.
         extension_management: None,
+        extension_surface_override: None,
         additional_capability_grants: Vec::new(),
     }
 }
@@ -490,6 +505,115 @@ async fn port_builds_and_includes_synthetic_capabilities() {
             .any(|definition| definition.capability_id.as_str() == "builtin.echo"),
         "stub host-runtime builtin capability must be present: {definitions:?}"
     );
+}
+
+#[tokio::test]
+async fn production_factory_grants_only_caller_visible_placeholder_credentials_to_shell() {
+    let caller = UserId::new("user-stub").expect("caller id");
+    let other_user = UserId::new("other-user").expect("other user id");
+    let visible_handle =
+        ironclaw_host_api::ids::SecretHandle::new("github_token").expect("secret handle");
+    let no_placeholder_handle =
+        ironclaw_host_api::ids::SecretHandle::new("oauth_token").expect("secret handle");
+    let other_user_handle =
+        ironclaw_host_api::ids::SecretHandle::new("private_token").expect("secret handle");
+    let capability = |id: &str,
+                      handle: ironclaw_host_api::ids::SecretHandle,
+                      placeholder_env: Option<&str>,
+                      owner: ironclaw_extension_registry::InstallationOwner|
+     -> ironclaw_extension_host::ActiveExtensionCapability {
+        ironclaw_extension_host::ActiveExtensionCapability {
+        id: CapabilityId::new(id).expect("capability id"),
+        provider: ExtensionId::new(id.split('.').next().expect("provider prefix"))
+            .expect("provider id"),
+        effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+        default_permission: PermissionMode::Allow,
+        runtime_credentials: vec![
+            ironclaw_host_api::capability::RuntimeCredentialRequirement {
+                handle,
+                source: ironclaw_host_api::capability::RuntimeCredentialRequirementSource::SecretHandle,
+                provider_scopes: Vec::new(),
+                audience: ironclaw_host_api::action::NetworkTargetPattern {
+                    scheme: Some(ironclaw_host_api::action::NetworkScheme::Https),
+                    host_pattern: "api.example.com".to_string(),
+                    port: None,
+                },
+                target: ironclaw_host_api::http::RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                placeholder_env: placeholder_env.map(str::to_string),
+                required: true,
+            },
+        ],
+        network_targets: Vec::new(),
+        max_egress_bytes: None,
+        owner,
+        }
+    };
+    let extension_surface =
+        ironclaw_extension_host::capability_surface::ExtensionCapabilitySurface::from_active_capabilities(
+            vec![
+                capability(
+                    "github.repo_list",
+                    visible_handle.clone(),
+                    Some("GH_TOKEN"),
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
+                ),
+                capability(
+                    "oauth.account",
+                    no_placeholder_handle.clone(),
+                    None,
+                    ironclaw_extension_registry::InstallationOwner::Tenant,
+                ),
+                capability(
+                    "private.account",
+                    other_user_handle.clone(),
+                    Some("PRIVATE_TOKEN"),
+                    ironclaw_extension_registry::InstallationOwner::users(
+                        [other_user].into_iter().collect(),
+                    )
+                    .expect("private owner"),
+                ),
+            ],
+        );
+    let runtime = Arc::new(StubHostRuntime::new());
+    let mut parts = test_parts(
+        run_context("shell-credential-grant").await,
+        Arc::clone(&runtime),
+        Arc::new(SharedStubCapabilityIo::new()),
+        None,
+        HashMap::new(),
+        BTreeMap::new(),
+    );
+    parts.fallback_user_id = caller;
+    parts.process_backend = ironclaw_host_api::runtime_policy::ProcessBackendKind::UserSandbox;
+    parts.extension_surface_override = Some(extension_surface);
+
+    let port = create_refreshing_capability_port_for_test(parts)
+        .await
+        .expect("port assembles through the real production factory");
+    port.visible_capabilities(ironclaw_loop_contracts::VisibleCapabilityRequest {})
+        .await
+        .expect("caller refreshes the capability surface");
+    let contexts = runtime.visible_contexts();
+    let shell_grant = contexts
+        .last()
+        .expect("runtime receives a visible request")
+        .grants
+        .grants
+        .iter()
+        .find(|grant| grant.capability.as_str() == ironclaw_host_runtime::SHELL_CAPABILITY_ID)
+        .expect("shell grant");
+
+    assert_eq!(shell_grant.constraints.secrets, vec![visible_handle]);
+    assert!(
+        !shell_grant
+            .constraints
+            .secrets
+            .contains(&no_placeholder_handle)
+    );
+    assert!(!shell_grant.constraints.secrets.contains(&other_user_handle));
 }
 
 #[tokio::test]
