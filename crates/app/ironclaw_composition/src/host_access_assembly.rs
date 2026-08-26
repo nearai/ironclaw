@@ -190,29 +190,39 @@ fn canonicalize_host_home_root(path: &Path) -> Result<PathBuf, RebornBuildError>
     Ok(path)
 }
 
+/// Relative paths under the storage root that the host treats as protected:
+/// a workspace overlapping any of them is rejected fail-closed by
+/// [`validate_workspace_skill_isolation`]. Single source of truth for the
+/// protected-root policy — the CLI's launch-time workspace fallback consumes
+/// this same list instead of re-spelling it, so the two can never drift apart.
+pub fn protected_root_suffixes() -> &'static [&'static str] {
+    &[
+        "skills",
+        "tenant-shared/skills",
+        "system/skills",
+        "system/extensions",
+    ]
+}
+
 pub(crate) fn validate_workspace_skill_isolation(
     storage_root: &Path,
     workspace_root: &Path,
 ) -> Result<(), RebornBuildError> {
-    for (label, skill_root) in [
-        ("/skills", storage_root.join("skills")),
-        (
-            "/tenant-shared/skills",
-            storage_root.join("tenant-shared/skills"),
-        ),
-        ("/system/skills", storage_root.join("system/skills")),
-        ("/system/extensions", storage_root.join("system/extensions")),
-    ] {
+    for suffix in protected_root_suffixes() {
+        let skill_root = storage_root.join(suffix);
         if paths_overlap(workspace_root, &skill_root) {
             return Err(RebornBuildError::InvalidConfig {
-                reason: format!("workspace root must not overlap default skill root {label}"),
+                reason: format!("workspace root must not overlap default skill root /{suffix}"),
             });
         }
     }
     Ok(())
 }
 
-fn paths_overlap(left: &Path, right: &Path) -> bool {
+/// Whether two paths overlap in either direction (equal, `left` contains
+/// `right`, or `right` contains `left`). Shared with the CLI's launch-time
+/// workspace fallback so overlap semantics stay composition-owned.
+pub fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
