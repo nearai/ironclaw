@@ -594,6 +594,7 @@ impl RunDeliveryObserver {
             // channel rendering. An auth-provider outage must not hide the
             // run-bound recovery action from the durable WebUI Inbox.
             if actionable_state.status == TurnStatus::BlockedAuth
+                && let Some(gate_ref) = actionable_state.gate_ref.as_ref()
                 && let Some(kind) = super::blocked_status_notification_kind(actionable_state.status)
             {
                 self.services
@@ -602,7 +603,7 @@ impl RunDeliveryObserver {
                         &scope,
                         run_id,
                         kind,
-                        actionable_state.gate_ref.as_ref().map(|gate| gate.as_str()),
+                        Some(gate_ref.as_str()),
                     )
                     .await;
             }
@@ -676,7 +677,7 @@ impl RunDeliveryObserver {
                     // actionable and continue observing so verified recovery
                     // can resolve it even while the auth prompt backend is
                     // unavailable.
-                    tracing::warn!(
+                    tracing::debug!(
                         target: "ironclaw::reborn::run_delivery",
                         %run_id,
                         %error,

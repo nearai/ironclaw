@@ -1,3 +1,4 @@
+// arch-exempt: large_file, triggered watcher remains in the owning run_delivery split, plan #6175
 //! The background-run notifier: watches a trigger-submitted run and tells the
 //! creator's **notification channels** when it needs them — an approval gate,
 //! an expired credential, or a failure — through the [`DeliveryCoordinator`].
@@ -820,15 +821,9 @@ async fn notify_background_run(
                 )
                 .await;
         }
-        if let Some(kind) = super::blocked_status_notification_kind(state.status) {
+        if let Some((kind, gate_ref)) = super::blocked_status_notification(&state) {
             services
-                .publish_inbox_notification(
-                    &creator_user_id,
-                    &scope,
-                    run_id,
-                    kind,
-                    state.gate_ref.as_ref().map(|gate| gate.as_str()),
-                )
+                .publish_inbox_notification(&creator_user_id, &scope, run_id, kind, Some(gate_ref))
                 .await;
         }
         if result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport

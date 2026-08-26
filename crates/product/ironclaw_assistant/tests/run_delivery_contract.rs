@@ -2219,6 +2219,39 @@ async fn observer_delivers_a_prompt_for_each_distinct_auth_gate() {
 }
 
 #[tokio::test]
+async fn observer_does_not_publish_an_auth_inbox_item_without_a_gate_ref() {
+    let harness = build_harness(
+        vec![
+            // The first state satisfies the foreign-run existence guard; the
+            // second is the actionable state observed by the delivery loop.
+            scripted_state(TurnStatus::BlockedAuth, None),
+            scripted_state(TurnStatus::BlockedAuth, None),
+        ],
+        false,
+        Some("https://provider.example/oauth"),
+        Duration::from_millis(40),
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-auth-without-gate"),
+            accepted_ack(TurnRunId::new()),
+        )
+        .await;
+
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert!(
+        inbox.notifications.is_empty(),
+        "auth without a gate ref is not actionable and must not leave an unresolved Inbox item"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "auth without a gate ref must not produce an external prompt"
+    );
+}
+
+#[tokio::test]
 async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
     const GATE: &str = "gate:auth-extension-00000000000000000000000001";
     let harness = build_harness_with_gate_ports(
@@ -3640,6 +3673,36 @@ async fn triggered_auth_prompt_reaches_only_dm_targets_and_run_stays_parked() {
     assert_eq!(
         delivered_conversations(&harness.adapter),
         vec!["dm-creator".to_string(), "chan-eng".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn triggered_auth_without_a_gate_ref_does_not_publish_an_inbox_item() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::BlockedAuth, None)],
+        Some("https://provider.example/oauth"),
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Skipped
+    );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert!(
+        inbox.notifications.is_empty(),
+        "a background auth block without a gate ref must not leave an unresolved Inbox item"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "a background auth block without a gate ref must not reach external channels"
     );
 }
 
