@@ -237,9 +237,11 @@ through this caller route.
 rules to every replayable message in the thread and queries logs at thread
 scope. Its `ironclaw.thread_artifact.v1` messages retain `run_id`, allowing the
 fixture importer to reconstruct multiple turns without mixing threads. Export
-is all-or-nothing and returns `413` when the thread exceeds 1,000 persisted
+is all-or-nothing and returns `413` when the thread exceeds 10,000 persisted
 messages, 16 MiB of stored message data, or 20 MiB after redaction and log
-assembly. The endpoint is limited to six requests per caller per minute.
+assembly. The higher row limit admits tool-heavy trajectories while both byte
+limits remain unchanged. The endpoint is limited to six requests per caller per
+minute.
 
 **Operator-gating.** LLM provider/configuration routes (including provider
 credentials and model-policy mutation), operator setup/config/service-control,
