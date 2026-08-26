@@ -94,7 +94,7 @@ Every dependency has an implementation approach in [PLAN.md](PLAN.md); the full 
 ## The decisions reviewers should weigh
 
 1. **Phase boundary** — is the Foundational cut correct, or should any Vision piece (the docked drawer, the reveal) graduate into Foundational? (PROPOSAL §2, §10)
-2. **The suggestion producer (D-F2)** — first-login trigger vs. deterministic starter set gated on connected extensions vs. an agent-driven suggester. This is the one genuinely new mechanism and the biggest open design question. (PROPOSAL §5.2)
+2. ~~**The suggestion producer (D-F2)**~~ — *resolved:* PR #7694 shipped the durable suggestions producer consumed by the current frontend. (PROPOSAL §5.2)
 3. **Agent-mode gate semantics (D-F4)** — `auto` skips the per-action gate for approved task *types*; confirm the typed generalization of `global_auto_approve` and its audit-trail requirements. (PROPOSAL §7)
 4. ~~**Carousel data safety (D-F5)**~~ — *resolved:* the surface reads the durable projection and never ships mock cards. (PROPOSAL §5.5)
 5. ~~**DESIGN.md pilot (D-F6)**~~ — *settled 2026-08-21:* design governance is owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md); OOBE's part is the pilot card family, catalogued through it. (PROPOSAL §5.6, §8.3)
@@ -103,9 +103,9 @@ Every dependency has an implementation approach in [PLAN.md](PLAN.md); the full 
 
 - Skim this file, then read [PROPOSAL.md](PROPOSAL.md) §3 (shipped-vs-net-new scope — the core framing) and §5 (dependencies + implementation approach).
 - Open [mockup.html](mockup.html), switch **Version** (Vision / Foundational) and **Scene** (First run / Thread / Plan) — every claim here is demonstrated there.
-- Argue sequencing in [PLAN.md](PLAN.md): the phases, gates, and suggested first PRs; only the ordering constraints marked ⚠ are load-bearing.
+- Argue sequencing in [PLAN.md](PLAN.md): the phases, gates, and historical first-PR sequence; only the ordering constraints marked ⚠ are load-bearing.
 - Challenge [CHECKLIST.md](CHECKLIST.md): it is the definition of done — anything missing goes there.
-- The **[integration-review.html](integration-review.html)** page renders the schematics — the 5-layer code integration map, the dependency graph, and the phase timeline — for reviewers who prefer the visual ([rendered preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/feat/oobe-chat-automations/docs/design/oobe/integration-review.html)).
+- The **[integration-review.html](integration-review.html)** page renders the schematics — the 5-layer code integration map, the dependency graph, and the phase timeline — for reviewers who prefer the visual ([rendered preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/main/docs/internal/design/oobe/integration-review.html)).
 
 ---
 

@@ -156,7 +156,7 @@ Each dependency states *what it needs* and *how to build it*; the PLAN sequences
 
 ### 5.5 D-F5 — Carousel data safety  ✅ resolved
 
-*Resolution:* the earlier `MOCK_COMPLETED_TASKS` path is retired. The landing surface reads the durable suggestion projection, renders no cards for an empty feed, and is always available without a rollout switch.
+*Resolution:* the earlier `MOCK_COMPLETED_TASKS` path is retired. The landing surface always reads the durable suggestion projection and renders no cards for an empty feed.
 
 ### 5.6 D-F6 — DESIGN.md + design tokens (cross-cutting, APDD design track)
 
@@ -241,7 +241,7 @@ Following `.claude/rules/testing.md` (integration-first; test through the caller
 ## 10. Feedback & decisions  *(APDD anchor — leave open until review folds in)*
 
 1. **[OPEN]** Phase boundary — is any Vision piece (docked drawer V4, reveal V2) worth pulling into Foundational?
-2. **[OPEN]** D-F2 suggestion producer — deterministic starter set (recommended) vs. triggers-hosted suggester vs. agent-driven? Bounds the first-run feed.
+2. **[RESOLVED]** D-F2 suggestion producer — PR #7694 shipped the durable suggestions producer; the current frontend consumes that contract directly.
 3. **[OPEN]** D-F4 `auto` semantics — exact definition/bounds of "approved task types" (per-tool, per-action, spend/impact caps)?
 4. **[RESOLVED]** D-F5 — the carousel reads the durable projection and the mock path is removed.
 5. **[RESOLVED 2026-08-21]** D-F6 — design governance is owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257, §9); OOBE contributes the card family as a pilot and stands up no `DESIGN.md`, tokens, or workbench of its own (§5.6).
@@ -253,7 +253,7 @@ Following `.claude/rules/testing.md` (integration-first; test through the caller
 - **PR #6918 (target-architecture) framing** — this package mirrors #6918's document set: an executive **README** (overview + reviewer decisions + doc index), an evidence-backed **PROPOSAL** (this file), a sequenced **PLAN** (waves/gates/PR-sizing), and a **CHECKLIST** (definition of done). It borrows #6918's execution discipline: move-only/behavior-free PRs kept separate from semantic changes, guidance travels with the change, deletions use the un-masking discipline, and `main` stays shippable after every PR (PLAN).
 - **APDD kit (product/design governance)** — this package follows the kit's **docs-first feature workflow**: spec → team review (this §10 stays open until folded in) → plan → test plan, with the binding anchors present (*Feedback & Decisions* §10, *Regression Tests* §8, and a *Critical Bug Fix Log* below per Rule 2). The **design track** is not ours to seed: `DESIGN.md` + tokens + the Storybook workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257), and D-F6 contributes the card family as its pilot (§5.6). The kit's evaluation for IronClaw is proposed at `docs/internal/apdd-governance-kit/` ([PR #7255](https://github.com/nearai/ironclaw/pull/7255) — open, not yet on `main`).
 
-<a name="review-artifact"></a>**Human-review artifact.** A self-contained visual review aid — the 5-layer integration schematic, the dependency graph, the phase timeline, and the shipped-vs-net-new map — lives in this package as [integration-review.html](integration-review.html) ([rendered preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/feat/oobe-chat-automations/docs/design/oobe/integration-review.html)). It renders §3, §5, and §6 for reviewers who prefer the visual.
+<a name="review-artifact"></a>**Human-review artifact.** A self-contained visual review aid — the 5-layer integration schematic, the dependency graph, the phase timeline, and the shipped-vs-net-new map — lives in this package as [integration-review.html](integration-review.html) ([rendered preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/main/docs/internal/design/oobe/integration-review.html)). It renders §3, §5, and §6 for reviewers who prefer the visual.
 
 ## 12. Critical Bug Fix Log  *(APDD Rule 2 — the single canonical log)*
 

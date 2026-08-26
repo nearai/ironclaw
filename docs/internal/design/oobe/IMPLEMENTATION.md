@@ -32,7 +32,7 @@ Scope: the six Phase-1 UX changes (PROPOSAL §2A). Foundational only — Vision 
 | Emit the first-run suggested cards | The durable producer seeds real starter suggestions and persists generation state. | **Enabled** |
 | Durable `AutomationTask` event/projection | Not present (`RunStatusProjection`/`RunProjectionStatus` is the closest). | **Not needed for v1** — a card drives an ordinary foreground turn keyed by `run_id`. |
 
-**Conclusion:** the card actions map onto shipped seams, and the durable producer removes the need for a separate rollout switch.
+**Conclusion:** the card actions map onto shipped seams, and the frontend consumes the durable producer directly.
 
 ## 1. Frontend architecture
 

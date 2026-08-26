@@ -18,7 +18,7 @@
 
 1. **D-F5 durable carousel data** ✅ — the landing carousel reads the real suggestion projection and renders an empty feed when no suggestions exist. The earlier prototype's mock path remains retired.
 2. **Contract reconciliation — ✅ done in this PR.** [AUTOMATION-TASKS-CONTRACT.md](AUTOMATION-TASKS-CONTRACT.md) now reflects the post-#6918 family-folder names: event log `ironclaw_event_log` + durable store `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `crates/product/ironclaw_assistant`; routes in `crates/product/ironclaw_webui/src/webui_v2/` (confirmed current). Docs-only.
-3. **Decision round #1** `[decision]` — close PROPOSAL §10 items 2 (suggestion producer) and 4 (carousel gating). One thread each. *(Item 5, the DESIGN.md pilot, is settled — see below.)*
+3. **Decision round #1** ✅ — PROPOSAL §10 items 2 (suggestion producer) and 4 (carousel data safety) are resolved. *(Item 5, the DESIGN.md pilot, is settled — see below.)*
 4. **D-F6 — nothing to seed here.** `DESIGN.md` and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PROPOSAL §5.6); OOBE's contribution is its card taxonomy + a11y floors, offered into that program's `DESIGN.md` (the Phase-2 work tracked by issue #7042, under Epic #7781) rather than a local draft.
 
 *Exit criteria: durable carousel data and the contract reconciliation are complete; §10.2 is resolved by the shipped producer (§10.5 settled — governance owned elsewhere).*
@@ -31,13 +31,13 @@
 - Approve/Revert wire to the existing product adapters (Gmail/Calendar) — **never a second outbound HTTP path**; success admitted from provider evidence + read-back. Modify branches on state (suggested = edit in place; automated = re-run).
 - **Milestone:** `list_automation_tasks` returns real (possibly empty) data; the frontend seam flips mock→`fetch` for `list` with **no component change**.
 
-## Phase F2 — First-run suggestion producer (D-F2) ⚠ gated on decision §10.2
+## Phase F2 — First-run suggestion producer (D-F2) — ✅ complete
 
-*The one genuinely new mechanism — hold the decision before building.*
+*The durable producer shipped in PR #7694; this phase is retained as historical execution context.*
 
-- Implement the decided approach (recommended: **deterministic starter set gated on admin-whitelisted / connected extensions** — PROPOSAL §5.2). A first-login hook appends `AutomationTaskProposed` via the durable sink, filtered to the tools present; no model call in the Foundational version.
-- Tests: a fresh user with tool set X gets exactly the expected proposals; a user with no whitelisted tools gets the safe/no-tool proposals; isolation holds.
-- **Milestone:** a brand-new user sees suggested cards at the first step, from real events — the Foundational cold-start is real end-to-end.
+- **Shipped approach:** the durable suggestions producer described by the governing [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) contract.
+- The frontend consumes that durable feed directly and renders an empty state when it contains no suggestions.
+- **Milestone:** a brand-new user can receive real suggestions directly from the durable feed.
 
 ## Phase F3 — Connect wiring + agent mode (D-F3 + D-F4)
 
@@ -72,9 +72,11 @@ Each is additive and a superset of a Foundational piece; none redo Foundational 
 - **V3 — Docked drawer frame (D-V4).** The composer-docked bordered drawer; reuses the Foundational drawer state machine.
 - **V4 — Named greeting + Bypass mode (D-V5 + V6).** Username derivation (⚠ decision §10.6) and the 4th gate mode (privilege-escalating; gate-suppression tests).
 
-## Suggested first PRs (concrete, in order)
+## Historical suggested first PR sequence
 
-1. **D-F5 durable carousel data** — the landing carousel reads the real projection and renders no cards when it is empty. Small and behavior-free until real suggestions exist.
+*Retained as the original Foundational execution record; completed work is marked below and the current Vision plan is governed by [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md).*
+
+1. **D-F5 durable carousel data** — ✅ complete; the landing carousel reads the real projection and renders no cards when it is empty.
 2. **Contract reconciliation** — crate-name refresh in the contract doc (docs-only). *(✅ already landed in this PR.)*
 3. **D-F1 part 1** — `AutomationTask` model + newtype + the 5 events with their persistence/replay/redaction/ordering/serialization tests.
 4. **D-F1 part 2** — `AutomationTaskProjection` + the cross-user isolation test; flip the `list` seam mock→`fetch`.
