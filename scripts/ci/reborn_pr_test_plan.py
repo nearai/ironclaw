@@ -73,6 +73,8 @@ def _sandbox_docker_prefixes() -> tuple[str, ...]:
 MAX_PR_CRATE_BUCKETS = 3
 DIFF_EVENTS = {"pull_request", "merge_group"}
 FULL_EVENTS = {"push", "workflow_call", "workflow_dispatch", "schedule"}
+ALL_ROOT_PARTITIONS = (0, 1, 2, 3)
+ALL_INTEGRATION_LANES = (0, 1, 2, 3, "groups")
 # Doc-fact contract tests (#7378) read `docs/` pages from inside owning
 # crates, so a published-page edit can fail a cargo test. Route those edits
 # to exactly the doc-fact test binaries (no reverse-dependency widening —
@@ -854,8 +856,8 @@ def _full_plan(
         "changed_packages": [],
         "affected_packages": canonical_packages,
         "crate_buckets": _bucket_packages(canonical_packages),
-        "root_partitions": [0, 1, 2, 3],
-        "integration_lanes": [0, 1, 2, 3, "groups"],
+        "root_partitions": list(ALL_ROOT_PARTITIONS),
+        "integration_lanes": list(ALL_INTEGRATION_LANES),
         "run_group_tests": True,
         "run_qa_replay": True,
         "run_sandbox_docker": True,
@@ -1086,22 +1088,36 @@ def build_plan(
             path.startswith("tests/support/reborn_parity_qa/")
             or path == "tests/support_unit_tests.rs"
         ):
-            root_partitions.add(0)
-            reasons.append(
-                "shared root-test support changed; PR runs a representative partition"
-            )
+            if event == "merge_group":
+                root_partitions.update(ALL_ROOT_PARTITIONS)
+                reasons.append(
+                    "shared root-test support changed; merge group runs every root partition"
+                )
+            else:
+                root_partitions.add(0)
+                reasons.append(
+                    "shared root-test support changed; PR runs a representative partition"
+                )
             continue
         if path.startswith("tests/support/") and path not in INTEGRATION_SUPPORT_OWNERS:
             # Direct shared root-test support (tests/support/mod.rs and the
             # modules it declares). The integration group targets also compile
             # this tree via `#[path = "../../support/mod.rs"]`, so schedule a
             # representative lane of each tier.
-            root_partitions.add(0)
-            integration_lanes.add(0)
-            reasons.append(
-                "shared root-test support changed; PR runs a representative "
-                "partition and integration lane"
-            )
+            if event == "merge_group":
+                root_partitions.update(ALL_ROOT_PARTITIONS)
+                integration_lanes.update(ALL_INTEGRATION_LANES)
+                reasons.append(
+                    "shared root-test support changed; merge group runs every "
+                    "root and integration consumer lane"
+                )
+            else:
+                root_partitions.add(0)
+                integration_lanes.add(0)
+                reasons.append(
+                    "shared root-test support changed; PR runs a representative "
+                    "partition and integration lane"
+                )
             continue
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
@@ -1123,6 +1139,23 @@ def build_plan(
         if snapshot_owner is not None:
             integration_lanes.add(integration_inventory[snapshot_owner])
             reasons.append(f"integration test snapshot changed: {path}")
+            continue
+        if path.startswith("tests/integration/support/"):
+            if event == "merge_group":
+                # Root parity/QA binaries and every flat/group integration
+                # target compile this support tree, so the queue must run all
+                # of those consumers together.
+                root_partitions.update(ALL_ROOT_PARTITIONS)
+                integration_lanes.update(ALL_INTEGRATION_LANES)
+                reasons.append(
+                    "shared integration support changed; merge group runs every "
+                    "root and integration consumer lane"
+                )
+            else:
+                integration_lanes.add(0)
+                reasons.append(
+                    "shared integration support changed; PR runs a representative lane"
+                )
             continue
         if path.startswith("tests/integration/"):
             integration_lanes.add(0)
@@ -1371,7 +1404,7 @@ def build_plan(
         "integration_lanes": sorted(
             integration_lanes, key=lambda value: (isinstance(value, str), str(value))
         ),
-        "run_group_tests": False,
+        "run_group_tests": event == "merge_group" and "groups" in integration_lanes,
         "run_qa_replay": run_qa_replay,
         "run_sandbox_docker": run_sandbox_docker,
         "coverage_mode": "none",

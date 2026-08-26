@@ -2150,6 +2150,26 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["root_partitions"], [0])
         self.assertEqual(plan["integration_lanes"], [0])
 
+    def test_merge_group_shared_root_support_runs_every_root_partition(self) -> None:
+        for path in (
+            "tests/support/reborn_parity_qa/assertions.rs",
+            "tests/support/mod.rs",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("merge_group", [path])
+                self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+
+    def test_merge_group_shared_integration_support_runs_every_integration_lane(
+        self,
+    ) -> None:
+        for path in ("tests/integration/support/database.rs", "tests/support/mod.rs"):
+            with self.subTest(path=path):
+                plan = self.plan("merge_group", [path])
+                self.assertEqual(
+                    plan["integration_lanes"], [0, 1, 2, 3, "groups"]
+                )
+                self.assertTrue(plan["run_group_tests"])
+
 
     def test_owned_integration_support_selects_its_exact_lane(self) -> None:
         for path, owner in planner.INTEGRATION_SUPPORT_OWNERS.items():
@@ -2373,14 +2393,31 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn('package_args+=(-p "${package}")', code_style)
         self.assertIn("needs.changes.outputs.has_clippy == 'true'", code_style)
         self.assertIn(
-            'cargo clippy "${package_args[@]}" --tests --examples', code_style
-        )
-        self.assertIn(
-            'cargo clippy "${package_args[@]}" --lib --bins -- -D warnings',
+            "needs.changes.outputs.has_clippy == 'true' &&\n"
+            "      (needs.changes.outputs.has_code == 'true' ||\n"
+            "       needs.changes.outputs.clippy_scope == 'full')",
             code_style,
         )
         self.assertIn(
-            "cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings",
+            'if [[ "${{ needs.changes.outputs.has_code }}" == "false" &&\n'
+            '                "${{ needs.changes.outputs.clippy_scope }}" != "full" ]]; then',
+            code_style,
+        )
+        self.assertIn('if [[ "${clippy_scope}" == "full" ]] ||', code_style)
+        self.assertIn(
+            "if: needs.changes.outputs.clippy_scope == 'full' && "
+            "github.event_name != 'pull_request'",
+            code_style,
+        )
+        self.assertIn(
+            'cargo clippy "${package_args[@]}" --all-targets', code_style
+        )
+        self.assertIn(
+            'cargo clippy "${package_args[@]}" -- -D warnings',
+            code_style,
+        )
+        self.assertIn(
+            "cargo clippy --all --all-targets ${{ matrix.flags }} -- -D warnings",
             code_style,
         )
         self.assertIn(

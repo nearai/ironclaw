@@ -6,7 +6,7 @@ a check belongs to exactly one tier on purpose.
 | Tier | Event | Job |
 |---|---|---|
 | PR feedback | `pull_request` | Fast, scoped signal for the author. May run slim matrices and path-scoped subsets. |
-| **Production gate** | `merge_group` (merge queue) | The authority on what reaches `main`. Runs affected deterministic checks for the combined candidate and widens to exhaustive coverage for global, topology, or unclassified changes. |
+| **Production gate** | `merge_group` (merge queue) | The authority on what reaches `main`. Runs affected deterministic checks for the combined candidate and widens to exhaustive deterministic checks for global, topology, or unclassified changes. |
 | Post-merge confirm | `push` to `main` | Runs exhaustive coverage, warms shared caches, and feeds Codecov/canaries. A main-only deterministic failure means the affected-area classifier missed an impact and must be widened. |
 | Deep / scheduled | `schedule` (nightly) | Exhaustive suites too slow for the queue: legacy v1 matrix, full browser E2E, stress scans. |
 
@@ -51,8 +51,8 @@ planner's reverse-dependency closure without the PR fan-out caps. Shared root
 or integration support changes select their owning lanes. CI workflow, CI
 script, coverage-policy, toolchain, workspace topology, and other global inputs
 widen the merge group to every crate bucket, root partition, group suite,
-integration lane, recorded replay, and coverage gate. Unclassified merge-group
-paths also widen to exhaustive coverage; unclassified pull-request paths and
+integration lane, and recorded replay. Unclassified merge-group paths also
+widen to exhaustive deterministic checks; unclassified pull-request paths and
 empty diffs fail planning loudly. Push, schedule, and manual runs remain
 exhaustive. A planner execution or schema failure fails the required check.
 `Cargo.lock` is scoped only when a structured base/head comparison proves that

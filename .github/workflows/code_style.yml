@@ -92,7 +92,8 @@ jobs:
             echo "has_clippy=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|deny\.toml$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|scripts/(check|test-check)-type-duplicates\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$|\.github/workflows/ironclaw-release\.yml$|rust-toolchain\.toml$|\.github/actions/setup-rust/)'; then
+          if [[ "${clippy_scope}" == "full" ]] || \
+             printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|deny\.toml$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/entrypoint\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|scripts/(check|test-check)-type-duplicates\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$|\.github/workflows/ironclaw-release\.yml$|rust-toolchain\.toml$|\.github/actions/setup-rust/)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -160,7 +161,8 @@ jobs:
     needs: changes
     # `has_guidance` OR-s in the guidance surfaces (.claude/, root
     # AGENTS.md/CLAUDE.md, docs/) so check-guidance.py runs for the files it
-    # governs; every other lane keys on `has_code` alone.
+    # governs. Clippy additionally follows `clippy_scope=full` for merge-group
+    # inputs that are outside the narrow `has_code` path filter.
     if: needs.changes.outputs.has_code == 'true' || needs.changes.outputs.has_guidance == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -375,8 +377,9 @@ jobs:
     name: Clippy (${{ matrix.name }})
     needs: changes
     if: >-
-      needs.changes.outputs.has_code == 'true' &&
-      needs.changes.outputs.has_clippy == 'true'
+      needs.changes.outputs.has_clippy == 'true' &&
+      (needs.changes.outputs.has_code == 'true' ||
+       needs.changes.outputs.clippy_scope == 'full')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -462,7 +465,7 @@ jobs:
           while IFS= read -r package; do
             package_args+=(-p "${package}")
           done < <(jq -r '.[]' <<< "${CLIPPY_PACKAGES}")
-          cargo clippy "${package_args[@]}" --tests --examples \
+          cargo clippy "${package_args[@]}" --all-targets \
             ${{ matrix.flags }} -- -D warnings
       - name: Check affected production-target lints (no dev-dependency features)
         if: github.event_name == 'merge_group' && needs.changes.outputs.clippy_scope == 'selected' && matrix.name == 'default'
@@ -473,10 +476,10 @@ jobs:
           while IFS= read -r package; do
             package_args+=(-p "${package}")
           done < <(jq -r '.[]' <<< "${CLIPPY_PACKAGES}")
-          cargo clippy "${package_args[@]}" --lib --bins -- -D warnings
+          cargo clippy "${package_args[@]}" -- -D warnings
       - name: Check all-target lints
         if: needs.changes.outputs.clippy_scope == 'full'
-        run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
+        run: cargo clippy --all --all-targets ${{ matrix.flags }} -- -D warnings
       # #7119. The PR lane above lints only the *changed* packages, so a crate
       # that is merely a dependency of that set compiles with whatever features
       # the set happens to enable. `--lib --bins` builds no dev-dependencies, and
@@ -545,7 +548,7 @@ jobs:
           key: windows-${{ matrix.name }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check lints
-        run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
+        run: cargo clippy --all --all-targets ${{ matrix.flags }} -- -D warnings
 
   reborn-cli-smoke:
     name: Reborn CLI smoke tests
@@ -657,7 +660,8 @@ jobs:
             exit 1
           fi
 
-          if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
+          if [[ "${{ needs.changes.outputs.has_code }}" == "false" &&
+                "${{ needs.changes.outputs.clippy_scope }}" != "full" ]]; then
             if [[ "${{ needs.changes.outputs.has_reborn_cli }}" == "true" && "${{ needs.reborn-cli-smoke.result }}" != "success" ]]; then
               echo "Reborn CLI smoke failed: ${{ needs.reborn-cli-smoke.result }}"
               exit 1
@@ -704,7 +708,7 @@ jobs:
             fi
           done
       - name: Assert the full clippy matrix ran (merge queue + push)
-        if: needs.changes.outputs.has_code == 'true' && github.event_name != 'pull_request'
+        if: needs.changes.outputs.clippy_scope == 'full' && github.event_name != 'pull_request'
         env:
           MATRIX_JSON: ${{ needs.changes.outputs.clippy_matrix }}
         run: |

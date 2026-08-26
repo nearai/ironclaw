@@ -40,6 +40,35 @@ def _workspace_packages(metadata: dict[str, Any]) -> list[tuple[Path, str]]:
     )
 
 
+def _reverse_dependency_closure(
+    metadata: dict[str, Any], roots: set[str]
+) -> set[str]:
+    workspace_members = set(metadata["workspace_members"])
+    workspace_packages = {
+        package["name"]: package
+        for package in metadata["packages"]
+        if package["id"] in workspace_members
+    }
+    dependents: dict[str, set[str]] = {
+        package_name: set() for package_name in workspace_packages
+    }
+    for package_name, package in workspace_packages.items():
+        for dependency in package.get("dependencies", []):
+            dependency_name = dependency.get("name")
+            if dependency_name in dependents:
+                dependents[dependency_name].add(package_name)
+
+    closure = set(roots)
+    pending = list(roots)
+    while pending:
+        package_name = pending.pop()
+        for dependent in dependents.get(package_name, set()):
+            if dependent not in closure:
+                closure.add(dependent)
+                pending.append(dependent)
+    return closure
+
+
 def changed_production_packages(
     changed_paths: list[str], metadata: dict[str, Any]
 ) -> list[str]:
@@ -104,6 +133,7 @@ def classify_clippy_scope(
         "CLAUDE.md",
         "README.md",
     }
+    production_packages: set[str] = set()
     for path in normalized_paths:
         matched_workspace_package = False
         for directory, package in sorted(
@@ -113,13 +143,19 @@ def classify_clippy_scope(
             if prefix and not path.startswith(prefix):
                 continue
             relative = path.removeprefix(prefix)
-            if (
+            production_input = (
                 relative == "Cargo.toml"
                 or relative == "build.rs"
-                or relative.startswith(("src/", "tests/", "benches/", "examples/"))
-            ):
+                or relative.startswith("src/")
+            )
+            package_test_surface = relative.startswith(
+                ("tests/", "benches/", "examples/")
+            )
+            if production_input or package_test_surface:
                 selected.add(package)
                 matched_workspace_package = True
+                if production_input:
+                    production_packages.add(package)
             break
         if path.startswith("crates/") and not matched_workspace_package:
             return {"mode": "full", "packages": []}
@@ -130,6 +166,7 @@ def classify_clippy_scope(
         ):
             return {"mode": "full", "packages": []}
 
+    selected.update(_reverse_dependency_closure(metadata, production_packages))
     package_names = sorted(selected)
     return {
         "mode": "selected" if package_names else "none",

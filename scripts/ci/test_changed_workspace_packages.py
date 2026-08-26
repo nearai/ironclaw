@@ -25,16 +25,19 @@ def metadata() -> dict:
                 "id": "root",
                 "name": "root",
                 "manifest_path": str(ROOT / "Cargo.toml"),
+                "dependencies": [{"name": "nested"}],
             },
             {
                 "id": "alpha",
                 "name": "alpha",
                 "manifest_path": str(ROOT / "crates/alpha/Cargo.toml"),
+                "dependencies": [],
             },
             {
                 "id": "nested",
                 "name": "nested",
                 "manifest_path": str(ROOT / "crates/family/nested/Cargo.toml"),
+                "dependencies": [{"name": "alpha"}],
             },
         ],
     }
@@ -100,6 +103,28 @@ class ChangedWorkspacePackagesTests(unittest.TestCase):
                 event="merge_group",
             ),
             {"mode": "selected", "packages": ["alpha", "nested"]},
+        )
+
+    def test_merge_group_production_changes_select_reverse_dependency_closure(
+        self,
+    ) -> None:
+        self.assertEqual(
+            selector.classify_clippy_scope(
+                ["crates/alpha/src/lib.rs"],
+                metadata(),
+                event="merge_group",
+            ),
+            {"mode": "selected", "packages": ["alpha", "nested", "root"]},
+        )
+
+    def test_merge_group_test_surface_selects_only_owning_package(self) -> None:
+        self.assertEqual(
+            selector.classify_clippy_scope(
+                ["crates/alpha/tests/contract.rs"],
+                metadata(),
+                event="merge_group",
+            ),
+            {"mode": "selected", "packages": ["alpha"]},
         )
 
     def test_merge_group_global_inputs_escalate_to_full(self) -> None:
