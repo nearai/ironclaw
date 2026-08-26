@@ -624,7 +624,7 @@ impl RebornIntegrationHarnessBuilder {
     /// `GithubHarnessAuthorizer`, which allows every dispatch with an
     /// `InjectCredentialAccountOnce` obligation. A scripted `github.*` tool call
     /// then executes the real WASM module, whose outbound HTTP request has a
-    /// synthetic `Authorization: Bearer <token>` credential injected by the host
+    /// synthetic `Authorization: token <token>` credential injected by the host
     /// egress pipeline before it reaches the recording network egress. Proves
     /// credential injection reaches the wire (T0-SECRET-INJECT).
     ///

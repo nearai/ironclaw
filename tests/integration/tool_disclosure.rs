@@ -109,7 +109,7 @@ async fn assert_deferred_bridge_flow(harness: &RebornIntegrationHarness) {
         .assert_network_egress_header_contains(
             "api.github.com/repos/nearai/ironclaw",
             "authorization",
-            "Bearer ghp_fake_fixture_token",
+            "token ghp_fake_fixture_token",
         )
         .await
         .expect("tool_call target reaches mediated GitHub egress with injected credentials");
