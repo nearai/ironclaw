@@ -63,18 +63,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
-          fetch-depth: 0
-          # The scope calculation needs merge-base ancestry for its three-dot
-          # diff, but no historical file contents.
+          # PR scope keeps full ancestry for its three-dot diff. A merge-group
+          # checkout is the candidate commit only; its base is fetched below.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           filter: blob:none
           persist-credentials: false
+      - name: Fetch merge-group base for scope diff
+        if: github.event_name == 'merge_group'
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: git fetch --no-tags --filter=blob:none --depth=1 origin "$BASE_SHA"
       - id: diff
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
-          CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            CHANGED_FILES="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          else
+            CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
+          fi
           printf '%s\n' "$CHANGED_FILES" > "${RUNNER_TEMP}/changed-files.txt"
 
           clippy_plan="$(
@@ -548,7 +557,7 @@ jobs:
           key: windows-${{ matrix.name }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check lints
-        run: cargo clippy --all --all-targets ${{ matrix.flags }} -- -D warnings
+        run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
   reborn-cli-smoke:
     name: Reborn CLI smoke tests

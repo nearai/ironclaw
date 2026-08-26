@@ -290,6 +290,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         for path in (
             "Cargo.toml",
             "Cargo.lock",
+            "crates/alpha/Cargo.toml",
             "rust-toolchain.toml",
             ".config/nextest.toml",
             ".github/workflows/reborn-tests.yml",
@@ -2430,10 +2431,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
             workflow,
         )
 
-    def test_scope_checkouts_minimize_transfer_without_losing_pr_ancestry(
+    def test_scope_checkouts_keep_pr_ancestry_and_bound_merge_group_fetches(
         self,
     ) -> None:
-        """Scope jobs keep merge-base semantics without downloading history blobs."""
+        """PRs keep three-dot ancestry; merge groups fetch only their base."""
         reborn_tests = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
             encoding="utf-8"
         )
@@ -2441,19 +2442,32 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "\n  crate-tests:\n", 1
         )[0]
         self.assertIn(
-            "fetch-depth: "
-            "${{ (github.event_name == 'pull_request' || "
-            "github.event_name == 'merge_group') && '0' || '1' }}",
+            "fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}",
             reborn_scope,
         )
         self.assertIn("filter: blob:none", reborn_scope)
         self.assertIn("github.event.merge_group.base_sha", reborn_scope)
         self.assertIn(
-            "github.event_name == 'pull_request' || "
-            "github.event_name == 'merge_group'",
+            'git fetch --no-tags --filter=blob:none --depth=1 origin "$BASE_SHA"',
             reborn_scope,
         )
+        self.assertIn(
+            'if [[ "${{ github.event_name }}" == "pull_request" || '
+            '"${{ github.event_name }}" == "merge_group" ]]; then',
+            reborn_scope,
+        )
+        self.assertIn('if [[ "${{ github.event_name }}" == "merge_group" ]]; then', reborn_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA" "$HEAD_SHA"', reborn_scope)
         self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', reborn_scope)
+        self.assertEqual(
+            reborn_scope.count('git diff --name-only "$BASE_SHA" "$HEAD_SHA"'),
+            1,
+        )
+        self.assertEqual(
+            reborn_scope.count('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"'),
+            1,
+        )
+        self.assertIn("ref: ${{ inputs.ref || github.sha }}", reborn_scope)
 
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
             encoding="utf-8"
@@ -2461,9 +2475,44 @@ class RebornPrTestPlanTests(unittest.TestCase):
         style_scope = code_style.split("\n  changes:\n", 1)[1].split(
             "\n  fast-checks:\n", 1
         )[0]
-        self.assertIn("fetch-depth: 0", style_scope)
+        self.assertIn(
+            "fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}",
+            style_scope,
+        )
         self.assertIn("filter: blob:none", style_scope)
+        self.assertIn("github.event.merge_group.base_sha", style_scope)
+        self.assertIn(
+            'git fetch --no-tags --filter=blob:none --depth=1 origin "$BASE_SHA"',
+            style_scope,
+        )
+        self.assertIn('if [[ "${{ github.event_name }}" == "merge_group" ]]; then', style_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA" "$HEAD_SHA"', style_scope)
         self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', style_scope)
+        self.assertEqual(
+            style_scope.count('git diff --name-only "$BASE_SHA" "$HEAD_SHA"'),
+            1,
+        )
+        self.assertEqual(
+            style_scope.count('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"'),
+            1,
+        )
+
+    def test_windows_push_clippy_keeps_tests_and_examples_scope(self) -> None:
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        windows_scope = code_style.split("\n  clippy-windows:\n", 1)[1].split(
+            "\n  reborn-cli-smoke:\n", 1
+        )[0]
+        self.assertIn(
+            "if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push'",
+            windows_scope,
+        )
+        self.assertIn(
+            "run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings",
+            windows_scope,
+        )
+        self.assertNotIn("--all-targets", windows_scope)
 
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(

@@ -43,6 +43,18 @@ def metadata() -> dict:
     }
 
 
+def metadata_with_renamed_workspace_dependency() -> dict:
+    data = metadata()
+    data["packages"][0]["dependencies"] = [
+        {
+            "name": "nested",
+            "rename": "renamed-nested",
+            "path": str(ROOT / "crates/family/nested"),
+        }
+    ]
+    return data
+
+
 class ChangedWorkspacePackagesTests(unittest.TestCase):
     def test_selects_direct_production_packages(self) -> None:
         self.assertEqual(
@@ -97,6 +109,7 @@ class ChangedWorkspacePackagesTests(unittest.TestCase):
             selector.classify_clippy_scope(
                 [
                     "crates/alpha/tests/contract.rs",
+                    "crates/alpha/benches/throughput.rs",
                     "crates/family/nested/examples/demo.rs",
                 ],
                 metadata(),
@@ -112,6 +125,18 @@ class ChangedWorkspacePackagesTests(unittest.TestCase):
             selector.classify_clippy_scope(
                 ["crates/alpha/src/lib.rs"],
                 metadata(),
+                event="merge_group",
+            ),
+            {"mode": "selected", "packages": ["alpha", "nested", "root"]},
+        )
+
+    def test_reverse_closure_uses_resolved_identity_for_renamed_dependency(
+        self,
+    ) -> None:
+        self.assertEqual(
+            selector.classify_clippy_scope(
+                ["crates/alpha/src/lib.rs"],
+                metadata_with_renamed_workspace_dependency(),
                 event="merge_group",
             ),
             {"mode": "selected", "packages": ["alpha", "nested", "root"]},
@@ -136,6 +161,19 @@ class ChangedWorkspacePackagesTests(unittest.TestCase):
             ".github/workflows/code_style.yml",
             ".github/actions/setup-rust/action.yml",
             "scripts/ci/changed_workspace_packages.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    selector.classify_clippy_scope(
+                        [path], metadata(), event="merge_group"
+                    ),
+                    {"mode": "full", "packages": []},
+                )
+
+    def test_merge_group_workspace_member_manifests_escalate_to_full(self) -> None:
+        for path in (
+            "crates/alpha/Cargo.toml",
+            "crates/family/nested/Cargo.toml",
         ):
             with self.subTest(path=path):
                 self.assertEqual(

@@ -49,12 +49,23 @@ def _reverse_dependency_closure(
         for package in metadata["packages"]
         if package["id"] in workspace_members
     }
+    workspace_package_by_directory = {
+        Path(package["manifest_path"]).resolve().parent: package["name"]
+        for package in workspace_packages.values()
+    }
     dependents: dict[str, set[str]] = {
         package_name: set() for package_name in workspace_packages
     }
     for package_name, package in workspace_packages.items():
         for dependency in package.get("dependencies", []):
-            dependency_name = dependency.get("name")
+            dependency_name = None
+            dependency_path = dependency.get("path")
+            if dependency_path:
+                dependency_name = workspace_package_by_directory.get(
+                    Path(dependency_path).resolve()
+                )
+            if dependency_name is None:
+                dependency_name = dependency.get("name")
             if dependency_name in dependents:
                 dependents[dependency_name].add(package_name)
 
@@ -116,14 +127,21 @@ def classify_clippy_scope(
         packages = changed_production_packages(list(normalized_paths), metadata)
         return {"mode": "selected" if packages else "none", "packages": packages}
 
+    packages = _workspace_packages(metadata)
+    workspace_manifests = {
+        "Cargo.toml"
+        if str(directory) == "."
+        else f"{directory.as_posix()}/Cargo.toml"
+        for directory, _package in packages
+    }
     if any(
         path in MERGE_GROUP_FULL_PATHS
+        or path in workspace_manifests
         or path.startswith(MERGE_GROUP_FULL_PREFIXES)
         for path in normalized_paths
     ):
         return {"mode": "full", "packages": []}
 
-    packages = _workspace_packages(metadata)
     selected: set[str] = set()
     ignored_prefixes = ("docs/", "openwiki/", ".claude/", ".github/ISSUE_TEMPLATE/")
     ignored_paths = {

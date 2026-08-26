@@ -927,6 +927,21 @@ def build_plan(
             )
 
     package_directories, reverse = _workspace_packages(metadata)
+    if event == "merge_group":
+        changed_manifest = next(
+            (
+                f"{directory}/Cargo.toml"
+                for directory in sorted(package_directories)
+                if f"{directory}/Cargo.toml" in paths
+            ),
+            None,
+        )
+        if changed_manifest is not None:
+            return _full_plan(
+                "merge-group workspace topology input changed: "
+                f"{changed_manifest}; running the exhaustive plan",
+                canonical_packages,
+            )
     production_packages: set[str] = set()
     direct_test_packages: set[str] = set()
     exact_test_targets: dict[str, set[tuple[str, str]]] = defaultdict(set)
