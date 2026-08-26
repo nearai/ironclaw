@@ -70,9 +70,11 @@ struct FrozenPathCount {
 /// eye: **79 paths / 276 members**. Lowered to **79/274** across two steps: the sandbox
 /// profile wiring made `RebornRuntimeStores::capability_policy` production-used instead of
 /// test-support-only, then #7171 did the same for the skill mount view once
-/// `skill_mounts_for` began deriving it per gate.
+/// `skill_mounts_for` began deriving it per gate. Lowered to **79/272** when
+/// the caller-filtered extension-authority test seam reused the production
+/// capability surface and deleted two duplicate test-only policy builders.
 const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 270;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 268;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -428,8 +430,10 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         // 51 -> 50: `skill_mounts_for_test` deleted. A pre-built, scope-free skill view on a
         // production struct is what let approval lease terms name `/projects/skills` while every
         // skill capability wrote to `/tenants/<t>/users/<u>/skills`; the replacement is a scope-taking
-        // free function, which this ratchet does not count.
-        count: 50,
+        // free function, which this ratchet does not count. 50 -> 48: caller-filtered extension
+        // authority now reuses the production capability surface instead of two duplicate
+        // test-only policy builders.
+        count: 48,
     },
     FrozenPathCount {
         category: "test-support",

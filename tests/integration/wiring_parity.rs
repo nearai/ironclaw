@@ -7,7 +7,7 @@
 //! edits: the mechanism is entirely test-side.
 //!
 //! **Scope, by design**: this compares Some/None SHAPE only, never field
-//! VALUES; only the local-dev/local-dev-yolo production profile (never
+//! VALUES; only the local-dev and local-dev-yolo production profiles (never
 //! `Production`/`HostedSingleTenant*`); never `DefaultPlannedRuntimeConfig`'s
 //! inner fields. Known accepted gap: it also cannot detect a silent
 //! value-preserving rewiring of an *existing* field in production — only
@@ -85,7 +85,7 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         // model cost table sets `model_budget_accountant: Some(..)` instead
         // (the `(_, Some(cost_table)) => Some(accountant)` arm) — this
         // constant does NOT hold for that case; it only pins the
-        // local-dev/harness scope this file compares.
+        // local-dev harness scope this file compares.
         model_budget_accountant: false,
         safety_context: false,                  // hardcoded None
         hook_security_audit_sink: true, // runtime.rs:3780 always Some(TracingSecurityAuditSink)

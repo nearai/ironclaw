@@ -248,16 +248,10 @@ impl RebornCapabilityBackend {
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::SandboxShellTools => {
-                if !matches!(shell_mode, ShellMode::Inert) {
-                    return Err(
-                        "sandbox shell harness executes real containers and does not support \
-                         shell mode overrides"
-                            .into(),
-                    );
-                }
-                let host_runtime =
-                    super::harness::profiles::sandbox_shell::sandbox_shell_tools().await?;
-                GroupCapability::HostRuntime(Arc::new(host_runtime))
+                return Err(
+                    "sandbox shell backend must be installed after canonical binding resolution"
+                        .into(),
+                );
             }
         })
     }

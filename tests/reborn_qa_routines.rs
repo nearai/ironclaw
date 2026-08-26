@@ -286,7 +286,7 @@ async fn build_qa_fire_runtime(
     let input = local_runtime_build_input_with_options(
         RebornCompositionProfile::StandaloneUnrestricted,
         QA_USER,
-        root.path().join("local-dev"),
+        ironclaw_config::RebornStoragePaths::from_installation_root(root.path()),
         RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },

@@ -256,7 +256,15 @@ observed_date = "2026-08-08"
 # that explanation now has one home and composition points at it, which is why
 # the seed is 42371 rather than 42380. Measured with
 # `bash scripts/ci/check-composition-budget.sh --print`, not padded.
-loc_ceiling = 42371
+#
+# Union re-measured 42371 -> 43513 on 2026-08-24 after merging the
+# profile-stable storage assembly with current main. The branch keeps concrete
+# filesystem construction, exact host-root validation, and the boot-migration
+# seam in composition as deployment assembly while exposing only the neutral
+# `RootFilesystem` contract downstream. This is the gate's exact merged-tree
+# measurement from `bash scripts/ci/check-composition-budget.sh --print`, not a
+# sum of branch deltas and not padded.
+loc_ceiling = 43513
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -267,7 +275,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42371
+loc_observed = 43513
 loc_observed_date = "2026-08-24"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
@@ -341,13 +349,14 @@ loc_observed_date = "2026-08-24"
 # measured on the merged tree, keeping the designed 15-site window.
 # 823 -> 826 on 2026-08-13 after merging #7532: the structured-trigger path
 # adds the production preflight seam and carries its existing multi-impl
-# capability/create-hook ports through assembly. The merged tree reports 841;
-# 826 + 15 tolerance = 841, preserving zero hidden headroom.
+# capability/create-hook ports through assembly.
 # 826 -> 830 on 2026-08-14 for the shared runtime-event sink: four governed
 # carrier/assembly sites route cancellation and milestone producers through one
 # `EventSink` seam. Production uses `CoalescingEventSink`; the overload fake
-# verifies lossless cancellation behavior. The merged tree reports 845;
-# 830 + 15 tolerance = 845, preserving zero hidden headroom.
+# verifies lossless cancellation behavior.
+# Re-equalized on 2026-08-21 after the final main merge: the merged tree reports
+# 845 governed sites. Keep main's existing 830 + 15 effective ceiling rather
+# than lowering it below both main and this branch's unchanged observation.
 arc_dyn_ceiling = 830
 arc_dyn_tolerance = 15
 arc_dyn_observed = 845

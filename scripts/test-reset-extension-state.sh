@@ -4,15 +4,15 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 script="$repo_root/scripts/reset-extension-state.sh"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/ironclaw-extension-reset.XXXXXX")"
-storage_root="$fixture_root/storage"
-database="$storage_root/reborn-local-dev.db"
+storage_root="$fixture_root/reborn-home"
+database="$storage_root/state/reborn-local-dev.db"
 
 cleanup() {
   find "$fixture_root" -depth -delete
 }
 trap cleanup EXIT
 
-mkdir -p "$storage_root/system/extensions/slack"
+mkdir -p "$storage_root/state" "$storage_root/system/extensions/slack"
 printf 'fixture\n' >"$storage_root/system/extensions/slack/manifest.toml"
 
 sqlite3 "$database" <<'SQL'

@@ -6,7 +6,13 @@ use ironclaw_host_api::{
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
     resource::ResourceScope,
 };
+#[cfg(not(target_os = "macos"))]
 use tempfile::tempdir;
+
+#[cfg(target_os = "macos")]
+fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new().tempdir_in("/private/tmp")
+}
 
 #[tokio::test]
 async fn local_create_subtree_atomic_publishes_the_complete_batch() {
@@ -897,6 +903,145 @@ async fn nonexistent_backend_mount_root_fails_without_leaking_host_path() {
     let display = err.to_string();
     assert!(display.contains("/projects"));
     assert!(!display.contains(&missing.display().to_string()));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn admitted_mount_root_substitution_cannot_redirect_writes() {
+    let storage = tempdir().unwrap();
+    let base = storage.path().canonicalize().unwrap();
+    let admitted = base.join("admitted");
+    let retained = base.join("retained");
+    let outside = base.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+
+    let mut root = DiskFilesystem::new();
+    root.mount_local_create(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(admitted.clone()),
+    )
+    .await
+    .unwrap();
+
+    std::fs::rename(&admitted, &retained).unwrap();
+    std::os::unix::fs::symlink(&outside, &admitted).unwrap();
+
+    root.write_file(
+        &VirtualPath::new("/projects/nested/result.txt").unwrap(),
+        b"retained capability",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(retained.join("nested/result.txt")).unwrap(),
+        b"retained capability"
+    );
+    assert!(!outside.join("nested/result.txt").exists());
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn admitted_mount_rejects_a_symlink_component() {
+    let storage = tempdir().unwrap();
+    let base = storage.path().canonicalize().unwrap();
+    let outside = base.join("outside");
+    let alias = base.join("alias");
+    std::fs::create_dir(&outside).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &alias).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&outside, &alias).unwrap();
+
+    let mut root = DiskFilesystem::new();
+    let error = root
+        .mount_local_create(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(alias),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, FilesystemError::LocalCapability { .. }));
+    assert!(!error.to_string().contains(base.to_string_lossy().as_ref()));
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn admitted_mount_rejects_a_nonfinal_symlink_ancestor() {
+    let storage = tempdir().unwrap();
+    let base = storage.path().canonicalize().unwrap();
+    let outside = base.join("outside");
+    let existing = outside.join("existing");
+    let alias = base.join("alias");
+    std::fs::create_dir_all(&existing).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &alias).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&outside, &alias).unwrap();
+
+    let mut root = DiskFilesystem::new();
+    let error = root
+        .mount_local_create(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(alias.join("existing/mount")),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, FilesystemError::LocalCapability { .. }));
+    assert!(!outside.join("existing/mount").exists());
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn admitted_mount_root_substitution_cannot_redirect_atomic_subtree_publication() {
+    let storage = tempdir().unwrap();
+    let base = storage.path().canonicalize().unwrap();
+    let admitted = base.join("admitted-subtree");
+    let retained = base.join("retained-subtree");
+    let outside = base.join("outside-subtree");
+    std::fs::create_dir(&outside).unwrap();
+
+    let mut root = DiskFilesystem::new();
+    root.mount_local_create(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(admitted.clone()),
+    )
+    .await
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        std::fs::rename(&admitted, &retained).unwrap();
+        std::os::unix::fs::symlink(&outside, &admitted).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        // cap-std deliberately opens directory handles without share-delete,
+        // so Windows itself may refuse this substitution while the handle is live.
+        if std::fs::rename(&admitted, &retained).is_err() {
+            return;
+        }
+        std::os::windows::fs::symlink_dir(&outside, &admitted).unwrap();
+    }
+
+    root.create_subtree_atomic(
+        &VirtualPath::new("/projects/bundle").unwrap(),
+        vec![AtomicSubtreeEntry {
+            path: VirtualPath::new("/projects/bundle/SKILL.md").unwrap(),
+            entry: Entry::bytes(b"retained subtree".to_vec()),
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read(retained.join("bundle/SKILL.md")).unwrap(),
+        b"retained subtree"
+    );
+    assert!(!outside.join("bundle/SKILL.md").exists());
 }
 
 #[tokio::test]

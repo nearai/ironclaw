@@ -45,6 +45,11 @@ async fn build_group_capability_with_base(
         .agent_id
         .clone()
         .ok_or("group product scope is missing an agent id")?;
+    // User-scoped fixtures and bundled extensions are published while the
+    // profile builds. Align the profile before that work so construction and
+    // dispatch use the same canonical actor rather than rewriting only the
+    // already-built harness afterward.
+    profile.user_id = actor_user.clone();
     profile.options = profile
         .options
         .with_local_runtime_identity(product_scope.tenant_id.clone(), agent_id);
@@ -100,6 +105,18 @@ impl RebornIntegrationGroup {
     /// registry credentials are seeded.
     pub async fn extension_lifecycle() -> HarnessResult<Self> {
         Self::builder().extension_lifecycle().await
+    }
+
+    /// [`Self::extension_lifecycle`] with user-skill fixtures written before
+    /// runtime boot, so the existing legacy import writes them into the
+    /// database-backed tenant/user skill store. Each entry is
+    /// `(name, description, content, installed)`.
+    pub async fn extension_lifecycle_with_preboot_user_skills(
+        user_skills: &[(&str, &str, &str, bool)],
+    ) -> HarnessResult<Self> {
+        Self::builder()
+            .extension_lifecycle_with_preboot_user_skills(user_skills)
+            .await
     }
 
     /// Extension-lifecycle group whose credential resolution follows each
@@ -371,6 +388,30 @@ impl RebornIntegrationGroupBuilder {
         self.into_group(base, capability).await
     }
 
+    /// Build the Docker-backed shell capability only after the group's
+    /// canonical binding has been resolved. The sandbox mount view and
+    /// container dispatch identity must be minted from that same binding;
+    /// constructing the profile earlier bakes the constructor's plain
+    /// `host-user` fixture into a run owned by the resolved opaque user id.
+    pub(crate) async fn build_with_sandbox_shell_capability(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let tenant_id = base.canonical_binding.tenant_id.clone();
+        let user_id = base.canonical_actor_user()?;
+        let agent_id = base
+            .canonical_binding
+            .agent_id
+            .clone()
+            .ok_or("sandbox shell canonical binding is missing an agent id")?;
+        let host_runtime = super::super::harness::profiles::sandbox_shell::sandbox_shell_tools(
+            tenant_id, user_id, agent_id,
+        )
+        .await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
     /// Build a live-approvals group. See [`RebornIntegrationGroup::live_approvals`].
     pub async fn live_approvals(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
@@ -472,9 +513,18 @@ impl RebornIntegrationGroupBuilder {
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
     pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
+        self.extension_lifecycle_with_preboot_user_skills(&[]).await
+    }
+
+    /// See [`RebornIntegrationGroup::extension_lifecycle_with_preboot_user_skills`].
+    pub async fn extension_lifecycle_with_preboot_user_skills(
+        self,
+        user_skills: &[(&str, &str, &str, bool)],
+    ) -> HarnessResult<RebornIntegrationGroup> {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
             CapabilityDispatchScope::CanonicalOwner,
+            user_skills,
         )
         .await
     }
@@ -485,6 +535,7 @@ impl RebornIntegrationGroupBuilder {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_for_user,
             CapabilityDispatchScope::RunOwner,
+            &[],
         )
         .await
     }
@@ -503,6 +554,7 @@ impl RebornIntegrationGroupBuilder {
         self.extension_lifecycle_with_profile(
             super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user,
             CapabilityDispatchScope::CanonicalOwner,
+            &[],
         )
         .await
     }
@@ -515,6 +567,7 @@ impl RebornIntegrationGroupBuilder {
         mut self,
         profile_for_user: fn(&str) -> HarnessResult<ToolsProfile>,
         dispatch_scope: CapabilityDispatchScope,
+        user_skills: &[(&str, &str, &str, bool)],
     ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Lifecycle ownership is caller-derived. Build the profile with the
@@ -524,7 +577,18 @@ impl RebornIntegrationGroupBuilder {
         // leave the credential rows under the old user and incorrectly block
         // otherwise credential-ready installs on auth.
         let actor_user = base.canonical_actor_user()?;
-        let profile = profile_for_user(actor_user.as_str())?;
+        let mut profile = profile_for_user(actor_user.as_str())?;
+        if !user_skills.is_empty() {
+            let mut options = profile
+                .options
+                .with_skill_activation_tenant(base.canonical_binding.tenant_id.clone())
+                .with_skill_activation_user(actor_user.clone());
+            for (name, description, content, installed) in user_skills {
+                options =
+                    options.with_user_skill_fixture(*name, *description, *content, *installed);
+            }
+            profile.options = options;
+        }
         let mut host_runtime = build_group_capability_with_base(profile, &base).await?;
         if matches!(dispatch_scope, CapabilityDispatchScope::RunOwner) {
             host_runtime = host_runtime.with_run_owner_scoped_capability_dispatch();
@@ -752,10 +816,13 @@ impl RebornIntegrationGroupBuilder {
     /// Build a visibility-probe group. See
     /// [`RebornIntegrationGroup::extension_visibility_probe`].
     pub async fn extension_visibility_probe(self) -> HarnessResult<RebornIntegrationGroup> {
-        let host_runtime =
-            super::super::harness::profiles::extension::extension_visibility_probe_tools().await?;
+        let base = self.build_base().await?;
+        let mut profile =
+            super::super::harness::profiles::extension::extension_visibility_probe_tools_profile()?;
+        profile.user_id = base.canonical_actor_user()?;
+        let host_runtime = build_group_capability_with_base(profile, &base).await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.build_with_capability(capability).await
+        self.into_group(base, capability).await
     }
 
     /// Build a prompt-description trust probe group. See
@@ -763,11 +830,13 @@ impl RebornIntegrationGroupBuilder {
     pub async fn extension_prompt_description_trust_probe(
         self,
     ) -> HarnessResult<RebornIntegrationGroup> {
-        let host_runtime = super::super::harness::profiles::extension::
-            extension_prompt_description_trust_probe_tools()
-        .await?;
+        let base = self.build_base().await?;
+        let mut profile = super::super::harness::profiles::extension::
+            extension_prompt_description_trust_probe_tools_profile()?;
+        profile.user_id = base.canonical_actor_user()?;
+        let host_runtime = build_group_capability_with_base(profile, &base).await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
-        self.build_with_capability(capability).await
+        self.into_group(base, capability).await
     }
 
     /// Build an auth-gate group. See [`RebornIntegrationGroup::live_auth_gate`].

@@ -439,7 +439,6 @@ impl ServeCommand {
             // `SessionAuthenticator` so those tokens validate. Gating this on
             // SSO left `POST /admin/users` as an open door onto the same
             // mismatch.
-            runtime_input = runtime_input.with_workspace_scoped_per_caller_services(true);
             let effective_workspace_scoping = runtime_input.config().is_some_and(
                 ironclaw_composition::deployment::DeploymentConfig::workspace_scoped_per_caller,
             );
@@ -1879,7 +1878,7 @@ slack_user_id = "U123"
             ironclaw_composition::local_runtime_build_input(
                 ironclaw_composition::RebornCompositionProfile::Standalone,
                 "serve-owner",
-                root.path().to_path_buf(),
+                ironclaw_config::RebornStoragePaths::from_installation_root(root.path()),
             )
             .expect("standalone build input"),
         );

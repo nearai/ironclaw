@@ -9,7 +9,7 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::path::{HostPath, VirtualPath};
 
 use crate::RebornBuildError;
-use crate::host_access_assembly::HostHomeRoot;
+use crate::host_access_assembly::{HostDiskMountCapabilities, HostHomeRoot};
 
 /// Compatibility filename for the embedded standalone database.
 ///
@@ -44,7 +44,7 @@ pub(crate) async fn database_file_bytes(
 }
 
 /// Seed a file into the standalone database, for tests that need a skill the runtime can find.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn write_database_file_for_test(
     storage_root: &Path,
     virtual_path: &str,
@@ -85,15 +85,18 @@ pub(crate) enum DurableStorageInput {
 
 /// Builds the storage substrate selected by already-resolved configuration.
 pub(crate) async fn build_filesystem(
-    storage_root: &Path,
+    state_root: &Path,
+    system_root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
+    admitted_disk_mounts: Option<&HostDiskMountCapabilities>,
     durable_storage: DurableStorageInput,
 ) -> Result<FilesystemAssembly, RebornBuildError> {
     let disk = Arc::new(host_disk_filesystem(
-        storage_root,
+        system_root,
         workspace_root,
         host_home_root,
+        admitted_disk_mounts,
     )?);
     let mut composite = CompositeRootFilesystem::new();
     let durable_backend = match durable_storage {
@@ -104,10 +107,10 @@ pub(crate) async fn build_filesystem(
             DurableBackend::Postgres(pool)
         }
         DurableStorageInput::EmbeddedLibsql => {
-            build_default_database_roots(storage_root, &mut composite).await?
+            build_default_database_roots(state_root, &mut composite).await?
         }
     };
-    mount_host_disk_roots(&mut composite, disk)?;
+    mount_host_disk_roots(&mut composite, disk, host_home_root.is_some())?;
     Ok(FilesystemAssembly {
         filesystem: Arc::new(composite),
         durable_backend,
@@ -145,27 +148,44 @@ pub(crate) async fn build_default_database_roots(
 }
 
 fn host_disk_filesystem(
-    root: &Path,
+    system_root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
+    admitted: Option<&HostDiskMountCapabilities>,
 ) -> Result<DiskFilesystem, RebornBuildError> {
     let mut filesystem = DiskFilesystem::new();
-    filesystem.mount_local(
-        VirtualPath::new("/projects")?,
-        HostPath::from_path_buf(root.to_path_buf()),
-    )?;
-    filesystem.mount_local(
-        VirtualPath::new("/projects/workspace")?,
-        HostPath::from_path_buf(workspace_root.to_path_buf()),
-    )?;
-    filesystem.mount_local(
-        VirtualPath::new("/system/extensions")?,
-        HostPath::from_path_buf(root.join("system/extensions")),
-    )?;
-    filesystem.mount_local(
-        VirtualPath::new("/system/skills")?,
-        HostPath::from_path_buf(root.join("system/skills")),
-    )?;
+    let roots = [
+        (
+            "/projects/workspace",
+            workspace_root.to_path_buf(),
+            admitted.map(|mounts| mounts.workspace.clone()),
+        ),
+        (
+            "/system/extensions",
+            system_root.join("extensions"),
+            admitted.map(|mounts| mounts.system_extensions.clone()),
+        ),
+        (
+            "/system/prompts",
+            system_root.join("prompts"),
+            admitted.map(|mounts| mounts.system_prompts.clone()),
+        ),
+        (
+            "/system/skills",
+            system_root.join("skills"),
+            admitted.map(|mounts| mounts.system_skills.clone()),
+        ),
+    ];
+    for (virtual_root, host_root, capability) in roots {
+        let virtual_root = VirtualPath::new(virtual_root)?;
+        let host_root = HostPath::from_path_buf(host_root);
+        match capability {
+            Some(capability) => {
+                filesystem.mount_local_capability(virtual_root, host_root, capability)?;
+            }
+            None => filesystem.mount_local(virtual_root, host_root)?,
+        }
+    }
     if let Some(host_home_root) = host_home_root {
         filesystem.mount_local(
             VirtualPath::new("/projects/host")?,
@@ -333,17 +353,23 @@ where
 fn mount_host_disk_roots(
     root: &mut CompositeRootFilesystem,
     disk: Arc<DiskFilesystem>,
+    include_host_home: bool,
 ) -> Result<(), RebornBuildError> {
     for (virtual_root, backend_id, content_kind) in [
         (
-            "/projects",
-            "standalone-project-files",
+            "/projects/workspace",
+            "standalone-workspace-files",
             ContentKind::ProjectFile,
         ),
         (
             "/system/extensions",
             "standalone-system-extensions",
             ContentKind::ExtensionPackage,
+        ),
+        (
+            "/system/prompts",
+            "standalone-system-prompts",
+            ContentKind::GenericFile,
         ),
         (
             "/system/skills",
@@ -362,6 +388,20 @@ fn mount_host_disk_roots(
                 BackendCapabilities::bytes_only(),
             )?,
             Arc::clone(&disk),
+        )?;
+    }
+    if include_host_home {
+        root.mount(
+            mount_descriptor(
+                "/projects/host",
+                "standalone-host-home",
+                BackendKind::DiskFilesystem,
+                StorageClass::FileContent,
+                ContentKind::ProjectFile,
+                IndexPolicy::NotIndexed,
+                BackendCapabilities::bytes_only(),
+            )?,
+            disk,
         )?;
     }
     Ok(())
@@ -385,4 +425,150 @@ pub(crate) fn mount_descriptor(
         index_policy,
         capabilities,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DurableStorageInput, STANDALONE_DB_FILENAME, build_filesystem};
+    use crate::host_access_assembly::build_host_access;
+    use ironclaw_filesystem::RootFilesystem;
+    use ironclaw_host_api::path::VirtualPath;
+
+    #[tokio::test]
+    async fn filesystem_assembly_keeps_state_system_and_workspace_content_in_separate_roots() {
+        let temp = tempfile::tempdir().expect("temporary Reborn home");
+        let home = temp.path().join("reborn-home");
+        let state = home.join("state");
+        let system = home.join("system");
+        let workspaces = home.join("workspaces");
+        std::fs::create_dir_all(&state).expect("create state root");
+        std::fs::create_dir_all(&workspaces).expect("create workspace root");
+        std::fs::create_dir_all(system.join("extensions")).expect("create system extensions root");
+        std::fs::create_dir_all(system.join("prompts")).expect("create system prompts root");
+        std::fs::create_dir_all(system.join("skills")).expect("create system skills root");
+
+        let assembly = build_filesystem(
+            &state,
+            &system,
+            &workspaces,
+            None,
+            None,
+            DurableStorageInput::EmbeddedLibsql,
+        )
+        .await
+        .expect("filesystem assembly");
+
+        let mounted_roots = assembly
+            .filesystem
+            .mounts()
+            .await
+            .expect("mount catalog")
+            .into_iter()
+            .map(|mount| mount.virtual_root.as_str().to_owned())
+            .collect::<Vec<_>>();
+        assert!(mounted_roots.contains(&"/projects/workspace".to_string()));
+        assert!(
+            !mounted_roots.contains(&"/projects".to_string()),
+            "the trusted disk catalog must not expose a broad projects root"
+        );
+        assert!(
+            !mounted_roots.contains(&"/projects/host".to_string()),
+            "a catalog without a confirmed host home must not advertise one"
+        );
+
+        let project_file = VirtualPath::new("/projects/workspace/only-workspace.txt")
+            .expect("workspace file virtual path");
+        RootFilesystem::write_file(assembly.filesystem.as_ref(), &project_file, b"workspace")
+            .await
+            .expect("workspace write");
+        for (virtual_path, contents, disk_path) in [
+            (
+                "/system/extensions/example.toml",
+                b"extension".as_slice(),
+                system.join("extensions/example.toml"),
+            ),
+            (
+                "/system/prompts/default-system.md",
+                b"prompt".as_slice(),
+                system.join("prompts/default-system.md"),
+            ),
+            (
+                "/system/skills/example/SKILL.md",
+                b"skill".as_slice(),
+                system.join("skills/example/SKILL.md"),
+            ),
+        ] {
+            let path = VirtualPath::new(virtual_path).expect("system file virtual path");
+            RootFilesystem::write_file(assembly.filesystem.as_ref(), &path, contents)
+                .await
+                .expect("system write");
+            assert_eq!(
+                std::fs::read(disk_path).expect("system file is mounted at system root"),
+                contents
+            );
+        }
+
+        assert!(
+            state.join(STANDALONE_DB_FILENAME).is_file(),
+            "the embedded database must be created in state/"
+        );
+        assert!(
+            !home.join(STANDALONE_DB_FILENAME).exists(),
+            "the embedded database must not be created at the Reborn home"
+        );
+        assert_eq!(
+            std::fs::read(workspaces.join("only-workspace.txt"))
+                .expect("workspace file is on the host workspace root"),
+            b"workspace"
+        );
+        assert!(
+            !home.join("only-workspace.txt").exists(),
+            "/projects/workspace must not map to the Reborn home"
+        );
+        assert!(
+            system.is_dir(),
+            "the reviewed system root is part of the explicit layout"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_disk_catalog_routes_confirmed_host_home_files() {
+        let temp = tempfile::tempdir().expect("temporary Reborn home");
+        let home = temp.path().join("reborn-home");
+        let host_home = temp.path().join("host-home");
+        std::fs::create_dir_all(&host_home).expect("create confirmed host home");
+        let host_access = build_host_access(
+            ironclaw_config::RebornStoragePaths::from_installation_root(&home),
+            None,
+            Some(host_home.clone()),
+            Some(
+                crate::standalone_unrestricted_runtime_policy(true)
+                    .expect("standalone unrestricted runtime policy"),
+            ),
+            false,
+        )
+        .expect("host access with confirmed host home");
+
+        let assembly = build_filesystem(
+            &host_access.state_root,
+            &host_access.system_root,
+            &host_access.workspace_root,
+            host_access.host_home_root.as_ref(),
+            None,
+            DurableStorageInput::EmbeddedLibsql,
+        )
+        .await
+        .expect("filesystem assembly with confirmed host home");
+
+        let host_file =
+            VirtualPath::new("/projects/host/safe.txt").expect("host file virtual path");
+        RootFilesystem::write_file(assembly.filesystem.as_ref(), &host_file, b"host file")
+            .await
+            .expect("composite catalog routes confirmed host home writes");
+
+        assert_eq!(
+            std::fs::read(host_home.join("safe.txt")).expect("host file written to disk"),
+            b"host file",
+        );
+    }
 }

@@ -7,6 +7,7 @@
 //! smuggled into manifests, mount paths, approvals, or audit records.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::HostApiError;
@@ -224,6 +225,51 @@ string_id!(SystemServiceId, "system_service", validate_name_segment);
 // names the product surface a direct-user `Product` invocation entered through.
 string_id!(ProductKind, "product", validate_name_segment);
 string_id!(RoutineId, "routine", validate_name_segment);
+
+/// Stable opaque identity for one tenant/user workspace leaf.
+///
+/// This preserves the released length-prefixed SHA-256 codec used by the
+/// Docker and Railway sandbox backends while keeping host-path construction
+/// outside the neutral host API contract.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TenantUserWorkspaceKey {
+    digest: String,
+}
+
+impl TenantUserWorkspaceKey {
+    pub fn from_tenant_user(tenant_id: &TenantId, user_id: &UserId) -> Self {
+        // FROZEN PERSISTED FORMAT: this digest names on-disk workspace leaves
+        // and is recomputed against adoption journals. Changing it orphans
+        // existing leaves and invalidates those journals; the fixed-vector test
+        // below is the compatibility guard.
+        let encoded = format!(
+            "{}:tenant={}:{};{}:user={}:{};",
+            "tenant".len(),
+            tenant_id.as_str().len(),
+            tenant_id.as_str(),
+            "user".len(),
+            user_id.as_str().len(),
+            user_id.as_str(),
+        );
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let bytes = Sha256::digest(encoded.as_bytes());
+        let mut digest = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            digest.push(HEX[(byte >> 4) as usize] as char);
+            digest.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        Self { digest }
+    }
+
+    pub fn from_scope(scope: &crate::resource::ResourceScope) -> Self {
+        Self::from_tenant_user(&scope.tenant_id, &scope.user_id)
+    }
+
+    /// A validated, single-segment digest suitable for neutral naming.
+    pub fn digest_segment(&self) -> &str {
+        &self.digest
+    }
+}
 // Slice-C kernel vocabulary (arch-simplification §3): an opaque correlation
 // handle to a durably-stored host-error record. The recoverability *class* rides
 // the `HostFailure` variant (transient/permanent/uncertain); the raw cause stays
@@ -498,6 +544,72 @@ uuid_id!(ActivityId);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tenant_user_workspace_key_preserves_the_released_digest_codec() {
+        let vectors = [
+            (
+                "acme",
+                "alice",
+                "c711caa52fd730885e365ba866cb387c38357e3a82dc675071d1bb9ac834fd22",
+            ),
+            (
+                "a",
+                "b:c",
+                "087ad01b349cc39435f08dd47e949dfbb5da0e4e264f962902932b7e23ca10ea",
+            ),
+            (
+                "a:b",
+                "c",
+                "d73913a30c9eef7c5f84d8f56a10bb2769a2fd4408dc5eeac30825b380dd06d8",
+            ),
+        ];
+
+        for (tenant, user, expected_digest) in vectors {
+            let key = TenantUserWorkspaceKey::from_tenant_user(
+                &TenantId::new(tenant).expect("valid tenant"),
+                &UserId::new(user).expect("valid user"),
+            );
+            assert_eq!(key.digest_segment(), expected_digest, "{tenant}/{user}");
+        }
+    }
+
+    #[test]
+    fn tenant_user_workspace_key_uses_only_tenant_and_user_from_a_scope() {
+        let tenant = TenantId::new("acme").expect("valid tenant");
+        let user = UserId::new("alice").expect("valid user");
+        let scope = crate::resource::ResourceScope {
+            tenant_id: tenant.clone(),
+            user_id: user.clone(),
+            agent_id: Some(AgentId::new("agent").expect("valid agent")),
+            project_id: Some(ProjectId::new("project").expect("valid project")),
+            mission_id: Some(MissionId::new("mission").expect("valid mission")),
+            thread_id: Some(ThreadId::new("thread").expect("valid thread")),
+            invocation_id: InvocationId::new(),
+        };
+
+        assert_eq!(
+            TenantUserWorkspaceKey::from_scope(&scope),
+            TenantUserWorkspaceKey::from_tenant_user(&tenant, &user),
+        );
+
+        assert_ne!(
+            TenantUserWorkspaceKey::from_tenant_user(
+                &TenantId::new("other-tenant").expect("valid tenant"),
+                &user,
+            ),
+            TenantUserWorkspaceKey::from_tenant_user(&tenant, &user),
+            "tenant identity must contribute to the workspace key"
+        );
+        assert_ne!(
+            TenantUserWorkspaceKey::from_tenant_user(
+                &tenant,
+                &UserId::new("other-user").expect("valid user"),
+            ),
+            TenantUserWorkspaceKey::from_tenant_user(&tenant, &user),
+            "user identity must contribute to the workspace key"
+        );
+    }
 
     #[test]
     fn approval_gate_record_ref_is_the_request_uuid_and_round_trips() {

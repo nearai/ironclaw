@@ -1644,7 +1644,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_filesystem::{CasExpectation, InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
         action::NetworkMethod,
         ids::{

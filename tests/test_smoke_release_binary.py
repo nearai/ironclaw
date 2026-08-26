@@ -86,7 +86,7 @@ class FakeRunner:
         if args == ("extension", "search", "--json"):
             database = (
                 Path(environment["IRONCLAW_REBORN_HOME"])
-                / "local-dev"
+                / "state"
                 / "reborn-local-dev.db"
             )
             database.parent.mkdir(parents=True)
@@ -316,7 +316,7 @@ elif args == ["profile", "list", "--json"]:
     ]}))
 elif args == ["extension", "search", "--json"]:
     from pathlib import Path
-    database = Path(os.environ["IRONCLAW_REBORN_HOME"]) / "local-dev" / "reborn-local-dev.db"
+    database = Path(os.environ["IRONCLAW_REBORN_HOME"]) / "state" / "reborn-local-dev.db"
     database.parent.mkdir(parents=True)
     database.write_bytes(b"migrated libsql")
     print(json.dumps({"payload": {"extensions": [

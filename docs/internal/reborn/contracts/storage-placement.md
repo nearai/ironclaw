@@ -10,6 +10,49 @@
 
 This contract freezes where durable state lives in Reborn.
 
+### Installation boundary and physical namespaces
+
+`IRONCLAW_REBORN_HOME` names exactly one installation boundary. A
+`RebornStoragePaths` value derives the only filesystem-backed durable
+namespaces directly beneath it:
+
+```text
+<IRONCLAW_REBORN_HOME>/
+├── config.toml and providers.json       # operator bootstrap/configuration
+├── layout.toml                          # versioned durable-layout admission record
+├── state/                               # authoritative libSQL state and local key material
+├── system/                              # host-managed extensions, prompts, and skills
+├── workspaces/users/<tenant-user-digest>/
+│                                      # persistent per-tenant-plus-user workspace leaf
+└── runtime/                             # provider bookkeeping and layout-adoption recovery
+```
+
+There is no deployment-id layer and no profile-named storage directory. A
+profile selects runtime policy and a process backend; it cannot select a
+different physical state, system, workspace, or runtime root. The persisted
+`layout.toml` records durable-state kind plus the tenancy and workspace-access
+security envelope. A profile change is restart-only and operator-controlled;
+startup admits it only when it preserves that envelope, before opening stores
+or activating runtimes. Changing the physical database backend is an explicit
+storage migration, never profile switching.
+
+`state/` is host-only. The cached local secrets master key and provider
+credentials never enter a sandbox, including transiently. `system/` is
+host-managed content, not a user workspace. A sandbox receives only its exact
+`workspaces/users/<tenant-user-digest>` leaf as `/workspace`; it cannot receive
+the home, `state/`, `system/`, `runtime/`, the workspace parent, or a sibling
+leaf. `runtime/` is durable provider/process bookkeeping, while cache and
+temporary invocation data remain disposable and must never be treated as
+authoritative state.
+
+For automatic boot-time migration, fail-closed ambiguity, interruption
+recovery, and old-binary rollback, see
+[the storage-layout operator runbook](../storage-layout-adoption.md).
+Migration is guarded mechanically — an advisory home lock plus a live-writer
+probe on the embedded database — and never merges candidates: a losing
+populated source stays in place untouched and is named in the retained
+`runtime/layout-migration.toml` provenance record.
+
 The rule is hybrid:
 
 ```text
@@ -134,6 +177,7 @@ not bypass domain invariants by mutating primitive storage rows directly.
 | `/projects` | local/object/project file backend | filesystem | optional project indexer | Project source files and user-authored project artifacts. |
 | `/system/settings` | typed settings repository | typed API + optional file projection | no, unless projection says otherwise | Settings source of truth is not memory. |
 | `/system/extensions` | extension package/registry repositories | extension API + filesystem package reads/projections | no semantic memory indexing | Installed packages, manifests, registry state. |
+| `/system/prompts` | host-managed prompt templates and prompt metadata | prompt/bootstrap APIs + filesystem reads | no semantic memory indexing | Prompt templates supplied by the host operator. |
 | `/system/skills` | skill package/registry repositories | skill API + optional file projection | no semantic memory indexing | Skill manifests and installed skill state. |
 | `/engine/runtime` | typed run/thread/process/turn repositories, or NotIndexed `/engine` DB filesystem for file-shaped runtime blobs | typed APIs primarily | no | High-churn runtime state must not pollute memory indexes. |
 | `/artifacts` | artifact/object/local backend | artifact APIs + filesystem refs | no semantic memory indexing by default | Large/binary/process output refs live here. |

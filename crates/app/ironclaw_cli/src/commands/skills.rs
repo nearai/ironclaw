@@ -1,7 +1,8 @@
 use clap::{Args, Subcommand};
-use ironclaw_composition::{RebornSkillSummary, reborn_skill_summary_json};
+use ironclaw_composition::{
+    RebornSkillSummary, list_reborn_local_skills_from_state, reborn_skill_summary_json,
+};
 use ironclaw_config::{RebornBootConfig, RebornProfile};
-use ironclaw_extension_host::skill_listing::list_reborn_local_skills;
 use std::path::PathBuf;
 
 use crate::context::RebornCliContext;
@@ -40,9 +41,9 @@ impl SkillsCommand {
 impl SkillsListCommand {
     fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         let config = build_skill_list_config(context.boot_config())?;
-        let skills = crate::runtime::block_on_cli(list_reborn_local_skills(
+        let skills = crate::runtime::block_on_cli(list_reborn_local_skills_from_state(
             config.owner_id.clone(),
-            config.standalone_root.clone(),
+            config.state_root.clone(),
         ))?;
 
         if self.json {
@@ -51,7 +52,7 @@ impl SkillsListCommand {
                 output["details"] = serde_json::json!({
                     "profile": config.profile.to_string(),
                     "reborn_home": context.boot_config().home().path(),
-                    "standalone_root": config.standalone_root,
+                    "state_root": config.state_root,
                     "owner_id": config.owner_id,
                 });
             }
@@ -69,7 +70,7 @@ impl SkillsListCommand {
                 "reborn_home: {}",
                 context.boot_config().home().path().display()
             );
-            println!("standalone_root: {}", config.standalone_root.display());
+            println!("state_root: {}", config.state_root.display());
             println!("owner_id: {}", config.owner_id);
         }
 
@@ -84,7 +85,7 @@ impl SkillsListCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SkillListConfig {
     owner_id: String,
-    standalone_root: PathBuf,
+    state_root: PathBuf,
     profile: RebornProfile,
 }
 
@@ -96,9 +97,10 @@ fn build_skill_list_config(config: &RebornBootConfig) -> anyhow::Result<SkillLis
             "ironclaw skills currently supports profile=local-dev, profile=local-dev-yolo, profile=hosted-single-tenant, profile=hosted-single-tenant-volume, profile=hosted-single-tenant-volume-sandboxed, or profile=hosted-single-tenant-volume-sandboxed-railway; got profile={profile}"
         );
     }
+    let paths = crate::runtime::ensure_ready_layout_for_profile(config, profile)?;
     Ok(SkillListConfig {
         owner_id: crate::runtime::default_owner_id(config_file.as_ref()).to_string(),
-        standalone_root: crate::runtime::local_runtime_storage_root(config, profile),
+        state_root: paths.state_root().to_path_buf(),
         profile,
     })
 }

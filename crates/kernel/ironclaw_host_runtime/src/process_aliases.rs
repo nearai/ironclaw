@@ -27,7 +27,7 @@ impl HostWorkdirAlias {
     /// This alias narrowed to one caller's workspace subtree.
     ///
     /// Mirrors `scoped_workspace_mount_view`, which resolves `/workspace` to
-    /// `<root>/tenants/<t>/users/<u>`. Only the workspace alias is scoped: `/host` and the raw
+    /// `<root>/users/<tenant-user-digest>`. Only the workspace alias is scoped: `/host` and the raw
     /// host-home aliases are ambient by construction and have no per-caller subtree.
     pub(crate) fn scoped_to_caller(
         &self,
@@ -36,14 +36,13 @@ impl HostWorkdirAlias {
         if self.alias != WORKSPACE_WORKDIR_ALIAS {
             return None;
         }
+        let workspace_key = ironclaw_host_api::ids::TenantUserWorkspaceKey::from_scope(scope);
         Some(Self {
             alias: self.alias.clone(),
             host_path: self
                 .host_path
-                .join("tenants")
-                .join(scope.tenant_id.as_str())
                 .join("users")
-                .join(scope.user_id.as_str()),
+                .join(workspace_key.digest_segment()),
         })
     }
 
@@ -488,7 +487,7 @@ mod per_caller_workspace_tests {
     /// The shell's `/workspace` must name the same directory the file tools write to.
     ///
     /// It did not. `scoped_workspace_mount_view` resolves `/workspace` to
-    /// `<root>/tenants/<t>/users/<u>`, while this alias list -- built once at composition, before any
+    /// `<root>/users/<tenant-user-digest>`, while this alias list -- built once at composition, before any
     /// caller exists -- resolved it to `<root>`. One alias, two directories, in one process: an agent
     /// wrote `scripts/egfr.py` with `write_file`, ran `python3 scripts/egfr.py` in the shell, and
     /// landed three directories above its own file. Neither side errored.
@@ -500,15 +499,21 @@ mod per_caller_workspace_tests {
         let scoped = alias
             .scoped_to_caller(&scope)
             .expect("workspace alias scopes");
+        let expected = PathBuf::from("/srv/workspace").join("users").join(
+            ironclaw_host_api::ids::TenantUserWorkspaceKey::from_scope(&scope).digest_segment(),
+        );
 
         assert_eq!(
-            resolve_local_host_workdir(Some("/workspace"), std::slice::from_ref(&scoped))
-                .expect("resolves"),
-            PathBuf::from(format!(
-                "/srv/workspace/tenants/{}/users/ada",
-                scope.tenant_id.as_str()
-            )),
+            &scoped.host_path, &expected,
             "the shell must land in the caller's own subtree, the one the file tools write to"
+        );
+        assert_eq!(
+            resolve_local_host_workdir(Some("/workspace"), std::slice::from_ref(&scoped))
+                .expect("resolves")
+                .components()
+                .collect::<Vec<_>>(),
+            scoped.host_path.components().collect::<Vec<_>>(),
+            "the workdir resolver must preserve the caller-scoped alias root"
         );
 
         // A path inside the command string is rewritten against the same narrowed root, so
@@ -518,7 +523,7 @@ mod per_caller_workspace_tests {
                 "cd /workspace && ls",
                 std::slice::from_ref(&scoped)
             )
-            .contains(&format!("/users/{}", "ada")),
+            .contains(expected.to_string_lossy().as_ref()),
             "command-string rewriting must use the same per-caller root"
         );
     }

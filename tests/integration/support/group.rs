@@ -50,6 +50,7 @@
 // does not exercise every variant.
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -430,6 +431,17 @@ impl GroupCapability {
         &self,
         extension_id: &str,
     ) -> HarnessResult<()> {
+        self.reopened_installation(extension_id).await?;
+        Ok(())
+    }
+
+    /// Reopen the on-disk installation store independently and resolve
+    /// `extension_id`, so durable assertions share one reopen shape and
+    /// missing-installation diagnostic.
+    async fn reopened_installation(
+        &self,
+        extension_id: &str,
+    ) -> HarnessResult<ironclaw_extension_registry::ExtensionInstallation> {
         let harness = match self {
             Self::HostRuntime(arc) => arc,
             Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
@@ -442,20 +454,66 @@ impl GroupCapability {
             )
             .await?;
         let installations = store.list_installations().await?;
-        if installations
+        installations
             .iter()
-            .any(|installation| installation.extension_id().as_str() == extension_id)
-        {
-            return Ok(());
-        }
-        let seen: Vec<&str> = installations
-            .iter()
-            .map(|installation| installation.extension_id().as_str())
-            .collect();
-        Err(
-            format!("extension {extension_id:?} not found after independent reopen; saw {seen:?}")
-                .into(),
+            .find(|installation| installation.extension_id().as_str() == extension_id)
+            .cloned()
+            .ok_or_else(|| {
+                let seen: Vec<&str> = installations
+                    .iter()
+                    .map(|installation| installation.extension_id().as_str())
+                    .collect();
+                format!(
+                    "extension {extension_id:?} not found after independent reopen; saw {seen:?}"
+                )
+                .into()
+            })
+    }
+
+    /// E-DURABLE membership: the independently reopened installation must
+    /// retain the installing user's membership as well as the extension id.
+    pub(crate) async fn assert_extension_install_membership_persists_after_reopen(
+        &self,
+        extension_id: &str,
+        expected_member: &UserId,
+        rejected_member: &UserId,
+    ) -> HarnessResult<()> {
+        let installation = self.reopened_installation(extension_id).await?;
+        assert_exact_installation_owner(
+            installation.owner(),
+            expected_member,
+            rejected_member,
+            extension_id,
         )
+    }
+}
+
+/// The durable reopen proof must reject legacy tenant-wide visibility. A
+/// personal install survives only when its exact member set survives too.
+pub(crate) fn assert_exact_installation_owner(
+    owner: &ironclaw_extension_registry::InstallationOwner,
+    expected_member: &UserId,
+    rejected_member: &UserId,
+    extension_id: &str,
+) -> HarnessResult<()> {
+    let expected_members = BTreeSet::from([expected_member.clone()]);
+    match owner {
+        ironclaw_extension_registry::InstallationOwner::Users { user_ids }
+            if user_ids == &expected_members && !owner.visible_to(rejected_member) =>
+        {
+            Ok(())
+        }
+        ironclaw_extension_registry::InstallationOwner::Tenant => Err(format!(
+            "extension {extension_id:?} reopened with legacy tenant-wide ownership; expected exactly user {:?}",
+            expected_member.as_str()
+        )
+        .into()),
+        ironclaw_extension_registry::InstallationOwner::Users { user_ids } => Err(format!(
+            "extension {extension_id:?} reopened with users {user_ids:?}; expected exactly {:?} and no visibility for {:?}",
+            expected_member.as_str(),
+            rejected_member.as_str()
+        )
+        .into()),
     }
 }
 
@@ -728,6 +786,24 @@ impl RebornIntegrationGroup {
         self.shared
             .capability
             .assert_extension_install_persists_after_reopen(extension_id)
+            .await
+    }
+
+    /// Group-level twin of
+    /// [`GroupCapability::assert_extension_install_membership_persists_after_reopen`].
+    pub async fn assert_extension_install_membership_persists_after_reopen(
+        &self,
+        extension_id: &str,
+        expected_member: &UserId,
+        rejected_member: &UserId,
+    ) -> HarnessResult<()> {
+        self.shared
+            .capability
+            .assert_extension_install_membership_persists_after_reopen(
+                extension_id,
+                expected_member,
+                rejected_member,
+            )
             .await
     }
 

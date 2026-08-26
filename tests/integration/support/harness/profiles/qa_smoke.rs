@@ -108,6 +108,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
         durable_capability_io_thread_service: Mutex::new(None),
         durable_capability_io_requested: false,
         root,
+        storage_paths: None,
         workspace_root,
         mounts,
         capability_mount_overrides: memory_capability_ids

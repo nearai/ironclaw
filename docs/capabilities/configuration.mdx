@@ -13,7 +13,9 @@ carry secrets.
 ## Where Configuration Lives
 
 Everything lives under `~/.ironclaw/reborn`. Override the location with
-`IRONCLAW_REBORN_HOME`.
+`IRONCLAW_REBORN_HOME`. This is one installation's storage boundary: a profile
+selects runtime policy and process backend, never a profile-named child
+directory.
 
 ```bash
 ironclaw config path
@@ -26,6 +28,26 @@ profile:      local-dev
 config_file:  ~/.ironclaw/reborn/config.toml
 providers:    ~/.ironclaw/reborn/providers.json
 ```
+
+The canonical namespaces are directly below that home:
+
+```text
+<IRONCLAW_REBORN_HOME>/
+├── state/       # libSQL state and cached local master key when applicable
+├── system/      # host-managed extensions, prompts, and skills
+├── workspaces/  # persistent tenant/user workspace leaves
+├── runtime/     # provider/runtime bookkeeping and adoption recovery data
+├── logs/        # operational logs; retained per operator logging policy
+├── cache/       # disposable operational cache
+└── tmp/         # disposable temporary files
+```
+
+`logs/`, `cache/`, and `tmp/` are operational namespaces, not authoritative
+application state.
+
+For a sandboxed request, only
+`workspaces/users/<tenant-user-digest>` is mounted as `/workspace`; the Reborn
+home, `state/`, `system/`, sibling workspaces, and credentials remain host-side.
 
 Two files matter, and both are optional — delete them and IronClaw falls back to built-in
 defaults.
@@ -169,8 +191,11 @@ Set it in `config.toml` under `[boot]`, or per-invocation with `IRONCLAW_REBORN_
 
 <Warning>
 Profile choice is a security boundary, not a preset. A deployment that serves more than
-one user must not run a profile with single-user host semantics. See
-[Security](/security).
+one user must not run a profile with single-user host semantics. Change it only under
+operator control with a full restart: startup compares the requested policy with the
+persisted durable-state, tenancy, and workspace-isolation envelope and rejects an unsafe
+transition before opening stores or runtimes. Profiles are not freely hot-swappable and
+do not select a different storage root. See [Security](/security).
 </Warning>
 
 ---
@@ -309,7 +334,7 @@ Overrides are namespaced `IRONCLAW_REBORN_*`. The ones you're most likely to nee
 
 | Variable | Purpose |
 | --- | --- |
-| `IRONCLAW_REBORN_HOME` | Where configuration and state live |
+| `IRONCLAW_REBORN_HOME` | Installation boundary for configuration and the direct `state/`, `system/`, `workspaces/`, `runtime/`, `logs/`, `cache/`, and `tmp/` namespaces |
 | `IRONCLAW_REBORN_PROFILE` | Boot profile |
 | `IRONCLAW_REBORN_LOG` | Log level, for example `debug` |
 | `IRONCLAW_REBORN_POSTGRES_URL` | Database URL when using the Postgres backend |

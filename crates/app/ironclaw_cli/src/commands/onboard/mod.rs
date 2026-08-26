@@ -55,29 +55,40 @@ impl OnboardCommand {
             return Ok(());
         }
 
+        let secret_store_mode =
+            crate::runtime::prepare_onboarding_layout(context.boot_config(), self.force)?;
+
         let outcome = write_default_config_files(home, self.force, ExistingConfigPolicy::Preserve)?;
         // Independent of `--force`: a valid existing token is never regenerated
         // (see `ensure_webui_token_file`), so repeated `onboard --force` can't
         // invalidate sessions or an operator-copied env var.
         let webui_token_action = crate::webui_token::ensure_webui_token_file(home.path())?;
-        let master_key_outcome = provision_master_key(context.boot_config())?;
         let mut prompts = StdinPromptSource;
-        let llm_outcome = match provision_llm_credentials(
-            home,
-            context.boot_config(),
-            &mut prompts,
-            &EncryptedLlmKeyStoreOpener,
-            &LiveLlmProbe,
-            self.force,
-        ) {
-            Ok(outcome) => outcome,
-            // Non-interactive session (headless CI, piped/scripted) is expected —
-            // mirrors `MasterKeyProvisionOutcome::Suppressed`; `models set-provider`
-            // remains the non-interactive path to configure a provider.
-            Err(LlmCredentialPromptError::NonInteractive) => {
-                LlmCredentialProvisionOutcome::SkippedNonInteractive
+        let interactive = prompts.is_interactive();
+        let (master_key_outcome, llm_outcome) = match secret_store_mode {
+            crate::runtime::OnboardingSecretStoreMode::Embedded => {
+                let master_key_outcome = provision_master_key(context.boot_config())?;
+                let llm_outcome = match provision_llm_credentials(
+                    home,
+                    context.boot_config(),
+                    &mut prompts,
+                    &EncryptedLlmKeyStoreOpener,
+                    &LiveLlmProbe,
+                    self.force,
+                ) {
+                    Ok(outcome) => outcome,
+                    // Non-interactive session (headless CI, piped/scripted) is expected.
+                    Err(LlmCredentialPromptError::NonInteractive) => {
+                        LlmCredentialProvisionOutcome::SkippedNonInteractive
+                    }
+                    Err(LlmCredentialPromptError::Other(error)) => return Err(error),
+                };
+                (master_key_outcome, llm_outcome)
             }
-            Err(LlmCredentialPromptError::Other(error)) => return Err(error),
+            crate::runtime::OnboardingSecretStoreMode::HostedExternal => (
+                MasterKeyProvisionOutcome::SkippedHostedExternal,
+                LlmCredentialProvisionOutcome::SkippedHostedExternal,
+            ),
         };
         // Computed after `llm_outcome` so `steps_pending` reflects what actually
         // happened this run, not an unconditional `llm_credentials` pending.
@@ -111,7 +122,7 @@ impl OnboardCommand {
             marker_action
         );
         println!("master_key: {}", master_key_outcome.display_line());
-        if let MasterKeyProvisionOutcome::Suppressed = master_key_outcome {
+        if matches!(master_key_outcome, MasterKeyProvisionOutcome::Suppressed) {
             println!(
                 "master_key_note: OS keychain unavailable; set SECRETS_MASTER_KEY yourself or \
                  let the first `serve`/`onboard` run auto-generate and cache \
@@ -141,6 +152,13 @@ impl OnboardCommand {
         println!("remaining:");
         if llm_configured {
             println!("- none for LLM credentials (configured above)");
+        } else if matches!(
+            llm_outcome,
+            LlmCredentialProvisionOutcome::SkippedHostedExternal
+        ) {
+            println!(
+                "- configure LLM credentials through deployment secrets or the hosted operator surface"
+            );
         } else {
             println!(
                 "- configure LLM credentials: rerun `ironclaw onboard` from an \
@@ -156,7 +174,7 @@ impl OnboardCommand {
             println!("- history import not requested");
         }
 
-        self.finish_with_service_and_login_link(&context, home, prompts.is_interactive())?;
+        self.finish_with_service_and_login_link(&context, home, interactive)?;
 
         Ok(())
     }

@@ -6,22 +6,35 @@
 use std::{collections::HashMap, process::Command};
 
 use ironclaw_host_api::{
-    ids::{AgentId, InvocationId, TenantId, UserId},
+    ids::{AgentId, InvocationId, TenantId, TenantUserWorkspaceKey, UserId},
+    mount::{MountGrant, MountPermissions, MountView},
+    path::{MountAlias, VirtualPath},
     process::{CommandExecutionRequest, SandboxCommandTransport},
     resource::ResourceScope,
 };
-use ironclaw_sandbox::{
-    RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport, RebornSandboxUserKey,
-};
+use ironclaw_sandbox::{RailwayPreviewSandboxConfig, RailwayPreviewSandboxTransport};
 
 fn required_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is required for the Railway canary"))
 }
 
 fn request(scope: &ResourceScope, command: impl Into<String>) -> CommandExecutionRequest {
+    let key = TenantUserWorkspaceKey::from_scope(scope);
+    let mut permissions = MountPermissions::read_write_list_delete();
+    permissions.execute = true;
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").expect("static workspace alias"),
+        VirtualPath::new(format!(
+            "/projects/workspace/users/{}",
+            key.digest_segment()
+        ))
+        .expect("derived workspace target"),
+        permissions,
+    )])
+    .expect("canonical workspace mount view");
     CommandExecutionRequest {
         scope: scope.clone(),
-        mounts: None,
+        mounts: Some(mounts),
         command: command.into(),
         workdir: Some("/workspace".to_string()),
         timeout_secs: Some(300),
@@ -30,10 +43,47 @@ fn request(scope: &ResourceScope, command: impl Into<String>) -> CommandExecutio
 }
 
 fn checkpoint_name(scope: &ResourceScope) -> String {
-    format!(
-        "{}-checkpoint",
-        RebornSandboxUserKey::from_scope(scope).container_name()
-    )
+    let key = TenantUserWorkspaceKey::from_scope(scope);
+    let prefix = key
+        .digest_segment()
+        .get(..24)
+        .unwrap_or(key.digest_segment());
+    format!("ironclaw-reborn-sandbox-user-{prefix}-checkpoint")
+}
+
+#[test]
+fn railway_canary_request_carries_the_canonical_workspace_authority() {
+    let scope = ResourceScope {
+        tenant_id: TenantId::new("canary-tenant").expect("tenant id"),
+        user_id: UserId::new("canary-user").expect("user id"),
+        agent_id: Some(AgentId::new("canary-agent").expect("agent id")),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    let request = request(&scope, "true");
+    let mount = request
+        .mounts
+        .expect("Railway canary must exercise the production workspace authority")
+        .mounts
+        .into_iter()
+        .next()
+        .expect("mandatory workspace mount");
+
+    assert_eq!(mount.alias.as_str(), "/workspace");
+    assert_eq!(
+        mount.target.as_str(),
+        format!(
+            "/projects/workspace/users/{}",
+            TenantUserWorkspaceKey::from_scope(&scope).digest_segment()
+        )
+    );
+    assert!(mount.permissions.read);
+    assert!(mount.permissions.write);
+    assert!(mount.permissions.list);
+    assert!(mount.permissions.delete);
+    assert!(mount.permissions.execute);
 }
 
 struct CheckpointCleanup {

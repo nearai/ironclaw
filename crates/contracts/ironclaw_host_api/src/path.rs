@@ -65,6 +65,7 @@ const VIRTUAL_ROOTS: &[&str] = &[
     "/engine",
     "/system/settings",
     "/system/extensions",
+    "/system/prompts",
     "/system/skills",
     "/users",
     "/projects",

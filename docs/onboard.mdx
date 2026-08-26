@@ -29,7 +29,11 @@ ironclaw onboard
 
 Onboarding resolves your IronClaw home — `~/.ironclaw/reborn` by default — and creates it
 if it doesn't exist. Override the location with the `IRONCLAW_REBORN_HOME` environment
-variable.
+variable. That home is the installation boundary, not a parent for profile-named state:
+durable state, host-managed system content, tenant/user workspaces, and runtime
+bookkeeping live directly beneath it in `state/`, `system/`, `workspaces/`, and
+`runtime/`. Profile changes remain operator-controlled restarts and do not move those
+namespaces.
 
 </Step>
 

@@ -90,7 +90,7 @@ def _telegram_preflight(
     the reborn host never consumes an operator-supplied webhook secret.
     """
     copied_home_mentions = False
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if db_path.exists():
         with closing(sqlite3.connect(db_path)) as db:
             row = db.execute(
@@ -121,7 +121,7 @@ def _github_auth_preflight(
     *,
     requires_github_auth: bool,
 ) -> dict[str, object]:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     token_names = [
         "AUTH_LIVE_GITHUB_TOKEN",
         "IRONCLAW_REBORN_GITHUB_TOKEN",
@@ -192,8 +192,8 @@ def _seed_generated_github_product_auth_if_configured(reborn_home: Path, user_id
     if not selected:
         return preflight
 
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "state" / ".reborn-local-dev-secrets-master-key"
     master_key_path.parent.mkdir(parents=True, exist_ok=True)
     if master_key_path.exists():
         master_key = master_key_path.read_text(encoding="utf-8").strip()

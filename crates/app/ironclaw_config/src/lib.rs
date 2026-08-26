@@ -31,6 +31,7 @@ mod home;
 mod profile;
 mod retired_sections;
 mod secrets_guard;
+mod storage_layout;
 
 pub use boot::RebornBootConfig;
 pub use budget::{
@@ -60,3 +61,9 @@ pub use home::{REBORN_HOME_ENV, RebornConfigError, RebornHome, RebornHomeSource}
 pub use profile::{REBORN_PROFILE_ENV, RebornProfile};
 pub use retired_sections::{RetiredSectionError, RetiredSections, retired_config_key_guidance};
 pub use secrets_guard::{InlineSecretError, reject_inline_secret};
+pub use storage_layout::{
+    DeploymentSecurityEnvelope, DurableStateKind, LayoutManifest, LayoutRequirement,
+    LegacyStorageSource, ProfileTransitionAdmission, RebornStoragePaths, StateLayoutVersion,
+    TenancyModel, WorkspaceAccessFloor, canonical_memory_provider_app_id,
+    legacy_memory_provider_app_id,
+};

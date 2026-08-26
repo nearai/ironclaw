@@ -3693,7 +3693,9 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "dotenvy",
+ "fs4",
  "hex",
+ "ironclaw_approvals",
  "ironclaw_auth",
  "ironclaw_common",
  "ironclaw_composition",
@@ -3701,6 +3703,7 @@ dependencies = [
  "ironclaw_extension_contracts",
  "ironclaw_extension_host",
  "ironclaw_extension_manager",
+ "ironclaw_extension_registry",
  "ironclaw_extension_support",
  "ironclaw_filesystem",
  "ironclaw_host_api",
@@ -3709,6 +3712,7 @@ dependencies = [
  "ironclaw_secrets",
  "ironclaw_slack_extension",
  "ironclaw_telegram_extension",
+ "ironclaw_threads",
  "ironclaw_trace_commons",
  "ironclaw_web_app",
  "ironclaw_web_app_extension",
@@ -3728,6 +3732,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4061,7 +4066,10 @@ name = "ironclaw_config"
 version = "0.1.0"
 dependencies = [
  "fs4",
+ "hex",
  "serde",
+ "sha2 0.11.0",
+ "siphasher",
  "tempfile",
  "thiserror 2.0.20",
  "toml 1.1.4+spec-1.1.0",
@@ -4382,6 +4390,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "cap-fs-ext",
+ "cap-std",
  "deadpool 0.13.0",
  "deadpool-postgres",
  "ironclaw_host_api",
@@ -4389,6 +4399,8 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_safety",
  "libsql",
+ "rustix 1.1.4",
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",
@@ -4399,7 +4411,6 @@ dependencies = [
  "tracing",
  "tracing-test",
  "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

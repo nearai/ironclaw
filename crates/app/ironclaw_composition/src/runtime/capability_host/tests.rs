@@ -2572,6 +2572,8 @@ mod tests {
     async fn standalone_skill_activate_tool_loads_selected_skill_context() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("standalone");
+        let storage_paths =
+            ironclaw_config::RebornStoragePaths::from_installation_root(&storage_root);
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input(
                 "standalone-skill-activate-owner",
@@ -2584,7 +2586,7 @@ mod tests {
         // correctly invisible now, so seeding to disk would make this test pass on nothing
         // (nearai/ironclaw#7168).
         crate::filesystem_assembly::write_database_file_for_test(
-            &storage_root,
+            storage_paths.state_root(),
             "/tenants/tenant-skill-activate-tool/users/skill-activate-user/skills/unit-activate-helper/SKILL.md",
             skill_md(
                 "unit-activate-helper",
@@ -4886,7 +4888,7 @@ mod tests {
     async fn local_yolo_capability_port_reads_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("standalone");
-        let workspace_root = dir.path().join("workspace");
+        let workspace_root = storage_root.join("workspaces/confirmed-host-test");
         std::fs::create_dir_all(&workspace_root).expect("workspace root"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(workspace_root.join("note.txt"), "safe workspace file\n")
             .expect("workspace file"); // safety: test-only setup in #[cfg(test)] module.
@@ -4905,17 +4907,19 @@ mod tests {
             .into_owned();
 
         let services = crate::factory::build_runtime_substrate(
-            crate::deployment::local_filesystem_build_input_with_profile(
-                crate::RebornCompositionProfile::StandaloneUnrestricted,
-                "standalone-unrestricted-host-owner",
-                storage_root,
-            )
-            .with_runtime_policy(
-                crate::standalone_unrestricted_runtime_policy(true)
-                    .expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
-            )
-            .with_local_runtime_workspace_root(workspace_root.clone())
-            .with_local_runtime_confirmed_host_home_root(host_home.clone()),
+            crate::test_support::with_local_runtime_workspace_root_for_test(
+                crate::deployment::local_filesystem_build_input_with_profile(
+                    crate::RebornCompositionProfile::StandaloneUnrestricted,
+                    "standalone-unrestricted-host-owner",
+                    storage_root,
+                )
+                .with_runtime_policy(
+                    crate::standalone_unrestricted_runtime_policy(true)
+                        .expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
+                )
+                .with_local_runtime_confirmed_host_home_root(host_home.clone()),
+                workspace_root.clone(),
+            ),
         )
         .await
         .expect("standalone-unrestricted services build"); // safety: test-only assertion in #[cfg(test)] module.
@@ -5158,6 +5162,8 @@ mod tests {
     async fn capability_port_skill_install_writes_user_skill_root() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("standalone");
+        let storage_paths =
+            ironclaw_config::RebornStoragePaths::from_installation_root(&storage_root);
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input_with_profile(
                 crate::RebornCompositionProfile::StandaloneUnrestricted,
@@ -5264,7 +5270,7 @@ mod tests {
         // (nearai/ironclaw#7168).
         assert!(
             crate::filesystem_assembly::database_file_bytes(
-                &storage_root,
+                storage_paths.state_root(),
                 "/tenants/tenant-skill-install-write/users/standalone-skill-port-user/skills/qa-smoke-skill/SKILL.md",
             )
             .await
@@ -5285,7 +5291,7 @@ mod tests {
     async fn capability_port_omits_host_disclosure_without_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("standalone");
-        let workspace_root = dir.path().join("workspace");
+        let workspace_root = storage_root.join("workspaces/no-host-test");
         std::fs::create_dir_all(&workspace_root).expect("workspace root"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(workspace_root.join("note.txt"), "hidden workspace file\n")
             .expect("workspace file"); // safety: test-only setup in #[cfg(test)] module.
@@ -5295,11 +5301,13 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let services = crate::factory::build_runtime_substrate(
-            crate::deployment::local_filesystem_build_input(
-                "standalone-no-host-owner",
-                storage_root,
-            )
-            .with_local_runtime_workspace_root(workspace_root.clone()),
+            crate::test_support::with_local_runtime_workspace_root_for_test(
+                crate::deployment::local_filesystem_build_input(
+                    "standalone-no-host-owner",
+                    storage_root,
+                ),
+                workspace_root.clone(),
+            ),
         )
         .await
         .expect("standalone services build"); // safety: test-only assertion in #[cfg(test)] module.

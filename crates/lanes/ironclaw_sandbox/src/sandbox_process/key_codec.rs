@@ -1,6 +1,8 @@
 //! Shared length-prefixed identity-key encoding plus SHA-256 digest used by
-//! the scope and user key types. Each type selects its own fields and namespace
-//! prefix. Only the collision-safe framing and digest step are shared here.
+//! [`super::scope_key::RebornSandboxScopeKey`] and provider posture stamps.
+//! Tenant/user persistence identity is owned by
+//! `ironclaw_host_api::ids::TenantUserWorkspaceKey`, so Docker, Railway,
+//! host-process, and filesystem consumers share one neutral codec.
 
 use sha2::{Digest, Sha256};
 

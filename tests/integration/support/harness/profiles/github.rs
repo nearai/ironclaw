@@ -80,7 +80,7 @@ pub(crate) fn file_and_github_auth_tools_profile() -> HarnessResult<ToolsProfile
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         post_construct_asset_copy: Some((
             github_support::asset_root(),
-            std::path::PathBuf::from("local-dev/system/extensions/github"),
+            std::path::PathBuf::from("system/extensions/github"),
         )),
         auto_approve_default: Some(false),
         ..ToolsProfile::new(
@@ -132,8 +132,9 @@ fn github_issue_tools_with_credential_result(
     credential_account_result: Result<SecretHandle, CredentialStageError>,
 ) -> HarnessResult<HostRuntimeCapabilityHarness> {
     let root = Arc::new(tempfile::tempdir()?);
-    let storage_root = root.path().join("local-dev");
-    let workspace_root = storage_root.join("workspace");
+    let storage_root = root.path().join("state");
+    let workspace_root = root.path().join("workspaces");
+    std::fs::create_dir_all(&storage_root)?;
     std::fs::create_dir_all(&workspace_root)?;
     let github_fixture_response =
         br#"{"object":{"sha":"abc123def4567890abc123def4567890abc123de"},"ok":true}"#.to_vec();
@@ -164,6 +165,7 @@ fn github_issue_tools_with_credential_result(
         durable_capability_io_thread_service: Mutex::new(None),
         durable_capability_io_requested: false,
         root,
+        storage_paths: None,
         workspace_root,
         mounts,
         capability_mount_overrides: Vec::new(),

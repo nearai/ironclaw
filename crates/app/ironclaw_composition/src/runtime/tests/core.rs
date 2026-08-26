@@ -2158,12 +2158,15 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 /// `db_backed_skill_grants`, so a disk-seeded skill is correctly invisible (nearai/ironclaw#7168).
 /// Migrations are idempotent, so this runs before the runtime is built.
 async fn seed_db_skill(
-    storage_root: &std::path::Path,
+    installation_root: &std::path::Path,
     virtual_dir: &str,
     files: &[(&str, String)],
 ) {
-    std::fs::create_dir_all(storage_root).expect("storage root");
-    let db_path = crate::filesystem_assembly::standalone_db_path(storage_root);
+    let storage_paths =
+        ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
+    let state_root = storage_paths.state_root();
+    std::fs::create_dir_all(state_root).expect("state root");
+    let db_path = crate::filesystem_assembly::standalone_db_path(state_root);
     let db = std::sync::Arc::new(
         libsql::Builder::new_local(&db_path)
             .build()
@@ -5046,9 +5049,12 @@ async fn standalone_runtime_wires_filesystem_skills_by_default_to_model_calls() 
 async fn standalone_runtime_backfills_legacy_owner_skill_root() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    std::fs::create_dir_all(storage_root.join("skills/legacy-helper")).expect("legacy skill dir");
+    let storage_paths = ironclaw_config::RebornStoragePaths::from_installation_root(&storage_root);
+    let snapshot_root =
+        ironclaw_config::LegacyStorageSource::LocalDev.snapshot_root(&storage_paths);
+    std::fs::create_dir_all(snapshot_root.join("skills/legacy-helper")).expect("legacy skill dir");
     std::fs::write(
-        storage_root.join("skills/legacy-helper/SKILL.md"),
+        snapshot_root.join("skills/legacy-helper/SKILL.md"),
         skill_md(
             "legacy-helper",
             "legacy helper description",
@@ -5062,6 +5068,8 @@ async fn standalone_runtime_backfills_legacy_owner_skill_root() {
             "runtime-legacy-skill-owner",
             storage_root.clone(),
         )
+        .with_legacy_skill_snapshot_source(ironclaw_config::LegacyStorageSource::LocalDev)
+        .expect("local filesystem accepts legacy snapshot source")
         .with_runtime_policy(standalone_runtime_policy()),
     );
     let runtime = build_reborn_runtime(input).await.expect("runtime");
@@ -5074,20 +5082,15 @@ async fn standalone_runtime_backfills_legacy_owner_skill_root() {
 
     assert_eq!(result.plan.activations().len(), 1);
     assert_eq!(result.plan.activations()[0].name, "legacy-helper");
-    // The legacy tree is migrated onto the host disk and then imported into the DATABASE, which is
-    // the only tree skills are read from. Both are asserted: the disk copy is deliberately left in
-    // place so a downgrade is not destructive, and the database copy is what makes the skill usable.
+    // The admitted adoption snapshot remains intact for recovery and rollback while its released
+    // unscoped skill shape is imported into the canonical database-backed tree.
     assert!(
-        storage_root
-            .join(
-                "tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md"
-            )
-            .exists(),
-        "the on-disk legacy migration must still run, so a downgrade keeps the skill"
+        snapshot_root.join("skills/legacy-helper/SKILL.md").exists(),
+        "the immutable adoption snapshot must retain the legacy skill"
     );
     assert!(
         crate::filesystem_assembly::database_file_bytes(
-            &storage_root,
+            storage_paths.state_root(),
             "/tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md",
         )
         .await
@@ -5276,7 +5279,7 @@ async fn standalone_runtime_fails_closed_for_ambiguous_explicit_skill_before_mod
 async fn standalone_runtime_suppresses_explicit_setup_skill_when_workspace_marker_exists() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    std::fs::create_dir_all(storage_root.join("workspace/markers")).expect("marker dir");
+    std::fs::create_dir_all(storage_root.join("workspaces/markers")).expect("marker dir");
     seed_user_skill(
         &storage_root,
         "runtime-setup-marker-tenant",
@@ -5291,7 +5294,7 @@ async fn standalone_runtime_suppresses_explicit_setup_skill_when_workspace_marke
     )
     .await;
     std::fs::write(
-        storage_root.join("workspace/markers/marker-helper.done"),
+        storage_root.join("workspaces/markers/marker-helper.done"),
         "done",
     )
     .expect("write setup marker");
@@ -5438,19 +5441,21 @@ async fn standalone_runtime_activates_setup_skill_when_workspace_marker_is_absen
 }
 
 #[tokio::test]
-async fn standalone_runtime_rejects_workspace_overlapping_default_skill_roots() {
+async fn standalone_runtime_rejects_workspace_overlapping_system_root() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("standalone");
-    let workspace_root = storage_root.join("skills");
+    let workspace_root = storage_root.join("system/skills");
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let gateway = Arc::new(RecordingGateway {
         reply: "should not build".to_string(),
         requests,
     });
     let input = RebornRuntimeInput::from_build_input(
-        crate::deployment::local_filesystem_build_input("runtime-overlap-owner", storage_root)
-            .with_local_runtime_workspace_root(workspace_root)
-            .with_runtime_policy(standalone_runtime_policy()),
+        crate::test_support::with_local_runtime_workspace_root_for_test(
+            crate::deployment::local_filesystem_build_input("runtime-overlap-owner", storage_root)
+                .with_runtime_policy(standalone_runtime_policy()),
+            workspace_root,
+        ),
     )
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-overlap-tenant".to_string(),
@@ -5471,7 +5476,7 @@ async fn standalone_runtime_rejects_workspace_overlapping_default_skill_roots() 
     assert!(
         error
             .to_string()
-            .contains("must not overlap default skill root /skills"),
+            .contains("system root must not overlap workspace root"),
         "unexpected error: {error}"
     );
 }
@@ -5546,21 +5551,25 @@ async fn standalone_runtime_skips_invalid_filesystem_skill_before_model_call() {
 #[tokio::test]
 async fn standalone_runtime_maps_workspace_to_configured_root() {
     let root = tempfile::tempdir().expect("tempdir");
-    let workspace_root = tempfile::tempdir().expect("workspace tempdir");
+    let installation_root = root.path().join("standalone");
+    let workspace_root = installation_root.join("workspaces/configured");
+    std::fs::create_dir_all(&workspace_root).expect("workspace root");
     std::fs::write(
-        workspace_root.path().join("workspace-sentinel.txt"),
+        workspace_root.join("workspace-sentinel.txt"),
         "visible through /workspace",
     )
     .expect("write sentinel");
     let gateway = Arc::new(WorkspaceListingGateway::default());
     let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
     let input = RebornRuntimeInput::from_build_input(
-        crate::deployment::local_filesystem_build_input(
-            "runtime-workspace-owner",
-            root.path().join("standalone"),
-        )
-        .with_local_runtime_workspace_root(workspace_root.path().to_path_buf())
-        .with_runtime_policy(standalone_runtime_policy()),
+        crate::test_support::with_local_runtime_workspace_root_for_test(
+            crate::deployment::local_filesystem_build_input(
+                "runtime-workspace-owner",
+                installation_root,
+            )
+            .with_runtime_policy(standalone_runtime_policy()),
+            workspace_root,
+        ),
     )
     .with_tool_disclosure(ToolDisclosureMode::Off)
     .with_identity(RebornRuntimeIdentity {
@@ -8187,13 +8196,13 @@ async fn thread_one_authors_a_scripted_skill_and_thread_two_executes_it() {
     // second time beneath the per-caller root, a directory that does not exist). That string is pinned
     // where it is produced, by `runnable_dir_tests` in ironclaw_first_party_extension_ports.
     let mut staged = Vec::new();
-    find_staged_script(&storage_root.join("workspace"), &mut staged);
+    find_staged_script(&storage_root.join("workspaces"), &mut staged);
     assert_eq!(
         staged.len(),
         1,
         "activation must stage the bundle exactly once somewhere a process can open it; found \
          {staged:?} under {}",
-        storage_root.join("workspace").display()
+        storage_root.join("workspaces").display()
     );
     let staged_script = staged.remove(0);
     let staged_dir = staged_script

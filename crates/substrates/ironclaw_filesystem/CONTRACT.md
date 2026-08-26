@@ -35,6 +35,13 @@ boundary. The current rule is codified in
   `LibSqlRootFilesystem`, `InMemoryBackend`, `HsmBackend`. All implement
   `RootFilesystem` (re-derive with
   `rg -n "impl RootFilesystem for" src/`).
+- `DiskDirectoryCapability` — trusted-setup admission for a host directory.
+  It creates descendants descriptor-relatively, binds mount metadata to the
+  same directory identity, and keeps reads, writes, listing, metadata, and
+  deletion rooted in that retained authority instead of re-opening a raceable
+  ambient pathname. `write_file_atomic_synced` publishes a file through that
+  same retained authority: temporary creation, file sync, rename, and parent
+  directory sync never re-resolve the ambient parent path.
 - `PostgresConnectionPool` (`src/postgres.rs`) — the workspace's own carrier for
   an opened `deadpool_postgres::Pool`. This crate is the Postgres substrate, so
   the driver is a chartered dependency *here*; crates above that only pass a
@@ -48,6 +55,36 @@ boundary. The current rule is codified in
   pins which crates may link the driver at all.
 - Backend containment checks (symlink traversal, mount escape, raw-host
   path prevention).
+- Local-disk mount admission and mutation capabilities
+  (`src/local_capability.rs`). `DiskFilesystem::mount_local_create` performs
+  blocking descriptor admission on Tokio's blocking pool, rejects a symlinked
+  mount root, creates missing descendants relative to an opened ordinary
+  ancestor, and retains the resulting directory handle. `write_file`,
+  `append_file`, `create_dir_all`, and `create_subtree_atomic` operate relative
+  to that handle; their child creation, temporary materialization, and atomic
+  publication cannot be redirected by later replacement of the ambient root or
+  one of its ancestors. Atomic subtree publication is no-replace: native
+  `renameat` flags provide that guarantee on supported Unix targets and Windows
+  rename provides it when the destination is absent. File contents are synced
+  before publication; on Windows the directory handle is not flushed because a
+  read-only directory handle can reject `FlushFileBuffers` after publication.
+  `FilesystemError::LocalCapability` keeps the underlying I/O source for trusted
+  diagnostics while its Display contract exposes only the virtual path.
+- Bounded ordinary host-tree inspection (`inspect_ordinary_host_tree`). This
+  host-only migration primitive accepts a non-serializable `HostPath`, rejects
+  root or nested symlinks and special entries, traverses relative to retained
+  directory handles, verifies directory identity after traversal, and reports
+  whether any regular file exists. Its fixed depth bound is inclusive: the
+  root is depth zero and entries through `MAX_ORDINARY_HOST_TREE_DEPTH` are
+  accepted. The bound is shared by callers; migration-specific directory
+  grammar remains in the app/domain that owns it.
+  `read_ordinary_host_file` accepts a retained `DiskDirectoryCapability` plus
+  a relative file path. It traverses every ancestor descriptor-relatively and
+  opens the final component without following links, so later replacement of
+  the admitted snapshot root or symlink replacement of a child directory cannot
+  redirect reads outside the retained root. It verifies regular-file metadata
+  from the opened handle; the caller's byte limit is checked against that
+  metadata and enforced again during the read to bound concurrent file growth.
 - `FaultInjecting` (`src/fault.rs`, behind the `test-support` feature) — a
   fault-injecting + op-recording `RootFilesystem` decorator. Downstream tests
   wrap the real backend in it (`SecretStore::ephemeral_over`,
@@ -154,10 +191,11 @@ boundary. The current rule is codified in
    serve an `IndexKind::Vector` or a `Filter::Range` declares so up front
    via `BackendCapabilities`; mount-time validation refuses the attachment.
    Runtime `Unsupported` errors are a fallback, not the primary signal.
-4. **Indexed projection is the only queryable surface.** Backends never
-   parse `Entry::body` to evaluate filters. Everything queryable lives in
-   `Entry::indexed`. This keeps the indexing contract portable across SQL,
-   filesystem-sidecar, and HSM backends.
+4. **Indexed projection and structural kind are the only queryable surfaces.**
+   Backends never parse `Entry::body` to evaluate filters. Domain fields that
+   need queries live in `Entry::indexed`; `Entry::kind` may be matched through
+   the typed `Filter::Kind` predicate. This keeps the query contract portable
+   across SQL, filesystem-sidecar, and HSM backends.
 5. **Request queries are bounded index traversals.** Ordered request paths
    use `query_ordered`, name the declared exact/prefix index, and carry a
    keyset cursor. Backends fail closed when the equality-filter prefix,

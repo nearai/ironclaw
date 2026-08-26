@@ -1860,6 +1860,118 @@ async fn libsql_query_filters_on_indexed_projection() {
         .count();
     assert_eq!(acme_active_count, 2);
 }
+
+async fn query_filters_on_structural_record_kind(filesystem: &dyn RootFilesystem) {
+    let selected = RecordKind::new("selected").unwrap();
+    for (path, kind) in [
+        ("/secrets/kind-query/selected", Some(selected.clone())),
+        (
+            "/secrets/kind-query/other",
+            Some(RecordKind::new("other").unwrap()),
+        ),
+        ("/secrets/kind-query/opaque", None),
+    ] {
+        let entry = match kind {
+            Some(kind) => Entry::record(kind, &serde_json::json!({})).unwrap(),
+            None => Entry::bytes(Vec::new()),
+        };
+        filesystem
+            .put(
+                &VirtualPath::new(path).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+
+    let results = filesystem
+        .query(
+            &VirtualPath::new("/secrets/kind-query").unwrap(),
+            &Filter::Kind { kind: selected },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].path,
+        VirtualPath::new("/secrets/kind-query/selected").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn libsql_query_filters_on_structural_record_kind() {
+    query_filters_on_structural_record_kind(&*libsql_root().await).await;
+}
+
+async fn query_or_filters_on_structural_record_kind(
+    filesystem: &dyn RootFilesystem,
+    prefix: &VirtualPath,
+) {
+    let selected = RecordKind::new("selected").unwrap();
+    let scope = IndexKey::new("scope").unwrap();
+    for (leaf, kind, indexed_scope) in [
+        ("selected", Some(selected.clone()), "excluded"),
+        (
+            "index-match",
+            Some(RecordKind::new("other").unwrap()),
+            "included",
+        ),
+        ("opaque", None, "excluded"),
+    ] {
+        let entry = match kind {
+            Some(kind) => Entry::record(kind, &serde_json::json!({})).unwrap(),
+            None => Entry::bytes(Vec::new()),
+        }
+        .with_indexed(scope.clone(), IndexValue::Text(indexed_scope.into()));
+        let path = VirtualPath::new(format!("{}/{leaf}", prefix.as_str())).unwrap();
+        filesystem
+            .put(&path, entry, CasExpectation::Absent)
+            .await
+            .unwrap();
+    }
+
+    let results = filesystem
+        .query(
+            prefix,
+            &Filter::Or(vec![
+                Filter::Kind { kind: selected },
+                Filter::Eq {
+                    key: scope,
+                    value: IndexValue::Text("included".into()),
+                },
+            ]),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+
+    let paths: Vec<_> = results.into_iter().map(|entry| entry.path).collect();
+    assert_eq!(
+        paths,
+        vec![
+            VirtualPath::new(format!("{}/index-match", prefix.as_str())).unwrap(),
+            VirtualPath::new(format!("{}/selected", prefix.as_str())).unwrap(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn in_memory_query_or_filters_on_structural_record_kind() {
+    let filesystem = InMemoryBackend::new();
+    let prefix = VirtualPath::new("/secrets/kind-query-or").unwrap();
+    query_or_filters_on_structural_record_kind(&filesystem, &prefix).await;
+}
+
+#[tokio::test]
+async fn libsql_query_or_filters_on_structural_record_kind() {
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/secrets/kind-query-or").unwrap();
+    query_or_filters_on_structural_record_kind(&*filesystem, &prefix).await;
+}
+
 #[tokio::test]
 async fn libsql_query_prefix_filter_matches_text_prefix() {
     let filesystem = libsql_root().await;
@@ -2487,6 +2599,38 @@ mod postgres_tests {
     };
     use ironclaw_host_api::path::VirtualPath;
 
+    const REQUIRE_POSTGRES_TESTS_ENV: &str = "IRONCLAW_REQUIRE_POSTGRES_TESTS";
+
+    fn postgres_required() -> bool {
+        std::env::var_os(REQUIRE_POSTGRES_TESTS_ENV).is_some()
+    }
+
+    fn should_skip_postgres_setup(required: bool, skip_requested: bool) -> bool {
+        skip_requested && !required
+    }
+
+    fn postgres_setup_is_skipped() -> bool {
+        should_skip_postgres_setup(
+            postgres_required(),
+            std::env::var_os("IRONCLAW_SKIP_POSTGRES_TESTS").is_some(),
+        )
+    }
+
+    #[test]
+    fn required_postgres_overrides_the_skip_request() {
+        assert!(!should_skip_postgres_setup(false, false));
+        assert!(should_skip_postgres_setup(false, true));
+        assert!(!should_skip_postgres_setup(true, false));
+        assert!(!should_skip_postgres_setup(true, true));
+    }
+
+    fn report_postgres_unavailable(stage: &'static str) {
+        if postgres_required() {
+            panic!("required Postgres filesystem test setup failed at stage={stage}");
+        }
+        eprintln!("skipping Postgres filesystem contract tests: stage={stage}");
+    }
+
     /// One container per test binary, started on first use.
     ///
     /// Kept alive for the process: dropping the handle stops the database out
@@ -2525,16 +2669,25 @@ mod postgres_tests {
                     .with_tag("16-alpine");
                 let container = match image.start().await {
                     Ok(container) => container,
-                    Err(error) => {
-                        eprintln!(
-                            "skipping Postgres filesystem contract tests: \
-                             docker/testcontainers unavailable ({error})"
-                        );
+                    Err(_) => {
+                        report_postgres_unavailable("start-testcontainer");
                         return None;
                     }
                 };
-                let host = container.get_host().await.ok()?;
-                let port = container.get_host_port_ipv4(5432).await.ok()?;
+                let host = match container.get_host().await {
+                    Ok(host) => host,
+                    Err(_) => {
+                        report_postgres_unavailable("resolve-testcontainer-host");
+                        return None;
+                    }
+                };
+                let port = match container.get_host_port_ipv4(5432).await {
+                    Ok(port) => port,
+                    Err(_) => {
+                        report_postgres_unavailable("resolve-testcontainer-port");
+                        return None;
+                    }
+                };
                 Some(ContainerUrl {
                     url: format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
                     _container: container,
@@ -2546,16 +2699,28 @@ mod postgres_tests {
     }
 
     async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
-        if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+        if postgres_setup_is_skipped() {
             return None;
         }
         let url = postgres_url().await?;
-        let config = url.parse::<tokio_postgres::Config>().ok()?;
+        let config = match url.parse::<tokio_postgres::Config>() {
+            Ok(config) => config,
+            Err(_) => {
+                report_postgres_unavailable("parse-connection-url");
+                return None;
+            }
+        };
         let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-        deadpool_postgres::Pool::builder(manager)
+        match deadpool_postgres::Pool::builder(manager)
             .max_size(4)
             .build()
-            .ok()
+        {
+            Ok(pool) => Some(pool),
+            Err(_) => {
+                report_postgres_unavailable("build-connection-pool");
+                None
+            }
+        }
     }
 
     /// Installs the projection triggers once per binary, before tests race.
@@ -2666,7 +2831,7 @@ mod postgres_tests {
         // Same opt-out every other PostgreSQL case honours through
         // `postgres_pool`, checked before anything provisions a container or
         // issues DDL.
-        if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+        if postgres_setup_is_skipped() {
             return None;
         }
         // Past the skip flag and a resolvable URL, every failure below is a
@@ -2752,7 +2917,10 @@ mod postgres_tests {
     async fn postgres_root() -> Option<(PostgresRootFilesystem, String)> {
         let pool = postgres_pool().await?;
         let fs = PostgresRootFilesystem::new(pool);
-        fs.run_migrations().await.ok()?;
+        if fs.run_migrations().await.is_err() {
+            report_postgres_unavailable("run-migrations");
+            return None;
+        }
         install_projection_once(&fs).await;
         // Unique per-test prefix under /secrets/leases (a known VirtualPath
         // root). Concurrent test runs against the same Postgres get
@@ -3615,6 +3783,48 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn postgres_query_filters_on_structural_record_kind() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let selected = RecordKind::new("selected").unwrap();
+        for (leaf, kind) in [
+            ("selected", Some(selected.clone())),
+            ("other", Some(RecordKind::new("other").unwrap())),
+            ("opaque", None),
+        ] {
+            let entry = match kind {
+                Some(kind) => Entry::record(kind, &serde_json::json!({})).unwrap(),
+                None => Entry::bytes(Vec::new()),
+            };
+            fs.put(&vpath(&prefix, leaf), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+
+        let results = fs
+            .query(
+                &VirtualPath::new(&prefix).unwrap(),
+                &Filter::Kind { kind: selected },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].path, vpath(&prefix, "selected"));
+    }
+
+    #[tokio::test]
+    async fn postgres_query_or_filters_on_structural_record_kind() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix = VirtualPath::new(prefix).unwrap();
+        super::query_or_filters_on_structural_record_kind(&fs, &prefix).await;
     }
 
     #[tokio::test]

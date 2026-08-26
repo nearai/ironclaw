@@ -2,14 +2,12 @@ use super::*;
 
 #[cfg(feature = "test-support")]
 use ironclaw_host_api::{
-    action::NetworkPolicy,
-    capability::{CapabilityGrant, EffectKind, GrantConstraints},
-    ids::{CapabilityGrantId, ExtensionId},
-    scope::Principal,
+    capability::CapabilityGrant,
+    ids::{ExtensionId, UserId},
 };
 use ironclaw_product_contracts::channel_config::ChannelConfigProductService;
 #[cfg(feature = "test-support")]
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::TrustDecision;
 
 /// Harness-facing wiring for
 /// [`RebornRuntimeStores::start_channel_host_assembly_for_test`]: the test group
@@ -164,13 +162,6 @@ impl RebornRuntimeStores {
         &self,
     ) -> &crate::runtime_mounts::WorkspaceMountPolicy {
         &self.workspace_mounts
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn standalone_storage_root_for_direct_test(&self) -> &PathBuf {
-        self.standalone_storage_root
-            .as_ref()
-            .expect("local runtime storage root")
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -492,17 +483,6 @@ impl RebornRuntimeStores {
         Some(Arc::clone(&self.outbound_preferences))
     }
 
-    /// Test-support access to the on-disk standalone storage root (W6-COLD-SPOTS
-    /// seam), for tests only — mirrors the same `standalone_storage_root`
-    /// that `build_local_runtime_runtime_stores` establishes in production. Used to reopen
-    /// a fresh outbound-preferences store at the same root (see
-    /// `open_standalone_outbound_preferences_store_for_test`). Returns `None` for
-    /// production-profile compositions without a standalone runtime.
-    #[cfg(feature = "test-support")]
-    pub(crate) fn standalone_storage_root_for_test(&self) -> Option<PathBuf> {
-        self.standalone_storage_root.clone()
-    }
-
     /// Single owner of the `ProjectScopedAttachmentReader` construction recipe
     /// over `workspace_filesystem` (mirrors the
     /// `read_write_workspace_filesystem` "single owner" pattern above). The
@@ -623,11 +603,12 @@ impl RebornRuntimeStores {
         &self,
         package: &ironclaw_extension_registry::ExtensionPackage,
         resolved: Option<&ironclaw_extension_registry::ResolvedExtensionManifest>,
+        owner: ironclaw_extension_registry::InstallationOwner,
     ) -> Option<Result<(), ironclaw_assistant::ProductSurfaceFailure>> {
         let extension_management = &self.extension_management;
         Some(
             extension_management
-                .publish_bundled_package_for_test(package, resolved)
+                .publish_bundled_package_for_test(package, resolved, owner)
                 .await
                 .map_err(ironclaw_assistant::ProductSurfaceFailure::from),
         )
@@ -685,10 +666,11 @@ impl RebornRuntimeStores {
     pub(crate) async fn standalone_active_extension_authority_for_test(
         &self,
         grantee: &ExtensionId,
+        caller: &UserId,
     ) -> Option<Result<ActiveExtensionAuthorityForTest, ironclaw_assistant::ProductSurfaceFailure>>
     {
         let extension_management = &self.extension_management;
-        Some(active_extension_authority_for_test(extension_management, grantee).await)
+        Some(active_extension_authority_for_test(extension_management, grantee, caller).await)
     }
 }
 
@@ -702,86 +684,18 @@ pub struct ActiveExtensionAuthorityForTest {
 pub(crate) async fn active_extension_authority_for_test(
     extension_management: &RebornLocalExtensionManagementPort,
     grantee: &ExtensionId,
+    caller: &UserId,
 ) -> Result<ActiveExtensionAuthorityForTest, ironclaw_assistant::ProductSurfaceFailure> {
     let active_capabilities = extension_management
         .active_model_visible_capabilities()
         .await?;
-    let grants = active_capabilities
-        .iter()
-        .map(|capability| CapabilityGrant {
-            id: CapabilityGrantId::new(),
-            capability: capability.id.clone(),
-            grantee: Principal::Extension(grantee.clone()),
-            issued_by: Principal::HostRuntime,
-            constraints: active_extension_grant_constraints_for_test(capability),
-        })
-        .collect();
-    let mut effects_by_provider: std::collections::BTreeMap<ExtensionId, Vec<EffectKind>> =
-        std::collections::BTreeMap::new();
-    for capability in &active_capabilities {
-        let effects = effects_by_provider
-            .entry(capability.provider.clone())
-            .or_default();
-        for effect in &capability.effects {
-            if !effects.contains(effect) {
-                effects.push(*effect);
-            }
-        }
-    }
-    let provider_trust = effects_by_provider
-        .into_iter()
-        .map(|(provider, allowed_effects)| {
-            (
-                provider,
-                TrustDecision {
-                    effective_trust: EffectiveTrustClass::user_trusted(),
-                    authority_ceiling: AuthorityCeiling {
-                        allowed_effects,
-                        max_resource_ceiling: None,
-                    },
-                    provenance: TrustProvenance::AdminConfig,
-                    evaluated_at: chrono::Utc::now(),
-                },
-            )
-        })
-        .collect();
+    let surface = ironclaw_extension_host::capability_surface::ExtensionCapabilitySurface::from_active_capabilities(active_capabilities);
+    let grants = surface.grants(grantee, caller);
+    let provider_trust = surface.provider_trust(caller).into_iter().collect();
     Ok(ActiveExtensionAuthorityForTest {
         grants,
         provider_trust,
     })
-}
-
-#[cfg(feature = "test-support")]
-fn active_extension_grant_constraints_for_test(
-    capability: &ironclaw_extension_host::ActiveExtensionCapability,
-) -> GrantConstraints {
-    GrantConstraints {
-        allowed_effects: capability.effects.clone(),
-        mounts: MountView::default(),
-        network: active_extension_network_policy_for_test(capability),
-        secrets: {
-            let mut handles = Vec::new();
-            for credential in &capability.runtime_credentials {
-                if !handles.contains(&credential.handle) {
-                    handles.push(credential.handle.clone());
-                }
-            }
-            handles
-        },
-        resource_ceiling: None,
-        expires_at: None,
-        max_invocations: None,
-    }
-}
-
-#[cfg(feature = "test-support")]
-fn active_extension_network_policy_for_test(
-    capability: &ironclaw_extension_host::ActiveExtensionCapability,
-) -> NetworkPolicy {
-    // Delegate to the production manifest-egress policy builder (gsuite +
-    // web-access declare their egress in their manifests now — no per-provider
-    // special-case, and no first-party dependency in this test-support seam).
-    ironclaw_extension_host::capability_surface::extension_network_policy(capability)
 }
 
 /// Bundle returned by [`RebornRuntimeStores::standalone_attachment_test_support_for_test`]
@@ -824,6 +738,22 @@ pub(crate) async fn mount_default_database_roots(
         .map(|_| ())
 }
 
+#[cfg(feature = "test-support")]
+async fn reopen_canonical_filesystem(
+    installation_root: &Path,
+) -> Result<crate::filesystem_assembly::FilesystemAssembly, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
+    build_filesystem(
+        paths.state_root(),
+        paths.system_root(),
+        paths.workspace_root(),
+        None,
+        None,
+        DurableStorageInput::EmbeddedLibsql,
+    )
+    .await
+}
+
 /// Test-only (T5 restart-survival seam): open a FRESH standalone root
 /// filesystem at an existing `storage_root`, for reconstructing the generic
 /// channel-identity store the way production boot does
@@ -833,17 +763,47 @@ pub(crate) async fn mount_default_database_roots(
 /// absence. Tests only; zero bytes in production.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_root_filesystem_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn RootFilesystem>, RebornBuildError> {
-    let workspace_root = storage_root.join("workspace");
-    let bundle = build_filesystem(
-        storage_root,
-        &workspace_root,
-        None,
-        DurableStorageInput::EmbeddedLibsql,
-    )
-    .await?;
+    let bundle = reopen_canonical_filesystem(installation_root).await?;
     Ok(bundle.filesystem)
+}
+
+/// Test-only (DURABLE-COLD): open a fresh, independent thread service over an
+/// existing standalone root. This is the production filesystem thread service
+/// and the same canonical `state/`, `system/`, and `workspaces/` assembly as
+/// standalone boot, without reconstructing a scheduler or runtime process.
+#[cfg(feature = "test-support")]
+pub(crate) async fn open_standalone_thread_service_for_test(
+    installation_root: &Path,
+) -> Result<
+    Arc<ironclaw_threads::FilesystemSessionThreadService<CompositeRootFilesystem>>,
+    RebornBuildError,
+> {
+    let bundle = reopen_canonical_filesystem(installation_root).await?;
+    let scoped = crate::wrap_scoped(bundle.filesystem);
+    Ok(Arc::new(
+        ironclaw_threads::FilesystemSessionThreadService::new(scoped),
+    ))
+}
+
+/// Test-only (DURABLE-COLD): reopen the production database-backed user-skill
+/// management service over an existing standalone root. This mirrors the
+/// runtime's `production_skill_management_mount_view` instead of reading the
+/// one-time legacy host-disk import source.
+#[cfg(feature = "test-support")]
+pub(crate) async fn open_standalone_skill_management_for_test(
+    installation_root: &Path,
+    owner_user_id: ironclaw_host_api::ids::UserId,
+) -> Result<Arc<ironclaw_skills::ScopedSkillManagementPort>, RebornBuildError> {
+    let bundle = reopen_canonical_filesystem(installation_root).await?;
+    Ok(Arc::new(
+        ironclaw_skills::ScopedSkillManagementPort::new_with_mount_resolver(
+            owner_user_id,
+            bundle.filesystem,
+            Arc::new(super::production_backend_assembly::production_skill_management_mount_view),
+        ),
+    ))
 }
 
 /// Test-only (E-DURABLE seam): open a FRESH, independent
@@ -860,17 +820,10 @@ pub(crate) async fn open_standalone_root_filesystem_for_test(
 /// tenant/user context is needed. Tests only; zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_extension_installation_store_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn ironclaw_extension_registry::ExtensionInstallationStorePort>, RebornBuildError>
 {
-    let workspace_root = storage_root.join("workspace");
-    let bundle = build_filesystem(
-        storage_root,
-        &workspace_root,
-        None,
-        DurableStorageInput::EmbeddedLibsql,
-    )
-    .await?;
+    let bundle = reopen_canonical_filesystem(installation_root).await?;
     let filesystem: Arc<dyn RootFilesystem> = bundle.filesystem;
     let state_path = ExtensionInstallationStore::default_state_path().map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -907,10 +860,11 @@ pub(crate) async fn open_standalone_extension_installation_store_for_test(
 /// production. Tests only; zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_approval_request_store_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn ironclaw_approvals::ApprovalRequestStorePort>, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let mut composite = CompositeRootFilesystem::new();
-    mount_default_database_roots(storage_root, &mut composite).await?;
+    mount_default_database_roots(paths.state_root(), &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
     Ok(Arc::new(ApprovalRequestStore::new(scoped)))
 }
@@ -924,10 +878,11 @@ pub(crate) async fn open_standalone_approval_request_store_for_test(
 /// Tests only.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_outbound_preferences_store_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn CommunicationPreferenceRepository>, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let mut composite = CompositeRootFilesystem::new();
-    mount_default_database_roots(storage_root, &mut composite).await?;
+    mount_default_database_roots(paths.state_root(), &mut composite).await?;
     Ok(
         crate::outbound_store_assembly::build_outbound_stores(Arc::new(composite))
             .outbound_preferences,
@@ -948,7 +903,7 @@ pub(crate) async fn open_standalone_outbound_preferences_store_for_test(
 /// production. Tests only; zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_approval_settings_stores_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<
     (
         Arc<dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort>,
@@ -957,8 +912,9 @@ pub(crate) async fn open_standalone_approval_settings_stores_for_test(
     ),
     RebornBuildError,
 > {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let mut composite = CompositeRootFilesystem::new();
-    mount_default_database_roots(storage_root, &mut composite).await?;
+    mount_default_database_roots(paths.state_root(), &mut composite).await?;
     let scoped = crate::wrap_scoped(Arc::new(composite));
     let tool_permission_overrides: Arc<
         dyn ironclaw_approvals::CapabilityPermissionOverrideStorePort,
@@ -988,10 +944,11 @@ pub(crate) async fn open_standalone_approval_settings_stores_for_test(
 /// production builds.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_standalone_trigger_repository_for_test(
-    storage_root: &Path,
+    installation_root: &Path,
 ) -> Result<Arc<dyn TriggerRepository>, RebornBuildError> {
+    let paths = ironclaw_config::RebornStoragePaths::from_installation_root(installation_root);
     let mut composite = CompositeRootFilesystem::new();
-    let backend = build_default_database_roots(storage_root, &mut composite).await?;
+    let backend = build_default_database_roots(paths.state_root(), &mut composite).await?;
     trigger_repository_for_durable_backend(&backend).await
 }
 

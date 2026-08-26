@@ -265,7 +265,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
-| A sandbox-profile shell turn executes as an unprivileged user in one reusable per-user Docker container, preserving workspace and container-local state across shell calls and sharing that container across the user's threads | `reborn_sandbox_shell_turn.rs` |
+| A sandbox-profile shell turn binds the capability backend to the canonical actor, then executes as an unprivileged user in one reusable per-user Docker container, preserving workspace and container-local state across shell calls and sharing that container across the user's threads | `reborn_sandbox_shell_turn.rs::sandbox_shell_backend_uses_canonical_binding_actor`, `reborn_sandbox_shell_turn.rs::sandbox_shell_turn_executes_in_a_real_container` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
 | User-registered and bundled hosted MCP servers register, authenticate, project active, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
@@ -313,6 +313,8 @@ One thread, whole real turn. Grouped by what the user experiences.
 |---|---|
 | Behavior is identical on in-memory, libSQL, and PostgreSQL storage; message exact lookups avoid sibling entry rows on both durable databases | `backend_matrix.rs` |
 | Installed extensions survive a fresh store reopen | `durable.rs` |
+| A durable extension reopen rejects legacy tenant-wide ownership and retains exactly the original personal owner | `durable.rs::durable_extension_reopen_rejects_tenant_wide_owner_and_requires_one_member` |
+| A cold reopen preserves thread history, encrypted secrets, extension ownership, approval settings, and system/user skills under the exact tenant/user scope | `durable.rs::durable_host_state_survives_cold_reopen_with_exact_tenant_user_ownership` |
 | Secrets survive a genuine on-disk reopen | `secrets.rs` |
 | Outbound preferences survive a process-level reopen | `outbound_store_durability.rs` |
 | Restart sequences over a gated run recover correctly | `generated_restart_sequences.rs` |

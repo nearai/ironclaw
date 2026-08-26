@@ -737,24 +737,6 @@ impl RebornIntegrationHarnessBuilder {
     pub async fn build(self) -> HarnessResult<RebornIntegrationHarness> {
         apply_hermetic_env();
 
-        // --- capability backend → GroupCapability --------------------------
-        // Echo by default (records, executes nothing — a text reply invokes no
-        // tool). Builtin/MCP swap in the real first-party runtime. (Live approval
-        // stores are a group-only backend; see `RebornIntegrationGroup::live_approvals`.)
-        let group_capability = self
-            .capability
-            .install(
-                self.shell_mode,
-                CapabilityScriptingInputs {
-                    keyed_http_responses: self.keyed_http_responses,
-                    web_access_response_bodies: self.web_access_response_bodies,
-                    github_network_responses: self.github_network_responses,
-                    real_egress_response_bodies: self.real_egress_response_bodies,
-                },
-                self.park_tool_gate,
-            )
-            .await?;
-
         // Routed through the group/thread builder (one assembly path for both
         // groups and single-shot harnesses). A single-shot harness is a
         // degenerate one-thread group and submits as the default
@@ -803,9 +785,47 @@ impl RebornIntegrationHarnessBuilder {
         if self.fail_append_tool_result_reference {
             group_builder = group_builder.fail_append_tool_result_reference_for_test();
         }
-        let group: RebornIntegrationGroup = group_builder
-            .build_with_capability(group_capability)
-            .await?;
+        // Most capability profiles are independent of the resolved product
+        // binding and can be installed directly. The sandbox profile is the
+        // exception: its admitted `/workspace` leaf and Docker identity are
+        // caller-scoped, so the group must resolve its canonical binding first.
+        let group: RebornIntegrationGroup =
+            if matches!(&self.capability, RebornCapabilityBackend::SandboxShellTools) {
+                if !matches!(self.shell_mode, ShellMode::Inert) {
+                    return Err(
+                        "sandbox shell harness executes real containers and does not support \
+                         shell mode overrides"
+                            .into(),
+                    );
+                }
+                if self.park_tool_gate.is_some() {
+                    return Err("park_tool_dispatch is only supported by \
+                         RebornCapabilityBackend::BuiltinHttpTools (select it via \
+                         .with_builtin_http_tools())"
+                        .into());
+                }
+                group_builder.build_with_sandbox_shell_capability().await?
+            } else {
+                // Echo by default (records, executes nothing — a text reply
+                // invokes no tool). Builtin/MCP swap in the real first-party
+                // runtime. Live approval stores are group-only.
+                let group_capability = self
+                    .capability
+                    .install(
+                        self.shell_mode,
+                        CapabilityScriptingInputs {
+                            keyed_http_responses: self.keyed_http_responses,
+                            web_access_response_bodies: self.web_access_response_bodies,
+                            github_network_responses: self.github_network_responses,
+                            real_egress_response_bodies: self.real_egress_response_bodies,
+                        },
+                        self.park_tool_gate,
+                    )
+                    .await?;
+                group_builder
+                    .build_with_capability(group_capability)
+                    .await?
+            };
         group
             .thread(self.conversation_id)
             .script(self.replies)
@@ -893,6 +913,17 @@ pub struct RebornIntegrationHarness {
 }
 
 impl RebornIntegrationHarness {
+    pub(crate) fn installation_home(&self) -> PathBuf {
+        match &self._shared.capability {
+            GroupCapability::HostRuntime(capability) => capability.storage_root_for_test(),
+            GroupCapability::Recording
+            | GroupCapability::RecordingNoProgress
+            | GroupCapability::RecordingRecoverablePortError => {
+                panic!("sandbox profile must use the production host-runtime capability path")
+            }
+        }
+    }
+
     /// Default harness: InMemory storage, hermetic env, real decorator chain.
     pub fn test_default() -> RebornIntegrationHarnessBuilder {
         Self::builder("conv-itest")
@@ -1449,6 +1480,24 @@ impl RebornIntegrationHarness {
         self._shared
             .capability
             .assert_extension_install_persists_after_reopen(extension_id)
+            .await
+    }
+
+    /// Assert an installed extension's caller membership survives an
+    /// independent reopen of the capability composite.
+    pub async fn assert_extension_install_membership_persists_after_reopen(
+        &self,
+        extension_id: &str,
+        expected_member: &UserId,
+        rejected_member: &UserId,
+    ) -> HarnessResult<()> {
+        self._shared
+            .capability
+            .assert_extension_install_membership_persists_after_reopen(
+                extension_id,
+                expected_member,
+                rejected_member,
+            )
             .await
     }
 

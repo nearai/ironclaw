@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use ironclaw_skills::{
     ManagedSkillSource, ScopedSkillManagementBuildError, ScopedSkillManagementError,
-    SkillManagementError, SkillManagementErrorKind,
+    ScopedSkillManagementPort, SkillManagementError, SkillManagementErrorKind,
     build_existing_standalone_skill_management_port,
 };
 
@@ -13,19 +13,28 @@ pub async fn list_reborn_local_skills(
     owner_id: impl Into<String>,
     standalone_storage_root: impl Into<std::path::PathBuf>,
 ) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornSkillListError> {
-    let mut skills =
-        match build_existing_standalone_skill_management_port(owner_id, standalone_storage_root)? {
-            Some(skill_management) => {
-                let scope = skill_management
-                    .owner_scope()
-                    .map_err(map_local_skill_management_error)?;
-                skill_management
-                    .list_for_scope(scope)
-                    .await
-                    .map_err(map_local_skill_management_error)?
-            }
-            None => Vec::new(),
-        };
+    let skill_management =
+        build_existing_standalone_skill_management_port(owner_id, standalone_storage_root)?;
+    list_reborn_skills_from_management(skill_management).await
+}
+
+/// List user skills from an already-composed authoritative filesystem and
+/// merge the embedded bundled catalog.
+pub async fn list_reborn_skills_from_management(
+    skill_management: Option<std::sync::Arc<ScopedSkillManagementPort>>,
+) -> Result<Vec<ironclaw_skills::SkillSummary>, RebornSkillListError> {
+    let mut skills = match skill_management {
+        Some(skill_management) => {
+            let scope = skill_management
+                .owner_scope()
+                .map_err(map_local_skill_management_error)?;
+            skill_management
+                .list_for_scope(scope)
+                .await
+                .map_err(map_local_skill_management_error)?
+        }
+        None => Vec::new(),
+    };
     let bundled_skills = bundled_reborn_skill_summaries()?;
     let bundled_names = bundled_skills
         .iter()

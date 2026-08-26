@@ -384,6 +384,7 @@ fn core_builtin_tools_from_runtime(
         durable_capability_io_thread_service: Mutex::new(None),
         durable_capability_io_requested: false,
         root,
+        storage_paths: None,
         workspace_root,
         mounts,
         capability_mount_overrides: memory_capability_ids

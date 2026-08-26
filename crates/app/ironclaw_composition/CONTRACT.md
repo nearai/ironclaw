@@ -373,7 +373,7 @@ the runtime-owned durable event log plus `EventStreamManager`, so
 `/events` and `/ws` no longer advertise routes that only return
 `Unavailable`. In standalone builds with `libsql` enabled, the log and
 runtime state stores sit behind the composed standalone root filesystem
-(`reborn-local-dev.db` for durable records, `/projects` for workspace
+(`state/reborn-local-dev.db` for durable records, `/projects` for workspace
 files). Production durable retention/live fanout still belongs in the
 host runtime/event-store follow-up rather than WebUI ingress.
 

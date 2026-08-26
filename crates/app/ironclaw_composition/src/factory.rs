@@ -39,10 +39,6 @@ use crate::operator_tool_catalog::ActiveRegistryOperatorToolCatalog;
 use crate::outbound_store_assembly::build_outbound_stores;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::runtime_mounts::{memory_mount_view, workspace_mount_view};
-#[cfg(all(test, unix))]
-use crate::standalone_bootstrap_assembly::LEGACY_SKILLS_BACKFILL_MARKER;
-#[cfg(test)]
-use crate::standalone_bootstrap_assembly::backfill_legacy_user_skills;
 use crate::standalone_bootstrap_assembly::bootstrap_standalone_host;
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornHostBindings, RebornReadiness,
@@ -344,7 +340,8 @@ pub(crate) struct RebornRuntimeStores {
     /// The deployment's single workspace scoping decision, read by every
     /// workspace write lane (grants, approval leases, attachment handles).
     pub(crate) workspace_mounts: crate::runtime_mounts::WorkspaceMountPolicy,
-    pub(crate) standalone_storage_root: Option<PathBuf>,
+    /// Host root for mutable system-owned content such as the seeded system prompt.
+    pub(crate) system_content_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,

@@ -225,8 +225,8 @@ pub struct WebUiV2Features {
     pub reborn_projects: bool,
     /// Whether the browser must hide raw workspace fallback and only show the
     /// caller-scoped workspace projection. Hosted deployments enable this to
-    /// avoid showing artifacts from a shared `/workspace` root; local
-    /// deployments keep it disabled so single-user workspaces remain visible.
+    /// require the composition-provided caller leaf; local deployments keep it
+    /// disabled so a trusted operator's shared workspace remains visible.
     pub workspace_requires_scoped_projection: bool,
     /// QA-only run and full-thread artifact export surface. Hidden and
     /// unmounted unless the deployment explicitly opts in.
@@ -830,14 +830,12 @@ pub async fn browse_fs_dir(
         .path
         .filter(|path| !path.trim().is_empty())
         .unwrap_or_default();
-    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
-    let (served_path, scoped_prefix) =
-        workspace_served_path(&query.mount, &requested_path, projection)?;
+    let served_path = workspace_served_path(&query.mount, &requested_path)?;
     let surface = state.bind_services(caller);
     let mount = query.mount;
     let request = RebornFsListRequest {
         mount: query.mount,
-        path: served_path,
+        path: served_path.clone(),
         project_id: query.project_id,
     };
     let mut response = match FS_LIST_VIEW.query_on(&surface, request, None).await {
@@ -848,7 +846,8 @@ pub async fn browse_fs_dir(
         // paths under it keep reporting NotFound.
         Err(error)
             if error.code == ProductSurfaceErrorCode::NotFound
-                && scoped_prefix.is_some()
+                && mount == FsMount::Workspace
+                && workspace_scoped_projection_required(&state, &capabilities)
                 && requested_path.trim_matches('/').is_empty() =>
         {
             RebornFsListResponse {
@@ -859,12 +858,7 @@ pub async fn browse_fs_dir(
         }
         other => other?,
     };
-    response.path = requested_path;
-    if let Some(prefix) = scoped_prefix {
-        for entry in response.entries.iter_mut() {
-            entry.path = strip_workspace_prefix(&prefix, &entry.path);
-        }
-    }
+    response.path = served_path;
     Ok(Json(response))
 }
 
@@ -874,24 +868,17 @@ pub async fn browse_fs_dir(
 pub async fn stat_fs_path(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<RebornFsStatResponse>, WebUiV2HttpError> {
     let requested_path = require_fs_browse_path(query.path)?;
-    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
-    let (served_path, scoped_prefix) =
-        workspace_served_path(&query.mount, &requested_path, projection)?;
+    let served_path = workspace_served_path(&query.mount, &requested_path)?;
     let surface = state.bind_services(caller);
     let request = RebornFsStatRequest {
         mount: query.mount,
         path: served_path,
         project_id: query.project_id,
     };
-    let mut response = FS_STAT_VIEW.query_on(&surface, request, None).await?;
-    if let Some(prefix) = scoped_prefix {
-        response.stat.path = strip_workspace_prefix(&prefix, &response.stat.path);
-    }
-    Ok(Json(response))
+    Ok(Json(FS_STAT_VIEW.query_on(&surface, request, None).await?))
 }
 
 /// `GET /api/webchat/v2/fs/content?mount=…&path=…&project_id=…`
@@ -901,23 +888,16 @@ pub async fn stat_fs_path(
 pub async fn read_fs_file(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<ProductSurfaceCaller>,
-    Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
     let requested_path = require_fs_browse_path(query.path)?;
-    let projection = workspace_projection_for(&state, &caller, &capabilities)?;
-    let (served_path, scoped_prefix) =
-        workspace_served_path(&query.mount, &requested_path, projection)?;
+    let served_path = workspace_served_path(&query.mount, &requested_path)?;
     let request = RebornFsReadRequest {
         mount: query.mount,
         path: served_path,
         project_id: query.project_id,
     };
-    let mut file =
-        invoke_product_command(state.services(), caller, FS_READ_COMMAND, request).await?;
-    if let Some(prefix) = scoped_prefix {
-        file.path = strip_workspace_prefix(&prefix, &file.path);
-    }
+    let file = invoke_product_command(state.services(), caller, FS_READ_COMMAND, request).await?;
     project_fs_download_response(file)
 }
 
@@ -942,89 +922,22 @@ fn workspace_scoped_projection_required(
     state.workspace_requires_scoped_projection() || !capabilities.operator_webui_config
 }
 
-/// Effective caller-scoped workspace projection for an authenticated `/fs/*`
-/// request. The browser must confine Workspace reads to the caller's own
-/// subtree (`tenants/{tenant}/users/{user}`) when scoped projection is
-/// required. Memory is already caller-scoped server-side; Workspace is shared
-/// by default, so this projection is what prevents one user from listing
-/// another user's workspace artifacts through the browser.
-///
-/// Returns the per-caller prefix to prepend when `Ok(Some)`; `Ok(None)` means
-/// the raw shared workspace root is served (local/operator fallback). `Err`
-/// fails closed: scoped projection is required but the caller identity cannot
-/// key a subtree, so serving the shared root would reintroduce the leak the
-/// projection exists to prevent.
-fn workspace_projection_for(
-    state: &WebUiV2State,
-    caller: &ProductSurfaceCaller,
-    capabilities: &WebUiV2Capabilities,
-) -> Result<Option<String>, WebUiV2HttpError> {
-    if !workspace_scoped_projection_required(state, capabilities) {
-        return Ok(None);
-    }
-    let tenant = caller.tenant_id.as_str();
-    let user = caller.user_id.as_str();
-    if tenant.is_empty() || user.is_empty() {
-        return Err(
-            ProductSurfaceError::validation("caller", ProductSurfaceValidationCode::Blank).into(),
-        );
-    }
-    Ok(Some(format!("tenants/{tenant}/users/{user}")))
-}
-
-/// Translate a mount-relative browser path into the path the product layer
-/// should read. For `Workspace` under scoped projection, the caller prefix is
-/// prepended so the product layer reads inside the caller's subtree; a missing
-/// subtree surfaces as a clean empty/404 rather than the shared root. Other
-/// mounts (Memory is already caller-scoped) pass through unchanged.
-///
-/// Returns the served path plus the prefix that must be stripped from any
-/// paths the product layer echoes back, so the browser keeps round-tripping
-/// mount-relative paths.
-fn workspace_served_path(
-    mount: &FsMount,
-    requested: &str,
-    projection: Option<String>,
-) -> Result<(String, Option<String>), WebUiV2HttpError> {
-    if *mount == FsMount::Workspace
-        && let Some(prefix) = projection
-    {
+/// Keep browser paths mount-relative. Composition already gives each caller a
+/// workspace mount rooted at that caller's tenant/user digest leaf; prepending
+/// another ownership prefix here would point below a nonexistent directory.
+fn workspace_served_path(mount: &FsMount, requested: &str) -> Result<String, WebUiV2HttpError> {
+    if *mount == FsMount::Workspace {
         let trimmed = requested.trim_matches('/');
-        // Reject parent-directory traversal before prepending the caller prefix.
-        // A `..` segment would otherwise become `tenants/{tenant}/users/{user}/../other`,
-        // which the product layer rejects too, but defense in depth keeps the
-        // browser from ever dispatching an escape attempt to the product layer.
-        if trimmed.split('/').any(|segment| segment == "..") {
+        if requested.contains('\\') || trimmed.split('/').any(|segment| segment == "..") {
             return Err(ProductSurfaceError::validation(
                 "path",
                 ProductSurfaceValidationCode::InvalidValue,
             )
             .into());
         }
-        let served = if trimmed.is_empty() {
-            prefix.clone()
-        } else {
-            format!("{prefix}/{trimmed}")
-        };
-        return Ok((served, Some(prefix)));
+        return Ok(trimmed.to_string());
     }
-    Ok((requested.to_string(), None))
-}
-
-/// Strip a caller-scoped workspace prefix from a path the product layer echoed
-/// back, yielding the mount-relative path the browser round-trips. A path that
-/// does not carry the prefix (e.g. a NotFound response that echoes the raw
-/// request) is returned trimmed of surrounding slashes.
-fn strip_workspace_prefix(prefix: &str, path: &str) -> String {
-    let base = prefix.trim_matches('/');
-    let value = path.trim_matches('/');
-    if value.is_empty() {
-        return String::new();
-    }
-    value
-        .strip_prefix(&format!("{base}/"))
-        .map(|rest| rest.trim_start_matches('/').to_string())
-        .unwrap_or_else(|| value.to_string())
+    Ok(requested.to_string())
 }
 
 /// Reject a missing or blank `?path=` on the stat/download routes with a

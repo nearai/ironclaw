@@ -204,10 +204,9 @@ pub(super) fn install_with_runner(
     // target the same label/path by design (see the module doc). Either
     // way the write below atomically replaces it.
     let replaced_existing = file.exists();
-    // WorkingDirectory anchors cwd at `<reborn_home>/workspace`, not
-    // launchd's default `/` and not the Reborn home itself — the home is
-    // an ancestor of every default skill root, so it still trips
-    // composition's `paths_overlap` check (see `service_working_directory`).
+    // WorkingDirectory anchors cwd at the Reborn installation root instead
+    // of launchd's default `/`. Canonical storage namespaces make the root
+    // safe without creating the retired top-level `workspace/` directory.
     let reborn_home = context.boot_config().home().path();
     let working_directory = super::ensure_service_working_directory(reborn_home)?;
     let plist = plist_content(invocation, &working_directory, &stdout_log, &stderr_log);
@@ -778,21 +777,18 @@ mod tests {
         assert!(plist.contains("<string>/home/op/.ironclaw/reborn/logs/serve.stderr.log</string>"));
     }
 
-    /// Pins the crash-loop fix: without WorkingDirectory, launchd runs with
-    /// cwd=`/`, which overlaps a default skill root and composition refuses
-    /// to boot. `plist_content` just writes the caller-supplied path
-    /// faithfully — see `install_with_runner` /
-    /// `ensure_service_working_directory` for the actual path choice.
+    /// Pins the service cwd: `plist_content` writes the caller-supplied Reborn
+    /// installation root faithfully instead of relying on launchd's `/`.
     #[test]
     fn plist_content_includes_working_directory_line() {
         let plist = plist_content(
             &sample_invocation(),
-            Path::new("/home/op/.ironclaw/reborn/workspace"),
+            Path::new("/home/op/.ironclaw/reborn"),
             Path::new("/home/op/.ironclaw/reborn/logs/serve.stdout.log"),
             Path::new("/home/op/.ironclaw/reborn/logs/serve.stderr.log"),
         );
         assert!(plist.contains("<key>WorkingDirectory</key>"));
-        assert!(plist.contains("<string>/home/op/.ironclaw/reborn/workspace</string>"));
+        assert!(plist.contains("<string>/home/op/.ironclaw/reborn</string>"));
         // WorkingDirectory precedes EnvironmentVariables, matching the doc
         // comment's placement.
         let working_dir_index = plist.find("<key>WorkingDirectory</key>").unwrap();

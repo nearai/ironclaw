@@ -38,14 +38,16 @@ None consumed in the workspace — it is a binary. Its own structure:
 
 ## Depends on / consumed by
 
-- **Normal workspace deps (14):** `ironclaw_composition`, `ironclaw_config`,
+- **Normal workspace deps (17):** `ironclaw_composition`, `ironclaw_config`,
   `ironclaw_operator`, `ironclaw_webui`, `ironclaw_auth`,
-  `ironclaw_host_api`, `ironclaw_product_contracts`,
+  `ironclaw_host_api`, `ironclaw_filesystem` (the shared host-tree validation
+  mechanism used during offline storage adoption), `ironclaw_product_contracts`,
   `ironclaw_extension_contracts`, `ironclaw_trace_commons`, and — uniquely in
   the workspace — the concrete extension packages and hosting crates the
   binary links directly: `ironclaw_extension_host`,
   `ironclaw_extension_manager`, `ironclaw_extension_support`,
-  `ironclaw_slack_extension`, `ironclaw_telegram_extension`. Re-derive with
+  `ironclaw_slack_extension`, `ironclaw_telegram_extension`,
+  `ironclaw_web_app_extension`, `ironclaw_web_app`. Re-derive with
   `grep -n '^ironclaw' crates/app/ironclaw_cli/Cargo.toml`.
 - **Consumed by:** nothing (asserted — the dependency set is pinned
   *exactly* by `assert_workspace_deps_exactly` for package `ironclaw` in

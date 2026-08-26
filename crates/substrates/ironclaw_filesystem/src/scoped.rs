@@ -165,6 +165,7 @@ fn filesystem_error_kind(error: &FilesystemError) -> &'static str {
         FilesystemError::SymlinkEscape { .. } => "symlink_escape",
         FilesystemError::MountConflict { .. } => "mount_conflict",
         FilesystemError::Backend { .. } => "backend",
+        FilesystemError::LocalCapability { .. } => "local_capability",
         FilesystemError::BackendBusy { .. } => "backend_busy",
         FilesystemError::VersionMismatch { .. } => "version_mismatch",
         FilesystemError::Unsupported { .. } => "unsupported",

@@ -656,7 +656,7 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
     let input = ironclaw_composition::local_runtime_build_input_with_options(
         RebornCompositionProfile::HostedSingleTenantVolume,
         "hosted-volume-owner",
-        dir.path().to_path_buf(),
+        ironclaw_config::RebornStoragePaths::from_installation_root(dir.path()),
         Default::default(),
     )
     .unwrap();
@@ -1446,7 +1446,8 @@ async fn standalone_services_dispatch_trigger_management_through_composed_runtim
         .expect("created trigger id")
         .to_string();
 
-    let standalone_db = libsql_db_at(dir.path().join("reborn-local-dev.db")).await;
+    let storage_paths = ironclaw_config::RebornStoragePaths::from_installation_root(dir.path());
+    let standalone_db = libsql_db_at(storage_paths.state_root().join("reborn-local-dev.db")).await;
     assert_eq!(libsql_trigger_record_count(&standalone_db).await, 1);
 
     let listed = invoke_trigger_management(

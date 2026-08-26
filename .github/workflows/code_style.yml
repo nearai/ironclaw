@@ -469,6 +469,34 @@ jobs:
         if: github.event_name != 'pull_request' && matrix.name == 'default'
         run: cargo clippy --all --lib --bins -- -D warnings
 
+  reborn-cli-storage-layout-windows:
+    name: Reborn CLI storage-layout locks (Windows)
+    needs: changes
+    if: needs.changes.outputs.has_reborn_cli == 'true' && github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: windows-storage-layout-locks
+          save-if: false
+      - name: Run lock acquisition, contention, and recovery contract
+        run: >-
+          cargo test -p ironclaw
+          runtime::storage_layout::tests::advisory_lock_recovers_after_a_terminated_process
+          -- --exact --nocapture
+      - name: Run non-file and reparse-point rejection contract
+        run: >-
+          cargo test -p ironclaw
+          runtime::storage_layout::tests::filesystem_security::migration_lock_rejects_an_existing_non_file_path
+          -- --exact --nocapture
+
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
     needs: changes
@@ -603,6 +631,7 @@ jobs:
       - changes
       - fast-checks
       - clippy
+      - reborn-cli-storage-layout-windows
       - clippy-windows
       - reborn-cli-smoke
       - webui-v2-js-lint
@@ -664,6 +693,19 @@ jobs:
           if ! job_result_ok \
             "clippy" "${{ needs.clippy.result }}" "${clippy_may_skip}" "allow"; then
             echo "clippy failed: ${{ needs.clippy.result }}"
+            exit 1
+          fi
+
+          windows_storage_layout_may_skip=true
+          if [[ "${{ github.event_name }}" == "pull_request" && \
+                "${{ needs.changes.outputs.has_reborn_cli }}" == "true" ]]; then
+            windows_storage_layout_may_skip=false
+          fi
+          if ! job_result_ok \
+            "reborn-cli-storage-layout-windows" \
+            "${{ needs.reborn-cli-storage-layout-windows.result }}" \
+            "${windows_storage_layout_may_skip}" "allow"; then
+            echo "Reborn CLI Windows storage-layout tests failed: ${{ needs.reborn-cli-storage-layout-windows.result }}"
             exit 1
           fi
 

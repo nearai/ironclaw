@@ -55,44 +55,34 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
 }
 
 #[tokio::test]
-async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
+async fn local_yolo_policy_rejects_workspace_outside_installation_root() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("standalone");
     let host_home = dir.path().join("home");
     let workspace_root = host_home.join("repo");
     std::fs::create_dir_all(&workspace_root).expect("workspace root");
 
-    let services = build_runtime_substrate(
-        crate::deployment::local_filesystem_build_input_with_profile(
-            RebornCompositionProfile::StandaloneUnrestricted,
-            "standalone-unrestricted-host-owner",
-            storage_root,
-        )
-        .with_runtime_policy(local_yolo_policy())
-        .with_local_runtime_workspace_root(workspace_root)
-        .with_local_runtime_confirmed_host_home_root(host_home),
+    let error = build_runtime_substrate(
+        crate::test_support::with_local_runtime_workspace_root_for_test(
+            crate::deployment::local_filesystem_build_input_with_profile(
+                RebornCompositionProfile::StandaloneUnrestricted,
+                "standalone-unrestricted-host-owner",
+                storage_root,
+            )
+            .with_runtime_policy(local_yolo_policy())
+            .with_local_runtime_confirmed_host_home_root(host_home),
+            workspace_root,
+        ),
     )
     .await
-    .expect("standalone-unrestricted services build");
-    let runtime_surfaces = services
-        .local_runtime_for_test()
-        .expect("standalone runtime substrate");
+    .expect_err("workspace outside the installation root must fail closed");
 
-    let workspace_mount = crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces)
-        .mounts
-        .iter()
-        .find(|mount| mount.alias.as_str() == "/workspace")
-        .expect("workspace mount exists");
-    assert_eq!(workspace_mount.target.as_str(), "/projects/workspace");
-    assert_eq!(workspace_mount.permissions, MountPermissions::read_write());
-
-    let host_mount = crate::factory::test_support::workspace_mounts_for_test(runtime_surfaces)
-        .mounts
-        .iter()
-        .find(|mount| mount.alias.as_str() == "/host")
-        .expect("host mount exists");
-    assert_eq!(host_mount.target.as_str(), "/projects/host");
-    assert_eq!(host_mount.permissions, MountPermissions::read_write());
+    assert!(
+        error
+            .to_string()
+            .contains("workspace root must be beneath the selected installation root"),
+        "unexpected error: {error}"
+    );
 }
 
 #[cfg(unix)]

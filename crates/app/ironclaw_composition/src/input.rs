@@ -303,13 +303,17 @@ pub(crate) enum PostgresPoolSource {
 pub(crate) enum RebornStorageInput {
     Disabled,
     LocalFilesystem {
-        root: PathBuf,
-        workspace_root: Option<PathBuf>,
+        paths: ironclaw_config::RebornStoragePaths,
+        legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
+        #[cfg(any(test, feature = "test-support"))]
+        workspace_root_for_test: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
     },
     HostedSingleTenantPostgres {
-        root: PathBuf,
-        workspace_root: Option<PathBuf>,
+        paths: ironclaw_config::RebornStoragePaths,
+        legacy_skill_snapshot_source: Option<ironclaw_config::LegacyStorageSource>,
+        #[cfg(any(test, feature = "test-support"))]
+        workspace_root_for_test: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
         pool_source: PostgresPoolSource,
         secret_master_key: ironclaw_secrets::SecretMaterial,
@@ -439,7 +443,7 @@ impl RebornHostBindings {
     pub(crate) fn local_filesystem_from_deployment(
         deployment: DeploymentConfig,
         owner_id: impl Into<String>,
-        root: PathBuf,
+        paths: ironclaw_config::RebornStoragePaths,
     ) -> Self {
         debug_assert!(deployment.uses_local_filesystem_storage());
         // Resolve the deployment's runtime policy from its policy request up
@@ -456,8 +460,10 @@ impl RebornHostBindings {
             deployment,
             owner_id,
             RebornStorageInput::LocalFilesystem {
-                root,
-                workspace_root: None,
+                paths,
+                legacy_skill_snapshot_source: None,
+                #[cfg(any(test, feature = "test-support"))]
+                workspace_root_for_test: None,
                 host_home_root: None,
             },
         );
@@ -470,7 +476,7 @@ impl RebornHostBindings {
     pub fn hosted_single_tenant_postgres(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
-        root: PathBuf,
+        paths: ironclaw_config::RebornStoragePaths,
         pool: deadpool_postgres::Pool,
         secret_master_key: ironclaw_secrets::SecretMaterial,
     ) -> Result<Self, RebornBuildError> {
@@ -491,8 +497,10 @@ impl RebornHostBindings {
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::HostedSingleTenantPostgres {
-                root,
-                workspace_root: None,
+                paths,
+                legacy_skill_snapshot_source: None,
+                #[cfg(any(test, feature = "test-support"))]
+                workspace_root_for_test: None,
                 host_home_root: None,
                 pool_source: PostgresPoolSource::Prebuilt(pool),
                 secret_master_key,
@@ -504,7 +512,7 @@ impl RebornHostBindings {
     pub fn hosted_single_tenant_postgres_from_config_and_env(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
-        root: PathBuf,
+        paths: ironclaw_config::RebornStoragePaths,
         config_file: Option<&ironclaw_config::RebornConfigFile>,
     ) -> Result<Self, RebornBuildError> {
         // The storage handle and the deployment must agree. Expressed as the
@@ -529,8 +537,10 @@ impl RebornHostBindings {
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::HostedSingleTenantPostgres {
-                root,
-                workspace_root: None,
+                paths,
+                legacy_skill_snapshot_source: None,
+                #[cfg(any(test, feature = "test-support"))]
+                workspace_root_for_test: None,
                 host_home_root: None,
                 pool_source: PostgresPoolSource::Config(connection),
                 secret_master_key,
@@ -539,23 +549,29 @@ impl RebornHostBindings {
         ))
     }
 
-    pub fn with_local_runtime_workspace_root(mut self, workspace_root: PathBuf) -> Self {
+    /// Attach the one fixed snapshot source admitted by the CLI's completed
+    /// layout-adoption journal. The value is an enum instead of a path so this
+    /// public input cannot be used to import active or arbitrary host content.
+    pub fn with_legacy_skill_snapshot_source(
+        mut self,
+        source: ironclaw_config::LegacyStorageSource,
+    ) -> Result<Self, RebornBuildError> {
         match &mut self.storage {
             RebornStorageInput::LocalFilesystem {
-                workspace_root: root,
+                legacy_skill_snapshot_source,
                 ..
-            } => {
-                *root = Some(workspace_root);
             }
-            RebornStorageInput::HostedSingleTenantPostgres {
-                workspace_root: root,
+            | RebornStorageInput::HostedSingleTenantPostgres {
+                legacy_skill_snapshot_source,
                 ..
-            } => {
-                *root = Some(workspace_root);
+            } => *legacy_skill_snapshot_source = Some(source),
+            _ => {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: "legacy skill snapshot sources require local filesystem or hosted single-tenant PostgreSQL storage".to_string(),
+                });
             }
-            _ => {}
         }
-        self
+        Ok(self)
     }
 
     pub fn with_local_runtime_confirmed_host_home_root(mut self, host_home_root: PathBuf) -> Self {
@@ -751,8 +767,7 @@ impl RebornHostBindings {
     /// a per-user subtree the agent never writes to. Raise-only: passing
     /// `false` leaves a scoped profile scoped.
     pub fn with_workspace_scoped_per_caller(mut self, required: bool) -> Self {
-        self.deployment.workspace_scoped_per_caller =
-            self.deployment.workspace_scoped_per_caller || required;
+        self.deployment = self.deployment.with_workspace_scoped_per_caller(required);
         self
     }
 
@@ -1312,5 +1327,16 @@ mod tests {
             .with_product_auth_ports(product_auth.clone());
 
         assert!(input.product_auth_ports.is_some());
+    }
+
+    #[test]
+    fn legacy_skill_snapshot_source_rejects_unsupported_storage() {
+        let result = RebornHostBindings::disabled("test-owner")
+            .with_legacy_skill_snapshot_source(ironclaw_config::LegacyStorageSource::LocalDev);
+
+        assert!(matches!(
+            result,
+            Err(RebornBuildError::InvalidConfig { .. })
+        ));
     }
 }

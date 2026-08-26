@@ -334,6 +334,7 @@ V1 canonical virtual areas/roots:
 /engine
 /system/settings
 /system/extensions
+/system/prompts
 /system/skills
 /users
 /projects

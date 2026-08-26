@@ -2487,6 +2487,11 @@ fn translate_filter(
             out.push_str("TRUE");
             Ok(())
         }
+        Filter::Kind { kind } => {
+            params.push(Box::new(kind.as_str().to_string()));
+            out.push_str(&format!("(kind = ${})", params.len()));
+            Ok(())
+        }
         Filter::Eq { key, value } => {
             let placeholder = bind_index_value(path, value, params)?;
             out.push_str(&format!("(indexed->>'{}' = ${placeholder})", key.as_str()));

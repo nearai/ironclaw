@@ -367,8 +367,8 @@ postgres_pull_count="$(
     'run: docker pull postgres:16-alpine' \
     "${repo_root}/.github/workflows/reborn-tests.yml"
 )"
-if [[ "${postgres_pull_count}" != "2" ]]; then
-  echo "expected two guarded Rust lanes to pre-pull Postgres, found ${postgres_pull_count}" >&2
+if [[ "${postgres_pull_count}" != "3" ]]; then
+  echo "expected three guarded Rust lanes to pre-pull Postgres, found ${postgres_pull_count}" >&2
   exit 1
 fi
 

@@ -144,7 +144,7 @@ def _google_credential_action_for_block(preflight: dict[str, object]) -> str | N
 
 
 def _stored_google_oauth_client_id_from_reborn_home(reborn_home: Path) -> tuple[str, str] | None:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     if not db_path.exists():
         return None
     with closing(sqlite3.connect(db_path)) as db:
@@ -301,7 +301,7 @@ def _google_oauth_refresh_probe(
         ],
         extra_env,
     )
-    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    master_key_path = reborn_home / "state" / ".reborn-local-dev-secrets-master-key"
     if not master_key_path.exists():
         return {
             "checked": True,
@@ -413,8 +413,8 @@ def _google_runtime_access_token(
         extra_env,
     )
 
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "state" / ".reborn-local-dev-secrets-master-key"
     if not db_path.exists() or not master_key_path.exists():
         if env_access_token:
             return env_access_token[1], {
@@ -533,7 +533,7 @@ def _google_product_auth_preflight(
     user_id: str,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
     env_status = _google_product_auth_env_status(extra_env)
     preflight: dict[str, object] = {
         "requires_google_product_auth": False,
@@ -544,7 +544,7 @@ def _google_product_auth_preflight(
         "ready": False,
     }
     if not db_path.exists():
-        preflight["reason"] = "reborn local-dev db missing"
+        preflight["reason"] = "state/reborn-local-dev.db missing"
         return preflight
     account_pattern = (
         f"/tenants/reborn-cli/users/{user_id}/secrets/agents/reborn-cli-agent/"
@@ -693,8 +693,8 @@ def _seed_generated_google_product_auth_if_configured(reborn_home: Path, user_id
     if not access_token or not refresh_token or not client_id:
         return preflight
 
-    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
-    master_key_path = reborn_home / "local-dev" / ".reborn-local-dev-secrets-master-key"
+    db_path = reborn_home / "state" / "reborn-local-dev.db"
+    master_key_path = reborn_home / "state" / ".reborn-local-dev-secrets-master-key"
     master_key_path.parent.mkdir(parents=True, exist_ok=True)
     if master_key_path.exists():
         master_key = master_key_path.read_text(encoding="utf-8").strip()

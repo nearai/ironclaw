@@ -445,9 +445,10 @@ impl ExtensionLifecycleManager {
     /// Test-support twin of the production activation choke point: publish a
     /// bundled package directly into the registry AND mirror it into the
     /// generic host's snapshot (mirrors `commit_activation` →
-    /// `publish_to_generic_host`, without the durable install/credential
-    /// legs). Direct registry publication alone would leave the package
-    /// undispatchable now that extension dispatch resolves from the snapshot.
+    /// `publish_to_generic_host`). It also creates the caller-owned durable
+    /// installation required by the production authority surface. Direct
+    /// registry publication alone would leave the package undispatchable now
+    /// that extension dispatch resolves from the snapshot.
     /// Operator `[channel.config]` values are NOT seeded here — they flow
     /// exclusively through the production configure surface
     /// (`ChannelConfigService`), and this seam reads whatever that surface
@@ -456,11 +457,8 @@ impl ExtensionLifecycleManager {
         &self,
         package: &ExtensionPackage,
         resolved: Option<&ironclaw_extension_registry::ResolvedExtensionManifest>,
+        owner: InstallationOwner,
     ) -> Result<(), ProductOperationFailure> {
-        self.active_extensions.publish(package)?;
-        let Some(host) = self.generic_host.get() else {
-            return Ok(());
-        };
         // The resolved base: caller-supplied for in-code fixture packages,
         // else parsed from the catalog entry's raw manifest.
         let base = match resolved {
@@ -496,12 +494,46 @@ impl ExtensionLifecycleManager {
                 .clone()
             }
         };
+        let definition =
+            ExtensionManifestRecord::from_resolved("", package.manifest.source, base.clone(), None)
+                .map_err(map_extension_installation_error)?;
+        self.register_lifecycle_package(package).await?;
+        let extension_id = package.id.clone();
+        let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
+            .map_err(map_extension_installation_error)?;
+        let installation = ExtensionInstallation::new(
+            installation_id.clone(),
+            extension_id.clone(),
+            ironclaw_extension_registry::ExtensionManifestRef::new(extension_id, None),
+            Vec::new(),
+            chrono::Utc::now(),
+            owner,
+        )
+        .map_err(map_extension_installation_error)?;
+        if let Err(error) = self
+            .installation_store
+            .upsert_manifest_and_installation(definition, installation)
+            .await
+            .map_err(map_extension_installation_error)
+        {
+            if let Err(rollback_error) = self.rollback_lifecycle_install(&package.id).await {
+                return Err(compensation_failure(
+                    "bundled extension publication persistence failed and lifecycle rollback failed",
+                    error,
+                    rollback_error,
+                ));
+            }
+            return Err(error);
+        }
+        self.active_extensions.publish(package)?;
+        let Some(host) = self.generic_host.get() else {
+            return Ok(());
+        };
         let effective = crate::effective_resolved_for_package(&base, package);
-        // This shortcut deliberately publishes without creating a durable
-        // installation. A tool-only package has no channel configuration to
-        // resolve, and asking the attached configuration consumer to load its
-        // absent installed manifest would make the test-support seam fail
-        // before the tool surface can be published.
+        // The shortcut creates the same caller-owned installation row used by
+        // the model-visible surface above. Tool-only fixtures have no channel
+        // configuration to resolve; channel fixtures read whatever the
+        // production configuration surface durably stored.
         let config = match (
             effective.channel.is_some(),
             self.channel_config.get().and_then(Weak::upgrade),
@@ -515,7 +547,7 @@ impl ExtensionLifecycleManager {
         };
         host.install(crate::InstallationRecord {
             extension_id: package.id.as_str().to_string(),
-            installation_id: format!("{}-test-install", package.id.as_str()),
+            installation_id: installation_id.as_str().to_string(),
             state: ironclaw_extension_contracts::state::InstallationState::Installed,
             resolved: Arc::new(effective),
             config,
@@ -525,7 +557,8 @@ impl ExtensionLifecycleManager {
         .map_err(generic_host_error)?;
         host.activate(package.id.as_str())
             .await
-            .map_err(generic_host_error)
+            .map_err(generic_host_error)?;
+        Ok(())
     }
 
     /// Mirror an unpublish into the generic host's snapshot (deactivation is
@@ -4194,6 +4227,102 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn bundled_test_publication_rolls_back_lifecycle_registration_when_upsert_fails() {
+        let available = fixture_extension_package();
+        let package = available.package.clone();
+        let resolved = Arc::clone(&available.resolved_manifest);
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let inner = ExtensionInstallationStore::load_at(
+            filesystem.clone(),
+            VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+            ironclaw_host_api::host_port::default_host_port_catalog().expect("host ports"),
+            crate::product_extension_host_api_contract_registry().expect("host contracts"),
+        )
+        .await
+        .expect("installation store");
+        let installation_store: Arc<
+            dyn ironclaw_extension_registry::ExtensionInstallationStorePort,
+        > = Arc::new(PauseOnAdmitStore {
+            inner,
+            holding: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+            fail_next_upsert: std::sync::atomic::AtomicBool::new(true),
+        });
+        let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let owner = UserId::new("lifecycle-owner").expect("valid owner");
+        let manager = ExtensionLifecycleManager::new(ExtensionLifecycleManagerDependencies {
+            filesystem,
+            catalog: AvailableExtensionCatalog::from_packages(vec![available]),
+            installation_store,
+            lifecycle_service: Arc::clone(&lifecycle_service),
+            active_extensions: ActiveExtensionPublisher::new(
+                active_registry,
+                Arc::new(
+                    HostTrustPolicy::new(vec![Box::new(ironclaw_trust::AdminConfig::new())])
+                        .expect("trust policy"),
+                ),
+                Arc::new(InvalidationBus::new()),
+            ),
+            credential_cleanup: None,
+            tenant_operator_user_id: owner,
+            hosted_mcp_dependencies: crate::HostedMcpPreparationDependencies {
+                runtime_ports: None,
+                catalog_safety: crate::McpCatalogAdmissionPolicy::new(Arc::new(
+                    ironclaw_safety::Sanitizer::new(),
+                )),
+                oauth_client_profiles: Arc::new(ironclaw_auth::EmptyOAuthClientProfileRegistry),
+            },
+        });
+
+        let error = manager
+            .publish_bundled_package_for_test(
+                &package,
+                Some(resolved.as_ref()),
+                InstallationOwner::Tenant,
+            )
+            .await
+            .expect_err("the first durable aggregate write is forced to fail");
+        assert!(
+            matches!(
+                &error,
+                ProductOperationFailure::Transient { reason }
+                    if reason.contains("forced durable upsert failure")
+            ),
+            "the original persistence failure must be preserved: {error:?}"
+        );
+        assert!(
+            lifecycle_service
+                .lock()
+                .await
+                .registry()
+                .get_extension(&package.id)
+                .is_none(),
+            "a failed durable upsert must not leave the lifecycle registry occupied"
+        );
+
+        manager
+            .publish_bundled_package_for_test(
+                &package,
+                Some(resolved.as_ref()),
+                InstallationOwner::Tenant,
+            )
+            .await
+            .expect("retry succeeds after rollback releases the lifecycle id");
+        assert!(
+            lifecycle_service
+                .lock()
+                .await
+                .registry()
+                .get_extension(&package.id)
+                .is_some(),
+            "the successful retry registers the package"
+        );
+    }
+
     /// Joining and leaving an existing installation must route through the
     /// store's membership operations, never an aggregate rewrite — the pin
     /// for the lost-update fix: a join leaves the installation record
@@ -4347,6 +4476,7 @@ mod tests {
         inner: ExtensionInstallationStore,
         holding: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
+        fail_next_upsert: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait]
@@ -4388,6 +4518,14 @@ mod tests {
             manifest: ExtensionManifestRecord,
             installation: ExtensionInstallation,
         ) -> Result<(), ExtensionInstallationError> {
+            if self
+                .fail_next_upsert
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(ExtensionInstallationError::StoreUnavailable {
+                    reason: "forced durable upsert failure".to_string(),
+                });
+            }
             self.inner
                 .upsert_manifest_and_installation(manifest, installation)
                 .await
@@ -4547,6 +4685,7 @@ output_schema_ref = "schemas/run.output.json"
             inner: inner_store,
             holding: Arc::clone(&holding),
             release: Arc::clone(&release),
+            fail_next_upsert: std::sync::atomic::AtomicBool::new(false),
         });
         let catalog = AvailableExtensionCatalog::from_packages(Vec::new());
         let lifecycle_service = Arc::new(Mutex::new(ExtensionLifecycleService::new(

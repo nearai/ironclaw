@@ -1081,8 +1081,8 @@ async fn adapter_config_can_authorize_non_dispatch_provider_trust_effects() {
 async fn standalone_adapter_invokes_read_file_with_configured_mounts() {
     let root = tempfile::tempdir().unwrap();
     let storage_root = root.path().join("standalone");
-    std::fs::create_dir_all(storage_root.join("workspace")).unwrap();
-    std::fs::write(storage_root.join("workspace/readme.md"), "alpha\nbeta\n").unwrap();
+    std::fs::create_dir_all(storage_root.join("workspaces")).unwrap();
+    std::fs::write(storage_root.join("workspaces/readme.md"), "alpha\nbeta\n").unwrap();
     let services = build_runtime_for_test(ironclaw_composition::local_filesystem_build_input(
         "read-file-owner",
         storage_root,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Self-test for docker/reborn/entrypoint.sh's legacy-Slack field migration.
+# Self-tests for docker/reborn/entrypoint.sh startup and narrow config migrations.
 #
 # #7115: the migration was gated on `IRONCLAW_REBORN_SLACK_ENABLED` not being
 # truthy. That variable lost its last Rust reader in #6116, while the operator
@@ -30,6 +30,7 @@ mkdir -p "${WORK}/bin"
 cat > "${WORK}/bin/ironclaw" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" > "${IRONCLAW_STUB_ARGV_PATH}"
+printf '%s\n' "${IRONCLAW_REBORN_STORAGE_MIGRATION:-}" > "${IRONCLAW_STUB_MIGRATION_PATH}"
 exit 0
 STUB
 chmod +x "${WORK}/bin/ironclaw"
@@ -54,8 +55,11 @@ run_entrypoint() {
     # validates the path prefix before it decides that.
     export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
     export IRONCLAW_STUB_ARGV_PATH="${home}/argv"
+    export IRONCLAW_STUB_MIGRATION_PATH="${home}/migration-policy"
     # Keep the Railway persistence guard out of the way.
     unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID RAILWAY_VOLUME_MOUNT_PATH
+    unset IRONCLAW_REBORN_SERVE_HOST IRONCLAW_REBORN_SERVE_PORT PORT
+    unset IRONCLAW_REBORN_STORAGE_MIGRATION
     for assignment in "$@"; do
       export "${assignment?}"
     done
@@ -92,6 +96,15 @@ expect_present() {
   fi
 }
 
+expect_literal_present() {
+  local name="$1" needle="$2" haystack="$3"
+  if ! printf '%s' "$haystack" | grep -Fq -- "$needle"; then
+    echo "FAIL[${name}]: expected literal '${needle}' to be present:" >&2
+    printf '%s\n' "$haystack" >&2
+    failures=$((failures + 1))
+  fi
+}
+
 LEGACY_DISABLED='[slack]
 enabled = false
 signing_secret_env = "SLACK_SIGNING_SECRET"
@@ -113,6 +126,13 @@ out="$(run_entrypoint plain "$LEGACY_DISABLED")"
 expect_absent plain 'signing_secret_env' "$out"
 expect_absent plain 'bot_token_env' "$out"
 expect_present plain 'enabled = false' "$out"
+local_argv="$(cat "${WORK}/plain/argv")"
+expect_literal_present plain 'serve --host 127.0.0.1 --port 3000' "$local_argv"
+
+out="$(run_entrypoint explicit_host "$LEGACY_DISABLED" \
+  "IRONCLAW_REBORN_SERVE_HOST=127.0.0.1")"
+explicit_argv="$(cat "${WORK}/explicit_host/argv")"
+expect_literal_present explicit_host 'serve --host 127.0.0.1 --port 3000' "$explicit_argv"
 
 # 2. The regression itself. Every truthy spelling the entrypoint's `is_truthy`
 #    accepts used to suppress the migration; the docs taught `=true`.
@@ -129,7 +149,48 @@ out="$(run_entrypoint enabled_true "$LEGACY_ENABLED")"
 expect_present enabled_true 'signing_secret_env' "$out"
 expect_present enabled_true 'bot_token_env' "$out"
 
-# 4. The dead variable has no reader left anywhere in the tree.
+# 4. Railway uses the same entrypoint, receives a network-reachable host, and
+#    forwards the operator's storage-migration policy override to `ironclaw serve`.
+out="$(run_entrypoint railway_volume/ironclaw-reborn "$LEGACY_DISABLED" \
+  "IRONCLAW_REBORN_HOME=" \
+  "RAILWAY_ENVIRONMENT=production" \
+  "RAILWAY_VOLUME_MOUNT_PATH=${WORK}/railway_volume" \
+  "IRONCLAW_REBORN_STORAGE_MIGRATION=manual")"
+railway_argv="$(cat "${WORK}/railway_volume/ironclaw-reborn/argv")"
+railway_policy="$(cat "${WORK}/railway_volume/ironclaw-reborn/migration-policy")"
+expect_literal_present railway_startup 'serve --host 0.0.0.0 --port 3000' "$railway_argv"
+expect_present railway_startup '^manual$' "$railway_policy"
+
+# An image-level host value would look like an operator override to the
+# entrypoint and silently defeat its container-reachable default.
+if awk '
+  function inspect_instruction() {
+    if (instruction ~ /^[[:space:]]*ENV[[:space:]]+/ \
+        && instruction ~ /(^|[[:space:]])IRONCLAW_REBORN_SERVE_HOST([=[:space:]]|$)/) {
+      found = 1
+    }
+  }
+  {
+    line = $0
+    continued = sub(/\\[[:space:]]*$/, "", line)
+    instruction = instruction " " line
+    if (!continued) {
+      inspect_instruction()
+      instruction = ""
+    }
+  }
+  END {
+    if (instruction != "") {
+      inspect_instruction()
+    }
+    exit !found
+  }
+' "${ROOT}/Dockerfile"; then
+  echo "FAIL: Dockerfile must not bake IRONCLAW_REBORN_SERVE_HOST; the entrypoint derives it per runtime" >&2
+  failures=$((failures + 1))
+fi
+
+# 5. The dead variable has no reader left anywhere in the tree.
 if grep -rn 'IRONCLAW_REBORN_SLACK_ENABLED' \
   --include='*.rs' --include='*.sh' --include='*.toml' \
   "${ROOT}/crates" "${ROOT}/docker" "${ROOT}/scripts" 2>/dev/null \

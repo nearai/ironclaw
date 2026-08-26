@@ -20,7 +20,7 @@ ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
 # rather than a transcribed copy that could drift with it.
 ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
-syn = { version = "3", features = ["full"] }
+syn = { version = "3", features = ["full", "visit"] }
 toml = "1.1"
 # Dev-only: the #7146 tracing-target gate emits both macro forms through a
 # capturing subscriber, so the language fact it enforces is measured rather than

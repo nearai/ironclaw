@@ -234,13 +234,11 @@ pub struct WebuiServeConfig {
     /// the same-origin check pass for a forged Origin. Defaults to
     /// `None` (fall back to Host-header comparison + allowlist).
     pub(crate) canonical_host: Option<String>,
-    /// Whether `/fs/*` workspace list/stat/read handlers must confine reads to
-    /// the caller's own subtree (`tenants/{tenant}/users/{user}`) instead of
-    /// the shared `/projects/workspace` root, and the `/session` feature flag
-    /// advertises the same mode to the browser. Hosted profiles enable this so
-    /// one user cannot list another user's workspace artifacts; local/operator
-    /// profiles keep it off so single-user workspaces stay visible. The flag
-    /// controls filesystem-handler path selection, not only UI display.
+    /// Whether the `/session` feature flag must require the caller-scoped
+    /// workspace supplied by composition instead of a trusted operator's
+    /// shared workspace view. Hosted profiles enable this so one user cannot
+    /// list another user's artifacts; `/fs/*` paths themselves remain relative
+    /// to whichever mount composition selected.
     pub(crate) workspace_requires_scoped_projection: bool,
     /// Trusted default agent id stamped onto every
     /// [`ProductSurfaceCaller`]. The browser body cannot influence

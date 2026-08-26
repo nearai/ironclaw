@@ -436,7 +436,7 @@ impl MountScopedRootFilesystem {
     /// the namespace their grant names, not a path they chose. A backend with
     /// nothing written under it reports `NotFound`, which is right for an
     /// ordinary path and wrong for the root --- and it broke every brand-new
-    /// per-caller workspace, whose `tenants/{tenant}/users/{user}` directory
+    /// per-caller workspace, whose `users/<tenant-user-digest>` directory
     /// does not exist until the first write, so `list_dir` and `glob` failed
     /// instead of reporting an empty workspace. Roots read as EMPTY; anything
     /// deeper keeps reporting `NotFound`.

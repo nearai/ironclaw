@@ -510,10 +510,10 @@ pub(crate) struct ToolsProfile {
     /// `None` leaves the harness's default empty trust list.
     pub(crate) provider_trust_override: Option<Vec<(ExtensionId, Vec<EffectKind>)>>,
     /// Mirrors `file_and_github_auth_tools`'s post-construct
-    /// `copy_dir_recursive(&github_support::asset_root(), &harness.root.path().join(..))`
-    /// step: `(source_dir, relative_dest_under_harness_root)`. The destination
-    /// is captured as a path RELATIVE to the harness's tempdir root because the
-    /// root itself is created inside `new_with_options` and does not exist yet
+    /// `copy_dir_recursive(&github_support::asset_root(), &installation_root.join(..))`
+    /// step: `(source_dir, relative_dest_under_installation_root)`. The destination
+    /// is captured as a path RELATIVE to the harness's canonical Reborn installation
+    /// root because that root is created inside `new_with_options` and does not exist yet
     /// when a `ToolsProfile` is assembled. Plain data (no closure) — the copy
     /// is a fixed filesystem operation, not caller-specific logic.
     pub(crate) post_construct_asset_copy: Option<(PathBuf, PathBuf)>,
@@ -596,9 +596,9 @@ impl ToolsProfile {
     pub(crate) fn with_post_construct_asset_copy(
         mut self,
         source_dir: PathBuf,
-        relative_dest_under_harness_root: PathBuf,
+        relative_dest_under_installation_root: PathBuf,
     ) -> Self {
-        self.post_construct_asset_copy = Some((source_dir, relative_dest_under_harness_root));
+        self.post_construct_asset_copy = Some((source_dir, relative_dest_under_installation_root));
         self
     }
 
@@ -620,7 +620,11 @@ impl ToolsProfile {
     /// 3. `post_construct_asset_copy` (if set)
     /// 4. `auto_approve_default` (enable/disable/neither)
     pub(crate) async fn build(self) -> HarnessResult<HostRuntimeCapabilityHarness> {
-        let mut harness = HostRuntimeCapabilityHarness::new_with_options(
+        // `new_with_options` carries the complete production runtime graph in
+        // its async state. Keep that large future on the heap so callers of
+        // this shared profile builder do not depend on the test thread's small
+        // native stack.
+        let mut harness = Box::pin(HostRuntimeCapabilityHarness::new_with_options(
             self.service_label,
             self.capability_ids,
             self.effect_kinds,
@@ -628,7 +632,7 @@ impl ToolsProfile {
             self.provider_id,
             self.user_id,
             self.options,
-        )
+        ))
         .await?;
         if let Some(policy) = self.network_policy_override {
             harness.network_policy = policy;
@@ -637,7 +641,12 @@ impl ToolsProfile {
             harness.additional_provider_trust = trust;
         }
         if let Some((source_dir, relative_dest)) = self.post_construct_asset_copy {
-            let dest = harness.root.path().join(relative_dest);
+            let installation_root = harness
+                .storage_paths
+                .as_ref()
+                .ok_or("tools profile asset copy requires canonical Reborn storage paths")?
+                .installation_root();
+            let dest = installation_root.join(relative_dest);
             super::copy_dir_recursive(&source_dir, &dest)?;
         }
         match self.auto_approve_default {

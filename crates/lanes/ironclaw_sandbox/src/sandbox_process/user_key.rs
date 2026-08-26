@@ -5,11 +5,9 @@
 use std::path::{Path, PathBuf};
 
 use ironclaw_host_api::{
-    ids::{TenantId, UserId},
+    ids::{TenantId, TenantUserWorkspaceKey, UserId},
     resource::ResourceScope,
 };
-
-use crate::sandbox_process::key_codec::{digest_hex, encode_parts};
 
 pub(crate) const USER_CONTAINER_NAME_PREFIX: &str = "ironclaw-reborn-sandbox-user-";
 pub(crate) const USER_PROXY_NAME_PREFIX: &str = "ironclaw-reborn-sandbox-proxy-";
@@ -18,7 +16,7 @@ pub(crate) const USER_CONTAINER_DIGEST_HEX_LEN: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RebornSandboxUserKey {
-    digest: String,
+    workspace_key: TenantUserWorkspaceKey,
 }
 
 impl RebornSandboxUserKey {
@@ -33,17 +31,13 @@ impl RebornSandboxUserKey {
     /// a reconstructable `ResourceScope` (no agent/project/thread/
     /// invocation survive on a label). One formula, two entry points.
     pub fn from_tenant_user(tenant_id: &TenantId, user_id: &UserId) -> Self {
-        let raw = encode_parts(&[
-            ("tenant", tenant_id.as_str().to_string()),
-            ("user", user_id.as_str().to_string()),
-        ]);
         Self {
-            digest: digest_hex(&raw),
+            workspace_key: TenantUserWorkspaceKey::from_tenant_user(tenant_id, user_id),
         }
     }
 
     pub fn workspace_path(&self, root: &Path) -> PathBuf {
-        root.join("users").join(&self.digest)
+        root.join("users").join(self.workspace_key.digest_segment())
     }
 
     pub fn container_name(&self) -> String {
@@ -59,9 +53,10 @@ impl RebornSandboxUserKey {
     }
 
     fn digest_prefix(&self) -> &str {
-        self.digest
+        self.workspace_key
+            .digest_segment()
             .get(..USER_CONTAINER_DIGEST_HEX_LEN)
-            .unwrap_or(self.digest.as_str())
+            .unwrap_or(self.workspace_key.digest_segment())
     }
 }
 

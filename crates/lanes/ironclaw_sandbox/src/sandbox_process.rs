@@ -20,7 +20,7 @@ use bollard::{
     models::{HostConfig, HostConfigLogConfig},
 };
 use fs2::FileExt;
-use ironclaw_host_api::resource::ResourceScope;
+use ironclaw_host_api::{ids::TenantUserWorkspaceKey, resource::ResourceScope};
 
 use ironclaw_host_api::process::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
@@ -40,6 +40,7 @@ mod scope_key;
 pub(crate) mod shell_limits;
 mod user_container;
 mod worker_spec;
+mod workspace_admission;
 
 use managed_egress::{ManagedEgressBundle, ManagedEgressConfig, ManagedEgressRuntime};
 
@@ -49,6 +50,9 @@ mod attribution;
 mod registry;
 mod user_key;
 
+use crate::sandbox_process::workspace_admission::{
+    WorkspaceLeafAdmission, admit_workspace_leaf, revalidate_workspace_host_boundary,
+};
 use mounts::RebornSandboxMountSources;
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
@@ -99,6 +103,114 @@ const DEFAULT_CPU_SHARES: u32 = 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize;
 const CONTAINER_WORKSPACE_ROOT: &str = "/workspace";
 
+pub(super) fn sandbox_user_container_name(key: &TenantUserWorkspaceKey) -> String {
+    let digest = key.digest_segment();
+    let prefix = digest
+        .get(..USER_SANDBOX_CONTAINER_DIGEST_HEX_LEN)
+        .unwrap_or(digest);
+    format!("{USER_SANDBOX_CONTAINER_NAME_PREFIX}{prefix}")
+}
+
+#[cfg(test)]
+mod workspace_prepare_test_hook {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    static HOOKS: OnceLock<Mutex<HashMap<PathBuf, Hook>>> = OnceLock::new();
+
+    pub(super) struct HookGuard {
+        workspace_root: PathBuf,
+    }
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+            hooks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.workspace_root);
+        }
+    }
+
+    pub(super) fn install(workspace_root: PathBuf, hook: Hook) -> HookGuard {
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut hooks = hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            hooks.insert(workspace_root.clone(), hook).is_none(),
+            "only one deterministic workspace preparation hook per root"
+        );
+        HookGuard { workspace_root }
+    }
+
+    pub(super) fn run(workspace_root: &Path) {
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let hook = hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(workspace_root);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+#[cfg(test)]
+mod container_create_test_hook {
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    type Hook = Box<dyn FnOnce() + Send>;
+
+    static HOOKS: OnceLock<Mutex<HashMap<PathBuf, Hook>>> = OnceLock::new();
+
+    pub(super) struct HookGuard {
+        workspace_root: PathBuf,
+    }
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+            hooks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.workspace_root);
+        }
+    }
+
+    pub(super) fn install(workspace_root: PathBuf, hook: Hook) -> HookGuard {
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut hooks = hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            hooks.insert(workspace_root.clone(), hook).is_none(),
+            "only one deterministic container-create hook per workspace root"
+        );
+        HookGuard { workspace_root }
+    }
+
+    pub(super) fn run(workspace_root: &Path) {
+        let hooks = HOOKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let hook = hooks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(workspace_root);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContainerWorkdir(String);
 
@@ -144,7 +256,7 @@ impl RebornSandboxConfig {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
-            mount_sources: RebornSandboxMountSources::default(),
+            mount_sources: RebornSandboxMountSources,
             image: std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
                 .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
                 .unwrap_or_else(|_| DEFAULT_IMAGE.to_string()),
@@ -224,16 +336,6 @@ impl RebornSandboxConfig {
         host_socket: impl Into<PathBuf>,
     ) -> Result<Self, RuntimeProcessError> {
         self.secret_broker = Some(RebornSandboxSecretBroker::unix_socket(host_socket)?);
-        Ok(self)
-    }
-
-    pub fn with_local_mount_source(
-        mut self,
-        virtual_root: ironclaw_host_api::path::VirtualPath,
-        host_root: impl Into<PathBuf>,
-    ) -> Result<Self, RuntimeProcessError> {
-        self.mount_sources
-            .add_local_source(virtual_root, host_root)?;
         Ok(self)
     }
 
@@ -456,35 +558,14 @@ impl RebornScopedSandboxCommandTransport {
     async fn prepare_workspace(
         &self,
         scope: &ResourceScope,
-    ) -> Result<PathBuf, RuntimeProcessError> {
-        let key = RebornSandboxUserKey::from_scope(scope);
-        let workspace = key.workspace_path(&self.config.workspace_root);
-        tokio::fs::create_dir_all(&workspace)
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace could not be initialized: {error}"
-                ))
-            })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(
-                &workspace,
-                std::fs::Permissions::from_mode(self.config.container_identity.workspace_mode()),
-            )
-            .await
-            .map_err(|error| {
-                RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace permissions could not be set: {error}"
-                ))
-            })?;
-        }
-        tokio::fs::canonicalize(&workspace).await.map_err(|error| {
-            RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace could not be resolved: {error}"
-            ))
-        })
+    ) -> Result<WorkspaceLeafAdmission, RuntimeProcessError> {
+        let key = TenantUserWorkspaceKey::from_scope(scope);
+        admit_workspace_leaf(
+            self.config.workspace_root.clone(),
+            key,
+            self.config.container_identity.workspace_mode(),
+        )
+        .await
     }
 
     fn resolve_container_workdir(
@@ -617,12 +698,12 @@ impl RebornScopedSandboxCommandTransport {
         let container_user = self
             .config
             .container_identity
-            .container_user(&workspace)
+            .container_user(&workspace.path)
             .await?;
         let mut binds = self
             .config
             .mount_sources
-            .prepare_container_binds(&workspace, request.mounts.as_ref())
+            .prepare_container_binds(&workspace.path, &request.scope, request.mounts.as_ref())
             .await?
             .into_iter()
             .map(|bind| bind.into_docker_bind())
@@ -657,6 +738,15 @@ impl RebornScopedSandboxCommandTransport {
                     .set_invocation(bundle, &request.scope.invocation_id)
                     .await?;
             }
+            #[cfg(test)]
+            container_create_test_hook::run(&self.config.workspace_root);
+            revalidate_workspace_host_boundary(
+                self.config.workspace_root.clone(),
+                TenantUserWorkspaceKey::from_scope(&request.scope),
+                self.config.container_identity.workspace_mode(),
+                &workspace,
+            )
+            .await?;
             let launch = self.user_container_launch_config(
                 &request,
                 &resolved_image,
@@ -1151,7 +1241,7 @@ mod tests {
         let mut binds = transport
             .config
             .mount_sources
-            .prepare_container_binds(&workspace, None)
+            .prepare_container_binds(&workspace, &sandbox_scope(), None)
             .await
             .unwrap()
             .into_iter()
@@ -1261,16 +1351,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_rejects_unconfigured_scoped_mount_before_container_create() {
+    async fn run_command_rejects_noncaller_workspace_mount_before_docker_io() {
         let temp = tempfile::tempdir().unwrap();
-        let docker = Docker::connect_with_local_defaults().unwrap();
-        let transport = test_support::transport(
-            docker,
-            RebornSandboxConfig::new(temp.path().join("workspaces")),
-        );
+        let workspace_root = temp.path().join("workspaces");
+        tokio::fs::create_dir(&workspace_root).await.unwrap();
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", unavailable.local_addr().unwrap());
+        let docker = Docker::connect_with_http(&endpoint, 1, bollard::API_DEFAULT_VERSION).unwrap();
+        let transport = test_support::transport(docker, RebornSandboxConfig::new(workspace_root));
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
-            VirtualPath::new("/projects/app").unwrap(),
+            VirtualPath::new("/projects/workspace/users/not-current-caller").unwrap(),
             process_read_only_permissions(),
         )])
         .unwrap();
@@ -1287,7 +1378,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(format!("{error}").contains("no trusted sandbox mount source"));
+        assert!(format!("{error}").contains("current caller workspace leaf"));
     }
     fn sandbox_scope() -> ResourceScope {
         ResourceScope::system()

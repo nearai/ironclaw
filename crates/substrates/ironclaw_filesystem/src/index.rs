@@ -272,6 +272,10 @@ impl IndexSpec {
 pub enum Filter {
     /// Match every record under the queried prefix.
     All,
+    /// Match records whose structural schema family equals `kind`.
+    Kind {
+        kind: crate::RecordKind,
+    },
     /// Match records whose indexed `key` equals `value`.
     Eq {
         key: IndexKey,
@@ -696,7 +700,8 @@ fn collect_equality_values<'a>(
         Filter::And(filters) => filters
             .iter()
             .all(|filter| collect_equality_values(filter, values)),
-        Filter::PrefixOn { .. }
+        Filter::Kind { .. }
+        | Filter::PrefixOn { .. }
         | Filter::Range { .. }
         | Filter::Fts { .. }
         | Filter::FtsRanked { .. }

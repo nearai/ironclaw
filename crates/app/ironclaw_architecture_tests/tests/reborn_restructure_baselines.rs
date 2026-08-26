@@ -137,6 +137,17 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// production wiring and inline regression coverage to the current main tree.
 /// Measured with `bash scripts/ci/check-composition-budget.sh --print`; the
 /// manifest ceiling and observed value move with this record.
+/// Union re-measured 41_582 -> 42_455 on 2026-08-10 for the profile-stable
+/// durable-layout assembly and adoption-time encrypted-state verification.
+/// The budget ceiling is pinned to this exact combined-tree count.
+/// Re-recorded 42_455 -> 42_669 on 2026-08-11 after profile-control cleanup,
+/// measured with the same budget gate; the manifest and this paired record
+/// move together so the nudge assertion remains binding.
+/// Re-measured 42_669 -> 42_934 after merging #7471's dedicated process-journal
+/// PostgreSQL pool, then 42_934 -> 42_952 for review-requested test-only
+/// inspection seams, and 42_952 -> 42_954 when those inspectors moved off
+/// production structs into test-support free functions; each measurement uses
+/// the same production-source gate.
 /// ✎ Re-recorded 41_582 → 41_731 on 2026-08-11 for #7471: the dedicated
 /// process-journal PostgreSQL pool adds its service-graph assembly (second
 /// pool open + journal filesystem mount wiring). Measured on this branch's
@@ -165,6 +176,26 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// eviction + #7373 re-equalization) into the unified-channel branch; the
 /// merged tree is measured, not summed, and the manifest ceiling/observed
 /// move with this record in the same commit.
+/// Union re-measured 42_954 -> 42_989 on 2026-08-12 after merging main into
+/// the profile-stable durable-storage branch. This is the exact merged-tree
+/// production-source count, including both main's composition changes and the
+/// branch's storage adoption assembly; it is not a sum of historical pins.
+/// Re-measured 42_989 -> 43_265 on 2026-08-14 after the profile-stable
+/// storage review changes, using
+/// `bash scripts/ci/check-composition-budget.sh --print`.
+/// Re-measured 43_265 -> 43_170 on 2026-08-18 after replacing the journaled
+/// storage-layout adoption engine with the rename-based boot migrator
+/// (adoption store verifiers evicted from composition).
+/// Union re-measured on 2026-08-18 after merging main (the unbound-turns
+/// surfaces work, whose composition share is the wire-DTO mapping, port
+/// adapter, and mount wiring) into this branch. `bash
+/// scripts/ci/check-composition-budget.sh --print` is the single
+/// authoritative re-capture, and this record moves with
+/// `scripts/ci/composition-budget.toml`'s `loc_ceiling`/`loc_observed` to the
+/// same figure in this commit.
+/// Union re-measured on 2026-08-19 after merging main again (its own record
+/// had moved 41_991 -> 42_142 meanwhile). Re-captured with
+/// `bash scripts/ci/check-composition-budget.sh --print` on the merged tree.
 /// ✎ Re-measured 2026-08-14 on the unbound-turns surfaces branch (main
 /// merged): the OpenAI-compat prepared-lane behavior lives in
 /// `ironclaw_assistant::UnboundPreparedTurnService`; composition's growth is
@@ -191,11 +222,15 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// assembly wiring; this record moves with them to the same figure in this
 /// commit, per the pairing this file's own history keeps. Measured with
 /// `bash scripts/ci/check-composition-budget.sh --print`, not padded.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_371;
+/// Union re-measured 43_436 -> 43_513 on 2026-08-24 after merging #7833 into
+/// the profile-stable storage branch. This is the exact merged-tree
+/// production-source count, preserving both branches' assembly changes; it
+/// moves with the composition-budget manifest's merged recapture.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_513;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
-/// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
-const WS0_COMPOSITION_ARC_DYN_SITES: usize = 827;
+/// 845 Arc<dyn> (governed prod, excl slack/extension_host)".
+const WS0_COMPOSITION_ARC_DYN_SITES: usize = 845;
 
 /// Integration-coverage floor, read from `tests/integration/coverage-floor.toml`
 /// `[global].floor_percent` at the WS0 commit (captured there from PR #6886's

@@ -91,6 +91,7 @@ Frozen V1 canonical virtual roots (aligned with `storage-placement.md`):
 /engine
 /system/settings
 /system/extensions
+/system/prompts
 /system/skills
 /users
 /projects
@@ -119,6 +120,7 @@ Recommended meaning:
 | `/engine` | host-owned runtime state, schemas, migrations, and service metadata |
 | `/system/settings` | typed settings repository and optional settings projections |
 | `/system/extensions` | installed extension packages and extension-local config/state/cache roots |
+| `/system/prompts` | host-managed prompt templates and prompt metadata |
 | `/system/skills` | skill manifests, registries, and installed skill state |
 | `/users` | user-owned durable profile/config areas |
 | `/projects` | project workspaces, missions, thread state, and project-local config |

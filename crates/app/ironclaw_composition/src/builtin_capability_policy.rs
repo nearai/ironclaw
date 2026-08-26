@@ -81,10 +81,10 @@ impl BuiltinCapabilityPolicy {
                 EffectKind::ReadFilesystem | EffectKind::WriteFilesystem
             )
         });
-        // The sandbox transport supplies its own per-user `/workspace` bind.
-        // Passing the host runtime's tenant-workspace grant would either expose
-        // the wrong storage boundary or fail its trusted-mount resolution.
-        shell.mounts = CapabilityMountProfile::Ambient;
+        // The sandbox transport binds only the host-authorized caller workspace
+        // grant. Keep that grant on the invocation so the transport can validate
+        // its exact tenant/user leaf before preparing the container bind.
+        shell.mounts = CapabilityMountProfile::Workspace;
         shell.network = CapabilityNetworkProfile::SandboxManagedEgress;
         shell.network_override = Some(network_override);
         Ok(self)
@@ -817,7 +817,7 @@ mod tests {
             shell.network,
             CapabilityNetworkProfile::SandboxManagedEgress
         );
-        assert_eq!(shell.mounts, CapabilityMountProfile::Ambient);
+        assert_eq!(shell.mounts, CapabilityMountProfile::Workspace);
 
         let network = policy
             .grant_constraints_for(

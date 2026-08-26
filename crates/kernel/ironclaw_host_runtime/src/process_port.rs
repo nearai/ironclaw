@@ -143,7 +143,7 @@ pub struct HostProcessPort {
     /// Whether `/workspace` is scoped to the caller, as the file tools scope it.
     ///
     /// The alias list is built once at composition and knows nothing about callers, while
-    /// `scoped_workspace_mount_view` resolves `/workspace` to `<root>/tenants/<t>/users/<u>`. With this
+    /// `scoped_workspace_mount_view` resolves `/workspace` to `<root>/users/<tenant-user-digest>`. With this
     /// false under a per-caller policy, one alias means two different directories in one process: an
     /// agent wrote `scripts/egfr.py` through `write_file`, ran `python3 scripts/egfr.py` in the shell,
     /// and landed three directories above its own file with no error from either side.

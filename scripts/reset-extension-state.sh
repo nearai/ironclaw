@@ -8,7 +8,8 @@ configuration, managed secrets, and automations.
 
 IronClaw must be stopped before applying the reset.
 
-Local/libSQL:
+Local/libSQL (pass the Reborn installation home, which contains `state/` and
+`system/`):
   scripts/reset-extension-state.sh --local-root PATH
   scripts/reset-extension-state.sh --local-root PATH --apply --server-stopped
 
@@ -104,12 +105,12 @@ SQL
 
 if [ -n "$local_root" ]; then
   command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 is required for --local-root"
-  [ -d "$local_root" ] || die "local storage root does not exist: $local_root"
+  [ -d "$local_root" ] || die "Reborn installation home does not exist: $local_root"
 
   local_root="$(cd "$local_root" && pwd -P)"
-  [ "$local_root" != "/" ] || die "refusing to use / as the local storage root"
+  [ "$local_root" != "/" ] || die "refusing to use / as the Reborn installation home"
 
-  database="$local_root/reborn-local-dev.db"
+  database="$local_root/state/reborn-local-dev.db"
   package_root="$local_root/system/extensions"
   [ -f "$database" ] || die "local IronClaw database not found: $database"
 

@@ -37,6 +37,11 @@ here is what lets the rest of the workspace stay backend-agnostic.
 - Backends: `DiskFilesystem`, `LibSqlRootFilesystem`, `PostgresRootFilesystem`,
   `InMemoryBackend`, and the `HsmBackend` demo backend (plus containment:
   symlink traversal, mount escape, and raw-host-path prevention).
+- `inspect_ordinary_host_tree` — the bounded, descriptor-relative no-follow
+  validator shared by host-only migration callers; product-specific tree
+  grammar remains with each caller. `read_ordinary_host_file` pairs a retained
+  `DiskDirectoryCapability` with a capability-relative path, resolving every
+  ancestor and the final ordinary file without following links.
 
 ## Depends on / consumed by
 

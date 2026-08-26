@@ -6,13 +6,13 @@
 //! operation against a trusted root filesystem namespace addressed by
 //! [`VirtualPath`]. Backend implementations alone touch raw host paths.
 //!
-//! The local backend canonicalizes existing paths and their nearest existing
-//! ancestors before opening files, and it re-roots new leaf paths on the checked
-//! canonical parent. That narrows symlink escape opportunities but does not
-//! provide a kernel-enforced race-free guarantee against a writable mount root
-//! being modified between containment checks and opens. Production hardening for
-//! hostile local directories should use fd-relative traversal such as `openat2`
-//! with `RESOLVE_BENEATH`, `O_NOFOLLOW`, or a capability filesystem crate.
+//! The local backend retains a directory capability for each mounted host root.
+//! `write_file`, `append_file`, `create_dir_all`, and `create_subtree_atomic`
+//! create child directories and temporary material relative to that retained
+//! handle, so replacing the ambient mount path or an ancestor after admission
+//! cannot redirect those writes. Reads resolve through the same retained handle
+//! and reject symlink components, and every error keeps the virtual-path-only
+//! boundary.
 #![warn(unreachable_pub)]
 
 mod backend;
@@ -26,6 +26,8 @@ mod in_memory;
 mod index;
 mod libsql;
 mod local;
+mod local_capability;
+mod ordinary_tree;
 mod postgres;
 #[cfg(feature = "test-support")]
 mod postgres_isolation;
@@ -51,6 +53,10 @@ pub use index::{
 };
 pub use libsql::LibSqlRootFilesystem;
 pub use local::DiskFilesystem;
+pub use local_capability::DiskDirectoryCapability;
+pub use ordinary_tree::{
+    MAX_ORDINARY_HOST_TREE_DEPTH, inspect_ordinary_host_tree, read_ordinary_host_file,
+};
 pub use postgres::{PostgresConnectionPool, PostgresRootFilesystem};
 #[cfg(feature = "test-support")]
 pub use postgres_isolation::{
