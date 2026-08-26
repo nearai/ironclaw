@@ -51,13 +51,13 @@ use super::{
     BlockedActionableMarker, DeliveredChannelMessage, HINT_SEEN_CAP, HintSeenSet, RunDeliveryError,
     RunDeliveryServices, RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
     delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
-    inbox_gate_observer::spawn_inbox_gate_observer, thread_scope_from_binding,
-    turn_scope_from_thread_scope,
+    thread_scope_from_binding, turn_scope_from_thread_scope,
 };
 use crate::ProductSurfaceFailure;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
+use crate::run_delivery::inbox_gate_observer::spawn_inbox_gate_observer;
 use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 
 const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
@@ -594,7 +594,7 @@ impl RunDeliveryObserver {
             // Persist the actionable gate before optional prompt enrichment or
             // channel rendering. An auth-provider outage must not hide the
             // run-bound recovery action from the durable WebUI Inbox.
-            if actionable_state.status == TurnStatus::BlockedAuth
+            let auth_inbox_published = if actionable_state.status == TurnStatus::BlockedAuth
                 && let Some(gate_ref) = actionable_state.gate_ref.as_ref()
                 && let Some(kind) = super::blocked_status_notification_kind(actionable_state.status)
             {
@@ -606,8 +606,10 @@ impl RunDeliveryObserver {
                         kind,
                         Some(gate_ref.as_str()),
                     )
-                    .await;
-            }
+                    .await
+            } else {
+                false
+            };
             let notification = match self
                 .notification_for_actionable_state(
                     &envelope,
@@ -684,9 +686,7 @@ impl RunDeliveryObserver {
                         %error,
                         "auth prompt enrichment failed; continuing with durable Inbox notification"
                     );
-                    if self.services.notification_inbox.is_some()
-                        && let Some(marker) = next_blocked_marker
-                    {
+                    if auth_inbox_published && let Some(marker) = next_blocked_marker {
                         spawn_inbox_gate_observer(
                             &self.services,
                             self.settings,

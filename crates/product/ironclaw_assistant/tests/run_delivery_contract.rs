@@ -51,8 +51,8 @@ use ironclaw_host_api::{
     path::ScopedPath,
 };
 use ironclaw_notifications::{
-    ListNotificationsRequest, NotificationInboxStore, NotificationInboxStorePort, NotificationKind,
-    NotificationRecipient,
+    ListNotificationsRequest, NoopNotificationInboxStore, NotificationInboxStore,
+    NotificationInboxStorePort, NotificationKind, NotificationRecipient,
 };
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
@@ -1048,6 +1048,7 @@ fn build_harness_with_settings(
             }) as Arc<dyn BlockedAuthPromptSource>
         }),
         None,
+        None,
     )
 }
 
@@ -1066,12 +1067,15 @@ fn build_harness_with_gate_ports(
     resolved_binding: ironclaw_product_contracts::binding::ResolvedBinding,
     blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
+    notification_inbox_override: Option<Arc<dyn NotificationInboxStorePort>>,
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let notification_inbox = notification_inbox();
+    let notification_inbox_port = notification_inbox_override
+        .unwrap_or_else(|| Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>);
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
@@ -1097,9 +1101,7 @@ fn build_harness_with_gate_ports(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-        notification_inbox: Some(
-            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>
-        ),
+        notification_inbox: Some(notification_inbox_port),
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: Arc::new(StaticTargetCatalog {
             targets: Vec::new(),
@@ -2270,6 +2272,7 @@ async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
         binding(),
         Some(Arc::new(FailingAuthPromptSource)),
         None,
+        None,
     );
     let run_id = TurnRunId::new();
 
@@ -2335,6 +2338,53 @@ async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
         harness.adapter.texts().last().map(String::as_str),
         Some("unrelated run finished"),
         "the released permit must remain available to unrelated replies"
+    );
+}
+
+#[tokio::test]
+async fn observer_reports_failed_auth_enrichment_when_inbox_publication_also_fails() {
+    const GATE: &str = "gate:auth-extension-00000000000000000000000002";
+    let harness = build_harness_with_gate_ports(
+        vec![scripted_state(TurnStatus::BlockedAuth, Some(GATE))],
+        false,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
+        },
+        &["status"],
+        None,
+        binding(),
+        Some(Arc::new(FailingAuthPromptSource)),
+        None,
+        Some(Arc::new(NoopNotificationInboxStore)),
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(
+                ProductTriggerReason::DirectChat,
+                "evt-auth-enrichment-and-inbox-down",
+            ),
+            accepted_ack(TurnRunId::new()),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts().last().map(String::as_str),
+        Some("Something went wrong delivering the result here. Check the WebUI."),
+        "without durable Inbox evidence, enrichment failure must remain caller-visible"
+    );
+    assert!(
+        inbox_records(harness.notification_inbox.as_ref())
+            .await
+            .notifications
+            .is_empty(),
+        "the failing Inbox port must not invent durable notification evidence"
     );
 }
 
