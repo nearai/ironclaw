@@ -175,13 +175,19 @@ Rules:
 - append and patch validate the final content, not only the delta;
 - write/append/patch version previous content before mutation according to version policy;
 - write/append/patch reindex after mutation according to metadata policy;
-- system-prompt-file write safety is delegated to kernel-mediated prompt safety policy hooks.
+- system-prompt-file write safety is delegated to kernel-mediated prompt safety policy hooks;
 - model-facing reads return a content hash; a rewrite may supply that hash as
   its expected prior state;
+- scheduled loop runs must supply that expectation for full-document
+  replacements; append and patch operations retain their operation-specific
+  atomicity;
 - the native provider enforces expected-content hashes atomically and returns a
   model-visible `conflict` when the document changed, without overwriting it;
-- providers without conditional-write support may treat the expectation as
-  best-effort and must document that limitation on their tool surface;
+- a native backend that cannot compare-and-write atomically fails closed rather
+  than discarding the expectation;
+- non-document providers may treat the expectation as best-effort only where
+  their supported operation cannot overwrite prior content, and must document
+  that limitation on their tool surface;
 
 ### 5.2 `MemorySearchService`
 

@@ -150,6 +150,14 @@ pub async fn run() -> HarnessResult<()> {
             .contains("Never invent, infer, or extrapolate")),
         "the pass must run under the curation prompt asset, not an ordinary chat prompt"
     );
+    let read_output = conversation
+        .tool_result_output(MEMORY_READ_CAPABILITY_ID)
+        .await?;
+    assert_eq!(
+        read_output["content_hash"].as_str(),
+        Some(expected_content_hash.as_str()),
+        "the production read result must return the exact hash supplied to the following write"
+    );
 
     // Read the document back the way the product does — through the always-on
     // memory lane of a LATER conversation belonging to the same user. That is
@@ -171,6 +179,125 @@ pub async fn run() -> HarnessResult<()> {
         .assert_model_request_excludes(FIRST_SAVED_FACT)
         .await?;
 
+    run_conflict_case().await
+}
+
+async fn run_conflict_case() -> HarnessResult<()> {
+    const STALE_SNAPSHOT: &str = "the user prefers the original itinerary";
+    const CONCURRENT_DOCUMENT: &str = "the user now prefers the updated itinerary";
+    const STALE_CURATION: &str = "the user prefers the original itinerary (curated)";
+
+    let group = RebornIntegrationGroup::builder()
+        .with_memory_curation_interval(
+            NonZeroU32::new(CURATION_INTERVAL).ok_or("the curation interval must be non-zero")?,
+        )
+        .builtin_tools_with_native_memory_libsql()
+        .await?;
+    let conversation = group
+        .thread("conv-curation-conflict-trigger")
+        .script([
+            RebornScriptedReply::tool_call(
+                MEMORY_WRITE_CAPABILITY_ID,
+                json!({
+                    "target": "memory",
+                    "content": STALE_SNAPSHOT,
+                    "append": false
+                }),
+            ),
+            RebornScriptedReply::text("recorded snapshot"),
+            RebornScriptedReply::tool_call(
+                MEMORY_WRITE_CAPABILITY_ID,
+                json!({
+                    "target": "memory",
+                    "content": CONCURRENT_DOCUMENT,
+                    "append": false
+                }),
+            ),
+            RebornScriptedReply::text("recorded newer fact"),
+        ])
+        .build()
+        .await?;
+    let curation_thread_prefix = format!(
+        "memory-curation-{}-{}-",
+        conversation.binding.tenant_id.as_str(),
+        group.canonical_actor_user().as_str()
+    );
+    let stale_hash = content_bytes_sha256(STALE_SNAPSHOT.as_bytes());
+    let current_hash = content_bytes_sha256(CONCURRENT_DOCUMENT.as_bytes());
+    let curation_llm = group
+        .register_scope_script_prefix_for_test(
+            curation_thread_prefix,
+            "memory-curation-conflict-pass",
+            [
+                RebornScriptedReply::tool_call(
+                    MEMORY_READ_CAPABILITY_ID,
+                    json!({ "path": "MEMORY.md" }),
+                ),
+                RebornScriptedReply::tool_call(
+                    MEMORY_WRITE_CAPABILITY_ID,
+                    json!({
+                        "target": "memory",
+                        "content": STALE_CURATION,
+                        "append": false,
+                        "expected_content_hash": stale_hash
+                    }),
+                ),
+                RebornScriptedReply::text("The document changed; no edit was made."),
+                RebornScriptedReply::text(
+                    json!({
+                        "changed": false,
+                        "summary": "No edit: the document changed during curation.",
+                        "entries_merged": 0
+                    })
+                    .to_string(),
+                ),
+            ],
+        )
+        .await?;
+
+    conversation
+        .submit_turn("Remember my original itinerary.")
+        .await?;
+    conversation
+        .submit_turn("I changed my itinerary preference.")
+        .await?;
+    wait_for_pass_to_finish(&curation_llm).await?;
+
+    let captured = curation_llm.captured_requests();
+    assert_eq!(
+        captured.len(),
+        4,
+        "a conflict must complete the pass without a second write attempt"
+    );
+    let read_output = conversation
+        .tool_result_output(MEMORY_READ_CAPABILITY_ID)
+        .await?;
+    assert_eq!(
+        read_output["content_hash"].as_str(),
+        Some(current_hash.as_str()),
+        "the curation read must observe the newer concurrent document"
+    );
+    let write_output = conversation
+        .tool_result_output(MEMORY_WRITE_CAPABILITY_ID)
+        .await?;
+    assert_eq!(
+        write_output["status"], "conflict",
+        "the stale conditional write must return a model-visible conflict"
+    );
+    conversation
+        .assert_capability_result_count(MEMORY_WRITE_CAPABILITY_ID, 3)
+        .await?;
+
+    let reader = group
+        .thread("conv-curation-conflict-reader")
+        .script([RebornScriptedReply::text("answered")])
+        .build()
+        .await?;
+    reader.submit_turn("Help with an unrelated note.").await?;
+    reader
+        .assert_model_request_contains(CONCURRENT_DOCUMENT)
+        .await?;
+    reader.assert_model_request_excludes(STALE_CURATION).await?;
     Ok(())
 }
 

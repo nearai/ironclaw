@@ -77,11 +77,12 @@ impl MemoryServiceWriteRequest {
         // Lenient parsing matching the pre-lift host `parse_write_command`: an
         // explicit JSON `null` target is treated as omitted (defaults to the
         // daily log), but any other present-but-wrong-typed `target` (number,
-        // bool, object, array) is rejected. Every other present-but-wrong-typed
-        // optional field coerces to its default rather than failing (exact
-        // original behavior). `new_string`/`timezone` are only consulted by the
-        // native write path when relevant (patch / daily_log), preserving origin
-        // semantics.
+        // bool, object, array) is rejected. Most other present-but-wrong-typed
+        // optional fields retain their historical coercion. The exception is
+        // `expected_content_hash`: silently coercing a malformed expectation to
+        // `None` would turn a conditional write into an unconditional one.
+        // `new_string`/`timezone` are only consulted by the native write path
+        // when relevant (patch / daily_log), preserving origin semantics.
         let target = match input.get("target") {
             Some(Value::String(target)) => target.to_string(),
             Some(Value::Null) | None => "daily_log".to_string(),
@@ -102,10 +103,11 @@ impl MemoryServiceWriteRequest {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let expected_content_hash = input
-            .get("expected_content_hash")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let expected_content_hash = match input.get("expected_content_hash") {
+            Some(Value::String(hash)) => Some(hash.to_string()),
+            Some(Value::Null) | None => None,
+            Some(_) => return Err(MemoryServiceError::input()),
+        };
         let old_string = input
             .get("old_string")
             .and_then(Value::as_str)
@@ -1147,6 +1149,35 @@ mod tests {
         .expect("conditional write input parses");
 
         assert_eq!(request.expected_content_hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn write_request_rejects_malformed_expected_content_hash() {
+        let error = MemoryServiceWriteRequest::from_tool_input(&json!({
+            "target": "memory",
+            "content": "curated",
+            "append": false,
+            "expected_content_hash": 1
+        }))
+        .expect_err("a malformed expectation must not become an unconditional write");
+
+        assert_eq!(error.kind(), MemoryServiceErrorKind::Input);
+    }
+
+    #[test]
+    fn write_request_allows_null_or_omitted_expected_content_hash() {
+        for input in [
+            json!({"target": "memory", "content": "x"}),
+            json!({
+                "target": "memory",
+                "content": "x",
+                "expected_content_hash": null
+            }),
+        ] {
+            let request = MemoryServiceWriteRequest::from_tool_input(&input)
+                .expect("null or omitted expectation remains optional");
+            assert_eq!(request.expected_content_hash, None);
+        }
     }
 
     #[test]
