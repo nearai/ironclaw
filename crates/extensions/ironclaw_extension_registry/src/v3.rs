@@ -35,7 +35,7 @@ use ironclaw_host_api::{
 
 use ironclaw_extension_contracts::{
     channel::{ChannelDescriptor, ChannelDescriptorError},
-    memory::MemoryDescriptor,
+    memory::{MemoryDescriptor, MemoryScheduledOpKind},
     recipe::{RecipeValidationError, VendorAuthRecipe},
 };
 use serde::Deserialize;
@@ -356,6 +356,14 @@ pub(crate) fn parse_v3(
         return Err(ManifestV3Error::InvalidMemory {
             reason: "[memory] requires a first_party runtime".to_string(),
         });
+    }
+    if let Some(memory) = &raw.memory {
+        memory
+            .validate()
+            .map_err(|error| ManifestV3Error::InvalidMemory {
+                reason: error.to_string(),
+            })?;
+        validate_memory_scheduled_ops(memory, raw.trust, &raw.tools)?;
     }
     let sandboxed_runtime = matches!(
         runtime,
@@ -772,6 +780,63 @@ pub(crate) fn parse_v3(
     Ok((manifest, resolved))
 }
 
+/// Validate `[memory].scheduled_ops` against the rest of the manifest.
+///
+/// The neutral memory contract validates one op's own shape (trigger
+/// vocabulary, op-kind tagging, cost floor, model-call ceiling, one op per
+/// trigger). The two rules here need the manifest-wide view, which is why they
+/// live at this layer — the same reason `[admin_configuration]`'s channel
+/// cross-check does:
+///
+/// - **Trust.** A `pass` op is a manifest-authored prompt executing with write
+///   tools, as every user, on a schedule. That is a strictly larger grant than
+///   a tool call the model chose, so only a manifest whose requested trust is
+///   first-party/system may declare one — the same default-deny wall the
+///   after-turn hook tiers apply, for the same reason. Requested trust is the
+///   right input here because the source gate above has already refused a
+///   first-party/system request from any non-host-bundled source; host trust
+///   policy still computes effective trust downstream.
+/// - **Tool subset.** A pass's `tools` must be ids the SAME manifest declares.
+///   Declaration is selection, never authority: a memory provider must not be
+///   able to schedule a pass wielding another extension's tools, and only this
+///   layer can see the `[[tools]]` array beside the `[memory]` section.
+fn validate_memory_scheduled_ops(
+    memory: &MemoryDescriptor,
+    trust: RequestedTrustClass,
+    tools: &[RawToolV3],
+) -> Result<(), ManifestV3Error> {
+    for scheduled in &memory.scheduled_ops {
+        match &scheduled.op {
+            MemoryScheduledOpKind::Pass(pass) => {
+                if !matches!(
+                    trust,
+                    RequestedTrustClass::FirstPartyRequested | RequestedTrustClass::SystemRequested
+                ) {
+                    return Err(ManifestV3Error::InvalidMemory {
+                        reason: format!(
+                            "a `pass` scheduled op runs a manifest-authored prompt with the \
+                             declared tools on a schedule, so it is restricted to first-party \
+                             manifests; trust `{trust:?}` may not declare one"
+                        ),
+                    });
+                }
+                for tool_id in &pass.tools {
+                    if !tools.iter().any(|tool| tool.id == tool_id.as_str()) {
+                        return Err(ManifestV3Error::InvalidMemory {
+                            reason: format!(
+                                "scheduled pass op for trigger `{}` selects tool `{tool_id}`, \
+                                 which this manifest does not declare in [[tools]]",
+                                scheduled.trigger.as_str()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate every channel runtime reference against the one manifest-owned
 /// deployment configuration schema. The neutral channel contract validates
 /// channel structure; the extension-manifest layer owns this cross-section
@@ -980,6 +1045,141 @@ default_permission = "ask"
 effects = ["network", "use_secret"]
 "#
         )
+    }
+
+    /// Minimal host-bundled `[memory]` provider manifest with a parameterized
+    /// trust class and `[[memory.scheduled_ops]]` body. Both cross-section
+    /// rules need the whole file, so they can only be exercised here.
+    fn memory_manifest(trust: &str, scheduled_ops: &str) -> String {
+        format!(
+            r#"
+schema_version = "{MANIFEST_SCHEMA_VERSION_V3}"
+id = "ironclaw.memory"
+name = "Memory"
+version = "0.1.0"
+description = "Memory provider fixture"
+trust = "{trust}"
+
+[runtime]
+kind = "first_party"
+service = "native_memory_provider"
+
+[memory]
+lifecycle = ["record_interaction"]
+{scheduled_ops}
+
+[[tools]]
+id = "ironclaw.memory.read"
+description = "Read a memory document."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/memory/document-read.input.v1.json"
+"#
+        )
+    }
+
+    const DECLARED_TOOL_PASS_OP: &str = r#"
+[[memory.scheduled_ops]]
+trigger = "after_turn"
+interval_turns = 10
+pass = { prompt = "prompts/memory_curation.md", tools = ["ironclaw.memory.read"], max_model_calls = 10 }
+"#;
+
+    #[test]
+    fn memory_pass_op_parses_when_first_party_and_selecting_a_declared_tool() {
+        let (_manifest, resolved) = parse_v3(
+            &memory_manifest("first_party_requested", DECLARED_TOOL_PASS_OP),
+            ManifestSource::HostBundled,
+            &catalog(),
+        )
+        .expect("a first-party manifest may schedule a pass over its own tools");
+        let memory = resolved.memory.expect("[memory] survives parsing");
+        assert_eq!(memory.scheduled_ops.len(), 1);
+    }
+
+    /// A pass runs a manifest-authored prompt with write tools, as every user,
+    /// on a schedule — a strictly larger grant than a model-chosen tool call.
+    /// Host-bundled alone is not enough; the manifest must request first-party
+    /// trust, the same default-deny wall the after-turn hook tiers apply.
+    #[test]
+    fn memory_pass_op_is_refused_without_first_party_trust() {
+        let error = parse_v3(
+            &memory_manifest("third_party", DECLARED_TOOL_PASS_OP),
+            ManifestSource::HostBundled,
+            &catalog(),
+        )
+        .expect_err("a third-party manifest must not declare a pass op");
+        assert!(
+            error.to_string().contains("first-party"),
+            "error must name the trust wall: {error}"
+        );
+    }
+
+    /// Declaration is selection, never authority: a memory provider must not be
+    /// able to schedule a pass wielding tools some other extension declares.
+    #[test]
+    fn memory_pass_op_is_refused_when_a_selected_tool_is_not_declared_here() {
+        let error = parse_v3(
+            &memory_manifest(
+                "first_party_requested",
+                r#"
+[[memory.scheduled_ops]]
+trigger = "after_turn"
+interval_turns = 10
+pass = { prompt = "prompts/memory_curation.md", tools = ["ironclaw.memory.read", "other.extension.write"], max_model_calls = 10 }
+"#,
+            ),
+            ManifestSource::HostBundled,
+            &catalog(),
+        )
+        .expect_err("an undeclared tool must not be selectable");
+        assert!(
+            error.to_string().contains("other.extension.write"),
+            "error must name the undeclared tool: {error}"
+        );
+    }
+
+    /// The section-local rules reach manifest parsing too, not just a direct
+    /// descriptor parse: two ops on one trigger have no well-defined cadence.
+    #[test]
+    fn memory_duplicate_scheduled_trigger_is_refused_at_manifest_parse() {
+        let error = parse_v3(
+            &memory_manifest(
+                "first_party_requested",
+                r#"
+[[memory.scheduled_ops]]
+trigger = "after_turn"
+interval_turns = 10
+pass = { prompt = "prompts/a.md", tools = [], max_model_calls = 4 }
+
+[[memory.scheduled_ops]]
+trigger = "after_turn"
+interval_turns = 20
+pass = { prompt = "prompts/b.md", tools = [], max_model_calls = 4 }
+"#,
+            ),
+            ManifestSource::HostBundled,
+            &catalog(),
+        )
+        .expect_err("two ops on one trigger must be refused");
+        assert!(
+            error.to_string().contains("after_turn"),
+            "error must name the duplicated trigger: {error}"
+        );
+    }
+
+    /// A manifest written before `scheduled_ops` existed must keep parsing.
+    #[test]
+    fn memory_manifest_without_scheduled_ops_still_parses() {
+        let (_manifest, resolved) = parse_v3(
+            &memory_manifest("first_party_requested", ""),
+            ManifestSource::HostBundled,
+            &catalog(),
+        )
+        .expect("a pre-scheduled_ops memory manifest parses unchanged");
+        let memory = resolved.memory.expect("[memory] survives parsing");
+        assert!(memory.scheduled_ops.is_empty());
     }
 
     #[test]

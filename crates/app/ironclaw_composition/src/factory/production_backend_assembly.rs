@@ -1438,6 +1438,7 @@ pub(super) async fn build_backend_production(
         memory_service_resolver: resolved_memory.resolver.clone(),
         memory_lifecycle: resolved_memory.lifecycle.clone(),
         memory_guidance: resolved_memory.guidance.clone(),
+        memory_scheduled_pass_prompts: resolved_memory.scheduled_pass_prompts.clone(),
         workspace_mounts: runtime_workspace_mounts,
         standalone_storage_root,
         default_system_prompt_path,

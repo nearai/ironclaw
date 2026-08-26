@@ -788,6 +788,22 @@ pub(crate) fn build_services_input_with_options(
     };
     services_input = services_input.with_memory_provider_connection(memory_provider_connection);
 
+    // Scheduled memory upkeep (#7276 / #7664), from the `[memory]` section
+    // only — no env override, matching `provider` and `admin_overrides` rather
+    // than the mem0 connection fields. This is an override of the cadence the
+    // bound provider declares for itself; absent lets the declaration decide.
+    // The config layer already rejects a `0` sentinel.
+    if let Some(interval_turns) = config_file
+        .as_ref()
+        .and_then(|file| file.memory.as_ref())
+        .and_then(|memory| memory.curation_interval_turns)
+        // Cannot silently drop a configured interval: the config layer above
+        // rejects `0` outright, so every value reaching here is non-zero.
+        .and_then(std::num::NonZeroU32::new)
+    {
+        services_input = services_input.with_memory_curation_interval_turns(interval_turns);
+    }
+
     Ok(RuntimeServicesInput {
         services_input,
         profile,

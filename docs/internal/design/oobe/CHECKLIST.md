@@ -8,11 +8,11 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done. Every code box imp
 
 ## F0 — De-risk & unblock
 
-- [x] Prototype rolled back; design reworked (§2A). Implementation **restarted behind an off-by-default flag** — slice 1 (`SuggestedTaskCard` + gated surface) landed, gate-green.
-- [x] Branch merged up to date with `main` (post-#6918 family-folder reorg); the `AUTOMATION-TASKS-CONTRACT.md` moved into `docs/design/oobe/`.
-- [ ] **Carousel gate (D-F5)** — *deferred to the implementation PR:* when the carousel is (re)built, it must not return `MOCK_COMPLETED_TASKS` to real users (behind DEV/flag or an empty real projection).
+- [x] Prototype rolled back; design reworked (§2A). The `SuggestedTaskCard` surface now mounts unconditionally over the durable suggestion feed.
+- [x] Branch merged up to date with `main` (post-#6918 family-folder reorg); [`AUTOMATION-TASKS-CONTRACT.md`](AUTOMATION-TASKS-CONTRACT.md) remains in the canonical `docs/internal/design/oobe/` directory.
+- [x] **Carousel data safety (D-F5)** — the surface reads the durable projection and never returns `MOCK_COMPLETED_TASKS` to real users.
 - [x] Contract reconciled to the post-#6918 family-folder names (`ironclaw_event_log` + `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `ironclaw_assistant`; `src/webui_v2/` confirmed current).
-- [ ] Decision round #1 recorded (PROPOSAL §10 items 2 and 4; item 5 settled 2026-08-21).
+- [x] Decision round #1 recorded (PROPOSAL §10 items 2 and 4 resolved; item 5 settled 2026-08-21).
 - [x] D-F6 settled — `DESIGN.md`, tokens and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md); no local seed is landed here (PROPOSAL §5.6).
 
 ## F1 — Automation-task backend (D-F1)

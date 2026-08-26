@@ -5,7 +5,9 @@ import { Panel, StatusPill } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { ConfirmDialog } from "../../../design-system/confirm-dialog";
 import { Icon } from "../../../design-system/icons";
+import { FormField, Input } from "../../../design-system/input";
 import { InlineNotice } from "../../../design-system/inline-notice";
+import { SearchField } from "../../../design-system/search-field";
 import { SelectMenu } from "../../../design-system/select-menu";
 import { Skeleton } from "../../../design-system/skeleton";
 import { useAdminUsers } from "../hooks/useAdminUsers";
@@ -100,27 +102,34 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
       <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.users.createUser")}</h3>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-3">
-          <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.users.displayName")}</label>
-            <input
+          <FormField
+            htmlFor="admin-user-display-name"
+            label={t("admin.users.displayName")}
+            required
+          >
+            <Input
+              id="admin-user-display-name"
               type="text"
               value={name}
               onChange={(e) => setName(e.currentTarget.value)}
               required
-              className="h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
+              size="sm"
               placeholder={t("admin.users.displayNamePlaceholder")}
             />
-          </div>
-          <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.users.email")}</label>
-            <input
+          </FormField>
+          <FormField
+            htmlFor="admin-user-email"
+            label={t("admin.users.email")}
+          >
+            <Input
+              id="admin-user-email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.currentTarget.value)}
-              className="h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
+              size="sm"
               placeholder={t("admin.users.emailPlaceholder")}
             />
-          </div>
+          </FormField>
           <div>
             <label className="mb-1 block text-xs text-iron-300">{t("admin.users.role")}</label>
             <SelectMenu
@@ -338,12 +347,14 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
             {t("admin.users.title", { count: filtered.length, total: users.length })}
           </h3>
           <div className="flex items-center gap-2">
-            <input
-              type="text"
+            <SearchField
               placeholder={t("admin.users.searchPlaceholder")}
+              aria-label={t("admin.users.searchPlaceholder")}
               value={search}
-              onChange={(e) => setSearch(e.currentTarget.value)}
-              className="h-8 w-48 rounded-md border border-iron-700 bg-iron-800/70 px-3 text-xs text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
+              onChange={setSearch}
+              onClear={() => setSearch("")}
+              clearLabel={t("settings.clearSearch")}
+              className="w-48"
             />
             <div className="flex gap-1">
               {FILTERS.map(

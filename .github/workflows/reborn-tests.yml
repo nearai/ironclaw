@@ -98,7 +98,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
-          fetch-depth: 0
+          # PR planning uses a three-dot diff and reads the base Cargo.lock,
+          # so it needs the commit graph. Other events always build the full
+          # plan and need only the execution commit.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+          # Keep PR ancestry while omitting historical blobs. Checkout still
+          # materializes the complete execution tree used by the planner.
+          filter: blob:none
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

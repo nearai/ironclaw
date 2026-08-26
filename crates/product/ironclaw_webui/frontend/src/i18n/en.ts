@@ -107,18 +107,12 @@ registerPack("en", {
   "login.localDevHint": "Running IronClaw locally? Get your sign-in link:",
 
   // Chat — empty state
-  "chat.heroTitle": "Hello, what do you need help with?",
+  "chat.heroTitle": "How can I help you today?",
   "chat.heroDesc":
     "Start with a goal, a repo question, a review request, or work you want inspected.",
   "chat.emptyTitle": "Start with a concrete operator task.",
   "chat.emptyDesc":
     "Send a message or ask for a gateway check. The workspace keeps approvals and runtime activity visible as the turn progresses.",
-  "chat.suggestion1": "Map the current gateway state",
-  "chat.suggestion1Desc": "Inspect runtime health, channels, tools, and open work.",
-  "chat.suggestion2": "Review recent thread activity",
-  "chat.suggestion2Desc": "Look for correctness risks, blocked approvals, and follow-ups.",
-  "chat.suggestion3": "Draft an extension readiness check",
-  "chat.suggestion3Desc": "Verify setup, auth, pairing, and available capabilities.",
 
   // Chat — OOBE suggestion cards (feature-gated first-run surface)
   "chat.oobe.heading": "Suggested for you",
@@ -131,6 +125,8 @@ registerPack("en", {
   "chat.oobe.action.openThread": "View in thread",
   "chat.oobe.action.generate": "Suggest something for me",
   "chat.oobe.action.tryAgain": "Try again",
+  "chat.oobe.action.refresh": "Refresh suggestions",
+  "chat.oobe.action.connect": "Connect tools",
   "chat.oobe.status.starting": "Starting\u2026",
   "chat.oobe.status.generating": "Finding things I can do for you\u2026",
   "chat.oobe.status.generateFailed": "Couldn\u2019t generate suggestions",

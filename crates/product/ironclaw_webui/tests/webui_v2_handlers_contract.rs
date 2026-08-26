@@ -4706,41 +4706,33 @@ async fn get_session_reports_reborn_projects_feature_from_state_flag() {
     }
 }
 
-// The browser hides the OOBE first-run suggestion cards unless the deployment
-// opts in. The gate is delivered through the session response's
-// `features.oobe_suggestions` field, fed from
-// `WebUiV2State::with_oobe_suggestions_enabled` at composition. Drive the real
-// router (not just the state accessor) so a handler that forgot to surface the
-// flag is caught — see `.claude/rules/testing.md` "Test Through the Caller".
 #[tokio::test]
-async fn get_session_reports_oobe_suggestions_feature_from_state_flag() {
-    for enabled in [false, true] {
-        let services = Arc::new(StubServices::default());
-        let router = webui_v2_router(
-            WebUiV2State::new(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-                .with_oobe_suggestions_enabled(enabled),
+async fn get_session_does_not_expose_an_oobe_suggestions_feature_gate() {
+    let services = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::new(
+        services,
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller()))
+    .layer(axum::Extension(WebUiV2Capabilities::default()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/session")
+                .body(Body::empty())
+                .expect("request"),
         )
-        .layer(axum::Extension(caller()))
-        .layer(axum::Extension(WebUiV2Capabilities::default()));
+        .await
+        .expect("oneshot");
 
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method(Method::GET)
-                    .uri("/api/webchat/v2/session")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = read_json(response).await;
-        assert_eq!(
-            body["features"]["oobe_suggestions"], enabled,
-            "features.oobe_suggestions must mirror the state flag (enabled={enabled})"
-        );
-    }
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert!(
+        body["features"].get("oobe_suggestions").is_none(),
+        "the always-on suggestion surface must not expose a feature gate"
+    );
 }
 
 #[tokio::test]

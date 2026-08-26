@@ -38,8 +38,9 @@ use crate::{
     app_loop_family::build_loop_family_registry_with_overrides,
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
-        HookDispatcherBuilderFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
-        apply_capability_surface_policy, capability_resolve_error_to_agent_host_error,
+        HookDispatcherBuilderFactory, HookDispatcherFactory, RebornLoopDriverHostFactory,
+        TextOnlyLoopHostConfig, apply_capability_surface_policy,
+        capability_resolve_error_to_agent_host_error,
     },
     loop_exit_applier::{AwaitDependentRunEvidenceStore, ThreadCheckpointLoopExitEvidencePort},
     planned_driver_factory::{
@@ -336,6 +337,32 @@ impl SchedulerWakeWiring {
     }
 }
 
+/// The runtime pieces an `after_turn` hook may need in order to start work of
+/// its own. Handed to [`AfterTurnHookWiring`] once the runtime has
+/// built them.
+pub struct AfterTurnHookDeps {
+    pub thread_service: Arc<dyn SessionThreadService>,
+    pub coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
+    /// The deployment's default agent/project axes, as the conversation path
+    /// resolves them. A hook-started run acts on these axes and on the tenant
+    /// and user the dispatch context carries — never on axes of its own.
+    pub thread_scope: ThreadScope,
+}
+
+/// Wires the `after_turn` point from the pieces above. Consumed once, at
+/// runtime build, and yields a [`HookDispatcherFactory`] — a per-run dispatcher
+/// MINT, not a dispatcher. The executor calls it once per terminal run so hook
+/// poison stays scoped to the run that caused it, matching the per-run
+/// discipline of the loop middleware's `HookDispatcherBuilderFactory`.
+///
+/// Declining is expressed by not supplying this at all
+/// (`after_turn_hook_wiring: None`), never by wiring that returns an empty
+/// success: once a deployment has asked for lifecycle hooks, wiring that
+/// cannot build them fails the build. A hook silently absent is a behavior
+/// nothing surfaces afterwards.
+pub type AfterTurnHookWiring =
+    Box<dyn FnOnce(AfterTurnHookDeps) -> Result<HookDispatcherFactory, String> + Send>;
+
 pub struct DefaultPlannedRuntimeParts<G>
 where
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
@@ -434,6 +461,16 @@ where
     /// the hook framework dormant: no dispatcher is composed and the runtime
     /// behaves exactly as it did before hooks existed.
     pub hook_dispatcher_builder_factory: Option<HookDispatcherBuilderFactory>,
+    /// Wires the `after_turn` hook point, if the composition wants it. `None`
+    /// (the default) leaves the point un-wired: the executor dispatches
+    /// nothing after a terminal run.
+    ///
+    /// Handed the runtime pieces once, after they exist, because the hooks at
+    /// this point may need to START work — and the door they submit through is
+    /// built from the coordinator, which does not exist until this very
+    /// function builds it. What it returns is a per-run dispatcher factory, not
+    /// a dispatcher: see [`AfterTurnHookWiring`].
+    pub after_turn_hook_wiring: Option<AfterTurnHookWiring>,
     pub communication_context_provider: Option<Arc<dyn CommunicationContextProvider>>,
     /// Pre-minted scheduler wake wiring.
     ///
@@ -466,6 +503,7 @@ pub enum DefaultPlannedRuntimeBuildError {
     RunProfile(String),
     SubagentCompletion(String),
     SteeringReconcileObserver(String),
+    AfterTurnHooks(String),
 }
 
 impl fmt::Display for DefaultPlannedRuntimeBuildError {
@@ -482,6 +520,9 @@ impl fmt::Display for DefaultPlannedRuntimeBuildError {
                     formatter,
                     "steering reconcile observer wiring failed: {error}"
                 )
+            }
+            Self::AfterTurnHooks(error) => {
+                write!(formatter, "after-turn hook wiring failed: {error}")
             }
         }
     }
@@ -852,6 +893,10 @@ where
     let safety_context = parts
         .safety_context
         .unwrap_or_else(non_production_noop_safety_context);
+    // Keep a copy of the thread scope before it is moved into the host factory
+    // below: the `after_turn` hook wiring is invoked further down, once the
+    // coordinator exists, and needs the same default agent/project axes.
+    let after_turn_thread_scope = parts.thread_scope.clone();
     // Build the after-turn memory recorder before `parts.thread_scope` is moved
     // into the host factory below. Present only when a bound memory
     // provider was resolved; it owner-rewrites the base thread scope per run
@@ -945,6 +990,15 @@ where
     );
     if let Some(recorder) = after_turn_memory_recorder {
         executor = executor.with_after_turn_memory_recorder(recorder);
+    }
+    if let Some(wiring) = parts.after_turn_hook_wiring {
+        let dispatchers = wiring(AfterTurnHookDeps {
+            thread_service: Arc::clone(&parts.thread_service),
+            coordinator: Arc::clone(&coordinator),
+            thread_scope: after_turn_thread_scope,
+        })
+        .map_err(DefaultPlannedRuntimeBuildError::AfterTurnHooks)?;
+        executor = executor.with_after_turn_hook_dispatcher_factory(dispatchers);
     }
     let executor = Arc::new(executor);
     let scheduler = TurnRunScheduler::new_with_process_runtime(

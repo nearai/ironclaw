@@ -1,6 +1,6 @@
 # IronClaw OOBE & Onboarding — Integration Proposal (Executive Overview)
 
-**Status:** Retargeted to **Vision** against the shipped backend suggestions contract ([PR #7694](https://github.com/nearai/ironclaw/pull/7694)); the frontend consumer lands behind the off-by-default `oobe_suggestions` flag · **Track:** WebChat v2 first-run / onboarding
+**Status:** Retargeted to **Vision** against the shipped backend suggestions contract ([PR #7694](https://github.com/nearai/ironclaw/pull/7694)); the frontend consumer is always on and lazy-loaded · **Track:** WebChat v2 first-run / onboarding
 **Documents:** this overview · **[VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) (governs — reconciles this package with the shipped backend contract)** · [PROPOSAL.md](PROPOSAL.md) (full spec: phasing, shipped-vs-net-new scope, dependency inventory) · [PLAN.md](PLAN.md) (how to execute — phases, gates, PR sizing) · [IMPLEMENTATION.md](IMPLEMENTATION.md) (build plan) · [CHECKLIST.md](CHECKLIST.md) (definition of done) · [oobe.md](../oobe.md) (design brief) · [mockup.html](mockup.html) (interactive mockup — self-contained, open in any browser) · [integration-review.html](integration-review.html) (visual review — schematics)
 
 > **⚠ Scope retargeted — Foundational is cut.** [PR #7694](https://github.com/nearai/ironclaw/pull/7694)
@@ -12,7 +12,7 @@
 
 This is the plan for taking OOBE from design into shipped product. It began as a two-phase model (a near-term **Foundational** track plus a north-star **Vision** track); **that split is now historical** — [PR #7694](https://github.com/nearai/ironclaw/pull/7694) shipped the durable suggestions producer that Foundational would have needed, so the program builds **Vision** directly against it. The sections below that describe two tracks, Foundational scope, or the six §2A changes are retained as the decision record; **[VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) is the current plan.**
 
-> **What this branch (PR #6994) carries now:** the design artifacts (the interactive [mockup.html](mockup.html), [integration-review.html](integration-review.html)) and the Vision frontend consumer of the #7694 contract — a suggestions client, the `useSuggestions` data hook, and the landing surface (generate → cards → start-into-thread → dismiss), behind the off-by-default `oobe_suggestions` flag. Cards carry no tool identity and there is no per-card connect state, single-active lock, or "+ Automation" (see VISION-RECONCILIATION §3–§4). An earlier UI prototype was rolled back in review (it rendered mock automations to real users and an autonomy selector execution ignored); nothing mock ships now.
+> **What this branch (PR #6994) carries now:** the design artifacts (the interactive [mockup.html](mockup.html), [integration-review.html](integration-review.html)) and the Vision frontend consumer of the #7694 contract — a suggestions client, the `useSuggestions` data hook, and the always-on landing surface (generate → cards → start-into-thread → dismiss). Cards carry no tool identity and there is no per-card connect state, single-active lock, or "+ Automation" (see VISION-RECONCILIATION §3–§4). An earlier UI prototype was rolled back in review (it rendered mock automations to real users and an autonomy selector execution ignored); nothing mock ships now.
 
 ---
 
@@ -94,18 +94,18 @@ Every dependency has an implementation approach in [PLAN.md](PLAN.md); the full 
 ## The decisions reviewers should weigh
 
 1. **Phase boundary** — is the Foundational cut correct, or should any Vision piece (the docked drawer, the reveal) graduate into Foundational? (PROPOSAL §2, §10)
-2. **The suggestion producer (D-F2)** — first-login trigger vs. deterministic starter set gated on connected extensions vs. an agent-driven suggester. This is the one genuinely new mechanism and the biggest open design question. (PROPOSAL §5.2)
+2. ~~**The suggestion producer (D-F2)**~~ — *resolved:* PR #7694 shipped the durable suggestions producer consumed by the current frontend. (PROPOSAL §5.2)
 3. **Agent-mode gate semantics (D-F4)** — `auto` skips the per-action gate for approved task *types*; confirm the typed generalization of `global_auto_approve` and its audit-trail requirements. (PROPOSAL §7)
-4. **Carousel gating (D-F5)** — the merge blocker on PR #6994: real projection now, or DEV/flag gate first? (PROPOSAL §5.5)
+4. ~~**Carousel data safety (D-F5)**~~ — *resolved:* the surface reads the durable projection and never ships mock cards. (PROPOSAL §5.5)
 5. ~~**DESIGN.md pilot (D-F6)**~~ — *settled 2026-08-21:* design governance is owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md); OOBE's part is the pilot card family, catalogued through it. (PROPOSAL §5.6, §8.3)
 
 ## How to review
 
 - Skim this file, then read [PROPOSAL.md](PROPOSAL.md) §3 (shipped-vs-net-new scope — the core framing) and §5 (dependencies + implementation approach).
 - Open [mockup.html](mockup.html), switch **Version** (Vision / Foundational) and **Scene** (First run / Thread / Plan) — every claim here is demonstrated there.
-- Argue sequencing in [PLAN.md](PLAN.md): the phases, gates, and suggested first PRs; only the ordering constraints marked ⚠ are load-bearing.
+- Argue sequencing in [PLAN.md](PLAN.md): the phases, gates, and historical first-PR sequence; only the ordering constraints marked ⚠ are load-bearing.
 - Challenge [CHECKLIST.md](CHECKLIST.md): it is the definition of done — anything missing goes there.
-- The **[integration-review.html](integration-review.html)** page renders the schematics — the 5-layer code integration map, the dependency graph, and the phase timeline — for reviewers who prefer the visual ([rendered preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/feat/oobe-chat-automations/docs/design/oobe/integration-review.html)).
+- The **[integration-review.html](integration-review.html)** page renders the schematics — the 5-layer code integration map, the dependency graph, and the phase timeline — for reviewers who prefer the visual ([rendered preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/main/docs/internal/design/oobe/integration-review.html)).
 
 ---
 

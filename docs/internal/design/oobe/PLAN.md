@@ -7,7 +7,7 @@
 1. **Owner-by-owner, never big-bang.** One coherent owner per PR — one event family, one route, one component seam.
 2. **Move-only / mock→real swaps are behavior-free and say so.** The frontend seam swap (mock→`fetch`) ships with no component change and is reviewed as such; semantic backend changes never share a PR with it.
 3. **Tests and guidance travel with the change.** Every PR updates the contract doc, the affected rule, and this plan's status in the same diff — guidance drift is how agents get confused.
-4. **`main` stays shippable after every PR.** Behind the carousel gate (D-F5) until the projection is real, so no PR exposes mock data to users.
+4. **`main` stays shippable after every PR.** The carousel reads the durable projection, so no PR exposes mock data to users.
 5. **Decision gates are cheap to hold, expensive to skip.** The `[decision]` items (PROPOSAL §10) are called before their phase starts — most are one thread each.
 
 ---
@@ -16,12 +16,12 @@
 
 *Everything here is independently landable and shrinks every later phase.*
 
-1. **D-F5 carousel gate** ⚠ — the guard for when the carousel returns. Gate the landing carousel behind DEV / a feature flag (or an empty-projection read) so it never exposes mock "done for you" cards to real users. The earlier prototype's *ungated* mock path is exactly what got it rolled back — the first implementation PR that re-adds the carousel must ship it gated.
+1. **D-F5 durable carousel data** ✅ — the landing carousel reads the real suggestion projection and renders an empty feed when no suggestions exist. The earlier prototype's mock path remains retired.
 2. **Contract reconciliation — ✅ done in this PR.** [AUTOMATION-TASKS-CONTRACT.md](AUTOMATION-TASKS-CONTRACT.md) now reflects the post-#6918 family-folder names: event log `ironclaw_event_log` + durable store `ironclaw_event_store` under `crates/events/`; facade `RebornServicesApi` in `crates/product/ironclaw_assistant`; routes in `crates/product/ironclaw_webui/src/webui_v2/` (confirmed current). Docs-only.
-3. **Decision round #1** `[decision]` — close PROPOSAL §10 items 2 (suggestion producer) and 4 (carousel gating). One thread each. *(Item 5, the DESIGN.md pilot, is settled — see below.)*
+3. **Decision round #1** ✅ — PROPOSAL §10 items 2 (suggestion producer) and 4 (carousel data safety) are resolved. *(Item 5, the DESIGN.md pilot, is settled — see below.)*
 4. **D-F6 — nothing to seed here.** `DESIGN.md` and the workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PROPOSAL §5.6); OOBE's contribution is its card taxonomy + a11y floors, offered into that program's `DESIGN.md` (the Phase-2 work tracked by issue #7042, under Epic #7781) rather than a local draft.
 
-*Exit criteria: the carousel-gate approach decided; contract reconciled (done); §10.2/§10.4 decided (§10.5 settled — governance owned elsewhere). (Implementation is landing behind an off-by-default flag; the docs remain mergeable.)*
+*Exit criteria: durable carousel data and the contract reconciliation are complete; §10.2 is resolved by the shipped producer (§10.5 settled — governance owned elsewhere).*
 
 ## Phase F1 — Automation-task backend (D-F1) — the leverage phase
 
@@ -29,15 +29,15 @@
 
 - **Order inside the phase:** `AutomationTask` model + `AutomationTaskId` newtype → the 5 events (one PR per event family is overkill; land them as one typed set with their persistence/replay/redaction/ordering/serialization tests) → `AutomationTaskProjection` + the ⚠ **cross-user isolation test** (PROPOSAL §7) → the 5 routes + `webui_v2_routes()` descriptor rows (or the descriptor contract test fails) → the 5 facade methods on `RebornServicesApi` (`ironclaw_assistant`), each returning server-confirmed records through the mediated capability host.
 - Approve/Revert wire to the existing product adapters (Gmail/Calendar) — **never a second outbound HTTP path**; success admitted from provider evidence + read-back. Modify branches on state (suggested = edit in place; automated = re-run).
-- **Milestone:** `list_automation_tasks` returns real (empty) data; the frontend seam flips mock→`fetch` for `list` with **no component change**; D-F5's gate can become "empty projection" instead of a flag.
+- **Milestone:** `list_automation_tasks` returns real (possibly empty) data; the frontend seam flips mock→`fetch` for `list` with **no component change**.
 
-## Phase F2 — First-run suggestion producer (D-F2) ⚠ gated on decision §10.2
+## Phase F2 — First-run suggestion producer (D-F2) — ✅ complete
 
-*The one genuinely new mechanism — hold the decision before building.*
+*The durable producer shipped in PR #7694; this phase is retained as historical execution context.*
 
-- Implement the decided approach (recommended: **deterministic starter set gated on admin-whitelisted / connected extensions** — PROPOSAL §5.2). A first-login hook appends `AutomationTaskProposed` via the durable sink, filtered to the tools present; no model call in the Foundational version.
-- Tests: a fresh user with tool set X gets exactly the expected proposals; a user with no whitelisted tools gets the safe/no-tool proposals; isolation holds.
-- **Milestone:** a brand-new user sees suggested cards at the first step, from real events — the Foundational cold-start is real end-to-end.
+- **Shipped approach:** the durable suggestions producer described by the governing [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md) contract.
+- The frontend consumes that durable feed directly and renders an empty state when it contains no suggestions.
+- **Milestone:** a brand-new user can receive real suggestions directly from the durable feed.
 
 ## Phase F3 — Connect wiring + agent mode (D-F3 + D-F4)
 
@@ -72,9 +72,11 @@ Each is additive and a superset of a Foundational piece; none redo Foundational 
 - **V3 — Docked drawer frame (D-V4).** The composer-docked bordered drawer; reuses the Foundational drawer state machine.
 - **V4 — Named greeting + Bypass mode (D-V5 + V6).** Username derivation (⚠ decision §10.6) and the 4th gate mode (privilege-escalating; gate-suppression tests).
 
-## Suggested first PRs (concrete, in order)
+## Historical suggested first PR sequence
 
-1. **D-F5 carousel gate** — the first implementation PR that re-adds the landing carousel ships it DEV/flag-gated (or reading an empty real projection). Small, behavior-free for users.
+*Retained as the original Foundational execution record; completed work is marked below and the current Vision plan is governed by [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md).*
+
+1. **D-F5 durable carousel data** — ✅ complete; the landing carousel reads the real projection and renders no cards when it is empty.
 2. **Contract reconciliation** — crate-name refresh in the contract doc (docs-only). *(✅ already landed in this PR.)*
 3. **D-F1 part 1** — `AutomationTask` model + newtype + the 5 events with their persistence/replay/redaction/ordering/serialization tests.
 4. **D-F1 part 2** — `AutomationTaskProjection` + the cross-user isolation test; flip the `list` seam mock→`fetch`.
@@ -84,11 +86,11 @@ Each is additive and a superset of a Foundational piece; none redo Foundational 
 
 - **Testing (every phase):** integration-first through the harness, asserting at a seam; the cross-user isolation test and the gate-suppression tests are non-negotiable; regression-with-every-fix (Rule 2). See `.claude/rules/testing.md` and PROPOSAL §8.
 - **Guidance (every phase):** the contract doc, the affected `.claude/rules/*`, and this PLAN's phase status update in the same diff.
-- **`main` shippable (every phase):** the carousel gate holds until the projection is real; no PR exposes mock data.
+- **`main` shippable (every phase):** the carousel reads only the real projection; no PR exposes mock data.
 
 ## Coordination notes
 
-- **PR #6994** (this branch) carries the design/plan **and** the rolling Foundational v1 implementation (behind an off-by-default flag; slice 1 landed). The earlier UI prototype on it was rolled back in review (mock automations shown to real users; an autonomy selector execution ignored — IronLoop/CodeRabbit blockers), so the carousel gate (D-F5) and the mode-pill confinement (D-F4) move to the implementation PRs rather than gating this one.
+- **PR #6994** carried the earlier design/prototype. Its mock automation path was rolled back in review; the current implementation instead mounts the surface unconditionally over the durable suggestion feed.
 - **Issue #6993** tracks the backend (D-F1, D-F4, and the D-V3 anticipatory states). This plan supersedes its ordering with the phased sequence above; keep #6993 as the tracking issue and tick CHECKLIST boxes in the PRs that land them.
 - **#6918 family reorg — landed on `main`.** The branch is merged up to date with it; every new backend piece goes straight into its current family folder (PROPOSAL §6): events/projection → `crates/events/`, facade/DTOs → `crates/product/ironclaw_assistant`, routes → `crates/product/ironclaw_webui`, suggestion producer → `crates/domains/ironclaw_triggers`. Keep semantic changes out of any remaining move-only PRs.
 - **WS1.x contracts** (`ironclaw_product_contracts` / `ironclaw_extension_contracts` / `ironclaw_loop_contracts`, landed) — the new task DTOs/ports belong in `ironclaw_product_contracts`, not inlined into `ironclaw_product`.
