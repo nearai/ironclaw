@@ -98,11 +98,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ inputs.ref || github.sha }}
-          # PR planning uses a three-dot diff and reads the base Cargo.lock,
-          # so it needs the commit graph. Other events always build the full
-          # plan and need only the execution commit.
-          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
-          # Keep PR ancestry while omitting historical blobs. Checkout still
+          # PR and merge-group planning use a three-dot diff, so both need the
+          # commit graph. Other events build the exhaustive plan directly.
+          fetch-depth: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && '0' || '1' }}
+          # Keep diff ancestry while omitting historical blobs. Checkout still
           # materializes the complete execution tree used by the planner.
           filter: blob:none
           persist-credentials: false
@@ -113,16 +112,18 @@ jobs:
       - id: plan
         name: Build affected-area test plan
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           changed_args=()
           base_args=()
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" || "${{ github.event_name }}" == "merge_group" ]]; then
             git diff --name-only "$BASE_SHA"..."$HEAD_SHA" \
               > "${RUNNER_TEMP}/reborn-changed-files.txt"
             changed_args=(--changed-files "${RUNNER_TEMP}/reborn-changed-files.txt")
+          fi
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base_args=(--base-sha "$BASE_SHA")
           fi
 

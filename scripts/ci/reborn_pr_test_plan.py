@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Select focused Reborn test lanes for pull requests.
+"""Select focused Reborn test lanes for pull requests and merge groups.
 
-Pull requests run direct evidence for changed packages and test surfaces.
-Merge-queue, main, and manual runs remain exhaustive.
+Diff events run direct evidence for changed packages and test surfaces.
+Global or unattributable merge-group changes widen to exhaustive coverage;
+main and manual runs remain exhaustive.
 """
 
 from __future__ import annotations
@@ -70,7 +71,8 @@ def _sandbox_docker_prefixes() -> tuple[str, ...]:
 
 
 MAX_PR_CRATE_BUCKETS = 3
-FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
+DIFF_EVENTS = {"pull_request", "merge_group"}
+FULL_EVENTS = {"push", "workflow_call", "workflow_dispatch", "schedule"}
 # Doc-fact contract tests (#7378) read `docs/` pages from inside owning
 # crates, so a published-page edit can fail a cargo test. Route those edits
 # to exactly the doc-fact test binaries (no reverse-dependency widening —
@@ -861,6 +863,36 @@ def _full_plan(
     }
 
 
+def _merge_group_global_risk(paths: set[str]) -> str | None:
+    """Return the first path whose queue impact cannot be narrowed safely."""
+    for path in sorted(paths):
+        if (
+            path in {"Cargo.lock", ".config/nextest.toml"}
+            or path in PR_STATIC_CONTROL_PATHS
+            or path in PR_STATIC_CONTROL_FRAGMENTS
+            or path.startswith(PR_STATIC_CONTROL_PREFIXES)
+            or path.startswith(SHARED_REBORN_ACTION_PREFIXES)
+        ):
+            return path
+    return None
+
+
+def _unclassified_path_plan(
+    *,
+    event: str,
+    reason: str,
+    canonical_packages: list[str],
+) -> dict[str, Any]:
+    """Fail PR feedback loudly; widen an otherwise valid queue diff."""
+    if event == "merge_group":
+        return _full_plan(
+            f"merge-group scope could not classify {reason}; running the "
+            "exhaustive plan",
+            canonical_packages,
+        )
+    raise ValueError(reason)
+
+
 def build_plan(
     *,
     event: str,
@@ -869,18 +901,28 @@ def build_plan(
     canonical_packages: list[str],
     lockfile_manifest_owned: bool = False,
 ) -> dict[str, Any]:
-    """Build a deterministic test plan, rejecting unknown PR inputs."""
+    """Build a deterministic test plan, rejecting or widening unknown inputs."""
     if event in FULL_EVENTS:
         return _full_plan(f"{event} requires exhaustive coverage", canonical_packages)
-    if event != "pull_request":
+    if event not in DIFF_EVENTS:
         return _full_plan(f"unknown event {event!r}", canonical_packages)
 
     paths = {path.strip().replace("\\", "/") for path in changed_paths if path.strip()}
     if not paths:
         raise ValueError(
-            "empty pull-request diff cannot be classified; refusing to launch "
-            "an unbounded PR matrix"
+            f"empty {event.replace('_', '-')} diff cannot be classified; "
+            "refusing to launch "
+            "an unbounded test matrix"
         )
+
+    if event == "merge_group":
+        global_risk = _merge_group_global_risk(paths)
+        if global_risk is not None:
+            return _full_plan(
+                f"merge-group global or topology input changed: {global_risk}; "
+                "running the exhaustive plan",
+                canonical_packages,
+            )
 
     package_directories, reverse = _workspace_packages(metadata)
     production_packages: set[str] = set()
@@ -1109,7 +1151,11 @@ def build_plan(
             reasons.append(f"integration fixture changed: {path}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
-            raise ValueError(f"unmapped Reborn test path: {path}")
+            return _unclassified_path_plan(
+                event=event,
+                reason=f"unmapped Reborn test path: {path}",
+                canonical_packages=canonical_packages,
+            )
         if path.startswith("tests/e2e/"):
             # E2E scenarios and support live in the dedicated
             # `reborn-e2e.yml` workflow, which runs its own changed-path
@@ -1238,7 +1284,11 @@ def build_plan(
                 reasons.append(f"production package changed: {package}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
-            raise ValueError(f"unmapped Reborn test path: {path}")
+            return _unclassified_path_plan(
+                event=event,
+                reason=f"unmapped Reborn test path: {path}",
+                canonical_packages=canonical_packages,
+            )
         if path.startswith("tests/e2e/"):
             # The browser/E2E suite has its own workflow (`reborn-e2e.yml`,
             # `paths: tests/e2e/**`) with its own scope detection, so this
@@ -1248,8 +1298,16 @@ def build_plan(
             reasons.append(f"dedicated Reborn E2E workflow owns: {path}")
             continue
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
-            raise ValueError(f"unmapped test or CI path: {path}")
-        raise ValueError(f"unclassified pull-request path: {path}")
+            return _unclassified_path_plan(
+                event=event,
+                reason=f"unmapped test or CI path: {path}",
+                canonical_packages=canonical_packages,
+            )
+        return _unclassified_path_plan(
+            event=event,
+            reason=f"unclassified pull-request path: {path}",
+            canonical_packages=canonical_packages,
+        )
 
     if nextest_config_changed:
         return _full_plan(
@@ -1326,7 +1384,7 @@ def main() -> int:
     parser.add_argument(
         "--changed-files",
         type=Path,
-        help="newline-delimited changed paths; required for pull_request",
+        help="newline-delimited changed paths; required for diff events",
     )
     parser.add_argument(
         "--canonical-packages",

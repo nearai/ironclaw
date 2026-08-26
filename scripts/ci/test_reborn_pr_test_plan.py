@@ -273,12 +273,49 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ],
         )
 
-    def test_merge_queue_is_always_exhaustive(self) -> None:
+    def test_merge_queue_uses_the_combined_diff_and_reverse_dependency_closure(
+        self,
+    ) -> None:
         plan = self.plan("merge_group", ["crates/alpha/src/lib.rs"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [{"name": "selected", "packages": ["alpha", "beta", "gamma"]}],
+        )
+        self.assertEqual(plan["coverage_mode"], "none")
+
+    def test_merge_queue_global_inputs_escalate_to_the_exhaustive_plan(self) -> None:
+        for path in (
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".config/nextest.toml",
+            ".github/workflows/reborn-tests.yml",
+            ".github/actions/setup-rust/action.yml",
+            "scripts/ci/reborn_pr_test_plan.py",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("merge_group", [path])
+                self.assertEqual(plan["mode"], "full")
+                self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+                self.assertEqual(
+                    plan["integration_lanes"], [0, 1, 2, 3, "groups"]
+                )
+
+    def test_merge_queue_unclassified_path_escalates_but_pr_still_fails(self) -> None:
+        path = "Makefile"
+        plan = self.plan("merge_group", [path])
         self.assertEqual(plan["mode"], "full")
-        self.assertEqual(plan["coverage_mode"], "full")
-        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
-        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
+        self.assertIn("could not classify", plan["reasons"][0])
+
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", [path])
+
+    def test_empty_merge_queue_diff_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "empty merge-group diff"):
+            self.plan("merge_group", [])
 
     def test_changed_package_includes_transitive_reverse_dependents(self) -> None:
         plan = self.plan("pull_request", ["crates/alpha/src/lib.rs"])
@@ -2330,8 +2367,18 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "python3 scripts/ci/changed_workspace_packages.py",
             code_style,
         )
+        self.assertIn('--event "${{ github.event_name }}"', code_style)
+        self.assertIn("clippy_scope:", code_style)
+        self.assertIn("needs.changes.outputs.clippy_scope == 'selected'", code_style)
         self.assertIn('package_args+=(-p "${package}")', code_style)
         self.assertIn("needs.changes.outputs.has_clippy == 'true'", code_style)
+        self.assertIn(
+            'cargo clippy "${package_args[@]}" --tests --examples', code_style
+        )
+        self.assertIn(
+            'cargo clippy "${package_args[@]}" --lib --bins -- -D warnings',
+            code_style,
+        )
         self.assertIn(
             "cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings",
             code_style,
@@ -2358,10 +2405,17 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )[0]
         self.assertIn(
             "fetch-depth: "
-            "${{ github.event_name == 'pull_request' && '0' || '1' }}",
+            "${{ (github.event_name == 'pull_request' || "
+            "github.event_name == 'merge_group') && '0' || '1' }}",
             reborn_scope,
         )
         self.assertIn("filter: blob:none", reborn_scope)
+        self.assertIn("github.event.merge_group.base_sha", reborn_scope)
+        self.assertIn(
+            "github.event_name == 'pull_request' || "
+            "github.event_name == 'merge_group'",
+            reborn_scope,
+        )
         self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', reborn_scope)
 
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
