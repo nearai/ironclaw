@@ -30,7 +30,8 @@ One flat `lib.rs` plus two private modules (`runtime_projection`,
   skipping).
 - Read-model DTOs: `ThreadTimeline`/`TimelineEntry`,
   `RunStatusProjection`/`RunProjectionStatus`,
-  `CapabilityActivityProjection`; `pub use
+  `CapabilityActivityProjection`, plus the bounded exact-parent-run
+  `CapabilityActivityProjectionWindow`; `pub use
   ironclaw_event_log::EventCursor`.
 
 ## Depends on / consumed by

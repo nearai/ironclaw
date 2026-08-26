@@ -607,13 +607,18 @@ pub(super) async fn build_backend_production(
     );
     let trigger_manual_fire_runner =
         Arc::new(crate::automation::trigger_poller::LateBoundTriggerManualFireRunner::default());
-    let mut first_party_registry = production_first_party_registry_with_trigger_create_hook(
-        Arc::clone(&trigger_repository),
-        Arc::clone(&trigger_create_hook) as Arc<dyn TriggerCreateHook>,
-        trigger_active_run_lookup,
-        trigger_manual_fire_runner.clone(),
-        process_backend,
-    )?;
+    let mut first_party_registry =
+        builtin_first_party_handlers_with_trigger_services_and_facts_for_process_backend(
+            Arc::clone(&trigger_repository),
+            Arc::clone(&trigger_create_hook) as Arc<dyn TriggerCreateHook>,
+            trigger_active_run_lookup,
+            projected_trigger_capability_call_facts_source(Arc::clone(&event_log)),
+            trigger_manual_fire_runner.clone(),
+            process_backend,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party handlers are invalid: {error}"),
+        })?;
     if let (Some(package), Some(handler)) = (
         resolved_memory.package.as_ref(),
         resolved_memory.tool_handler.as_ref(),

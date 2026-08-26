@@ -1173,6 +1173,33 @@ impl RebornIntegrationHarness {
         Ok(Arc::new(self.thread_harness.service_instance()?))
     }
 
+    /// Persist a compaction summary over this harness thread.
+    ///
+    /// Tests use this to exercise prompt projection independently from the
+    /// threshold and model-inference paths that create summaries in production.
+    pub(crate) async fn create_compaction_summary_for_test(
+        &self,
+        start_sequence: u64,
+        end_sequence: u64,
+        content: &str,
+    ) -> HarnessResult<ironclaw_threads::SummaryArtifact> {
+        let scope = thread_scope_from_binding(&self.binding)?;
+        Ok(self
+            .thread_service_for_test()?
+            .create_summary_artifact(ironclaw_threads::CreateSummaryArtifactRequest {
+                scope,
+                thread_id: self.binding.thread_id.clone(),
+                start_sequence,
+                end_sequence,
+                summary_kind: ironclaw_threads::SummaryKind::Compaction,
+                content: ironclaw_threads::MessageContent::text(content),
+                model_context_policy: Some(
+                    ironclaw_threads::SummaryModelContextPolicy::ReplaceRangeWhenSelected,
+                ),
+            })
+            .await?)
+    }
+
     /// The group-shared turn coordinator every thread's runs execute on.
     pub(crate) fn turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
         Arc::clone(&self.coordinator)

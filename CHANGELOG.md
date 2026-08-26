@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-19
+
+Stable promotion of `1.3.0-rc.2`, including the upgrade and container fixes
+validated in RC2 and the complete RC1 scope below.
+
+### Fixed in 1.3.0-rc.2
+
+- Upgrades from 1.2 now accept and preserve the released extension
+  `activation_state` field instead of crash-looping during startup.
+- The canonical Reborn runtime image again supports opt-in, public-key-only
+  worker SSH on port 2222 while running IronClaw as an unprivileged user.
+
+### Added
+
+- **Per-user model preferences.** Each user picks their own model from WebUI
+  settings, the CLI, or chat commands, and the choice follows them through
+  channel turns and inbound replay. Admins bound what is selectable with a
+  tenant-scoped model selection policy.
+- **Structured automations.** A scheduled trigger now carries a validated
+  execution contract — prompt spec, execution policy, required skills — checked
+  by a fail-closed preflight at creation instead of a free-form prompt string,
+  and unattended runs get their own protocol. A deterministic no-result
+  sentinel lets a run that has nothing to report finish silently instead of
+  delivering filler.
+- **Document editing.** Structural edits to `.docx`, `.xlsx`, and `.pptx`
+  files, and PDF rendering from HTML.
+- **Telegram linked devices.** Pair a personal Telegram account with the bot
+  channel so the agent can read your conversations and act as you through the
+  standard messaging operations. Reads are live against Telegram's own servers
+  — there is no local mirror, retention policy, or search index of the account
+  — while message content a run actually reads is retained in that run's
+  transcript like any other tool result.
+- **The full Slack messaging vocabulary.** Eight more standard operations —
+  edit message, delete message, add reaction, remove reaction, open DM, get
+  message, resolve user, list members — complete the core surface.
+- **Ranked memory recall.** Retrieval ranks by relevance instead of requiring
+  every term of the question to appear in the saved fact, so a differently
+  worded question still finds it, and broken memory is visibly different from
+  empty memory. Memory-save guidance ships with an always-on `MEMORY.md` prompt
+  lane.
+- **Opt-in parallel tool batches** in the agent loop.
+- Explicit Anthropic `cache_control` prompt-cache breakpoints on both
+  transports.
+- A shared WebUI search field, and per-field help text on admin extension
+  configuration forms alongside a rewritten channel setup guide.
+
+### Changed
+
+- **Substantially fewer database writes per turn.** Capability invocation state
+  persists at gate and terminal edges only; runtime milestone events, thread
+  index touches, message lookup indexes, trigger and outbound state, and
+  process heartbeats all coalesce or fold into existing rows.
+- Turn execution runs on prepared-context ("unbound") turns behind one accept
+  door, replacing the kernel binding-ref path.
+- Channel ingress is normalized once, with reply split from delivery.
+- The public documentation site deploys from a `docs-live` branch that stable
+  releases move, so published docs describe the released binary rather than
+  unreleased `main`.
+
+### Fixed
+
+- Context-window eviction compacts instead of discarding: the accepted task and
+  any steering survive the eviction.
+- Lease expiry recovers safe runs instead of failing them, and the journal
+  heartbeat pool is isolated.
+- An unavailable capability call is repaired instead of aborting the run, and
+  repeated-call detection is advisory rather than fatal.
+- Model-bound secrets are redacted without rejecting the turn.
+- Telegram sticker and voice attachments no longer brick the channel, and the
+  2FA gate on migrated data centers is recognized and says where the login code
+  arrives.
+- Extension cards and install results report what actually happened; bundled
+  MCP state refreshes after auth; hosted MCP OAuth supports origin-scoped
+  servers.
+- WebUI: SSE reconnect storms are bounded, long conversation titles reveal on
+  hover, exposed-route copy is localized, and a failed tool call reads as a
+  subtle badge instead of a loud summary.
+- The resource governor keeps retrying through a full libSQL writer attempt
+  instead of surfacing the contention as a failure, and libSQL write-lane
+  starvation no longer cascades through it: the delta journal gets its own
+  bounded write lane, congestion is distinguished from storage damage so a
+  contended write replays instead of invalidating the authority, and stale
+  reservations are swept rather than leaking as permanent `Active` holds.
+
+### Removed
+
+- Retired WebUI surfaces: the standalone missions page, the routines surface,
+  admin analytics placeholders, and project mission placeholders.
+- Retired IronLoop network settings.
+
 ## [1.2.0] - 2026-08-13
 
 Stable promotion of `1.2.0-rc.3`, including the fixes validated in RC2 and

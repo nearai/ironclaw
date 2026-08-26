@@ -232,6 +232,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
+| Incremental compaction summaries preserve every disjoint compacted range while raw covered history remains stored | `model_recovery.rs::compaction_summary_chain_preserves_earlier_compacted_history` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
 | Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs` |
@@ -392,8 +393,8 @@ unreachable from another: `reborn_agent_scope_isolation_parity.rs`,
 `reborn_trace_core_builtin_tools_parity.rs`, `reborn_trace_file_tools_parity.rs`,
 `reborn_trace_coding_read_tools_parity.rs`, `reborn_trace_error_path_parity.rs`,
 `reborn_trace_wasm_github_fixture_parity.rs`,
-`reborn_trace_first_party_tool_coverage.rs` (10; including the product-triggered
-manual-run and scheduled-run denial evidence),
+`reborn_trace_first_party_tool_coverage.rs` (10; including model-visible trigger
+status reads, product-triggered manual runs, and scheduled-run denial evidence),
 `reborn_recorded_trace_parity.rs`, `reborn_minimal_dispatch_parity.rs`,
 `reborn_response_order_parity.rs`, `reborn_tool_param_coercion_parity.rs`,
 `reborn_approval_traces_parity.rs`, `reborn_turn_state_lock_free_submit_parity.rs`.

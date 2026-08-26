@@ -154,13 +154,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort, HostRuntimeServices,
-    PostEditCheckConfig, ProductAuthProviderRuntimePorts, RuntimeCredentialAccessSecret,
+    CapabilitySurfaceVersion, HostProcessPort, HostRuntimeServices, PostEditCheckConfig,
+    ProductAuthProviderRuntimePorts, RuntimeCredentialAccessSecret,
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, TriggerCreateHook,
-    builtin_first_party_package,
+    builtin_first_party_package, projected_trigger_capability_call_facts_source,
 };
 use ironclaw_host_runtime::{
-    builtin_first_party_handlers_with_trigger_services_for_process_backend,
+    builtin_first_party_handlers_with_trigger_services_and_facts_for_process_backend,
     builtin_first_party_package_for_process_backend,
 };
 use ironclaw_identity::projects::ProjectRepository;
@@ -1221,25 +1221,6 @@ fn production_builtin_extension_registry(
         })?;
     insert_bound_memory_package(&mut registry, memory_package)?;
     Ok(registry)
-}
-
-fn production_first_party_registry_with_trigger_create_hook(
-    trigger_repository: Arc<dyn TriggerRepository>,
-    trigger_create_hook: Arc<dyn TriggerCreateHook>,
-    active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
-    manual_fire_runner: Arc<dyn ironclaw_triggers::TriggerManualFireRunner>,
-    process_backend: ProcessBackendKind,
-) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_services_for_process_backend(
-        trigger_repository,
-        trigger_create_hook,
-        active_run_lookup,
-        manual_fire_runner,
-        process_backend,
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("built-in first-party handlers are invalid: {error}"),
-    })
 }
 
 fn manifest_channel_account_setup_descriptors(

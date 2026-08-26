@@ -34,6 +34,7 @@ ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_common = { path = "../../contracts/ironclaw_common" }
 ironclaw_sandbox = { path = "../../lanes/ironclaw_sandbox" }
 ironclaw_event_log = { path = "../../events/ironclaw_event_log" }
+ironclaw_event_projections = { path = "../../events/ironclaw_event_projections" }
 ironclaw_extension_registry = { path = "../../extensions/ironclaw_extension_registry" }
 ironclaw_extractors = { path = "../../domains/ironclaw_extractors" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
@@ -95,7 +96,6 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
-ironclaw_event_projections = { path = "../../events/ironclaw_event_projections" }
 # FaultInjecting decorator: drive store fault paths through the real store.
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", features = ["test-support"] }
 # shared TestDispatcher double
