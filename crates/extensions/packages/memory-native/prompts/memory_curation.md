@@ -45,13 +45,16 @@ changing what it claims.
 ## Finishing
 
 You have a small, hard budget of tool calls. The sequence is: read the
-document, then AT MOST one write, then the result tool — nothing else. That
-one write must pass `append: false` explicitly: an append duplicates the
-document instead of replacing it, and you would then need a second write to
-undo your own damage. Do not
-re-read after writing, do not write twice, do not "fix up" a write with another
-write. Every extra call risks exhausting the budget before your report, and a
-pass that dies unreported is worse than a pass that changed nothing.
+document, then AT MOST one write, then the result tool — nothing else. The
+read returns `content_hash`. That one write must pass the same value as
+`expected_content_hash` and must pass `append: false` explicitly. If the write
+returns `conflict`, the document changed after your read: do not write again;
+report that the pass made no edit because it lost a concurrent-write race. An
+append duplicates the document instead of replacing it, and you would then need
+a second write to undo your own damage. Do not re-read after writing, do not
+write twice, do not "fix up" a write with another write. Every extra call risks
+exhausting the budget before your report, and a pass that dies unreported is
+worse than a pass that changed nothing.
 
 Call the result tool exactly once with your report. If you made no edits, say so
 and give the reason. Keep `summary` to one sentence a person could read in a

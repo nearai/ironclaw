@@ -176,6 +176,12 @@ Rules:
 - write/append/patch version previous content before mutation according to version policy;
 - write/append/patch reindex after mutation according to metadata policy;
 - system-prompt-file write safety is delegated to kernel-mediated prompt safety policy hooks.
+- model-facing reads return a content hash; a rewrite may supply that hash as
+  its expected prior state;
+- the native provider enforces expected-content hashes atomically and returns a
+  model-visible `conflict` when the document changed, without overwriting it;
+- providers without conditional-write support may treat the expectation as
+  best-effort and must document that limitation on their tool surface;
 
 ### 5.2 `MemorySearchService`
 

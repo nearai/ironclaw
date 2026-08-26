@@ -62,6 +62,9 @@ pub struct MemoryServiceWriteRequest {
     pub target: String,
     pub content: String,
     pub append: bool,
+    /// Optional hash returned by a prior read. Providers that support
+    /// conditional writes reject the write when the document has changed.
+    pub expected_content_hash: Option<String>,
     pub old_string: Option<String>,
     pub new_string: Option<String>,
     pub replace_all: bool,
@@ -99,6 +102,10 @@ impl MemoryServiceWriteRequest {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let expected_content_hash = input
+            .get("expected_content_hash")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let old_string = input
             .get("old_string")
             .and_then(Value::as_str)
@@ -127,6 +134,7 @@ impl MemoryServiceWriteRequest {
         Ok(Self {
             target,
             content,
+            expected_content_hash,
             append,
             old_string,
             new_string,
@@ -147,13 +155,13 @@ pub enum MemoryProfileSetStatus {
     Ok,
 }
 
-/// Serializes to exactly `"cleared"` / `"written"` / `"patched"` via serde
-/// snake_case, preserving the historical wire format that previously lived in
-/// a `String` status field.
+/// Serializes to stable snake_case wire strings. `Conflict` is a correctable,
+/// model-visible outcome; storage and host failures remain errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryWriteStatus {
     Cleared,
+    Conflict,
     Written,
     Patched,
 }
@@ -163,6 +171,7 @@ impl MemoryWriteStatus {
     pub fn as_wire_str(&self) -> &'static str {
         match self {
             MemoryWriteStatus::Cleared => "cleared",
+            MemoryWriteStatus::Conflict => "conflict",
             MemoryWriteStatus::Written => "written",
             MemoryWriteStatus::Patched => "patched",
         }
@@ -202,6 +211,8 @@ pub struct MemoryServiceReadResponse {
     pub path: String,
     pub content: String,
     pub word_count: usize,
+    /// SHA-256 hash of `content`, used for conditional follow-up writes.
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -844,6 +855,11 @@ pub fn write_response_output(response: MemoryServiceWriteResponse) -> Value {
             "path": response.path,
             "message": response.message.unwrap_or_default(),
         }),
+        MemoryWriteStatus::Conflict => json!({
+            "status": response.status,
+            "path": response.path,
+            "message": response.message.unwrap_or_default(),
+        }),
         MemoryWriteStatus::Patched => json!({
             "status": response.status,
             "path": response.path,
@@ -864,6 +880,7 @@ pub fn read_response_output(response: MemoryServiceReadResponse) -> Value {
     json!({
         "path": response.path,
         "content": response.content,
+        "content_hash": response.content_hash,
         "word_count": response.word_count,
     })
 }
@@ -1117,6 +1134,38 @@ mod tests {
         let request =
             MemoryServiceWriteRequest::from_tool_input(&input).expect("default target is in-scope");
         assert_eq!(request.target, "daily_log");
+    }
+
+    #[test]
+    fn write_request_parses_expected_content_hash() {
+        let request = MemoryServiceWriteRequest::from_tool_input(&json!({
+            "target": "memory",
+            "content": "curated",
+            "append": false,
+            "expected_content_hash": "abc123"
+        }))
+        .expect("conditional write input parses");
+
+        assert_eq!(request.expected_content_hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn conflict_write_output_is_model_visible() {
+        let output = write_response_output(MemoryServiceWriteResponse {
+            status: MemoryWriteStatus::Conflict,
+            path: "MEMORY.md".to_string(),
+            append: false,
+            content_length: 0,
+            replacements: None,
+            message: Some("Document changed since it was read.".to_string()),
+        });
+
+        assert_eq!(output["status"], "conflict");
+        assert!(
+            output["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("changed"))
+        );
     }
 
     #[test]

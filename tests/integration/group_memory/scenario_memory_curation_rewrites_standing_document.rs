@@ -26,7 +26,8 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_runtime::MEMORY_WRITE_CAPABILITY_ID;
+use ironclaw_host_runtime::{MEMORY_READ_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID};
+use ironclaw_memory::content_bytes_sha256;
 use serde_json::json;
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
@@ -84,23 +85,30 @@ pub async fn run() -> HarnessResult<()> {
         binding.tenant_id.as_str(),
         user_id.as_str()
     );
+    let expected_content_hash =
+        content_bytes_sha256(format!("{FIRST_SAVED_FACT}\n{SECOND_SAVED_FACT}\n").as_bytes());
 
     // Script the pass BEFORE any turn runs: it is submitted from a background
     // path this test does not drive, so there is no later moment at which to
-    // register its model. Three replies, matching the unbound-structured
-    // shape: the rewrite, an ordinary work-phase candidate, then the one
-    // host-owned finalizer call that records the validated report.
+    // register its model. Four replies, matching the unbound-structured shape:
+    // the versioned read, the rewrite, an ordinary work-phase candidate, then
+    // the one host-owned finalizer call that records the validated report.
     let curation_llm = group
         .register_scope_script_prefix_for_test(
             curation_thread_prefix,
             "memory-curation-pass",
             [
                 RebornScriptedReply::tool_call(
+                    MEMORY_READ_CAPABILITY_ID,
+                    json!({ "path": "MEMORY.md" }),
+                ),
+                RebornScriptedReply::tool_call(
                     MEMORY_WRITE_CAPABILITY_ID,
                     json!({
                         "target": "memory",
                         "content": CURATED_DOCUMENT,
-                        "append": false
+                        "append": false,
+                        "expected_content_hash": expected_content_hash
                     }),
                 ),
                 RebornScriptedReply::text("Merged two entries that said the same thing."),
@@ -126,15 +134,15 @@ pub async fn run() -> HarnessResult<()> {
         .await?;
 
     // The pass runs on the scheduler like any other turn, so nothing here has a
-    // handle to await. Wait on the pass's own model instead: three scripted
+    // handle to await. Wait on the pass's own model instead: four scripted
     // replies consumed means the pass ran to its structured report.
     wait_for_pass_to_finish(&curation_llm).await?;
     let captured = curation_llm.captured_requests();
     assert_eq!(
         captured.len(),
-        3,
-        "the pass must run exactly once — a background run that re-triggered curation \
-         would schedule its own successor forever"
+        4,
+        "the pass must read, rewrite, and finish exactly once — a background run that \
+         re-triggered curation would schedule its own successor forever"
     );
     assert!(
         captured[0].iter().any(|message| message
@@ -172,10 +180,10 @@ pub async fn run() -> HarnessResult<()> {
 /// evidence available to wait on.
 async fn wait_for_pass_to_finish(curation_llm: &Arc<TraceLlm>) -> HarnessResult<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while curation_llm.captured_requests().len() < 3 {
+    while curation_llm.captured_requests().len() < 4 {
         if std::time::Instant::now() > deadline {
             return Err(format!(
-                "the curation pass never finished; it made {} of 3 scripted model calls",
+                "the curation pass never finished; it made {} of 4 scripted model calls",
                 curation_llm.captured_requests().len()
             )
             .into());
