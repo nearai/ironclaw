@@ -50,7 +50,10 @@ function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}
   function ConfigureModal() {}
   function CustomMcpRegistrationModal() {}
   function InlineNotice() {}
+  function PageScroll() {}
+  function PageStack() {}
   function RegistryTab() {}
+  function Skeleton() {}
   const translations = {
     "ext.catalog.loadErrorTitle": "Extension catalog unavailable",
     "ext.catalog.loadErrorDesc": "The extension catalog could not be loaded.",
@@ -81,8 +84,13 @@ function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}
     InlineNotice,
     ToolsTab() {},
     Navigate() {},
+    PageScroll,
+    PageStack,
     React: {
       useCallback: (fn) => fn,
+      // Identity-stable memoization is not what this harness measures; it
+      // renders once per assertion, so evaluating the factory is equivalent.
+      useMemo: (factory) => factory(),
       useEffect: (effect) => effect(),
       useRef: (initial) => {
         const index = hookCursor;
@@ -104,10 +112,23 @@ function renderExtensionsPage(tab, extensionState = {}, { isAdmin = false } = {}
       },
     },
     RegistryTab,
+    Skeleton,
     globalThis: {},
     html(strings, ...values) {
       return { strings: Array.from(strings), values };
     },
+    // The setup-link landing (`?configure=&setup=`) is covered end to end in
+    // `hooks/useSetupLanding.test.tsx`; this harness only needs the page to
+    // render when no link was followed.
+    useExtensionSetupLanding: () => ({ setupPath: null, clearSetupPath() {} }),
+    // The real mapping, not a stub: the page hands these to the landing hook
+    // and to `ConfigureModal`, and passing raw API items is exactly the wiring
+    // bug that let the deep link open nothing on a live deployment.
+    configureRequest: (extension) => ({
+      ...extension,
+      packageRef: extension.package_ref,
+      displayName: extension.display_name || extension.package_ref?.id || "",
+    }),
     useExtensions: () => ({
       status: {},
       channels: [],

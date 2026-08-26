@@ -117,7 +117,7 @@ drain_proxy_audit() {
     rm -f "$audit_append" "$audit_capture"
     return 1
   fi
-  cat "$audit_append" >> "$audit_log"
+  cat "$audit_append" >> "$audit_log" || return 1
   chmod 600 "$audit_log"
   rm -f "$audit_append" "$audit_capture"
   if [ -n "$last_record" ]; then

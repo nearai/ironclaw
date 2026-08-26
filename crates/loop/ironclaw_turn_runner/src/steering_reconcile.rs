@@ -436,6 +436,7 @@ mod tests {
                 idempotency_key: IdempotencyKey::new("forward-key").expect("key"),
                 received_at: chrono::Utc::now(),
                 requested_run_profile: None,
+                resolved_run_profile: None,
             })
             .await
             .expect_err("the recording inner coordinator always errors");
@@ -1085,6 +1086,7 @@ mod observer_tests {
                 metadata: serde_json::Value::Null,
             },
             kind,
+            occurred_at: None,
             sanitized_reason: None,
         };
 
@@ -1150,6 +1152,7 @@ mod observer_tests {
                 metadata: serde_json::Value::Null,
             },
             kind: ProcessJournalKind::Failed,
+            occurred_at: None,
             sanitized_reason: None,
         };
 

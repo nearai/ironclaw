@@ -941,7 +941,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "execution_contract": {
                     "type": "object",
-                    "description": "Versioned contract rendered into the frozen future-run prompt. Describe the task itself, never the act of creating or scheduling it. Referenced capabilities only narrow the scheduled surface; required skills must activate before the first model call.",
+                    "description": "Versioned contract rendered into the frozen future-run prompt. Keep it concise and outcome-focused. Describe the task itself, never the act of creating or scheduling it or a speculative sequence of tool calls. The scheduled fire discovers the capabilities and task data available when it runs; required skills must activate before the first model call.",
                     "properties": {
                         "version": { "const": 1 },
                         "goal": {
@@ -966,10 +966,6 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                         "policy": {
                             "type": "object",
                             "properties": {
-                                "allowed_capability_ids": {
-                                    "type": ["array", "null"], "maxItems": 64,
-                                    "items": { "type": "string" }
-                                },
                                 "required_skills": {
                                     "type": "array", "maxItems": 8,
                                     "items": { "type": "string" }
@@ -1251,6 +1247,12 @@ mod tests {
         assert_eq!(
             schema["properties"]["execution_contract"]["properties"]["policy"]["required"],
             serde_json::json!(["result_delivery"])
+        );
+        assert!(
+            schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]
+                .get("allowed_capability_ids")
+                .is_none(),
+            "the model must not predict a future run's capability surface"
         );
         assert!(
             schema["properties"]["execution_contract"]["properties"]["policy"]["properties"]

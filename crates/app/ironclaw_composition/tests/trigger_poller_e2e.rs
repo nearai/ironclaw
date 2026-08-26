@@ -61,7 +61,12 @@ use ironclaw_outbound::{
     CommunicationPreferenceRecord, DeliveryDefaultScope, TriggeredRunDeliveryOutcomeKind,
     TriggeredRunDeliveryStore,
 };
-use ironclaw_product_contracts::surface::{ProductSurfaceCaller, ProductSurfaceInvokeRequest};
+use ironclaw_product_contracts::{
+    notification_inbox::{
+        NOTIFICATIONS_VIEW, ProductListNotificationsResponse, ProductNotificationKind,
+    },
+    surface::{ProductSurfaceCaller, ProductSurfaceInvokeRequest, ProductSurfaceQueryRequest},
+};
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerDeliveryTargetId, TriggerExecutionSpec,
@@ -1548,8 +1553,8 @@ where
 /// model (spec §8): a scheduled fire's RESULT is never pushed to a channel.
 ///
 /// due trigger -> trusted ingress -> real Reborn run -> persisted final reply
-/// in the fire's own run thread -> background-run notifier -> **nothing on any
-/// channel**.
+/// in the fire's own run thread -> durable Inbox outcome, while the background
+/// delivery notifier still sends **nothing on any channel**.
 ///
 /// The two arms are the two ways the retired routing used to pick a
 /// destination: QA-9B had none (it inherited the creator's default), QA-9D
@@ -1601,7 +1606,7 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
     )
     .await;
 
-    wait_for_recorded_outcome(
+    let default_run_id = wait_for_recorded_outcome(
         &repository,
         &delivery_store,
         default_target_trigger,
@@ -1615,7 +1620,7 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         TriggeredRunDeliveryOutcomeKind::Suppressed,
     )
     .await;
-    wait_for_recorded_outcome(
+    let explicit_run_id = wait_for_recorded_outcome(
         &repository,
         &delivery_store,
         explicit_target_trigger,
@@ -1682,6 +1687,71 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
         "the suppressible routine must perform prior tool work before its typed result"
     );
 
+    let caller = ProductSurfaceCaller::new(
+        TenantId::new(TENANT).expect("tenant"),
+        UserId::new(USER).expect("user"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        None,
+    );
+    let surface = runtime.product_surface(None).expect("product surface");
+    let inbox = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = surface
+                .query(
+                    caller.clone(),
+                    ProductSurfaceQueryRequest {
+                        view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                        input: json!({ "limit": 10 }),
+                        cursor: None,
+                        limit: None,
+                    },
+                )
+                .await
+                .expect("query notification Inbox");
+            let response: ProductListNotificationsResponse = serde_json::from_value(
+                page.items
+                    .into_iter()
+                    .next()
+                    .expect("notification response payload"),
+            )
+            .expect("decode notification response");
+            if response.notifications.len() == 2 {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background completion notifications arrive");
+    assert!(
+        inbox
+            .notifications
+            .iter()
+            .all(|notification| notification.kind == ProductNotificationKind::RunCompleted),
+        "only selected completed results are materialized: {:?}",
+        inbox.notifications
+    );
+    let notified_runs = inbox
+        .notifications
+        .iter()
+        .filter_map(|notification| notification.turn_run_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        notified_runs,
+        std::collections::BTreeSet::from(
+            [default_run_id.to_string(), explicit_run_id.to_string(),]
+        ),
+        "ordinary scheduled completions notify, while NothingToReport stays suppressed"
+    );
+
+    // The identities themselves are what dedupe on replay.
+    let record_count_before_restart = inbox.notifications.len();
+    let identities_before_restart = inbox
+        .notifications
+        .iter()
+        .map(|notification| notification.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(
         slack_provider.provider_messages().is_empty(),
@@ -1696,7 +1766,79 @@ async fn scheduled_trigger_results_are_never_pushed_to_a_channel_across_restart(
     )
     .await;
     register_delivery_targets(&restarted);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let restarted_surface = restarted.product_surface(None).expect("restarted surface");
+    let replayed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let replayed_page = restarted_surface
+                .query(
+                    caller.clone(),
+                    ProductSurfaceQueryRequest {
+                        view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                        input: json!({ "limit": 10 }),
+                        cursor: None,
+                        limit: None,
+                    },
+                )
+                .await
+                .expect("query Inbox while observer replay settles");
+            let replayed: ProductListNotificationsResponse = serde_json::from_value(
+                replayed_page
+                    .items
+                    .into_iter()
+                    .next()
+                    .expect("replayed notification payload"),
+            )
+            .expect("decode replayed Inbox");
+            if replayed.notifications.len() >= record_count_before_restart {
+                break replayed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("observer replay reaches the pre-restart notification count");
+    assert_eq!(
+        replayed.notifications.len(),
+        record_count_before_restart,
+        "restart/replay must not add a second record under an already-existing id"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let settled_page = restarted_surface
+        .query(
+            caller,
+            ProductSurfaceQueryRequest {
+                view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                input: json!({ "limit": 10 }),
+                cursor: None,
+                limit: None,
+            },
+        )
+        .await
+        .expect("query Inbox after observer replay settles");
+    let settled: ProductListNotificationsResponse = serde_json::from_value(
+        settled_page
+            .items
+            .into_iter()
+            .next()
+            .expect("settled notification payload"),
+    )
+    .expect("decode settled Inbox");
+    assert_eq!(
+        settled.notifications.len(),
+        record_count_before_restart,
+        "restart/replay must remain at the pre-restart count after a settle window"
+    );
+    assert_eq!(
+        settled
+            .notifications
+            .iter()
+            .map(|notification| notification.id.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        identities_before_restart,
+        "restart/replay resolves to the same notification identities, so a replayed \
+         commit is absorbed by its stable id instead of arriving twice"
+    );
     restarted
         .shutdown()
         .await

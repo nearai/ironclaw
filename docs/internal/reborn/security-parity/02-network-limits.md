@@ -13,7 +13,8 @@ and `03-headers-errors.md` for headers + error sanitization.
   and the host SSO mount descriptors from
   `ironclaw_webui::webui_v2_auth_router` (`auth/routes.rs`).
 
-Decision legend as in `01-auth.md`: **Keep** / **Change** / **Beta-break**.
+Status and decision legend as in `01-auth.md`: historical migration-parity
+record (v1 removed); **Keep** / **Change** / **Beta-break**.
 
 ## Decision table
 

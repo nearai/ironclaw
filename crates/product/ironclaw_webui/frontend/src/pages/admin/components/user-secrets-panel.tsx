@@ -5,6 +5,7 @@ import { Panel } from "../../../design-system/primitives";
 import { Button } from "../../../design-system/button";
 import { Input } from "../../../design-system/input";
 import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
+import { SkeletonList } from "../../../design-system/skeleton";
 import { useAdminUserSecrets } from "../hooks/useAdminUsers";
 
 export function UserSecretsPanel({ userId }) {
@@ -93,10 +94,12 @@ export function UserSecretsPanelView({
       </div>
 
       {query.isLoading ? (
-        <div className="space-y-2" aria-label={t("admin.user.secrets.loading")}>
-          <div className="v2-skeleton h-9 rounded" />
-          <div className="v2-skeleton h-9 rounded" />
-        </div>
+        <SkeletonList
+          count={2}
+          className="space-y-2"
+          itemClassName="h-9 rounded"
+          aria-label={t("admin.user.secrets.loading")}
+        />
       ) : query.error ? (
         <p className="text-sm text-red-200" role="alert">
           {t("admin.user.secrets.loadFailed", { message: query.error.message })}

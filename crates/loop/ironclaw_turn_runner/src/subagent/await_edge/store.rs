@@ -46,7 +46,10 @@ impl AwaitEdgeStore {
             scope: scope.to_resource_scope(),
             dependent_process_id: parent_run_id.map(Self::process_id),
             group_ref,
+            allowed_states: None,
             include_closed,
+            after: None,
+            limit: None,
         }
     }
 
@@ -326,6 +329,48 @@ impl AwaitEdgeStore {
             .collect()
     }
 
+    /// Bounded read of one thread's background-mode dependency edges
+    /// (`group_ref = "bg:{thread_id}"`, the exact tag `finish_spawn` writes
+    /// for `SpawnSubagentMode::Background` — `subagent_spawn_port.rs`).
+    /// Scope-wide (no `dependent_process_id` filter): a thread's outstanding
+    /// background children may have been spawned by any of its historical
+    /// runs, not just the one now starting. Used by the run-start sweep
+    /// (`AwaitEdgeResolver::sweep_thread_on_run_start`).
+    pub async fn list_background_for_thread(
+        &self,
+        scope: &TurnScope,
+        limit: u32,
+        human_initiated: bool,
+    ) -> Result<Vec<(TurnRunId, TurnRunId, AwaitEdge)>, AwaitEdgeStoreError> {
+        let mut allowed_states = vec![
+            ProcessDependencyState::Settled,
+            ProcessDependencyState::ResultAppended,
+            ProcessDependencyState::AttentionScheduled,
+        ];
+        if human_initiated {
+            allowed_states.push(ProcessDependencyState::AttentionDeferred);
+        }
+        self.dependencies
+            .query_process_dependencies(ProcessDependencyQuery {
+                scope: scope.to_resource_scope(),
+                dependent_process_id: None,
+                group_ref: Some(format!("bg:{}", scope.thread_id)),
+                allowed_states: Some(allowed_states),
+                include_closed: false,
+                after: None,
+                limit: Some(limit),
+            })
+            .await
+            .map_err(map_process_error)?
+            .into_iter()
+            .map(|record| {
+                let parent = Self::run_id(record.dependent_process_id);
+                let child = Self::run_id(record.dependency_process_id);
+                Self::edge_from_record(record).map(|edge| (parent, child, edge))
+            })
+            .collect()
+    }
+
     pub async fn consume(
         &self,
         scope: &TurnScope,
@@ -359,15 +404,17 @@ impl AwaitEdgeStore {
             AwaitEdgeState::Settled | AwaitEdgeState::AttentionScheduled => {
                 self.consume(scope, parent_run_id, child_run_id).await
             }
-            // Still in flight. `ResultAppended` has no attention recorded yet
-            // and a streak-capped edge is parked for a later sweep; the kernel
-            // refuses to consume either, because closing would strand the
-            // parent with an undelivered result.
-            AwaitEdgeState::Open
-            | AwaitEdgeState::ResultAppended
-            | AwaitEdgeState::AttentionDeferredStreakCap
-            | AwaitEdgeState::Drained
-            | AwaitEdgeState::Abandoned => Ok(()),
+            // `ResultAppended` has no attention recorded yet and a
+            // streak-capped edge is parked for a later sweep; the result is
+            // durably appended but the parent hasn't been made attentive to
+            // it, so closing here would strand the result and hold the
+            // descendant reservation. Refuse instead of silently no-opping.
+            AwaitEdgeState::ResultAppended | AwaitEdgeState::AttentionDeferredStreakCap => {
+                Err(AwaitEdgeStoreError::UndeliveredResult { state: edge.state })
+            }
+            // Benign re-observation: still open, or already closed by a
+            // previous call.
+            AwaitEdgeState::Open | AwaitEdgeState::Drained | AwaitEdgeState::Abandoned => Ok(()),
         }
     }
 }

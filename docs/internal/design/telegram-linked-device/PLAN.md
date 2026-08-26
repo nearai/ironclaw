@@ -206,13 +206,13 @@ enables, or land the manifest auth section in PR 6 and inject a test manifest
 here.
 
 **Budget the harness work — it is this PR's critical path, not the package code.**
-`tests/CLAUDE.md` records that **Telegram has no group-tier lifecycle scenario**
+`tests/AGENTS.md` records that **Telegram has no group-tier lifecycle scenario**
 because its setup resolves through a pairing mechanism the bare harness does not
 mount. The integration proof needs a new harness profile that mounts the native
 package with admin config satisfied, helpers that drive a multi-step device-link
 flow through the product-auth services, tool dispatch as a specific user, unlink
 through credential cleanup, the two-user variant, a `[[test]]` registration, and
-a `tests/CLAUDE.md` row.
+a `tests/AGENTS.md` row.
 
 **Watch:**
 - `grammers-session` and `grammers-tl-types` (types only, no sockets) arrive here

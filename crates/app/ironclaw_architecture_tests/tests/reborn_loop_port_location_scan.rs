@@ -340,6 +340,43 @@ fn port_definition_scan_matches_definitions_not_references() {
 }
 
 #[test]
+fn input_queue_ack_effect_uses_neutral_loop_contract_vocabulary() {
+    let root = workspace_root();
+    let contract_path = root.join("crates/contracts/ironclaw_loop_contracts/src/host/input.rs");
+    let queue_path = root.join("crates/loop/ironclaw_loop_host/src/input_queue.rs");
+    let resolver_path =
+        root.join("crates/loop/ironclaw_turn_runner/src/subagent/await_edge/resolver.rs");
+    let contract = std::fs::read_to_string(&contract_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", contract_path.display()));
+    let queue = std::fs::read_to_string(&queue_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", queue_path.display()));
+    let resolver = std::fs::read_to_string(&resolver_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", resolver_path.display()));
+
+    assert!(
+        contract.contains("pub struct LoopInputAckEffect"),
+        "durable input acknowledgment effect vocabulary belongs in ironclaw_loop_contracts"
+    );
+    for feature_specific_name in ["BackgroundSubagentAck", "handle_background_subagent_ack"] {
+        assert!(
+            !queue.contains(feature_specific_name),
+            "the shared input queue must not own feature-specific acknowledgment vocabulary: \
+             found {feature_specific_name} in {}",
+            queue_path.display()
+        );
+    }
+    assert!(
+        queue.contains("handle_ack_effect"),
+        "the shared queue should invoke a neutral acknowledgment-effect handler"
+    );
+    assert!(
+        resolver.contains("impl<S> HostInputAckEffectHandler for AwaitEdgeResolver<S>")
+            && resolver.contains("effect: LoopInputAckEffect"),
+        "the await-edge resolver should interpret the neutral effect contract"
+    );
+}
+
+#[test]
 fn re_export_scan_separates_intra_crate_plumbing_from_cross_crate_paths() {
     let names = ["LoopModelPort", "LoopCapabilityPort"];
 

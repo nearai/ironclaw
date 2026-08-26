@@ -59,7 +59,7 @@ function configureModalSourceForTest() {
     }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ConfigureModal, ModalShell };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ConfigureModal, ModalShell, SetupReadiness, AdminSetupFieldsNotice };`;
 }
 
 function renderModal({
@@ -77,6 +77,7 @@ function renderModal({
   initialState = [],
   runEffects = false,
   blockPopup = false,
+  initialConnection = null,
 } = {}) {
   const calls = [];
   const invalidations = [];
@@ -138,7 +139,13 @@ function renderModal({
         ...oauthMutationState,
       };
     },
-    useSetupSubmit: () => ({ mutate() {}, isPending: false, error: null }),
+    useSetupSubmit: () => ({
+      mutate(payload) {
+        calls.push(payload);
+      },
+      isPending: false,
+      error: null,
+    }),
     useHostedMcpAuthSelection: (...args) => {
       hostedMcpAuthArgs.push(args);
       return {
@@ -158,6 +165,7 @@ function renderModal({
     hasChannelSurface,
     isWebGeneratedCodeConnection,
     resolveFocusTarget,
+    SkeletonList() {},
     window: {
       open: (url, target, features) => {
         if (blockPopup) {
@@ -185,12 +193,16 @@ function renderModal({
     },
     onClose,
     onSaved,
+    initialConnection,
   });
   return {
     calls,
     context,
     DeviceLinkPanel: context.DeviceLinkPanel,
     PairingWebCodePanel: context.PairingWebCodePanel,
+    SetupReadiness: context.globalThis.__testExports.SetupReadiness,
+    AdminSetupFieldsNotice:
+      context.globalThis.__testExports.AdminSetupFieldsNotice,
     invalidations,
     notifications,
     oauthCalls,
@@ -222,6 +234,7 @@ test("ConfigureModal recovers ambiguous hosted MCP auth with only three explicit
           setup: { kind: "manual_token" },
         },
       ],
+      fields: [{ name: "tenant_url", prompt: "Tenant URL" }],
       onboarding: null,
       isLoading: false,
       error: null,
@@ -234,7 +247,9 @@ test("ConfigureModal recovers ambiguous hosted MCP auth with only three explicit
   assert.match(body, /extensions\.customMcpAuth\.no_auth/);
   assert.doesNotMatch(body, /extensions\.customMcpAuth\.auto/);
   assert.doesNotMatch(body, /must-not-be-rendered/);
+  assert.doesNotMatch(body, /Tenant URL/);
   assert.doesNotMatch(body, /extension-secret-/);
+  assertAdminSetupFieldsNotice(view);
 
   const submit = findHandler(view.rendered, "authSelection:");
   assert.ok(submit, "the selected recovery choice can be submitted");
@@ -280,10 +295,108 @@ test("ConfigureModal keeps setup open when Bearer selection still requires a cre
   assert.equal(closeCalls, 0);
 });
 
+test("ConfigureModal surfaces every setup blocker without exposing internal refs", () => {
+  const blockerKinds = [
+    "setup",
+    "auth",
+    "pairing",
+    "approval",
+    "policy",
+    "credential",
+    "runtime",
+  ];
+  const view = renderModal({
+    surfaces: toolSurfaces,
+    setupResult: {
+      phase: "setup_needed",
+      blockers: blockerKinds.map((kind) => ({
+        kind,
+        ref_id: `internal-${kind}-diagnostic`,
+      })),
+      secrets: [],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  const readiness = renderFirstComponent(view.rendered, view.SetupReadiness);
+  const body = JSON.stringify(readiness);
+  assert.match(body, /extensions\.setupPhase\.setup_needed/);
+  for (const kind of blockerKinds) {
+    assert.match(body, new RegExp(`extensions\\.setupBlocker\\.${kind}`));
+    assert.doesNotMatch(body, new RegExp(`internal-${kind}-diagnostic`));
+  }
+  assert.doesNotMatch(body, /extensions\.noConfigRequired/);
+});
+
+test("ConfigureModal reserves channel configuration fields for administrators", () => {
+  const view = renderModal({
+    surfaces: channelSurfaces,
+    setupResult: {
+      phase: "setup_needed",
+      blockers: [],
+      secrets: [],
+      fields: [
+        {
+          name: "public_url",
+          prompt: "Public webhook URL",
+          optional: false,
+          placeholder: "https://example.test/hook",
+        },
+      ],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  const body = JSON.stringify(view.rendered);
+  assertAdminSetupFieldsNotice(view);
+  assert.doesNotMatch(body, /Public webhook URL/);
+  assert.doesNotMatch(body, /extension-field-public_url/);
+  assert.doesNotMatch(body, /extensions\.noConfigRequired/);
+});
+
+test("ConfigureModal reserves the no-configuration state for a truly empty setup", () => {
+  const onboardingView = renderModal({
+    surfaces: toolSurfaces,
+    setupResult: {
+      phase: "setup_needed",
+      blockers: [],
+      secrets: [],
+      fields: [],
+      onboarding: { credential_next_step: "Finish setup in the provider." },
+      isLoading: false,
+      error: null,
+    },
+  });
+  assert.match(JSON.stringify(onboardingView.rendered), /Finish setup in the provider/);
+  assert.doesNotMatch(
+    JSON.stringify(onboardingView.rendered),
+    /extensions\.noConfigRequired/,
+  );
+
+  const emptyView = renderModal({
+    surfaces: toolSurfaces,
+    setupResult: {
+      phase: "active",
+      blockers: [],
+      secrets: [],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+  assert.match(JSON.stringify(emptyView.rendered), /extensions\.noConfigRequired/);
+});
+
 function renderFirstComponent(rendered, component, props = {}) {
   if (!rendered || !Array.isArray(rendered.values)) return null;
   if (rendered.values[0] === component) {
-    return component({
+    return component(rendered.props ? { ...rendered.props, ...props } : {
       onClose: rendered.values[1],
       title: rendered.values[2],
       ...props,
@@ -294,6 +407,17 @@ function renderFirstComponent(rendered, component, props = {}) {
     if (child) return child;
   }
   return null;
+}
+
+function assertAdminSetupFieldsNotice(view) {
+  const notice = renderFirstComponent(
+    view.rendered,
+    view.AdminSetupFieldsNotice,
+  );
+  assert.match(
+    JSON.stringify(notice),
+    /extensions\.setupFieldsAdminRequired/,
+  );
 }
 
 // Walks the rendered html-template tree and returns the first captured
@@ -370,6 +494,65 @@ test("ConfigureModal hosts the web-code pairing panel instead of a paste box or 
   );
 });
 
+test("ConfigureModal keeps pairing blockers visible beside the pairing panel", () => {
+  const view = renderModal({
+    surfaces: webCodeSurfaces,
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    displayName: "Acme Messenger",
+    setupResult: {
+      phase: "setup_needed",
+      blockers: [
+        { kind: "pairing", ref_id: "internal-pairing-correlation" },
+      ],
+      secrets: [],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
+    true,
+  );
+  const readiness = renderFirstComponent(view.rendered, view.SetupReadiness);
+  const body = JSON.stringify(readiness);
+  assert.match(body, /extensions\.setupBlocker\.pairing/);
+  assert.doesNotMatch(body, /internal-pairing-correlation/);
+});
+
+test("ConfigureModal keeps the administrator-field notice beside the pairing panel", () => {
+  const view = renderModal({
+    surfaces: webCodeSurfaces,
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    displayName: "Acme Messenger",
+    setupResult: {
+      phase: "setup_needed",
+      blockers: [],
+      secrets: [],
+      fields: [
+        {
+          name: "public_url",
+          prompt: "Public webhook URL",
+          optional: false,
+        },
+      ],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
+    true,
+  );
+  const body = JSON.stringify(view.rendered);
+  assertAdminSetupFieldsNotice(view);
+  assert.doesNotMatch(body, /Public webhook URL/);
+});
+
 test("ConfigureModal keeps the web-code panel for an installed (non-pairing) lifecycle state", () => {
   const view = renderModal({
     surfaces: webCodeSurfaces,
@@ -427,7 +610,7 @@ test("ConfigureModal renders Slack OAuth without opening the popup automatically
 });
 
 test("ConfigureModal never renders tenant administrator fields in caller setup", () => {
-  const { rendered } = renderModal({
+  const view = renderModal({
     surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "provider-neutral-channel" },
     channel: "provider-neutral-channel",
@@ -448,8 +631,6 @@ test("ConfigureModal never renders tenant administrator fields in caller setup",
           },
         },
       ],
-      // A stale or mixed-version server must not make deployment-owned
-      // manifest configuration editable on the caller's Configure surface.
       fields: [
         {
           name: "deployment_provider_id",
@@ -463,9 +644,10 @@ test("ConfigureModal never renders tenant administrator fields in caller setup",
     },
   });
 
-  const body = JSON.stringify(rendered);
+  const body = JSON.stringify(view.rendered);
   assert.match(body, /Connect your account/);
   assert.match(body, /extensions\.authorize/);
+  assertAdminSetupFieldsNotice(view);
   assert.doesNotMatch(body, /Tenant deployment provider id/);
   assert.doesNotMatch(body, /deployment_provider_id/);
 });
@@ -954,6 +1136,10 @@ test("ConfigureModal explains independent bot and personal onboarding before con
     displayName: "Telegram",
     installationState: "setup_needed",
     setupResult: {
+      phase: "setup_needed",
+      blockers: [
+        { kind: "auth", ref_id: "internal-auth-correlation" },
+      ],
       secrets: [
         {
           name: "telegram_linked_session",
@@ -963,7 +1149,7 @@ test("ConfigureModal explains independent bot and personal onboarding before con
           setup: { kind: "device_link" },
         },
       ],
-      fields: [],
+      fields: [{ name: "tenant_url", prompt: "Tenant URL" }],
       isLoading: false,
       error: null,
     },
@@ -974,6 +1160,11 @@ test("ConfigureModal explains independent bot and personal onboarding before con
   assert.match(body, /extensions\.connectionChoice\.workspaceBot/);
   assert.match(body, /extensions\.connectionChoice\.personalAccount/);
   assert.doesNotMatch(body, /extensions\.connectionChoice\.adminRequired/);
+  const readiness = renderFirstComponent(view.rendered, view.SetupReadiness);
+  const readinessBody = JSON.stringify(readiness);
+  assert.match(readinessBody, /extensions\.setupPhase\.setup_needed/);
+  assert.match(readinessBody, /extensions\.setupBlocker\.auth/);
+  assert.doesNotMatch(readinessBody, /internal-auth-correlation/);
   assert.equal(
     renderedContainsComponent(view.rendered, view.DeviceLinkPanel),
     false,
@@ -983,6 +1174,13 @@ test("ConfigureModal explains independent bot and personal onboarding before con
     renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
     false,
     "opening Configure must not mint a workspace-bot pairing code",
+  );
+  assertAdminSetupFieldsNotice(view);
+  assert.doesNotMatch(body, /Tenant URL/);
+  assert.ok(!body.includes("pairing.placeholder"), "no secret paste box");
+  assert.ok(
+    !body.includes("extensions.noConfigRequired"),
+    "device-link Configure must never claim no configuration is required",
   );
   assert.deepEqual(
     capturedValuesAfter(view.rendered, "checked="),
@@ -1038,6 +1236,48 @@ test("ConfigureModal starts personal-account linking only after Continue", () =>
     "the personal DeviceLinkPanel renders only after Continue",
   );
   assert.equal(renderedContainsComponent(linking.rendered, linking.PairingWebCodePanel), false);
+});
+
+test("ConfigureModal opens on the setup path a deep link named", () => {
+  // #7853: `?configure=telegram&setup=personal_account` exists so a user handed
+  // the link in a Telegram or Slack thread lands ON the device-link panel.
+  // Dropping them on the two-path choice screen would leave the last unaided
+  // step exactly where it was.
+  //
+  // Only indices 0-2 are pinned, so `activeConnection` (index 3) falls through
+  // to the component's real initializer — which is the prop under test.
+  const linking = renderModal({
+    surfaces: botAndPersonalSurfaces,
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+    installationState: "setup_needed",
+    setupResult: {
+      secrets: [
+        {
+          name: "telegram_linked_session",
+          provider: "telegram",
+          prompt: "Link your Telegram account",
+          provided: false,
+          setup: { kind: "device_link" },
+        },
+      ],
+      fields: [],
+      isLoading: false,
+      error: null,
+    },
+    initialState: [undefined, undefined, undefined],
+    initialConnection: "personal_account",
+  });
+
+  assert.equal(
+    renderedContainsComponent(linking.rendered, linking.DeviceLinkPanel),
+    true,
+    "a personal_account deep link skips the choice screen",
+  );
+  assert.equal(
+    renderedContainsComponent(linking.rendered, linking.PairingWebCodePanel),
+    false,
+  );
 });
 
 test("ConfigureModal starts workspace-bot pairing without personal device linking", () => {

@@ -120,8 +120,8 @@ pub async fn run() -> HarnessResult<()> {
     reader
         .submit_turn("Can you help me draft a short thank-you note?")
         .await?;
-    reader.assert_system_prompt_contains("quokka").await?;
-    reader.assert_system_prompt_excludes("narwhal").await?;
+    reader.assert_model_request_contains("quokka").await?;
+    reader.assert_model_request_excludes("narwhal").await?;
 
     Ok(())
 }

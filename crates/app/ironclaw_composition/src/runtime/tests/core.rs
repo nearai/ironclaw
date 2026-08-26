@@ -6071,6 +6071,7 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
                     ),
                 },
                 action: ironclaw_notifications::NotificationAction::OpenThread { thread_id },
+                initial_state: ironclaw_notifications::NotificationInitialState::Open,
                 occurred_at: Utc::now(),
             }),
     )

@@ -38,10 +38,14 @@ function renderEmptyState({
   // them apart.
   const lazyComponents = [components.SuggestedTaskSurface, components.OobeRestorePill];
   let lazyIndex = 0;
+  const requestedKeys = [];
   const context = {
     ...components,
     globalThis: {},
-    useT: () => (key) => key,
+    useT: () => (key) => {
+      requestedKeys.push(key);
+      return key;
+    },
     // EmptyState wraps SuggestedTaskSurface in React.lazy()/React.Suspense
     // (see empty-state.tsx) so it loads as its own chunk instead of padding
     // every /chat page load. The vm harness never actually resolves a lazy
@@ -61,7 +65,6 @@ function renderEmptyState({
   };
   vm.runInNewContext(emptyStateSourceForTest(), context);
   const tree = context.globalThis.__testExports.EmptyState({
-    onSuggestion: () => {},
     onSend: () => {},
     disabled: false,
     sendDisabled: false,
@@ -74,7 +77,7 @@ function renderEmptyState({
     onCancel: () => {},
     ...props,
   });
-  return { tree, components };
+  return { tree, components, requestedKeys };
 }
 
 test("EmptyState forwards a non-empty commands list to its composer so the menu is reachable from the landing view", () => {
@@ -88,7 +91,30 @@ test("EmptyState forwards a non-empty commands list to its composer so the menu 
   assert.deepEqual(props.commands, commands);
 });
 
-test("EmptyState always mounts the OOBE suggestion surface without a session feature flag", () => {
+test("EmptyState no longer renders the static below-composer suggestion list", () => {
+  // The three hardcoded "Map the current gateway state" / "Review recent
+  // thread activity" / "Draft an extension readiness check" rows are
+  // deprecated (superseded by the backend-driven OOBE suggestion surface
+  // above the composer) — pin that the retired copy keys are never
+  // requested and the component no longer needs an onSuggestion callback.
+  const { requestedKeys } = renderEmptyState();
+
+  for (const key of [
+    "chat.suggestion1",
+    "chat.suggestion1Desc",
+    "chat.suggestion2",
+    "chat.suggestion2Desc",
+    "chat.suggestion3",
+    "chat.suggestion3Desc",
+  ]) {
+    assert.ok(
+      !requestedKeys.includes(key),
+      `retired suggestion key ${key} must not be requested`,
+    );
+  }
+});
+
+test("EmptyState always mounts the OOBE suggestion surface", () => {
   const { tree, components } = renderEmptyState();
 
   assert.ok(

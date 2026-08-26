@@ -42,7 +42,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: ./.github/actions/setup-rust
 
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm

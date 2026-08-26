@@ -1,4 +1,6 @@
 import React from "react";
+import { SkeletonList } from "../../design-system/skeleton";
+import { PageScroll, PageStack } from "../../layout/page-shell";
 import { useT } from "../../lib/i18n";
 import { AutomationsList } from "./components/automations-list";
 import { AutomationsSummaryStrip } from "./components/automations-summary-strip";
@@ -57,9 +59,8 @@ export function AutomationsPage() {
   ]);
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto">
-      <div className="v2-page-entrance flex-1 p-4 sm:p-6">
-        <div className="space-y-5">
+    <PageScroll>
+      <PageStack>
           {automationsState.error &&
           (
             <div
@@ -105,15 +106,10 @@ export function AutomationsPage() {
 
                 {automationsState.isLoading
                   ? (
-                      <div className="space-y-4">
-                        {[1, 2, 3].map(
-                          (index) =>
-                            (<div
-                              key={index}
-                              className="v2-skeleton h-28 rounded-[18px]"
-                            />)
-                        )}
-                      </div>
+                      <SkeletonList
+                        count={3}
+                        itemClassName="h-28 rounded-[18px]"
+                      />
                     )
                   : (
                       <AutomationsList
@@ -136,8 +132,7 @@ export function AutomationsPage() {
                     )}
                 </>
               )}
-        </div>
-      </div>
-    </div>
+      </PageStack>
+    </PageScroll>
   );
 }

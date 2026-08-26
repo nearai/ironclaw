@@ -108,7 +108,7 @@ update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
   caller-level route tests mirroring `tests/google_oauth_routes.rs`.
 - **Streaming / events:** never broadcast durable-looking state directly from a
   handler; project through `ProductSurface` into the redacted
-  `WebChatV2EventFrame` first (see `.claude/rules/gateway-events.md`).
+  `WebChatV2EventFrame` first (see `.claude/rules/events.md`).
 
 ## Validation
 

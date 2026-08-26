@@ -694,7 +694,9 @@ async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
             && RAILWAY_MANAGED_EGRESS_WRAPPER
                 .contains("for audit_file in \"$material\"/audit/proxy.log*; do")
             && RAILWAY_MANAGED_EGRESS_WRAPPER
-                .contains("if [ \"$audit_total\" -gt 268435456 ]; then"),
+                .contains("if [ \"$audit_total\" -gt 268435456 ]; then")
+            && RAILWAY_MANAGED_EGRESS_WRAPPER
+                .contains("cat \"$audit_append\" >> \"$audit_log\" || return 1"),
         "Railway audit append must fail closed before aggregate retained evidence exceeds 256 MiB"
     );
     assert!(

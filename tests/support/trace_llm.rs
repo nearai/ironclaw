@@ -295,8 +295,84 @@ pub struct TraceLlm {
 #[derive(Debug, Clone)]
 struct CapturedCall {
     messages: Vec<ChatMessage>,
-    tools: Vec<ToolDefinition>,
+    tools: Option<Vec<ToolDefinition>>,
     response_format: Option<CompletionResponseFormat>,
+}
+
+/// One request whose cached prompt prefix churned with no surface change.
+///
+/// Both fields are consumed through the `Debug` rendering in
+/// `assert_prompt_cache_prefix_stable`'s failure message, which the lint does
+/// not count as a read — and the many test binaries that mount this support
+/// tree without calling that assertion see them as dead. Same allow the
+/// sibling support modules carry for the same reason.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PromptCachePrefixChurn {
+    /// Index into `captured_requests()` of the request that diverged.
+    pub request_index: usize,
+    /// Human-readable excerpt around the first differing byte.
+    pub divergence: String,
+}
+
+/// The provider-cached prompt prefix: the LEADING run of system messages.
+///
+/// Only the leading run — a system message positioned after the first
+/// non-system message is transcript content, not part of the cached prefix.
+pub fn leading_system_block(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .take_while(|message| matches!(message.role, Role::System))
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn tool_surface_signature(tools: Option<&Vec<ToolDefinition>>) -> Option<Vec<String>> {
+    tools.map(|defs| {
+        let mut definitions = defs
+            .iter()
+            .map(|def| {
+                serde_json::to_string(&(&def.name, &def.description, &def.parameters))
+                    .expect("ToolDefinition fields are JSON-serializable")
+            })
+            .collect::<Vec<_>>();
+        definitions.sort();
+        definitions
+    })
+}
+
+/// Excerpt around the first differing BYTE, clamped to char boundaries.
+///
+/// Byte offsets are what a cache actually compares; the clamping keeps the
+/// diagnostic printable when the divergence lands inside a multi-byte
+/// character (the prompt is full of em dashes, so this is the common case).
+pub fn first_divergence(before: &str, after: &str) -> String {
+    let at = before
+        .as_bytes()
+        .iter()
+        .zip(after.as_bytes())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| before.len().min(after.len()));
+    format!(
+        "diverges at byte {at}: before={:?} after={:?}",
+        excerpt_around(before, at),
+        excerpt_around(after, at)
+    )
+}
+
+/// A window around `at`, with both ends walked back to a char boundary so the
+/// slice can never panic and never degrades to an unhelpful placeholder.
+fn excerpt_around(text: &str, at: usize) -> &str {
+    let mut start = at.saturating_sub(80).min(text.len());
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (at + 120).min(text.len());
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
+    &text[start..end]
 }
 
 /// Return the `last_user_message_contains` substring of a step, if any.
@@ -478,6 +554,43 @@ impl TraceLlm {
             .collect()
     }
 
+    /// Requests whose provider-cached prompt prefix changed without a
+    /// tool-surface change to explain it (#6985).
+    ///
+    /// Providers cache a prefix of the request, so a system block that is
+    /// rewritten between calls means every call pays full input cost. No
+    /// functional assertion can see that — the model still answers correctly —
+    /// which is why it is checked structurally here, over the same capture the
+    /// other assertions read.
+    ///
+    /// A changed tool surface is the one legitimate cause (installing an
+    /// extension really does rewrite the capability list), so it is excluded.
+    /// Mirrors the `_observe_cache_prefix` gate in `tests/e2e/mock_llm.py`.
+    pub fn prompt_cache_prefix_churn(&self) -> Vec<PromptCachePrefixChurn> {
+        let captures = self.captured_calls.lock().unwrap().clone();
+        let mut churn = Vec::new();
+        for index in 1..captures.len() {
+            let before = leading_system_block(&captures[index - 1].messages);
+            let after = leading_system_block(&captures[index].messages);
+            if before == after {
+                continue;
+            }
+            let before_surface = tool_surface_signature(captures[index - 1].tools.as_ref());
+            let after_surface = tool_surface_signature(captures[index].tools.as_ref());
+            if before_surface.is_none() || after_surface.is_none() {
+                continue;
+            }
+            if before_surface != after_surface {
+                continue;
+            }
+            churn.push(PromptCachePrefixChurn {
+                request_index: index,
+                divergence: first_divergence(&before, &after),
+            });
+        }
+        churn
+    }
+
     /// Clone of every `tools` argument the dispatcher / worker shipped to the
     /// model. Index `i` matches the `i`-th `captured_requests()` entry.
     /// Empty for `complete()`-only calls (text-only paths).
@@ -486,7 +599,7 @@ impl TraceLlm {
             .lock()
             .unwrap()
             .iter()
-            .map(|call| call.tools.clone())
+            .map(|call| call.tools.clone().unwrap_or_default())
             .collect()
     }
 
@@ -528,7 +641,7 @@ impl TraceLlm {
         // cannot associate one request's format with another request.
         self.captured_calls.lock().unwrap().push(CapturedCall {
             messages: messages.to_vec(),
-            tools: tools.map(|t| t.to_vec()).unwrap_or_default(),
+            tools: tools.map(|t| t.to_vec()),
             response_format,
         });
 
@@ -894,5 +1007,127 @@ impl LlmProvider for TraceLlm {
                     .to_string(),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_cache_tests {
+    use super::*;
+
+    fn tool(description: &str, parameters: serde_json::Value) -> ToolDefinition {
+        ToolDefinition {
+            name: "search".to_string(),
+            description: description.to_string(),
+            parameters,
+        }
+    }
+
+    #[test]
+    fn tool_surface_signature_includes_description_and_parameters() {
+        let baseline = vec![tool("search docs", serde_json::json!({"type": "object"}))];
+        let description_changed = vec![tool(
+            "search all docs",
+            serde_json::json!({"type": "object"}),
+        )];
+        let parameters_changed = vec![tool(
+            "search docs",
+            serde_json::json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+        )];
+
+        assert_ne!(
+            tool_surface_signature(Some(&baseline)),
+            tool_surface_signature(Some(&description_changed))
+        );
+        assert_ne!(
+            tool_surface_signature(Some(&baseline)),
+            tool_surface_signature(Some(&parameters_changed))
+        );
+        assert_ne!(
+            tool_surface_signature(None),
+            tool_surface_signature(Some(&vec![]))
+        );
+    }
+
+    #[test]
+    fn concurrent_request_and_tool_capture_stays_aligned() {
+        fn trace_with_steps(count: usize) -> TraceLlm {
+            TraceLlm::from_trace(LlmTrace {
+                model_name: "capture-test".to_string(),
+                turns: vec![TraceTurn {
+                    user_input: "capture".to_string(),
+                    steps: (0..count)
+                        .map(|_| TraceStep {
+                            request_hint: None,
+                            response: TraceResponse::Text {
+                                content: "ok".to_string(),
+                                input_tokens: 1,
+                                output_tokens: 1,
+                            },
+                            expected_tool_results: Vec::new(),
+                        })
+                        .collect(),
+                    expects: TraceExpects::default(),
+                }],
+                memory_snapshot: Vec::new(),
+                http_exchanges: Vec::new(),
+                expects: TraceExpects::default(),
+                steps: Vec::new(),
+            })
+        }
+
+        let llm = std::sync::Arc::new(trace_with_steps(16));
+        let threads = (0..16)
+            .map(|index| {
+                let llm = std::sync::Arc::clone(&llm);
+                std::thread::spawn(move || {
+                    let tag = format!("call-{index}");
+                    let messages = vec![
+                        ChatMessage::system(format!("system {tag}")),
+                        ChatMessage::user(tag.clone()),
+                    ];
+                    let tools = vec![tool(&tag, serde_json::json!({"type": "object"}))];
+                    llm.next_step(&messages, Some(&tools), None)
+                        .expect("concurrent trace step is available");
+                })
+            })
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().expect("capture thread completes");
+        }
+
+        let captures = llm.captured_calls.lock().unwrap().clone();
+        assert_eq!(captures.len(), 16);
+        for capture in captures {
+            let user = capture
+                .messages
+                .iter()
+                .find(|message| message.role == Role::User)
+                .expect("capture carries its user tag");
+            assert_eq!(capture.tools.as_ref().unwrap()[0].description, user.content);
+        }
+
+        let sequential = trace_with_steps(2);
+        let stable_tools = vec![tool("stable", serde_json::json!({"type": "object"}))];
+        sequential
+            .next_step(
+                &[
+                    ChatMessage::system("system before"),
+                    ChatMessage::user("first"),
+                ],
+                Some(&stable_tools),
+                None,
+            )
+            .expect("first trace step is available");
+        sequential
+            .next_step(
+                &[
+                    ChatMessage::system("system after"),
+                    ChatMessage::user("second"),
+                ],
+                Some(&stable_tools),
+                None,
+            )
+            .expect("second trace step is available");
+        assert_eq!(sequential.prompt_cache_prefix_churn().len(), 1);
     }
 }

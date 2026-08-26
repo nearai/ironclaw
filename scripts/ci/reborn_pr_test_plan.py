@@ -153,8 +153,16 @@ IGNORED_PREFIXES = (
     ".codebase-memory/",
 )
 IGNORED_GUIDANCE_PATHS = {
+    "tests/AGENTS.md",
     "tests/CLAUDE.md",
+    "tests/integration/AGENTS.md",
     "tests/integration/CLAUDE.md",
+    # `check-guidance.py`'s alias rule also requires this pair (`crates/` or
+    # `TESTS_PREFIX`); without an explicit entry here it falls into the
+    # `tests/support/reborn_parity_qa/` arm below and over-selects the root
+    # partition for a pure guidance edit.
+    "tests/support/reborn_parity_qa/AGENTS.md",
+    "tests/support/reborn_parity_qa/CLAUDE.md",
 }
 # Repo-root prose/example files with no build or test surface. Root `*.md` is
 # already handled inline below; this covers the non-`.md` siblings.
@@ -450,10 +458,27 @@ PR_STATIC_CONTROL_PATHS = {
     #     exercise a change to it. Surfaced 2026-08-05 (#7259) when the docs
     #     path sweep touched its docstring.
     "scripts/check-type-duplicates.py",
+    #   * Its self-test, `python3 scripts/test-check-type-duplicates.py`, runs
+    #     under Code Style's "Static-check self-tests" step
+    #     (`.github/workflows/code_style.yml`) — the same lane that runs
+    #     `scripts/ci/test-check-guidance.py` and the other `scripts/ci/`
+    #     self-tests covered by the `PR_STATIC_CONTROL_PREFIXES` rule below.
+    #     Neither this file nor `scripts/check-type-duplicates.py` sits under
+    #     `scripts/ci/`, so unlike its sibling neither tripped the workflow's
+    #     `has_code` path filter on its own — a PR touching only this file had
+    #     `fast-checks` (and thus the self-test step) skipped entirely (review
+    #     on #7797). `has_code`'s scope list now names both scripts
+    #     explicitly, pinned by the `has_code` filter's `in_scope` probes in
+    #     `scripts/ci/ws12_workflow_contracts.py`. Static control here means
+    #     "no Tests (Reborn) lane reads it", not "no workflow runs it": Code
+    #     Style owns this self-test, not a Reborn Rust test lane, so it stays
+    #     classified as static control.
+    "scripts/test-check-type-duplicates.py",
     #   * `render-architecture-video.sh` is a local one-command Remotion
-    #     render for docs/internal/architecture-video; referenced only by the
-    #     `architecture-video` Claude skill, never by a workflow. Same PR,
-    #     same reason: the sweep rewrote its VIDEO_DIR path.
+    #     render for docs/internal/architecture-video; never invoked by a
+    #     workflow (the `architecture-video` Claude skill that used to
+    #     reference it was deleted as stale v1-architecture content — see
+    #     `.claude/skills/`). No lane can exercise a change to it.
     "scripts/render-architecture-video.sh",
     #   * `pre-commit-safety.sh` is a local git hook, not a CI lane.
     "scripts/pre-commit-safety.sh",
@@ -570,7 +595,24 @@ REPO_CONFIG_TEST_OWNERS = {
 # hook, while Code Style both triggers on the tree and lints its contents
 # (`scripts/ci/test-ci-comm-locale-pin.sh` follows the symlinks and scans them).
 PR_STATIC_CONTROL_PREFIXES = (".github/workflows/", "scripts/ci/", ".githooks/")
-SHARED_REBORN_ACTION_PREFIXES = (".github/actions/setup-sccache-dist/",)
+# cargo-dist's build-setup fragment. cargo-dist re-inlines it into
+# `.github/workflows/ironclaw-release.yml` on every `dist generate`, so it is
+# workflow source that happens to live outside `.github/workflows/` — the same
+# static control as the file it is inlined into, and read by no Reborn lane.
+# The planner fails closed on unclassified paths, so a `.github/` file with no
+# rule takes the whole PR's plan step down rather than mis-scheduling it.
+PR_STATIC_CONTROL_FRAGMENTS = (".github/dist-build-setup.yml",)
+SHARED_REBORN_ACTION_PREFIXES = (
+    ".github/actions/setup-sccache-dist/",
+    ".github/actions/setup-rust/",
+    # The deliberate mapping the arm below asks for. `install-cargo-component`
+    # is consumed by `coverage.yml` and `platform-and-compat.yml`; a change to
+    # it can move what those lanes build, and no narrow lane exercises it
+    # safely, so it takes the exhaustive plan like its two siblings. Until this
+    # entry existed it hit the fail-closed arm, so a PR editing only that file
+    # took the whole plan step down instead of scheduling anything.
+    ".github/actions/install-cargo-component/",
+)
 BUCKET_WEIGHTS = {
     "reborn-core": 12,
     "auth-security": 9,
@@ -896,10 +938,12 @@ def build_plan(
             nextest_config_changed = True
             continue
         if path.startswith(SHARED_REBORN_ACTION_PREFIXES):
-            # Every `Tests (Reborn)` job installs the compiler cache through
-            # this local action. No narrow lane can exercise a change to it
-            # safely, so use the exhaustive plan just as we do for shared
-            # nextest configuration. Keep other `.github/actions/**` paths
+            # Every `Tests (Reborn)` job installs the compiler cache
+            # (setup-sccache-dist) or the Rust toolchain itself
+            # (setup-rust) through one of these local actions. No narrow
+            # lane can exercise a change to either safely, so use the
+            # exhaustive plan just as we do for shared nextest
+            # configuration. Keep other `.github/actions/**` paths
             # fail-closed until their consumers are mapped deliberately.
             shared_reborn_action_changed = True
             continue
@@ -921,7 +965,7 @@ def build_plan(
             exact_test_targets[package].add(("test", Path(owner).stem))
             reasons.append(f"repository config parsed by {owner}: {path}")
             continue
-        if path in PR_STATIC_CONTROL_PATHS or path.startswith(
+        if path in PR_STATIC_CONTROL_FRAGMENTS or path in PR_STATIC_CONTROL_PATHS or path.startswith(
             PR_STATIC_CONTROL_PREFIXES
         ):
             reasons.append(f"static CI or workspace-policy checks own: {path}")
@@ -1214,7 +1258,7 @@ def build_plan(
         )
     if shared_reborn_action_changed:
         return _full_plan(
-            "shared sccache action changed; this PR runs the exhaustive plan",
+            "shared reborn action changed; this PR runs the exhaustive plan",
             canonical_packages,
         )
 

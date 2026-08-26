@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
+import { SkeletonList } from "../../../design-system/skeleton";
 import { useT } from "../../../lib/i18n";
 import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 
@@ -462,7 +463,13 @@ export function WorkspaceTree({
   ]);
 
   if (isLoading) {
-    return (<div className="space-y-2 p-3">{[1, 2, 3, 4].map((i) => (<div key={i} className="v2-skeleton h-8 rounded-md" />))}</div>);
+    return (
+      <SkeletonList
+        count={4}
+        className="space-y-2 p-3"
+        itemClassName="h-8 rounded-md"
+      />
+    );
   }
 
   if (!rootEntries.length) {

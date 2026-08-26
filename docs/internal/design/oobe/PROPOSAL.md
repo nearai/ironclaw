@@ -17,7 +17,7 @@
 
 This is the evidence-backed specification behind the overview. It states the problem, defines the two-phase model, inventories **what extends shipped code vs. what is net-new** (§3–§4 — the core framing), enumerates every dependency with an implementation approach (§5), maps the work onto the existing codebase and the #6918 family folders — now landed on `main` (§6), and records the security model, test strategy, risks, and open decisions. §11 explains how the APDD kit and PR #6918 frameworks are applied.
 
-> **Implementation is landing behind an off-by-default flag.** The earlier UI prototype (#6994) was rolled back in review; this branch carries the design artifacts (the [mockup](mockup.html) + [integration-review.html](integration-review.html)) and this written plan. Where this spec says *"the prototype"* or *"mock→`fetch` swap,"* it describes the *demonstrated* target UI and the earlier prototype — not code in this PR. Implementation **restarted** — slice 1 (`SuggestedTaskCard` + a gated surface) is landed, `oobe_suggestions` off by default; see [IMPLEMENTATION.md](IMPLEMENTATION.md).
+> **Current implementation is always available over durable data.** The earlier UI prototype (#6994) was rolled back in review because it exposed mock cards. The shipped surface mounts unconditionally, reads the durable suggestion feed, and renders no fabricated fallback data; see [VISION-RECONCILIATION.md](VISION-RECONCILIATION.md).
 
 ---
 
@@ -154,13 +154,15 @@ Each dependency states *what it needs* and *how to build it*; the PLAN sequences
 - `GET/POST /api/webchat/v2/settings/agent-mode`; surface `agent_mode` on the session so the pill hydrates on load exactly as `global_auto_approve` already does.
 - Wire semantics into the existing approval system: `suggest` = every action gates (today's default); `plan` = batched plan, one approval resolves the set; `auto` = approved task **types** skip the per-action gate (the **typed generalization of `global_auto_approve`**), others still gate; `bypass` (Vision) = no gates. `auto`/`bypass` are privilege-escalating and require explicit gate-suppression tests + an audit trail on every auto-run action.
 
-### 5.5 D-F5 — Carousel de-risk / gating  ⚠ current merge blocker
+### 5.5 D-F5 — Carousel data safety  ✅ resolved
 
-*Needs:* PR #6994's landing carousel calls `listAutomationTasks()` → `MOCK_COMPLETED_TASKS` for **all** users and is **not** DEV-gated (only `/design-preview` is). Merging as-is shows fabricated "done for you" cards to real users. *Approach:* wire the carousel to the real projection (empty until tasks exist) — which D-F1 provides — **or** gate it behind DEV / a feature flag until D-F1 lands. This dependency is why PR #6994 is a draft; it must close before Foundational ships.
+*Resolution:* the earlier `MOCK_COMPLETED_TASKS` path is retired. The landing surface reads the durable suggestion projection, renders no cards for an empty feed, and is always available without a rollout switch.
 
 ### 5.6 D-F6 — DESIGN.md + design tokens (cross-cutting, APDD design track)
 
-*Needs:* IronClaw has no root `DESIGN.md` and no component workbench; the OOBE cards are a greenfield component family — the natural pilot to seed the APDD design governance track (see the prior APDD kit evaluation, `docs/plans/apdd-governance-kit/`). *Approach:* seed a `DESIGN.md` capturing the v2 token system, theming, a11y floors, and the card component taxonomy; optionally stand up a Storybook workbench for the card/drawer/action-bar components (they are pure Tier-2/3 presentational components — ideal isolation candidates). Deferrable, but cheapest to do while the components are being productionized.
+> ✎ **Governance ownership moved (2026-08-21).** The `DESIGN.md` constitution, the `--v2-*` token architecture, and the Storybook workbench are owned by the WebUI design-system program — [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257; Phase 1 under Epic #7038, shipping as PR #7750 · Phases 2–3 under Epic #7781, with issue #7042 tracking the Phase-2 `DESIGN.md` governance work specifically), whose [PROPOSAL §9](../../reborn/design-system/PROPOSAL.md#9-ownership-boundary-one-canonical-governance-record) records the boundary. **D-F6 no longer stands any of that up.** What survives is its *pilot* half: the OOBE card/drawer/action-bar family is catalogued and judged **through** that system — stories in the Phase-1 catalog, conformance against the Phase-2 `DESIGN.md`. If the cards productionize before Phase 1 lands, they ship as ordinary token-driven components and their stories follow in its wake; they do not fork a second workbench. The original text below is **historical** — kept as the record of why this dependency was raised, superseded in full by the note above.
+
+> *Historical (pre-2026-08-21):* *Needs:* IronClaw has no root `DESIGN.md` and no component workbench; the OOBE cards are a greenfield component family — the natural pilot to seed the APDD design governance track (see the prior APDD kit evaluation, `docs/internal/apdd-governance-kit/` — [PR #7255](https://github.com/nearai/ironclaw/pull/7255), not yet on `main`). *Approach:* seed a `DESIGN.md` capturing the v2 token system, theming, a11y floors, and the card component taxonomy; optionally stand up a Storybook workbench for the card/drawer/action-bar components (they are pure Tier-2/3 presentational components — ideal isolation candidates). Deferrable, but cheapest to do while the components are being productionized.
 
 ### 5.7 D-V1 — Cold-start queued OAuth orchestration
 
@@ -222,14 +224,14 @@ Following `.claude/rules/testing.md` (integration-first; test through the caller
 
 - **8.1 Backend (integration-first).** Each new event: persistence / replay / projection-visibility / redaction / ordering / transport-serialization tests. The projection: the cross-user isolation test (§7). Each route/facade method: a Reborn integration test through the harness asserting at a seam — not `wait_for_status(Completed)` alone. The `auto`/`bypass` gate-suppression paths: explicit privilege-escalation tests + audit-trail assertions. Modify-rerun: a test that an automated-task modify re-executes and returns fresh evidence.
 - **8.2 Frontend.** The prototype already ships `automation-tasks.test.ts` + VM-sandbox stubs (1032 tests green). Add: seam contract tests (the `fetch` shapes match the route DTOs), drawer state-machine tests, connect-flow wiring test (the card's connect calls the shared resolver with the right `extension_name`).
-- **8.3 Design validation gate (APDD).** If D-F6 is adopted: `DESIGN.md` conformance (tokens, theming, a11y floors — contrast, focus rings, state-not-by-color-alone), 1:1 parity against the mockup, and — if Storybook is stood up — smoke play test + token/CSS check + one story per card state.
+- **8.3 Design validation gate (APDD).** Judged against the design-system program's `DESIGN.md` once it lands (§5.6; Phase 2 sits under Epic #7781 and is tracked by issue #7042): `DESIGN.md` conformance (tokens, theming, a11y floors — contrast, focus rings, state-not-by-color-alone), 1:1 parity against the mockup, and — once the Phase-1 Storybook catalog lands (#7750) — smoke play test + token/CSS check + one story per card state.
 - **8.4 CUJ.** Add a first-run onboarding Critical User Journey (fresh user → cards appear → connect a tool → approve → card flips to done → appears in `/automations`) to the regression baseline once Foundational lands.
 
 ## 9. Risks
 
 | Risk | Mitigation |
 |---|---|
-| Mock cards shown to real users (D-F5) | Draft gate on PR #6994; carousel reads real projection or DEV/flag before merge |
+| Mock cards shown to real users (D-F5) | Mock data path removed; carousel reads only the durable suggestion projection |
 | Suggestion producer (D-F2) scope-creeps into an agent feature | Ship the deterministic starter set first; keep the suggester an explicit Vision upgrade |
 | `auto`/`bypass` over-suppress gates | Typed per-kind consent + gate-suppression tests + audit trail; `bypass` deferred to Vision |
 | Contract drifts from current crate names | Names reconciled to current `main` (§5.1, F0) after the #6918 reorg; the contract's `src/webui_v2/` path is still current (verified) |
@@ -241,15 +243,15 @@ Following `.claude/rules/testing.md` (integration-first; test through the caller
 1. **[OPEN]** Phase boundary — is any Vision piece (docked drawer V4, reveal V2) worth pulling into Foundational?
 2. **[OPEN]** D-F2 suggestion producer — deterministic starter set (recommended) vs. triggers-hosted suggester vs. agent-driven? Bounds the first-run feed.
 3. **[OPEN]** D-F4 `auto` semantics — exact definition/bounds of "approved task types" (per-tool, per-action, spend/impact caps)?
-4. **[OPEN]** D-F5 — real projection now, or DEV/flag gate first, to unblock PR #6994?
-5. **[OPEN]** D-F6 — adopt the APDD design track (DESIGN.md + tokens now, Storybook later) with the OOBE cards as pilot?
+4. **[RESOLVED]** D-F5 — the carousel reads the durable projection and the mock path is removed.
+5. **[RESOLVED 2026-08-21]** D-F6 — design governance is owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257, §9); OOBE contributes the card family as a pilot and stands up no `DESIGN.md`, tokens, or workbench of its own (§5.6).
 6. **[OPEN]** D-V5 — username-derivation precedence when several sources resolve; fallback when none.
 7. **[OPEN]** Enterprise tool config — does the admin-whitelisted set surface to the user as read-only "connected by your workspace," or invisibly?
 
 ## 11. How the two reference frameworks are applied
 
 - **PR #6918 (target-architecture) framing** — this package mirrors #6918's document set: an executive **README** (overview + reviewer decisions + doc index), an evidence-backed **PROPOSAL** (this file), a sequenced **PLAN** (waves/gates/PR-sizing), and a **CHECKLIST** (definition of done). It borrows #6918's execution discipline: move-only/behavior-free PRs kept separate from semantic changes, guidance travels with the change, deletions use the un-masking discipline, and `main` stays shippable after every PR (PLAN).
-- **APDD kit (product/design governance)** — this package follows the kit's **docs-first feature workflow**: spec → team review (this §10 stays open until folded in) → plan → test plan, with the binding anchors present (*Feedback & Decisions* §10, *Regression Tests* §8, and a *Critical Bug Fix Log* below per Rule 2). The **design track** (D-F6) proposes seeding `DESIGN.md` + tokens + a Storybook workbench for the new component family, exactly the kit's core design governance. The kit's evaluation for IronClaw is recorded at `docs/plans/apdd-governance-kit/`.
+- **APDD kit (product/design governance)** — this package follows the kit's **docs-first feature workflow**: spec → team review (this §10 stays open until folded in) → plan → test plan, with the binding anchors present (*Feedback & Decisions* §10, *Regression Tests* §8, and a *Critical Bug Fix Log* below per Rule 2). The **design track** is not ours to seed: `DESIGN.md` + tokens + the Storybook workbench are owned by [`docs/internal/reborn/design-system/`](../../reborn/design-system/README.md) (PR #7257), and D-F6 contributes the card family as its pilot (§5.6). The kit's evaluation for IronClaw is proposed at `docs/internal/apdd-governance-kit/` ([PR #7255](https://github.com/nearai/ironclaw/pull/7255) — open, not yet on `main`).
 
 <a name="review-artifact"></a>**Human-review artifact.** A self-contained visual review aid — the 5-layer integration schematic, the dependency graph, the phase timeline, and the shipped-vs-net-new map — lives in this package as [integration-review.html](integration-review.html) ([rendered preview](https://html-preview.github.io/?url=https://github.com/nearai/ironclaw/blob/feat/oobe-chat-automations/docs/design/oobe/integration-review.html)). It renders §3, §5, and §6 for reviewers who prefer the visual.
 

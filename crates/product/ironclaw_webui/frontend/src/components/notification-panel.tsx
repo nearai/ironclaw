@@ -67,7 +67,7 @@ function NotificationRow({ message, unread, onOpen, onArchive }) {
         </span>
       </span>
       </button>
-      {message.durable && onArchive &&
+      {onArchive &&
       (<button
         type="button"
         data-testid="notification-archive"

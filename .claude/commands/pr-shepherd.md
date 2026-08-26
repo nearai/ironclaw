@@ -100,8 +100,8 @@ Read EVERY changed file in full (not just diff hunks). For PRs touching >20 file
 - No `.unwrap()` or `.expect()` in production code
 - Prefer `crate::` for cross-module imports (`super::` OK in tests/intra-module)
 - Error types use `thiserror`
-- If persistence touched, both backends updated (postgres.rs AND libsql/)
-- New tools implement `Tool` trait correctly and registered
+- If persistence touched, verify dual-backend parity the way `ironclaw_hooks` does it (`.claude/skills/ironclaw-reborn-testing/SKILL.md` — `src/postgres_backend/` + `src/libsql_backend/`, proved by its `parity_matrix.rs`); first confirm this crate is one of the ones that branch on backend at all (`.claude/rules/database.md`) with `for d in $(find crates -type d -name postgres_backend); do p=$(dirname "$d"); [ -d "$p/libsql_backend" ] && echo "$p"; done` — only `ironclaw_hooks` matches today
+- New model-callable tools implement `ToolAdapter` (`crates/contracts/ironclaw_extension_contracts/src/tool_adapter.rs`) via an extension manifest, wired per `.claude/skills/reborn-extension-surfaces/SKILL.md`
 - External tool output passes through safety layer
 - Tool parameters redacted before logging/SSE
 - No byte-index slicing on external strings
@@ -171,7 +171,7 @@ Follow IronClaw conventions:
 - `thiserror` for errors
 - `crate::` imports
 - No `.unwrap()` in production
-- Both DB backends if persistence touched
+- Dual-backend parity if persistence touched and the crate branches on backend (see the IronClaw-specific checks above)
 - Regression test for every bug fix (enforced by commit-msg hook; bypass only with `[skip-regression-check]` if genuinely not feasible)
 
 After all fixes implemented, proceed to Phase 4.
@@ -187,17 +187,17 @@ cargo fmt
 ```
 
 ```bash
-cargo clippy --all --benches --tests --examples --all-features
+cargo clippy --all --benches --tests --examples --all-features -- -D warnings
 ```
 
 ```bash
-cargo test --lib
+cargo test
 ```
 
-If persistence changes are present, also verify feature isolation:
+If persistence changes are present in a crate with a real dual-backend split (see the IronClaw-specific checks above), also verify both backends build:
 ```bash
-cargo check --no-default-features --features libsql
-cargo check --all-features
+cargo check -p <crate>
+cargo check -p <crate> --all-features
 ```
 
 **If any step fails:** fix the issue and re-run. Do NOT proceed past a failing step. Loop up to 3 times per step. If still failing after 3 attempts, report the failure and stop.

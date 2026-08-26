@@ -1,3 +1,4 @@
+// arch-exempt: large_file, provider request conversion and Bedrock wire-shape tests still lack a separate provider-wire sub-owner; one match arm was forced by Role::HostReminder (#6985), plan #6985
 //! AWS Bedrock LLM provider using the native Converse API.
 //!
 //! Uses `aws-sdk-bedrockruntime` to call `client.converse()` directly,
@@ -455,7 +456,7 @@ fn convert_messages(
                     system_blocks.push(SystemContentBlock::Text(msg.content.clone()));
                 }
             }
-            Role::User => {
+            Role::User | Role::HostReminder => {
                 // Flush any pending tool results as a User message first
                 flush_tool_results(&mut pending_tool_results, &mut bedrock_messages)?;
 
@@ -1242,6 +1243,38 @@ mod tests {
         assert_eq!(msgs[2].content().len(), 2);
         assert!(msgs[2].content()[0].is_tool_result());
         assert!(msgs[2].content()[1].is_tool_result());
+    }
+
+    #[test]
+    fn host_reminder_merges_with_flushed_tool_results() {
+        let messages = vec![
+            ChatMessage::user("fetch weather"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![crate::provider::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "weather".to_string(),
+                    arguments: serde_json::json!({}),
+                    reasoning: None,
+                    signature: None,
+                    arguments_parse_error: None,
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "weather", "sunny"),
+            ChatMessage::host_reminder("Current date/time at loop start: 10:00"),
+        ];
+
+        let (_, converted) = convert_messages(&messages).expect("messages convert");
+
+        assert_eq!(
+            converted.len(),
+            3,
+            "tool result and reminder must share one user turn"
+        );
+        let tail = converted.last().expect("tail user message");
+        assert_eq!(*tail.role(), ConversationRole::User);
+        assert!(matches!(tail.content()[0], ContentBlock::ToolResult(_)));
+        assert!(matches!(tail.content()[1], ContentBlock::Text(_)));
     }
 
     #[test]

@@ -1591,6 +1591,28 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         .assert_tool_invoked("builtin.extension_install")
         .await
         .expect("the natural-language install turn invokes extension installation");
+    // #7853 regression: Telegram's workspace-bot install (this turn) reaches
+    // `Active` through the generic per-account credential gate, WITHOUT a
+    // personal device-link ceremony — but Telegram's manifest ALSO declares a
+    // separate personal-account device-link auth requirement (the linked
+    // session `group_device_link/` exercises). The model-visible `next_step`
+    // the install tool result carries must therefore still direct the user to
+    // link their own account from the Web UI (the device-link user-setup guidance
+    // in `extension_lifecycle_capabilities.rs`) instead of reporting a bare
+    // "activation completed" — PR #7766 changed telegram's
+    // `[channel.connection] strategy` from `device_link` to
+    // `web_generated_code`, which silently flips
+    // `device_link_user_setup_requirement`'s predecessor to `false` (it required BOTH
+    // the connection strategy AND the auth setup to read `DeviceLink`) and
+    // drops this guidance.
+    lifecycle
+        .assert_tool_result_contains("cannot run from chat")
+        .await
+        .expect(
+            "an Active Telegram install must direct the user to link their own account from \
+             the Web UI (device-link user-setup guidance) rather than only reporting \
+             activation complete",
+        );
     let installation_store = services
         .extension_installation_store_for_test()
         .expect("extension delivery profile carries the lifecycle store");
@@ -2386,6 +2408,156 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
         .assert_tool_invoked(ironclaw_host_runtime::ATTACH_WORKSPACE_FILE_TO_REPLY_CAPABILITY_ID)
         .await
         .expect("Telegram file delivery was sourced from the explicit reply-attachment tool");
+}
+
+/// #7853 GAP 2: `DeviceLinkUserSetup::AlreadyLinked` had zero coverage
+/// anywhere — every existing device-link assertion (this file's `cannot run
+/// from chat` regression on `telegram_update_becomes_a_turn_and_a_coordinated_reply`,
+/// `group_device_link/`) proves only the `Required` state.
+/// `resolve_device_link_user_setup` returns `AlreadyLinked` only when
+/// `RuntimeExtensionActivationCredentialGate::missing_requirements` finds the
+/// caller's device-link credential already satisfied, so this seeds a REAL
+/// Configured Telegram credential account for the install turn's actual
+/// dispatch caller through the harness's production manual-token seam
+/// (`seed_credential_account_with_material`, the same
+/// `RuntimeCredentialAccountSelectionService` seam production reads) before
+/// installing — never by hand-passing `DeviceLinkUserSetup::AlreadyLinked`
+/// into a renderer, which would bypass the resolver and prove nothing. The
+/// crate-tier lifecycle harness cannot reach this: it wires no native
+/// device-link adapter for Telegram, so activation there fails outright
+/// ("extension declares a device-link auth surface but bound no device-link
+/// adapter") before the resolver is ever reached — only this production-wired
+/// group (`TelegramFixtureFactory`) can drive telegram to `Active`.
+///
+/// `AlreadyLinked` and `Required` are only distinguishable on
+/// `builtin.extension_install`'s `next_step`
+/// (`install_guidance::active_install_next_step`); the bare
+/// `builtin.extension_activate` arm stays silent for both
+/// (`activate_device_link_notice`'s doc comment), so this drives install.
+#[tokio::test(flavor = "multi_thread")]
+async fn telegram_install_reports_already_linked_for_a_caller_with_a_satisfied_device_link_account()
+{
+    let group = RebornIntegrationGroup::builder()
+        .storage(StorageMode::LibSql)
+        .extension_delivery()
+        .await
+        .expect("delivery group builds on this backend");
+    let services = reborn_services(&group);
+
+    let lifecycle = group
+        .thread("conv-telegram-already-linked-lifecycle")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "telegram"}),
+            ),
+            RebornScriptedReply::text("installed and ready"),
+            // Second, idempotent install call after seeding the caller's own
+            // device-link credential account (`builtin.extension_install`
+            // supports being called again on an already-Active install and
+            // reports current state fresh each time — the capability's own
+            // model-facing description: "If install reports the extension is
+            // already installed, report the installed state ... it returns").
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "telegram"}),
+            ),
+            RebornScriptedReply::text("already linked, nothing more to do"),
+        ])
+        .build()
+        .await
+        .expect("telegram lifecycle thread builds");
+    // Production channel host assembly, exactly like the sibling #7853
+    // regression test above — attaches the snapshot watch, ingress registry,
+    // and admin-configuration secret storage the generic host's publish step
+    // for a CHANNEL-declaring package (Telegram) needs.
+    let _assembly = services
+        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+            thread_service: lifecycle
+                .thread_service_for_test()
+                .expect("group thread service"),
+            turn_coordinator: lifecycle.turn_coordinator_for_test(),
+            run_delivery_settings: RunDeliverySettings::default(),
+            identity: ChannelHostIdentity {
+                tenant_id: lifecycle.binding.tenant_id.clone(),
+                agent_id: lifecycle
+                    .binding
+                    .agent_id
+                    .clone()
+                    .expect("binding agent id"),
+                project_id: lifecycle.binding.project_id.clone(),
+                operator_user_id: lifecycle.binding.actor_user_id.clone(),
+            },
+        })
+        .expect("the production channel host assembly starts over the composed runtime");
+
+    // Admin bot configuration is required before the generic host will
+    // publish a CHANNEL-declaring package (Telegram) to `Active` — mirrors
+    // the sibling #7853 regression test's setup exactly.
+    configure_admin_group(
+        &group,
+        "extension.telegram",
+        0,
+        json!([
+            {"handle": "telegram_bot_token", "value": TELEGRAM_BOT_TOKEN},
+            {"handle": "telegram_webhook_secret", "value": TELEGRAM_WEBHOOK_SECRET},
+            {"handle": "telegram_webhook_url", "value": "https://hooks.example.test/webhooks/extensions/telegram/updates"},
+            {"handle": "bot_username", "value": "itest_already_linked_bot"},
+        ]),
+    )
+    .await;
+
+    lifecycle
+        .submit_turn("install telegram")
+        .await
+        .expect("Telegram installs without requiring a personal device link");
+    lifecycle
+        .assert_tool_invoked("builtin.extension_install")
+        .await
+        .expect("the natural-language install turn invokes extension installation");
+
+    // Seed a Configured device-link credential account for THIS caller, under
+    // the run's actual dispatch scope, only AFTER Telegram is installed — the
+    // production manual-token flow this seeds through resolves its auth
+    // recipe from the INSTALLED manifest, so seeding earlier has no recipe to
+    // resolve against.
+    let scope = ResourceScope {
+        tenant_id: lifecycle.binding.tenant_id.clone(),
+        user_id: lifecycle.binding.actor_user_id.clone(),
+        agent_id: lifecycle.binding.agent_id.clone(),
+        project_id: lifecycle.binding.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    };
+    group
+        .capability_harness()
+        .expect("host-runtime capability harness")
+        .seed_configured_credential_account(&scope, "telegram", "already-linked telegram device")
+        .await
+        .expect("seed a Configured Telegram credential account for the install caller");
+
+    lifecycle
+        .submit_turn("install telegram again")
+        .await
+        .expect("Telegram re-install reports the already-linked caller's fresh state");
+
+    let install_output = lifecycle
+        .tool_result_output("builtin.extension_install")
+        .await
+        .expect("install tool result is recorded");
+    let next_step = install_output["payload"]["next_step"]
+        .as_str()
+        .expect("install payload carries next_step");
+    assert!(
+        next_step.contains("already linked"),
+        "a caller with a satisfied device-link credential account must get the \
+         already-linked copy: {next_step}"
+    );
+    assert!(
+        !next_step.contains("cannot run from chat"),
+        "an already-linked caller must not be told to go link again: {next_step}"
+    );
 }
 
 /// Added with the run-acts-as-invoker ruling (#7377): presence admits the

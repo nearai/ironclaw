@@ -65,10 +65,10 @@ pub async fn run(group: &RebornIntegrationGroup) -> HarnessResult<()> {
         .submit_turn("when does Sarah like her standup scheduled")
         .await?;
     reader
-        .assert_system_prompt_contains("Thursday mornings")
+        .assert_model_request_contains("Thursday mornings")
         .await?;
     reader
-        .assert_system_prompt_excludes(UNWRITTEN_MARKER)
+        .assert_model_request_excludes(UNWRITTEN_MARKER)
         .await?;
 
     Ok(())

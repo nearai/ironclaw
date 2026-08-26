@@ -871,6 +871,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "LICENSE-APACHE",
             "LICENSE-MIT",
             "scripts/check_no_panics.py",
+            "scripts/check-type-duplicates.py",
+            "scripts/test-check-type-duplicates.py",
             "scripts/dev_metrics.py",
             "scripts/pre-commit-safety.sh",
             "scripts/test-mutation-audit.sh",
@@ -1012,13 +1014,102 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "full")
         self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
         self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
-        self.assertIn("shared sccache action changed", plan["reasons"][0])
+        self.assertIn("shared reborn action changed", plan["reasons"][0])
 
         with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
             self.plan(
                 "pull_request",
                 [
                     ".github/actions/setup-sccache-dist/action.yml",
+                    ".github/actions/some-undecided-action/action.yml",
+                ],
+            )
+
+    def test_shared_setup_rust_action_widens_to_exhaustive_plan(self) -> None:
+        """The shared setup-rust action installs Rust for every Reborn test lane.
+
+        Regression for the T1 CI-expedite landing: every `Tests (Reborn)` job
+        now installs Rust through `.github/actions/setup-rust` instead of a
+        bare `dtolnay/rust-toolchain` step, but the planner's fail-closed arm
+        for `.github/actions/**` had no rule for it — failing `Detect Reborn
+        test scope` on the very PR that introduced the composite.
+        """
+        plan = self.plan("pull_request", [".github/actions/setup-rust/action.yml"])
+        # Full field-by-field equality, not a handful of spot checks: an
+        # exhaustive plan has ten fields besides `reasons` that a partial
+        # assertion would leave silently unpinned (e.g. `run_sandbox_docker`
+        # regressing to False on a "full" plan would pass every check this
+        # test used to make).
+        self.assertEqual(
+            plan,
+            {
+                "mode": "full",
+                "reasons": [
+                    "shared reborn action changed; this PR runs the "
+                    "exhaustive plan"
+                ],
+                "changed_packages": [],
+                "affected_packages": ["alpha", "beta", "gamma"],
+                "crate_buckets": [
+                    {"name": "selected", "packages": ["alpha", "beta", "gamma"]}
+                ],
+                "root_partitions": [0, 1, 2, 3],
+                "integration_lanes": [0, 1, 2, 3, "groups"],
+                "run_group_tests": True,
+                "run_qa_replay": True,
+                "run_sandbox_docker": True,
+                "coverage_mode": "full",
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                [
+                    ".github/actions/setup-rust/action.yml",
+                    ".github/actions/some-undecided-action/action.yml",
+                ],
+            )
+
+    def test_shared_install_cargo_component_action_widens_to_exhaustive_plan(self) -> None:
+        """install-cargo-component is the third shared action, and needs the same pin.
+
+        Its two siblings each have a widening test; this one had only the
+        `.github/actions/**` sweep, which asserts the planner does not RAISE
+        but never checks the mode it returns. A mis-ordering against
+        PR_STATIC_CONTROL_FRAGMENTS could drop this path to a `none` or
+        `selected` plan and the sweep would still pass.
+        """
+        plan = self.plan("pull_request", [".github/actions/install-cargo-component/action.yml"])
+        # Full field-by-field equality, not a handful of spot checks: an
+        # exhaustive plan has ten fields besides `reasons` that a partial
+        # assertion would leave silently unpinned (e.g. `run_sandbox_docker`
+        # regressing to False on a "full" plan would pass every check this
+        # test used to make).
+        self.assertEqual(
+            plan,
+            {
+                "mode": "full",
+                "reasons": ["shared reborn action changed; this PR runs the exhaustive plan"],
+                "changed_packages": [],
+                "affected_packages": ["alpha", "beta", "gamma"],
+                "crate_buckets": [
+                    {"name": "selected", "packages": ["alpha", "beta", "gamma"]}
+                ],
+                "root_partitions": [0, 1, 2, 3],
+                "integration_lanes": [0, 1, 2, 3, "groups"],
+                "run_group_tests": True,
+                "run_qa_replay": True,
+                "run_sandbox_docker": True,
+                "coverage_mode": "full",
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "unmapped test or CI path"):
+            self.plan(
+                "pull_request",
+                [
+                    ".github/actions/install-cargo-component/action.yml",
                     ".github/actions/some-undecided-action/action.yml",
                 ],
             )
@@ -1087,7 +1178,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertNotEqual(paired["crate_buckets"], [], path)
 
     def test_repo_wide_test_guidance_selects_no_rust_lane(self) -> None:
-        for path in ("tests/CLAUDE.md", "tests/integration/CLAUDE.md"):
+        """Every path in IGNORED_GUIDANCE_PATHS, including the `CLAUDE.md`
+        alias symlinks the AGENTS.md/CLAUDE.md rename (#7797) introduced and
+        the parity-QA support pair, must select nothing on its own.
+
+        Regression: `tests/CLAUDE.md` used to be a real file; the rename
+        converted it (and its siblings) to `CLAUDE.md -> AGENTS.md` symlinks.
+        `git diff --name-only` still reports the path as changed on that
+        conversion, and only the new `AGENTS.md` half was ever added to
+        `IGNORED_GUIDANCE_PATHS` — so the alias half fell through to the
+        unmapped-path fail-closed arm and aborted the whole `Tests (Reborn)`
+        roll-up (`unmapped test or CI path: tests/CLAUDE.md`)."""
+        for path in (
+            "tests/AGENTS.md",
+            "tests/CLAUDE.md",
+            "tests/integration/AGENTS.md",
+            "tests/integration/CLAUDE.md",
+            "tests/support/reborn_parity_qa/AGENTS.md",
+            "tests/support/reborn_parity_qa/CLAUDE.md",
+        ):
             with self.subTest(path=path):
                 plan = self.plan("pull_request", [path])
                 self.assertEqual(plan["mode"], "none")
@@ -1159,6 +1268,95 @@ class RebornPrTestPlanTests(unittest.TestCase):
         # And an unknown `.github/` sibling still refuses.
         with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
             self.plan("pull_request", [".github/labeler.yml"])
+
+    def test_dist_build_setup_fragment_is_classified_as_static_control(self) -> None:
+        """`.github/dist-build-setup.yml` is workflow source outside `workflows/`.
+
+        Regression for a real red on PR #7821: that PR edited the fragment,
+        the planner had no rule for it, and the fail-closed arm took the whole
+        `Build affected-area test plan` step down — the plan step failed before
+        it could schedule anything, so a PR touching only CI plumbing could not
+        report. Exactly the `pull_request_template.md` gap above, one directory
+        over.
+
+        cargo-dist re-inlines this file into `.github/workflows/`
+        `ironclaw-release.yml` on every `dist generate`, so it is the same
+        static control as the workflow it becomes, and no Reborn lane reads it.
+
+        Paired assertions, same shape as the sibling tests: accepted AND
+        selects no Rust lane, with a real change riding along still selecting
+        its lane, and an undecided `.github/` neighbour still refusing.
+        """
+        plan = self.plan("pull_request", [".github/dist-build-setup.yml"])
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["crate_buckets"], [])
+        self.assertEqual(plan["root_partitions"], [])
+        self.assertEqual(plan["integration_lanes"], [])
+
+        paired = self.plan(
+            "pull_request",
+            [".github/dist-build-setup.yml", "crates/alpha/src/lib.rs"],
+        )
+        self.assertEqual(paired["mode"], "selected")
+        self.assertNotEqual(paired["crate_buckets"], [])
+
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", [".github/labeler.yml"])
+
+    def test_every_workflow_source_under_github_is_classified(self) -> None:
+        """Every file that makes CI *run* must be classified, with no gaps.
+
+        Scoped deliberately to `.github/actions/**` and the cargo-dist
+        fragment — the composite actions and workflow source that jobs
+        execute. `.github/workflows/**` is already covered wholesale by
+        `PR_STATIC_CONTROL_PREFIXES`.
+
+        NOT a sweep of all of `.github/`. Fail-closed on an undecided path is
+        this planner's intended behaviour, and the sibling test above pins
+        `.github/labeler.yml` refusing on purpose. The line drawn here is
+        between "config someone may deliberately leave undecided" and "source
+        a job runs", where a refusal is always a latent red plan step.
+
+        This test found `.github/actions/install-cargo-component/action.yml`,
+        unmapped since it was added; `.github/dist-build-setup.yml` is the gap
+        that actually went red on PR #7821.
+
+        Known remaining refusals outside this scope, reported rather than
+        silently mapped: `.github/labeler.yml` (pinned as refusing by the test
+        above) and the six `.github/scripts/*.sh|.py` PR-automation helpers.
+        `ci-job-result-ok.sh` in particular is invoked by workflows, so it is a
+        latent plan-step break of the same class — mapping it is a deliberate
+        policy call for the planner's owner, not a drive-by.
+        """
+        root = Path(__file__).resolve().parents[2]
+        sources = sorted(
+            str(child.relative_to(root))
+            for child in (root / ".github" / "actions").rglob("*")
+            if child.is_file()
+        )
+        sources.append(".github/dist-build-setup.yml")
+        self.assertTrue(
+            (root / ".github" / "dist-build-setup.yml").is_file(),
+            "the cargo-dist fragment should exist; update this test if it moved",
+        )
+        self.assertGreater(len(sources), 1, ".github/actions should not be empty")
+
+        refused = []
+        for path in sources:
+            try:
+                # Real owners, not the fake workspace: some entries name a
+                # real crate file as their owner, which the synthetic package
+                # list cannot resolve.
+                self.plan_real_owners([path])
+            except ValueError as error:
+                message = str(error)
+                if "unclassified pull-request path" in message or (
+                    "unmapped test or CI path" in message
+                ):
+                    refused.append(f"{path}: {message}")
+                else:
+                    raise
+        self.assertEqual([], refused)
 
     def test_dependabot_config_routes_to_linked_device_supply_chain_test(self) -> None:
         """The config is an asserted input of the linked-device pin test."""
@@ -1903,6 +2101,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(root_plan["root_partitions"], [0])
         self.assertEqual(integration_plan["integration_lanes"], [0])
 
+        trace_plan = self.plan("pull_request", ["tests/support/trace_llm.rs"])
+        self.assertEqual(trace_plan["integration_lanes"], [0])
+        self.assertEqual(trace_plan["root_partitions"], [0])
+
     def test_direct_root_support_runs_both_representative_tiers(self) -> None:
         # tests/support/mod.rs is compiled into the root suites AND the
         # integration group targets (via `#[path = "../../support/mod.rs"]`),
@@ -1910,6 +2112,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         plan = self.plan("pull_request", ["tests/support/mod.rs"])
         self.assertEqual(plan["root_partitions"], [0])
         self.assertEqual(plan["integration_lanes"], [0])
+
 
     def test_owned_integration_support_selects_its_exact_lane(self) -> None:
         for path, owner in planner.INTEGRATION_SUPPORT_OWNERS.items():
@@ -2142,6 +2345,34 @@ class RebornPrTestPlanTests(unittest.TestCase):
             '                    -p "${package}" "--${kind}" "${name}"',
             workflow,
         )
+
+    def test_scope_checkouts_minimize_transfer_without_losing_pr_ancestry(
+        self,
+    ) -> None:
+        """Scope jobs keep merge-base semantics without downloading history blobs."""
+        reborn_tests = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        reborn_scope = reborn_tests.split("\n  changes:\n", 1)[1].split(
+            "\n  crate-tests:\n", 1
+        )[0]
+        self.assertIn(
+            "fetch-depth: "
+            "${{ github.event_name == 'pull_request' && '0' || '1' }}",
+            reborn_scope,
+        )
+        self.assertIn("filter: blob:none", reborn_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', reborn_scope)
+
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        style_scope = code_style.split("\n  changes:\n", 1)[1].split(
+            "\n  fast-checks:\n", 1
+        )[0]
+        self.assertIn("fetch-depth: 0", style_scope)
+        self.assertIn("filter: blob:none", style_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', style_scope)
 
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(

@@ -1,6 +1,6 @@
 # Worked Examples — Good and Bad Reborn Architecture Hygiene
 
-Living curriculum for the checklist in `../SKILL.md`. Each example names its live in-tree exemplar and the command that re-verifies it still holds. Maintained under `ironclaw-reborn-skill-maintainer` rules.
+Living curriculum for the checklist in `../SKILL.md`. Each example names its live in-tree exemplar and the command that re-verifies it still holds. Maintained under `.claude/rules/guidance-maintenance.md`.
 
 ## Contents
 - 1. Traits: ritual vs boundary

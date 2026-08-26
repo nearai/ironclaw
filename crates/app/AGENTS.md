@@ -50,9 +50,11 @@ owns the concept.
   receives every binding as an opaque, pre-built handle and can never itself
   name a package.
 - **Production code in the enforcement crate.** `ironclaw_architecture_tests`
-  has no library surface, no runtime role, and only a dev-only vocabulary
-  import — a change that makes a boundary test easier to pass, rather than the
-  design more correct, is the failure mode this family's guidance exists to
+  has no library surface, no runtime role, and only dev-only vocabulary
+  imports (`ironclaw_host_api`, `ironclaw_product_contracts` — see its
+  `Cargo.toml` for why each exists) — a change that makes a boundary test
+  easier to pass, rather than the design more correct, is the failure mode
+  this family's guidance exists to
   name.
 
 ## The rules, and what enforces them
@@ -69,11 +71,13 @@ owns the concept.
   `composition_crate_installs_installed_tier_only_through_registrar`).
 - **Composition's mass is governed by a ratchet, not taste.**
   `bash scripts/ci/check-composition-budget.sh` (budget:
-  `scripts/ci/composition-budget.toml`) — current ceilings equal today's
-  observed values: **40,423 production LOC** (`loc_ceiling`, tolerance 150)
-  and **814 `Arc<dyn>` sites** (`arc_dyn_ceiling`, tolerance 15), plus the
-  share metric (`ceiling_bp = 658`). One-directional: re-ratchet down in the
-  same PR as any eviction; raising needs a one-line PR rationale.
+  `scripts/ci/composition-budget.toml`) — current ceilings are tracked live in
+  that file (`loc_ceiling`, `arc_dyn_ceiling`); run
+  `bash scripts/ci/check-composition-budget.sh --print` for today's values
+  rather than trusting a number restated in prose here. The share metric
+  (`ceiling_bp = 658`) is a deliberately-frozen WS0 record, not a moving
+  ratchet. One-directional: re-ratchet down in the same PR as any eviction;
+  raising needs a one-line PR rationale.
 - **Nothing depends on `app`.** No substrate reaches the composition root
   (`reborn_composition_boundaries.rs::no_substrate_crate_depends_on_composition_root`),
   and the CLI's dependency set is asserted *exactly*
