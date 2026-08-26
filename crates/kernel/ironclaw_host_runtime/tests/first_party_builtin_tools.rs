@@ -335,7 +335,6 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         JSON_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
-        TRIGGER_STATUS_CAPABILITY_ID,
     ] {
         assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
     }
