@@ -4156,6 +4156,104 @@ async fn triggered_resource_block_publishes_one_inbox_record_and_resolves_after_
 }
 
 #[tokio::test]
+async fn triggered_auth_prompt_is_retracted_after_an_intervening_resource_block() {
+    const AUTH_GATE: &str = "gate:auth-before-resource-00000000000000000001";
+    const RESOURCE_GATE: &str = "gate:resource-after-auth-0000000000000000001";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_GATE)),
+            scripted_state(TurnStatus::BlockedResource, Some(RESOURCE_GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        Some("https://provider.example/oauth"),
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Skipped
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        1,
+        "only the auth prompt is external: {texts:?}"
+    );
+    assert!(texts[0].contains("Setup link: https://provider.example/oauth"));
+    assert_eq!(
+        harness.adapter.retracted_refs(),
+        vec!["ts-1".to_string()],
+        "the OAuth prompt must be removed after recovery despite the intervening resource block"
+    );
+}
+
+#[tokio::test]
+async fn triggered_resource_block_keeps_watching_for_a_later_approval_gate() {
+    const RESOURCE_GATE: &str = "gate:resource-before-approval-00000000000000001";
+    const APPROVAL_GATE: &str = "gate:approval-after-resource-00000000000000001";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedResource, Some(RESOURCE_GATE)),
+            scripted_state(TurnStatus::BlockedApproval, Some(APPROVAL_GATE)),
+        ],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "resource detail stays private: {texts:?}");
+    assert!(texts[0].contains("Approval needed"));
+}
+
+#[tokio::test]
+async fn triggered_resource_block_keeps_watching_for_a_later_auth_gate() {
+    const RESOURCE_GATE: &str = "gate:resource-before-auth-000000000000000000001";
+    const AUTH_GATE: &str = "gate:auth-after-resource-0000000000000000000001";
+    let harness = build_triggered_harness(
+        vec![
+            scripted_state(TurnStatus::BlockedResource, Some(RESOURCE_GATE)),
+            scripted_state(TurnStatus::BlockedAuth, Some(AUTH_GATE)),
+        ],
+        Some("https://provider.example/oauth"),
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "resource detail stays private: {texts:?}");
+    assert!(texts[0].contains("Setup link: https://provider.example/oauth"));
+}
+
+#[tokio::test]
 async fn triggered_notification_preference_read_failure_is_not_reported_as_no_configuration() {
     let harness = build_triggered_harness_with_preferences(
         vec![
