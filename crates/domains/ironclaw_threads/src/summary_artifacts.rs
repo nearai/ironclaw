@@ -17,6 +17,7 @@ pub(crate) fn select_context_barrier(
                 summary.end_sequence,
                 Reverse(summary.start_sequence),
                 summary.content.as_str(),
+                summary.summary_id.as_uuid(),
             )
         })
 }
@@ -135,20 +136,15 @@ mod tests {
 
     #[test]
     fn context_barrier_selection_is_stable_for_equal_end_sequences() {
-        let left = summary_with(2, 10, "alpha");
-        let right = summary_with(2, 10, "zeta");
+        let left = summary_with(2, 10, "same content");
+        let right = summary_with(2, 10, "same content");
         let forward = vec![left.clone(), right.clone()];
         let reverse = vec![right, left];
 
         let selected_forward = select_context_barrier(&forward, |_| true).unwrap();
         let selected_reverse = select_context_barrier(&reverse, |_| true).unwrap();
 
-        assert_eq!(selected_forward.content, "zeta");
-        assert_eq!(selected_reverse.content, selected_forward.content);
-        assert_eq!(
-            selected_reverse.start_sequence,
-            selected_forward.start_sequence
-        );
+        assert_eq!(selected_reverse.summary_id, selected_forward.summary_id);
     }
     #[test]
     fn exact_compaction_summary_replay_matches_on_coordinates_and_content() {
