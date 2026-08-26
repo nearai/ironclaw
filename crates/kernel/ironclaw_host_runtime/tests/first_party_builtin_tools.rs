@@ -3954,6 +3954,60 @@ async fn builtin_spawn_subagent_authorization_invokes_through_host_runtime() {
     assert_eq!(output, json!({"authorized": true}));
 }
 
+/// A shell failure the model can correct must say WHAT it broke.
+///
+/// When a first-party handler supplies no `safe_summary`, `failure_from`
+/// substitutes `ModelDiagnostic::unavailable()` — "the capability runtime did
+/// not provide additional diagnostic detail" — and the model retries the
+/// identical call because nothing told it what to change. A baseline benchmark
+/// run measured 119 such blind failures across 40 tasks. These two shell
+/// rejections (over-limit timeout, unsupported scoped workdir) were among the
+/// `resource` and `client` buckets; both are trivially correctable once named.
+#[tokio::test]
+async fn builtin_shell_rejections_name_the_cause_for_the_model() {
+    // Over-limit timeout: the model must learn the ceiling to lower its value.
+    let failure = invoke_failure_with_context(
+        &runtime(),
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo hi", "timeout": 9_000}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::Resource);
+    let summary = failure
+        .safe_summary()
+        .expect("over-limit timeout must carry a model-visible reason, not a bare category");
+    assert!(
+        summary.contains("timeout") && summary.contains("120"),
+        "summary must name the ceiling the model has to respect, got: {summary}"
+    );
+
+    // Scoped workdir on a backend that cannot honour it: the model must learn
+    // to drop `workdir` rather than re-sending the same rejected call.
+    let root = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(root.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts_and_network(
+        [SHELL_CAPABILITY_ID],
+        mounts,
+        shell_test_policy(),
+    );
+    let failure = invoke_failure_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo hi", "workdir": "/workspace"}),
+        context,
+    )
+    .await;
+    let summary = failure
+        .safe_summary()
+        .expect("workdir rejection must carry a model-visible reason, not a bare category");
+    assert!(
+        summary.contains("workdir"),
+        "summary must name the offending parameter, got: {summary}"
+    );
+}
+
 #[tokio::test]
 async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
     let outcome = runtime()
