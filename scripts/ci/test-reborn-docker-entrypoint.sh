@@ -52,7 +52,10 @@ printf '%s\n' "${IRONCLAW_REBORN_SSH_PUBLIC_KEY:-}" > "${IRONCLAW_STUB_SSH_PATH}
 STUB
 cat > "${WORK}/root-bin/chown" <<'STUB'
 #!/bin/sh
-printf '%s\n' "$*" > "${IRONCLAW_STUB_CHOWN_PATH}"
+# Appends: the root pass issues a second chown for the workspace root only when
+# that path is inside a directory the entrypoint manages, so the tests need to
+# see every invocation, not just the last one.
+printf '%s\n' "$*" >> "${IRONCLAW_STUB_CHOWN_PATH}"
 STUB
 cat > "${WORK}/root-bin/mkdir" <<'STUB'
 #!/bin/sh
@@ -289,7 +292,8 @@ if ! grep -q '^ironclaw .*docker/reborn/entrypoint.sh' "$gosu_record"; then
   echo "FAIL[ssh_root]: entrypoint did not re-exec through gosu: $(cat "$gosu_record")" >&2
   failures=$((failures + 1))
 fi
-if [ "$(cat "$chown_record")" != "ironclaw:ironclaw ${WORK}/ssh_root /workspace ${WORK}/ssh_root/workspace" ]; then
+if ! grep -qx "ironclaw:ironclaw ${WORK}/ssh_root /workspace" "$chown_record" \
+  || ! grep -qx "ironclaw:ironclaw ${WORK}/ssh_root/workspace" "$chown_record"; then
   echo "FAIL[ssh_root]: root pass did not hand runtime paths to ironclaw: $(cat "$chown_record")" >&2
   failures=$((failures + 1))
 fi
@@ -343,7 +347,14 @@ run_workspace_root_privdrop() {
     export IRONCLAW_STUB_UID=0
     export IRONCLAW_STUB_UNWRITABLE_PARENT="$locked_parent"
     export IRONCLAW_REBORN_WORKSPACE_ROOT="$locked_workspace_root"
-    unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID RAILWAY_VOLUME_MOUNT_PATH
+    # The root pass pre-creates the workspace root only inside a directory it
+    # manages -- $IRONCLAW_REBORN_HOME or the Railway volume mount -- so that a
+    # raw override can never have an arbitrary path chowned to the runtime uid
+    # before the containment check (which runs after the privilege drop) can
+    # reject it. This case's locked parent IS that volume mount, which is the
+    # scenario the fix exists for.
+    export RAILWAY_VOLUME_MOUNT_PATH="$locked_parent"
+    unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID
     sh "$ENTRYPOINT" >/dev/null 2>"${workspace_root_privdrop_home}/entrypoint.err"
   )
 }
@@ -361,6 +372,46 @@ elif ! grep -q "$locked_workspace_root" "$workspace_root_chown_record"; then
   cat "$workspace_root_chown_record" >&2
   failures=$((failures + 1))
 fi
+
+# 6b. The root pass must NEVER chown a workspace root that lies outside the
+#     directories this entrypoint manages. The Railway containment check that
+#     validates an operator-supplied override runs only after the privilege
+#     drop, so a root-run `chown` of the raw value would hand the runtime uid
+#     ownership of an arbitrary path -- `IRONCLAW_REBORN_WORKSPACE_ROOT=/etc`
+#     chowning /etc to ironclaw before anything rejects it. The `..` spelling
+#     below also pins that the comparison is canonicalized, not lexical.
+outside_root_home="${WORK}/outside-root"
+mkdir -p "$outside_root_home"
+printf '%s' "$LEGACY_DISABLED" > "${outside_root_home}/config.toml"
+outside_mount="${WORK}/outside-mount"
+mkdir -p "$outside_mount"
+outside_chown_record="${outside_root_home}/chown-argv"
+
+run_outside_workspace_root() {
+  (
+    export PATH="${WORK}/root-bin:${WORK}/bin:${PATH}"
+    export IRONCLAW_REBORN_HOME="$outside_root_home"
+    export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
+    export IRONCLAW_STUB_ARGV_PATH="${outside_root_home}/argv"
+    export IRONCLAW_STUB_WORKSPACE_PATH="${outside_root_home}/workspace-root"
+    export IRONCLAW_STUB_CHOWN_PATH="$outside_chown_record"
+    export IRONCLAW_STUB_UID=0
+    export RAILWAY_VOLUME_MOUNT_PATH="$outside_mount"
+    export IRONCLAW_REBORN_WORKSPACE_ROOT="$1"
+    unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID
+    sh "$ENTRYPOINT" >/dev/null 2>"${outside_root_home}/entrypoint.err"
+  )
+}
+
+for outside_case in "${WORK}/not-managed-at-all" "${outside_mount}/../not-managed-via-dotdot"; do
+  rm -f "$outside_chown_record"
+  run_outside_workspace_root "$outside_case" || true
+  if [ -f "$outside_chown_record" ] && grep -q "not-managed" "$outside_chown_record"; then
+    echo "FAIL[workspace_root_outside_managed]: root pass chowned an unvalidated workspace root: $outside_case" >&2
+    cat "$outside_chown_record" >&2
+    failures=$((failures + 1))
+  fi
+done
 
 # 7. The Railway containment guard must canonicalize paths even when an
 #    intermediate component does not exist yet. GNU `readlink -f` requires

@@ -51,8 +51,36 @@ if [ "$(id -u)" = "0" ]; then
   # with EACCES under `set -eu` and abort the container at boot. This chown
   # is intentionally non-recursive (no `-R`): start-sshd.sh relies on
   # $IRONCLAW_REBORN_HOME/ssh staying root-owned.
-  mkdir -p "$IRONCLAW_REBORN_HOME" /workspace "$IRONCLAW_REBORN_WORKSPACE_ROOT"
-  chown ironclaw:ironclaw "$IRONCLAW_REBORN_HOME" /workspace "$IRONCLAW_REBORN_WORKSPACE_ROOT"
+  mkdir -p "$IRONCLAW_REBORN_HOME" /workspace
+  chown ironclaw:ironclaw "$IRONCLAW_REBORN_HOME" /workspace
+  # ...but ONLY when the override provably lives inside a directory this
+  # entrypoint already manages. The Railway containment check that validates an
+  # operator-supplied workspace root runs after the privilege drop (it needs
+  # $effective_profile, resolved from the config file further down), so
+  # chowning the raw value here would hand the runtime uid ownership of an
+  # arbitrary path -- `IRONCLAW_REBORN_WORKSPACE_ROOT=/etc` chowns /etc to
+  # ironclaw before anything rejects it. Paths outside are left untouched: the
+  # containment check rejects them shortly afterwards, and off-Railway the
+  # later unprivileged `mkdir -p` reports the failure as it did before.
+  # Compare canonicalized paths so `$IRONCLAW_REBORN_HOME/../../etc` cannot
+  # spell its way in.
+  canonical_home="$(readlink -m "$IRONCLAW_REBORN_HOME")"
+  canonical_ws_root="$(readlink -m "$IRONCLAW_REBORN_WORKSPACE_ROOT")"
+  workspace_root_managed=false
+  case "$canonical_ws_root" in
+    "$canonical_home"|"$canonical_home"/*) workspace_root_managed=true ;;
+  esac
+  if [ "$workspace_root_managed" = false ] \
+    && [ -n "$railway_volume_mount" ] && [ "$railway_volume_mount" != "/" ]; then
+    canonical_mount="$(readlink -m "$railway_volume_mount")"
+    case "$canonical_ws_root" in
+      "$canonical_mount"/*) workspace_root_managed=true ;;
+    esac
+  fi
+  if [ "$workspace_root_managed" = true ]; then
+    mkdir -p "$IRONCLAW_REBORN_WORKSPACE_ROOT"
+    chown ironclaw:ironclaw "$IRONCLAW_REBORN_WORKSPACE_ROOT"
+  fi
   if [ -n "$ssh_public_key" ]; then
     ironclaw-reborn-start-sshd
   fi
