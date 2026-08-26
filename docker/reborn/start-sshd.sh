@@ -62,6 +62,44 @@ else
 fi
 chmod 600 "$host_key"
 
+# ssh-keygen -l -f (below) exits 0 for a private key file too, so a pasted
+# private key must be rejected here, before anything derived from it is ever
+# written to disk. Never echo $public_key itself into a diagnostic.
+case "$public_key" in
+  *'-----BEGIN'*)
+    echo "IRONCLAW_REBORN_SSH_PUBLIC_KEY looks like a private key (PEM header found); supply the matching .pub public key instead" >&2
+    exit 1
+    ;;
+esac
+
+# Operators routinely paste the key straight out of `cat id_ed25519.pub`, which
+# carries a trailing newline, and some consoles add surrounding blank lines.
+# Those are valid single-line keys, so strip surrounding whitespace BEFORE the
+# single-line check below -- otherwise the most common paste is rejected, and
+# because the entrypoint runs this under `set -e` a rejection aborts the whole
+# container boot, not just SSH.
+key_lines="$(printf '%s' "$public_key" | awk 'NF { gsub(/^[ \t\r]+|[ \t\r]+$/, ""); print }')"
+if [ -z "$key_lines" ]; then
+  echo "IRONCLAW_REBORN_SSH_PUBLIC_KEY contains no key material" >&2
+  exit 1
+fi
+if [ "$(printf '%s\n' "$key_lines" | wc -l)" -gt 1 ]; then
+  echo "IRONCLAW_REBORN_SSH_PUBLIC_KEY must contain exactly one OpenSSH public key" >&2
+  exit 1
+fi
+public_key="$key_lines"
+
+if [ "$(printf '%s\n' "$public_key" | wc -l)" -gt 1 ]; then
+  echo "IRONCLAW_REBORN_SSH_PUBLIC_KEY must be a single-line OpenSSH public key (<type> <base64> [comment]); it looks like a multi-line private key" >&2
+  exit 1
+fi
+case "$(printf '%s\n' "$public_key" | awk '{print NF}')" in
+  0|1)
+    echo "IRONCLAW_REBORN_SSH_PUBLIC_KEY must be an OpenSSH public key in '<type> <base64> [comment]' form" >&2
+    exit 1
+    ;;
+esac
+
 printf '%s\n' "$public_key" > "$authorized_keys_tmp"
 if ! ssh-keygen -l -f "$authorized_keys_tmp" >/dev/null 2>&1; then
   echo "IRONCLAW_REBORN_SSH_PUBLIC_KEY is not a valid OpenSSH public key" >&2
@@ -87,6 +125,9 @@ mv "$authorized_keys_tmp" "$authorized_keys"
     'StrictModes yes' \
     'UsePAM no' \
     'X11Forwarding no' \
+    'AllowTcpForwarding no' \
+    'AllowAgentForwarding no' \
+    'PermitTunnel no' \
     'PrintMotd no' \
     "SetEnv IRONCLAW_REBORN_HOME=$IRONCLAW_REBORN_HOME CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup" \
     'Subsystem sftp internal-sftp'

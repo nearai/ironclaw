@@ -371,8 +371,10 @@ jobs:
 
           ssh_work="$(mktemp -d)"
           container_name="ironclaw-reborn-ssh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          paste_container_name="${container_name}-paste"
           cleanup() {
             docker rm --force "$container_name" >/dev/null 2>&1 || true
+            docker rm --force "$paste_container_name" >/dev/null 2>&1 || true
             rm -rf "$ssh_work"
           }
           trap cleanup EXIT
@@ -411,6 +413,47 @@ jobs:
           if [ "$ssh_ready" != "true" ]; then
             docker logs "$container_name"
             echo "Reborn runtime did not accept an SSH session as agent" >&2
+            exit 1
+          fi
+
+          paste_key="$(cat "$ssh_work/id_ed25519.pub")"$'\n'
+          # The key almost always arrives via `cat id_ed25519.pub`, so the value
+          # carries a trailing newline. start-sshd must tolerate that: it runs
+          # under the entrypoint's `set -e`, so rejecting a usable key does not
+          # merely disable SSH, it aborts the whole container boot. Reuses the
+          # image already built above -- no second build.
+          docker run --detach \
+            --name "$paste_container_name" \
+            --publish 127.0.0.1::2222 \
+            --env IRONCLAW_REBORN_WEBUI_TOKEN=ssh-ci-webui-token-0123456789abcdef0123456789abcdef \
+            --env "IRONCLAW_REBORN_SSH_PUBLIC_KEY=${paste_key}" \
+            ironclaw-reborn-test:ci
+
+          paste_port="$(docker port "$paste_container_name" 2222/tcp | awk -F: 'NR == 1 { print $NF }')"
+          paste_ready=false
+          for _ in $(seq 1 30); do
+            if ssh \
+              -i "$ssh_work/id_ed25519" \
+              -p "$paste_port" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=1 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              agent@127.0.0.1 'test "$USER" = agent'
+            then
+              paste_ready=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$paste_container_name")" != "true" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$paste_ready" != "true" ]; then
+            docker logs "$paste_container_name"
+            echo "A public key with a trailing newline must still be accepted; rejecting it aborts container boot" >&2
             exit 1
           fi
 

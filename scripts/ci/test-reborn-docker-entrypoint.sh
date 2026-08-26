@@ -56,12 +56,29 @@ printf '%s\n' "$*" > "${IRONCLAW_STUB_CHOWN_PATH}"
 STUB
 cat > "${WORK}/root-bin/mkdir" <<'STUB'
 #!/bin/sh
+# IRONCLAW_STUB_UNWRITABLE_PARENT simulates a root-owned, non-writable parent
+# directory: once the (stubbed) privilege drop has happened -- IRONCLAW_STUB_UID
+# no longer "0" -- creating a not-yet-existing path under it fails closed, the
+# same EACCES a real unprivileged `mkdir -p` would hit. A path already created
+# during the earlier root pass is unaffected (mkdir -p on an existing directory
+# is always a no-op), which is exactly what distinguishes the fixed entrypoint
+# (creates it while still root) from the broken one (only tries later).
 for path in "$@"; do
   case "$path" in
-    -*) ;;
-    /workspace) ;;
-    *) /bin/mkdir -p "$path" ;;
+    -*) continue ;;
+    /workspace) continue ;;
   esac
+  if [ "${IRONCLAW_STUB_UID:-0}" != "0" ] && [ -n "${IRONCLAW_STUB_UNWRITABLE_PARENT:-}" ] \
+    && [ ! -d "$path" ]
+  then
+    case "$path" in
+      "${IRONCLAW_STUB_UNWRITABLE_PARENT}"|"${IRONCLAW_STUB_UNWRITABLE_PARENT}"/*)
+        echo "mkdir: cannot create directory '$path': Permission denied" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  /bin/mkdir -p "$path"
 done
 STUB
 cat > "${WORK}/root-bin/gosu" <<'STUB'
@@ -272,7 +289,7 @@ if ! grep -q '^ironclaw .*docker/reborn/entrypoint.sh' "$gosu_record"; then
   echo "FAIL[ssh_root]: entrypoint did not re-exec through gosu: $(cat "$gosu_record")" >&2
   failures=$((failures + 1))
 fi
-if [ "$(cat "$chown_record")" != "ironclaw:ironclaw ${WORK}/ssh_root /workspace" ]; then
+if [ "$(cat "$chown_record")" != "ironclaw:ironclaw ${WORK}/ssh_root /workspace ${WORK}/ssh_root/workspace" ]; then
   echo "FAIL[ssh_root]: root pass did not hand runtime paths to ironclaw: $(cat "$chown_record")" >&2
   failures=$((failures + 1))
 fi
@@ -298,7 +315,73 @@ then
   failures=$((failures + 1))
 fi
 
-# 6. The dead variable has no reader left anywhere in the tree.
+# 6. An explicit IRONCLAW_REBORN_WORKSPACE_ROOT override must be created and
+#    chowned during the root pass, before the privilege drop. Left until the
+#    later unprivileged `mkdir -p` (bottom of the script), a workspace root
+#    whose parent is a fresh, root-owned volume mount aborts the container at
+#    boot under `set -eu`. IRONCLAW_STUB_UNWRITABLE_PARENT (consumed by the
+#    root-bin/mkdir stub above) simulates exactly that: it fails any
+#    not-yet-existing path under it once IRONCLAW_STUB_UID has flipped away
+#    from "0", i.e. once the (stubbed) privilege drop has happened. The fixed
+#    entrypoint creates the workspace root while still root, so the later
+#    unprivileged call is a no-op against an already-existing directory.
+workspace_root_privdrop_home="${WORK}/workspace-root-privdrop"
+mkdir -p "$workspace_root_privdrop_home"
+printf '%s' "$LEGACY_DISABLED" > "${workspace_root_privdrop_home}/config.toml"
+locked_parent="${WORK}/locked-volume-mount"
+locked_workspace_root="${locked_parent}/project-workspace"
+workspace_root_chown_record="${workspace_root_privdrop_home}/chown-argv"
+
+run_workspace_root_privdrop() {
+  (
+    export PATH="${WORK}/root-bin:${WORK}/bin:${PATH}"
+    export IRONCLAW_REBORN_HOME="$workspace_root_privdrop_home"
+    export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
+    export IRONCLAW_STUB_ARGV_PATH="${workspace_root_privdrop_home}/argv"
+    export IRONCLAW_STUB_WORKSPACE_PATH="${workspace_root_privdrop_home}/workspace-root"
+    export IRONCLAW_STUB_CHOWN_PATH="$workspace_root_chown_record"
+    export IRONCLAW_STUB_UID=0
+    export IRONCLAW_STUB_UNWRITABLE_PARENT="$locked_parent"
+    export IRONCLAW_REBORN_WORKSPACE_ROOT="$locked_workspace_root"
+    unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID RAILWAY_VOLUME_MOUNT_PATH
+    sh "$ENTRYPOINT" >/dev/null 2>"${workspace_root_privdrop_home}/entrypoint.err"
+  )
+}
+
+rm -f "${workspace_root_privdrop_home}/argv"
+if ! run_workspace_root_privdrop; then
+  echo "FAIL[workspace_root_privdrop]: entrypoint aborted instead of creating the workspace root while still root" >&2
+  cat "${workspace_root_privdrop_home}/entrypoint.err" >&2
+  failures=$((failures + 1))
+elif [ ! -d "$locked_workspace_root" ]; then
+  echo "FAIL[workspace_root_privdrop]: workspace root was never created: $locked_workspace_root" >&2
+  failures=$((failures + 1))
+elif ! grep -q "$locked_workspace_root" "$workspace_root_chown_record"; then
+  echo "FAIL[workspace_root_privdrop]: workspace root was not chowned during the root pass" >&2
+  cat "$workspace_root_chown_record" >&2
+  failures=$((failures + 1))
+fi
+
+# 7. The Railway containment guard must canonicalize paths even when an
+#    intermediate component does not exist yet. GNU `readlink -f` requires
+#    every component but the last to already exist and otherwise fails
+#    outright -- falling back to the raw, unresolved spelling, which then
+#    lexically (but wrongly) matches the mount-prefix check even though the
+#    path actually resolves outside the mount via `..`. `missing-intermediate`
+#    below is deliberately never created.
+railway_escape_missing_root="${railway_mount}/missing-intermediate/../../tmp-outside-mount"
+
+rm -f "${railway_home}/argv"
+if run_railway_entrypoint "$railway_escape_missing_root"; then
+  echo "FAIL[railway_escape_missing_intermediate]: a workspace root with a non-existent intermediate component and a '..' escape was accepted" >&2
+  failures=$((failures + 1))
+elif ! grep -q 'IRONCLAW_REBORN_WORKSPACE_ROOT' "${railway_home}/railway.err"; then
+  echo "FAIL[railway_escape_missing_intermediate]: expected a workspace-root containment diagnostic" >&2
+  cat "${railway_home}/railway.err" >&2
+  failures=$((failures + 1))
+fi
+
+# 8. The dead variable has no reader left anywhere in the tree.
 if grep -rn 'IRONCLAW_REBORN_SLACK_ENABLED' \
   --include='*.rs' --include='*.sh' --include='*.toml' \
   "${ROOT}/crates" "${ROOT}/docker" "${ROOT}/scripts" 2>/dev/null \

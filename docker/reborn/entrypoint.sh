@@ -43,8 +43,16 @@ export IRONCLAW_REBORN_WORKSPACE_ROOT
 
 ssh_public_key="${IRONCLAW_REBORN_SSH_PUBLIC_KEY:-}"
 if [ "$(id -u)" = "0" ]; then
-  mkdir -p "$IRONCLAW_REBORN_HOME" /workspace
-  chown ironclaw:ironclaw "$IRONCLAW_REBORN_HOME" /workspace
+  # The workspace root is created and chowned here too (not just at
+  # $IRONCLAW_REBORN_HOME and /workspace) because an explicit
+  # IRONCLAW_REBORN_WORKSPACE_ROOT override can point at a path whose parent
+  # is a fresh, root-owned volume mount. Left until the later unprivileged
+  # `mkdir -p` (below, after the privilege drop), that call would fail closed
+  # with EACCES under `set -eu` and abort the container at boot. This chown
+  # is intentionally non-recursive (no `-R`): start-sshd.sh relies on
+  # $IRONCLAW_REBORN_HOME/ssh staying root-owned.
+  mkdir -p "$IRONCLAW_REBORN_HOME" /workspace "$IRONCLAW_REBORN_WORKSPACE_ROOT"
+  chown ironclaw:ironclaw "$IRONCLAW_REBORN_HOME" /workspace "$IRONCLAW_REBORN_WORKSPACE_ROOT"
   if [ -n "$ssh_public_key" ]; then
     ironclaw-reborn-start-sshd
   fi
@@ -265,13 +273,25 @@ then
       # `/volume/../ephemeral`, passes a purely lexical prefix test while the
       # runtime resolves the real (ephemeral) target — booting a deployment
       # whose project files silently do not persist, which is the exact failure
-      # this guard exists to prevent. `readlink -f` resolves symlinks and
-      # relative segments without requiring the path to exist yet, and falls
-      # back to the original spelling if it is unavailable.
-      canonical_workspace_root="$(readlink -f "$IRONCLAW_REBORN_WORKSPACE_ROOT" 2>/dev/null \
-        || printf '%s' "$IRONCLAW_REBORN_WORKSPACE_ROOT")"
-      canonical_volume_mount="$(readlink -f "$railway_volume_mount" 2>/dev/null \
-        || printf '%s' "$railway_volume_mount")"
+      # this guard exists to prevent. `readlink -m` canonicalizes symlinks and
+      # `.`/`..` segments even when a path (or an intermediate component of it)
+      # does not exist yet. `readlink -f` requires every component but the
+      # last to already exist and otherwise fails outright, which used to send
+      # a not-yet-created path (routine for a fresh volume) down a fallback to
+      # its raw, unresolved spelling — and a raw spelling containing `..` can
+      # lexically match the containment check below while actually resolving
+      # outside the mount, defeating this guard. There is deliberately no
+      # fallback to the raw spelling any more: failing closed on a
+      # canonicalization error is safe, silently comparing an unresolved path
+      # is not.
+      if ! canonical_workspace_root="$(readlink -m "$IRONCLAW_REBORN_WORKSPACE_ROOT" 2>/dev/null)"; then
+        echo "Failed to resolve IRONCLAW_REBORN_WORKSPACE_ROOT=$IRONCLAW_REBORN_WORKSPACE_ROOT for the Railway containment check." >&2
+        exit 1
+      fi
+      if ! canonical_volume_mount="$(readlink -m "$railway_volume_mount" 2>/dev/null)"; then
+        echo "Failed to resolve RAILWAY_VOLUME_MOUNT_PATH=$railway_volume_mount for the Railway containment check." >&2
+        exit 1
+      fi
       case "$canonical_workspace_root" in
         "$canonical_volume_mount"|"$canonical_volume_mount"/*) ;;
         *)
