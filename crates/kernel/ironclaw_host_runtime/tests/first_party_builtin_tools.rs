@@ -511,6 +511,52 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     assert!(!host_shell.description.contains("/workspace/.venv"));
 }
 
+/// The shell description is the only place the model is told to reduce data
+/// *inside* the pipeline. Without it the model reads whole files and datasets
+/// into the conversation to count or sort them, which burns context on raw
+/// content that the shell could have collapsed to a one-line conclusion. The
+/// steering must reach the model on every process backend, so it lives in the
+/// base description rather than a backend-conditional suffix like the
+/// user-sandbox guidance above.
+#[tokio::test]
+async fn builtin_shell_description_steers_the_model_to_filter_in_the_pipeline() {
+    const STEERING: &str = "Prefer computing the answer in the pipeline";
+
+    for backend in [
+        ProcessBackendKind::LocalHost,
+        ProcessBackendKind::UserSandbox,
+        ProcessBackendKind::Docker,
+    ] {
+        let package = builtin_first_party_package_for_process_backend(backend)
+            .expect("built-in first-party package");
+        let descriptor = package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell descriptor");
+        assert!(
+            descriptor.description.contains(STEERING),
+            "{backend:?} shell descriptor lost the pipeline-filtering steering: {}",
+            descriptor.description
+        );
+        assert!(
+            descriptor.description.contains("conclusions, not content"),
+            "{backend:?} shell descriptor lost the conclusions-not-content rule: {}",
+            descriptor.description
+        );
+
+        // The manifest is the copy that reaches the model surface, so it must
+        // carry the same steering as the descriptor.
+        let manifest = package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell manifest");
+        assert_eq!(manifest.description, descriptor.description);
+    }
+}
+
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
     let expected_effects = match descriptor.id.as_str() {
         WRITE_FILE_CAPABILITY_ID => vec![EffectKind::WriteFilesystem],

@@ -34,7 +34,7 @@ const SAVED_OUTPUT_SCOPED_DIR: &str = "command-outputs";
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         SHELL_CAPABILITY_ID,
-        "Execute shell commands with copied v1 validation and saved-file references for large local output",
+        "Execute shell commands with copied v1 validation and saved-file references for large local output. Prefer computing the answer in the pipeline (`grep | sort | uniq -c`, `awk`) over reading raw data into the conversation — return conclusions, not content.",
         vec![
             EffectKind::DispatchCapability,
             EffectKind::SpawnProcess,
