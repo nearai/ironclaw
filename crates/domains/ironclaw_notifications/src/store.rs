@@ -400,6 +400,7 @@ fn validate_notification_action(
     action: &NotificationAction,
 ) -> Result<(), NotificationInboxError> {
     match action {
+        NotificationAction::None => Ok(()),
         NotificationAction::OpenThread { thread_id } if thread_id != &source.thread_id => {
             Err(NotificationInboxError::InvalidRequest {
                 reason: "notification action does not match its source thread",

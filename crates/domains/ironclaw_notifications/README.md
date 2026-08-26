@@ -21,6 +21,11 @@ backend and provides tenant/user-rewritten mounts. Records contain metadata and
 typed references only; prompts, replies, tool payloads, secrets, and backend
 diagnostics are forbidden.
 
+Actions are typed metadata, not arbitrary URLs. `open_thread` is valid only
+when its thread matches the record source; terminal facts created before a
+canonical thread exists use `none`, so clients present them without inventing
+a dead navigation target.
+
 ## Validation
 
 ```bash

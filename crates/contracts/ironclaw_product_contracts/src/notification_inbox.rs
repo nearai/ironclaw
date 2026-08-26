@@ -51,6 +51,7 @@ pub enum ProductNotificationSeverity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProductNotificationAction {
+    None,
     OpenThread { thread_id: String },
 }
 

@@ -67,7 +67,7 @@ pub(crate) mod prompts;
 mod triggered;
 
 pub use observer::RunDeliveryObserver;
-pub use triggered::TriggeredRunDeliveryDriver;
+pub use triggered::{PreSubmitFailureInboxNotifier, TriggeredRunDeliveryDriver};
 
 const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);

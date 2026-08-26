@@ -572,7 +572,6 @@ pub(crate) fn start_channel_host(
             outbound_store: Arc::clone(outbound_state),
             route_store: Arc::clone(delivered_gate_routes),
             communication_preferences: Arc::clone(outbound_preferences),
-            notification_inbox: Some(Arc::clone(notification_inbox)),
             delivery_targets: Arc::clone(outbound_delivery_targets),
             project_filesystem: Arc::clone(project_filesystem),
             approval_context,
@@ -592,6 +591,7 @@ pub(crate) fn start_channel_host(
             llm_config: llm_config.map(|service| service as _),
             approval_interaction,
             auth_interaction,
+            notification_inbox: Some(Arc::clone(notification_inbox)),
             identity: ironclaw_assistant::ChannelWorkflowIdentity {
                 tenant_id: identity.tenant_id.clone(),
                 agent_id: identity.agent_id.clone(),

@@ -245,8 +245,9 @@ pub use run_delivery::notifications::{
     resolve_user_notification_targets,
 };
 pub use run_delivery::{
-    DeliveredChannelMessage, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, triggered_run_delivery_settings,
+    DeliveredChannelMessage, PreSubmitFailureInboxNotifier, RunDeliveryError, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    triggered_run_delivery_settings,
 };
 // `TriggeredRunDeliveryRequest` is deliberately absent: it moved to
 // `ironclaw_outbound` with the `TriggeredRunDelivery` port it crosses

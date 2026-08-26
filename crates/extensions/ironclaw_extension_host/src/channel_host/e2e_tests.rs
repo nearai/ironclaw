@@ -644,6 +644,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             llm_config: Some(Arc::clone(&model_preferences) as Arc<dyn LlmConfigService>),
             approval_interaction: Some(approval_interaction),
             auth_interaction: Some(auths.clone() as Arc<dyn AuthInteractionService>),
+            notification_inbox: None,
             identity: ironclaw_assistant::ChannelWorkflowIdentity {
                 tenant_id: identity.tenant_id.clone(),
                 agent_id: identity.agent_id.clone(),
@@ -656,7 +657,6 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                 outbound_store,
                 route_store: Arc::clone(&route_store),
                 communication_preferences: preferences,
-                notification_inbox: None,
                 // The creator-owned notification catalog the background-run
                 // notifier resolves stored channel ids through.
                 delivery_targets: notification_catalog(vec![
@@ -5857,6 +5857,7 @@ async fn generic_triggered_hook_notifies_the_creators_notification_channels() {
     let delivery_store = Arc::clone(&harness.triggered_delivery_store);
     let hook = GenericTriggeredRunDeliveryHook::new(
         harness_background_run_notifier(&harness),
+        None,
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
     );
 

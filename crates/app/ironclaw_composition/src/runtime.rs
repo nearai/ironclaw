@@ -4422,12 +4422,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Arc::clone(assembly),
             ),
         ));
+        let pre_submit_failure_notifier = workflow_factory.pre_submit_failure_notifier();
 
         let generic_trigger_hook: Arc<
             dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
         > = Arc::new(
             ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
                 notifier,
+                pre_submit_failure_notifier,
                 Arc::clone(triggered_run_delivery),
             ),
         );

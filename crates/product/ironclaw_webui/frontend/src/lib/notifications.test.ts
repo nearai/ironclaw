@@ -116,3 +116,18 @@ test("notificationMessages does not trust arbitrary action URLs", () => {
   ], t);
   assert.equal(message.href, null);
 });
+
+test("a non-actionable notification does not link to its source thread", () => {
+  const [message] = notificationMessages([
+    {
+      id: "pre-submit-failure",
+      kind: "run_failed",
+      action: { kind: "none" },
+      thread_id: "route-id-without-a-materialized-thread",
+      created_at: "2026-06-30T08:43:00Z",
+      resolved_at: "2026-06-30T08:43:00Z",
+    },
+  ], t);
+
+  assert.equal(message.href, null);
+});

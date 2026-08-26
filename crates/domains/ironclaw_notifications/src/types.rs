@@ -151,7 +151,11 @@ pub enum NotificationInitialState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NotificationAction {
-    OpenThread { thread_id: ThreadId },
+    /// Present the notification without linking to a workflow surface.
+    None,
+    OpenThread {
+        thread_id: ThreadId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -16,8 +16,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_assistant::{
-    DeliveryCoordinator, DeliveryRetryPolicy, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver,
+    DeliveryCoordinator, DeliveryRetryPolicy, PreSubmitFailureInboxNotifier, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use ironclaw_assistant::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
@@ -51,9 +51,12 @@ use ironclaw_host_api::{
     path::ScopedPath,
 };
 use ironclaw_notifications::{
-    ListNotificationsRequest, NotificationInboxStore, NotificationInboxStorePort, NotificationKind,
-    NotificationRecipient, NotificationSeverity,
+    ListNotificationsRequest, MarkAllNotificationsReadRequest, NoopNotificationInboxStore,
+    NotificationAction, NotificationInboxError, NotificationInboxStore, NotificationInboxStorePort,
+    NotificationKind, NotificationMutationOutcome, NotificationMutationRequest, NotificationPage,
+    NotificationRecipient, NotificationRecord, PublishNotificationRequest,
 };
+use ironclaw_outbound::TriggeredRunDelivery;
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,
     CommunicationPreferenceRepository, DeliveredGateRouteStore, DeliveryDefaultScope,
@@ -2762,6 +2765,53 @@ async fn observer_non_oauth_auth_block_cancels_run_and_posts_unavailable_notice(
 
 // ── Triggered rows ─────────────────────────────────────────────────────────
 
+struct HangingNotificationInbox;
+
+#[async_trait]
+impl NotificationInboxStorePort for HangingNotificationInbox {
+    async fn publish(
+        &self,
+        _request: PublishNotificationRequest,
+    ) -> Result<NotificationRecord, NotificationInboxError> {
+        std::future::pending().await
+    }
+
+    async fn list(
+        &self,
+        request: ListNotificationsRequest,
+    ) -> Result<NotificationPage, NotificationInboxError> {
+        NoopNotificationInboxStore.list(request).await
+    }
+
+    async fn mark_read(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.mark_read(request).await
+    }
+
+    async fn mark_all_read(
+        &self,
+        request: MarkAllNotificationsReadRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.mark_all_read(request).await
+    }
+
+    async fn resolve(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.resolve(request).await
+    }
+
+    async fn archive(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.archive(request).await
+    }
+}
+
 fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDeliveryRequest {
     TriggeredRunDeliveryRequest {
         run_id,
@@ -3072,6 +3122,60 @@ async fn triggered_project_scoped_fire_is_denied_without_delivery() {
 }
 
 #[tokio::test]
+async fn pre_submit_failure_reaches_inbox_without_channel_delivery() {
+    let inbox = notification_inbox();
+    let notifier = PreSubmitFailureInboxNotifier::with_publish_timeout(
+        Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+        Duration::from_millis(20),
+    );
+    let scope = binding_scope();
+
+    let request = TriggeredFireFailureDeliveryRequest {
+        scope: scope.clone(),
+        creator_user_id: user(),
+        project_scoped: false,
+        prompt: "Send the daily summary".to_string(),
+        failure_ref: ironclaw_outbound::ProjectionUpdateRef::new("trigger-failure:inbox-only")
+            .expect("failure ref"),
+    };
+    notifier
+        .on_trigger_failed_before_submit(request.clone())
+        .await;
+    notifier.on_trigger_failed_before_submit(request).await;
+
+    let records = inbox_records(inbox.as_ref()).await;
+    assert_eq!(records.notifications.len(), 1);
+    assert_eq!(records.notifications[0].kind, NotificationKind::RunFailed);
+    assert_eq!(records.notifications[0].action, NotificationAction::None);
+    assert_eq!(records.notifications[0].source.thread_id, scope.thread_id);
+    assert!(records.notifications[0].resolved_at.is_some());
+}
+
+#[tokio::test]
+async fn stalled_pre_submit_inbox_publication_is_bounded() {
+    let notifier = PreSubmitFailureInboxNotifier::with_publish_timeout(
+        Arc::new(HangingNotificationInbox),
+        Duration::from_millis(5),
+    );
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        notifier.on_trigger_failed_before_submit(TriggeredFireFailureDeliveryRequest {
+            scope: binding_scope(),
+            creator_user_id: user(),
+            project_scoped: false,
+            prompt: "Send the daily summary".to_string(),
+            failure_ref: ironclaw_outbound::ProjectionUpdateRef::new(
+                "trigger-failure:stalled-inbox",
+            )
+            .expect("failure ref"),
+        }),
+    )
+    .await
+    .expect("Inbox publication must respect its deadline");
+}
+
+#[tokio::test]
 async fn permanent_pre_submit_failure_notifies_every_configured_channel_with_no_run() {
     let harness = build_triggered_harness(
         vec![scripted_state(TurnStatus::Completed, None)],
@@ -3107,20 +3211,6 @@ async fn permanent_pre_submit_failure_notifies_every_configured_channel_with_no_
         texts.iter().all(|text| !text.contains("materialization")),
         "notification copy must not leak internal failure detail: {texts:?}"
     );
-    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
-    assert_eq!(
-        inbox.notifications.len(),
-        1,
-        "one durable Inbox record per settled fire"
-    );
-    assert_eq!(inbox.notifications[0].kind, NotificationKind::RunFailed);
-    assert_eq!(inbox.notifications[0].severity, NotificationSeverity::Error);
-    assert_eq!(inbox.notifications[0].source.thread_id, scope.thread_id);
-    assert_eq!(inbox.notifications[0].source.turn_run_id, None);
-    assert!(
-        inbox.notifications[0].resolved_at.is_some(),
-        "a terminal pre-submit failure is resolved when first persisted"
-    );
     let attempts = harness
         .store
         .list_delivery_attempts(scope)
@@ -3152,14 +3242,6 @@ async fn permanent_pre_submit_failure_notifies_every_configured_channel_with_no_
             .len(),
         2,
         "stable fire identity must reuse the durable attempts"
-    );
-    assert_eq!(
-        inbox_records(harness.notification_inbox.as_ref())
-            .await
-            .notifications
-            .len(),
-        1,
-        "replaying one settled fire must reuse the durable Inbox record"
     );
 }
 

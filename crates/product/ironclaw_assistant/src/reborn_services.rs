@@ -3060,6 +3060,7 @@ where
                     kind: product_notification_kind(record.kind),
                     severity: product_notification_severity(record.severity),
                     action: match record.action {
+                        NotificationAction::None => ProductNotificationAction::None,
                         NotificationAction::OpenThread { thread_id } => {
                             ProductNotificationAction::OpenThread {
                                 thread_id: thread_id.to_string(),
