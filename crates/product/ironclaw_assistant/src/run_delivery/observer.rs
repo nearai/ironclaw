@@ -51,7 +51,8 @@ use super::{
     BlockedActionableMarker, DeliveredChannelMessage, HINT_SEEN_CAP, HintSeenSet, RunDeliveryError,
     RunDeliveryServices, RunDeliverySettings, blocked_actionable_marker, cancel_auth_blocked_run,
     delivered_messages_from_outcome, gate_routes::record_gate_route_if_needed,
-    thread_scope_from_binding, turn_scope_from_thread_scope,
+    inbox_gate_observer::spawn_inbox_gate_observer, thread_scope_from_binding,
+    turn_scope_from_thread_scope,
 };
 use crate::ProductSurfaceFailure;
 use crate::delivery_coordinator::{
@@ -683,8 +684,20 @@ impl RunDeliveryObserver {
                         %error,
                         "auth prompt enrichment failed; continuing with durable Inbox notification"
                     );
-                    delivered_blocked_marker = next_blocked_marker;
-                    continue;
+                    if self.services.notification_inbox.is_some()
+                        && let Some(marker) = next_blocked_marker
+                    {
+                        spawn_inbox_gate_observer(
+                            &self.services,
+                            self.settings,
+                            scope,
+                            binding.actor_user_id,
+                            run_id,
+                            marker,
+                        );
+                        return Ok(());
+                    }
+                    return Err(error);
                 }
                 Err(error) => return Err(error),
             };

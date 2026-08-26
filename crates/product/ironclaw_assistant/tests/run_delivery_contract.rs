@@ -2255,17 +2255,12 @@ async fn observer_does_not_publish_an_auth_inbox_item_without_a_gate_ref() {
 async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
     const GATE: &str = "gate:auth-extension-00000000000000000000000001";
     let harness = build_harness_with_gate_ports(
-        vec![
-            scripted_state(TurnStatus::BlockedAuth, Some(GATE)),
-            scripted_state(TurnStatus::BlockedAuth, Some(GATE)),
-            scripted_state(TurnStatus::Running, None),
-            scripted_state(TurnStatus::Completed, None),
-        ],
+        vec![scripted_state(TurnStatus::BlockedAuth, Some(GATE))],
         false,
         RunDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(5),
-            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
+            max_concurrent_deliveries: NonZeroUsize::new(1).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
             first_nudge_after: Duration::from_secs(3600),
             renudge_interval: Duration::from_secs(3600),
@@ -2277,15 +2272,16 @@ async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
         None,
     );
     let run_id = TurnRunId::new();
-    seed_final_message(&harness.threads, run_id, "authenticated and finished").await;
 
-    harness
-        .observer
-        .observe_ack(
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        harness.observer.observe_ack(
             user_message_envelope(ProductTriggerReason::DirectChat, "evt-auth-enrichment-down"),
             accepted_ack(run_id),
-        )
-        .await;
+        ),
+    )
+    .await
+    .expect("failed auth enrichment must release the sole delivery permit");
 
     let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
     assert_eq!(inbox.notifications.len(), 1);
@@ -2303,8 +2299,8 @@ async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
         Some(GATE)
     );
     assert!(
-        inbox.notifications[0].resolved_at.is_some(),
-        "verified run recovery resolves the durable auth notification"
+        inbox.notifications[0].resolved_at.is_none(),
+        "the durable auth notification remains actionable while the run is parked"
     );
     assert!(
         harness
@@ -2314,10 +2310,31 @@ async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
             .all(|text| !text.contains("Authentication required")),
         "a failed enrichment must not invent an auth channel prompt"
     );
+
+    let unrelated_run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, unrelated_run_id, "unrelated run finished").await;
+    harness
+        .turns
+        .set_state(scripted_state(TurnStatus::Completed, None));
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        harness.observer.observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-unrelated-run"),
+            accepted_ack(unrelated_run_id),
+        ),
+    )
+    .await
+    .expect("an unrelated run must acquire the released delivery permit");
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::AuthenticationRequired,
+        GATE,
+    )
+    .await;
     assert_eq!(
         harness.adapter.texts().last().map(String::as_str),
-        Some("authenticated and finished"),
-        "prompt enrichment failure must not abort final reply observation"
+        Some("unrelated run finished"),
+        "the released permit must remain available to unrelated replies"
     );
 }
 
