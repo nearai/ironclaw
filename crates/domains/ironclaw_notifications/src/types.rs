@@ -138,6 +138,16 @@ pub enum NotificationSeverity {
     Error,
 }
 
+/// Producer-selected lifecycle state at the moment a notification is created.
+///
+/// Terminal facts are born resolved; actionable notifications remain open
+/// until their originating workflow settles them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationInitialState {
+    Open,
+    Resolved,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NotificationAction {
@@ -174,6 +184,7 @@ pub struct PublishNotificationRequest {
     pub severity: NotificationSeverity,
     pub source: NotificationSource,
     pub action: NotificationAction,
+    pub initial_state: NotificationInitialState,
     pub occurred_at: DateTime<Utc>,
 }
 

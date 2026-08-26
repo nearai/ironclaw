@@ -115,6 +115,21 @@ Queue claims keyset-page until the queue is exhausted or enough eligible work
 is found. Owner and concurrency-class quota reads are reused per unique key;
 quota-blocked prefixes cannot starve later eligible work.
 
+Dependency queries may provide `allowed_states` for actionable delivery
+sweeps. The row-native dependency projection indexes lineage scope, group,
+state, and the canonical dependent/dependency pair; bounded reads issue one
+exact prefix query per allowed state, then merge the streams by that pair
+cursor. `allowed_states` requires `group_ref` because the bounded projection
+uses group equality as part of its exact prefix; callers that need the
+historical group-less query retain the existing no-state-filter shape.
+
+The actionable projection is declared before row-native writers are exposed.
+This PR is the first writer of `bg:{thread_id}` dependency rows, and deployment
+is gated on the fleet-wide 2a rollout, so no retained production background
+rows predate the projection. Existing group-less or non-background rows remain
+available through the compatibility query path; no broad startup backfill or
+silent scan fallback is permitted.
+
 ## Compatibility and migration
 
 Pre-row-native deployments may contain lifecycle data in:

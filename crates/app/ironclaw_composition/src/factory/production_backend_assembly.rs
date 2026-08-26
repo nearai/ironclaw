@@ -1116,6 +1116,7 @@ pub(super) async fn build_backend_production(
         &mut first_party_registry,
         Arc::clone(&extension_management),
         product_auth_services.runtime_credential_account_selection_service(),
+        crate::extension_host_assembly::connect_link_base_url_from_env(),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle handlers are invalid: {error}"),

@@ -8,11 +8,13 @@
 //! place, and the two backends cannot drift.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ids::ThreadId;
-use ironclaw_loop_contracts::{LoopInput, LoopInputAckToken, LoopInputCursorToken};
+use ironclaw_loop_contracts::{
+    LoopInput, LoopInputAckEffect, LoopInputAckToken, LoopInputCursorToken,
+};
 use ironclaw_threads::{MessageStatus, SessionThreadService, ThreadMessageId, ThreadScope};
 use ironclaw_turns::{TurnId, TurnRunId};
 use serde::{Deserialize, Serialize};
@@ -166,6 +168,19 @@ pub trait HostInputEnqueuePort: Send + Sync {
     ) -> Result<HostInputEnvelope, HostInputQueueError>;
 }
 
+/// Host-owned callback for durable queue acknowledgment effects.
+///
+/// Queue implementations call this only after the corresponding input ack is
+/// durably recorded. A failed callback leaves the effect in the queue's
+/// pending state so later queue operations or terminal reconciliation retry it.
+#[async_trait]
+pub trait HostInputAckEffectHandler: Send + Sync {
+    async fn handle_ack_effect(
+        &self,
+        effect: LoopInputAckEffect,
+    ) -> Result<(), HostInputQueueError>;
+}
+
 /// Null-object enqueue port used as the default when a host has not wired a
 /// real input queue. Every enqueue fails closed with the distinct
 /// [`HostInputQueueError::Disabled`] rather than silently dropping the
@@ -191,6 +206,10 @@ pub struct EnqueueQueuedMessageRequest {
     pub thread_id: ThreadId,
     pub message_id: ThreadMessageId,
     pub input: LoopInput,
+    /// Optional durable callback effect. Only background subagent result
+    /// inputs populate this field; ordinary steering/followup input leaves it
+    /// `None`.
+    pub ack_effect: Option<LoopInputAckEffect>,
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +233,8 @@ pub(crate) struct QueueEntry {
     pub(crate) sequence: u64,
     pub(crate) input: LoopInput,
     pub(crate) status: QueuedMessageStatusUpdate,
+    #[serde(default)]
+    pub(crate) ack_effect: Option<LoopInputAckEffect>,
 }
 
 /// A consumed (acked) entry whose `Queued` → `Submitted` transcript flip has
@@ -224,6 +245,14 @@ pub(crate) struct QueueEntry {
 pub(crate) struct PendingSubmitFlip {
     pub(crate) sequence: u64,
     pub(crate) status: QueuedMessageStatusUpdate,
+}
+
+/// A consumed entry's deferred callback effect. Retained until the handler
+/// reports success, including across durable queue rehydration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PendingAckEffect {
+    pub(crate) sequence: u64,
+    pub(crate) effect: LoopInputAckEffect,
 }
 
 /// Bounded dedup identity for an input the loop already consumed. Successful
@@ -267,6 +296,10 @@ pub(crate) struct RunQueueModel {
     /// every later ack, re-enqueue, and the terminal reconciliation.
     #[serde(default)]
     pending_submit_flips: Vec<PendingSubmitFlip>,
+    /// Callback effects moved out of consumed entries. These count toward the
+    /// queue capacity and keep the queue document alive until acknowledged.
+    #[serde(default)]
+    pending_ack_effects: Vec<PendingAckEffect>,
     /// Recent successful or pending consumptions, retained independently from
     /// live queue capacity. The ring is bounded to cover concurrent/retried
     /// admissions without making a long-lived run permanently full after the
@@ -295,6 +328,7 @@ impl Default for RunQueueModel {
             acked_watermark: 0,
             acked_above: BTreeSet::new(),
             pending_submit_flips: Vec::new(),
+            pending_ack_effects: Vec::new(),
             recently_consumed: Vec::new(),
             closed: false,
             pending_reject_flips: Vec::new(),
@@ -323,6 +357,8 @@ pub(crate) struct AckOutcome {
     /// Every `Submitted` flip now due — the newly acked bindings plus any
     /// retained retries from earlier failed flips.
     pub(crate) due_flips: Vec<PendingSubmitFlip>,
+    /// Every callback effect now due, including retained retries.
+    pub(crate) due_ack_effects: Vec<PendingAckEffect>,
 }
 
 impl RunQueueModel {
@@ -379,10 +415,21 @@ impl RunQueueModel {
                 sequence: consumed.sequence,
             });
         }
-        // The ceiling bounds the live + failed-flip segment. The independently
-        // bounded recent-consumption ring does not consume live capacity: a
-        // successful run must remain able to accept later distinct inputs.
-        if self.entries.len() + self.pending_submit_flips.len() >= MAX_QUEUED_INPUTS_PER_RUN {
+        // Bound distinct tracked inputs, not outstanding operations: one
+        // consumed input can own both a transcript flip and an ack effect.
+        // The independently bounded replay ring does not consume capacity.
+        let tracked_sequences: BTreeSet<u64> = self
+            .entries
+            .iter()
+            .map(|entry| entry.sequence)
+            .chain(self.pending_submit_flips.iter().map(|flip| flip.sequence))
+            .chain(
+                self.pending_ack_effects
+                    .iter()
+                    .map(|effect| effect.sequence),
+            )
+            .collect();
+        if tracked_sequences.len() >= MAX_QUEUED_INPUTS_PER_RUN {
             return Err(HostInputQueueError::CapacityExhausted);
         }
         let sequence = self.next_sequence;
@@ -393,8 +440,25 @@ impl RunQueueModel {
             sequence,
             input,
             status,
+            ack_effect: None,
         });
         Ok(EnqueueDisposition::Inserted { sequence })
+    }
+
+    pub(crate) fn attach_ack_effect(
+        &mut self,
+        sequence: u64,
+        effect: Option<LoopInputAckEffect>,
+    ) -> Result<(), HostInputQueueError> {
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.sequence == sequence)
+        else {
+            return Err(HostInputQueueError::Internal);
+        };
+        entry.ack_effect = effect;
+        Ok(())
     }
 
     /// Strictly-after scan: an entry's own cursor is its sequence, so polling
@@ -462,6 +526,7 @@ impl RunQueueModel {
             return Ok(AckOutcome {
                 newly_acked: false,
                 due_flips: Vec::new(),
+                due_ack_effects: Vec::new(),
             });
         }
         let mut newly_acked = Vec::new();
@@ -482,6 +547,10 @@ impl RunQueueModel {
                 sequence,
                 status: entry.status.clone(),
             });
+            if let Some(effect) = entry.ack_effect.clone() {
+                self.pending_ack_effects
+                    .push(PendingAckEffect { sequence, effect });
+            }
             self.recently_consumed.push(ConsumedMessage {
                 sequence,
                 message_id: entry.status.message_id,
@@ -499,6 +568,7 @@ impl RunQueueModel {
         Ok(AckOutcome {
             newly_acked: !newly_acked.is_empty(),
             due_flips: self.pending_submit_flips.clone(),
+            due_ack_effects: self.pending_ack_effects.clone(),
         })
     }
 
@@ -506,6 +576,12 @@ impl RunQueueModel {
     pub(crate) fn confirm_submit_flips(&mut self, flipped: &[u64]) {
         self.pending_submit_flips
             .retain(|pending| !flipped.contains(&pending.sequence));
+    }
+
+    /// Drop callback effects whose handlers completed successfully.
+    pub(crate) fn confirm_ack_effects(&mut self, confirmed: &[u64]) {
+        self.pending_ack_effects
+            .retain(|pending| !confirmed.contains(&pending.sequence));
     }
 
     /// Terminal claim: close the queue (rejecting further enqueues) and move
@@ -540,6 +616,11 @@ impl RunQueueModel {
         self.pending_submit_flips.clone()
     }
 
+    /// Callback effects currently awaiting a successful handler retry.
+    pub(crate) fn due_ack_effects(&self) -> Vec<PendingAckEffect> {
+        self.pending_ack_effects.clone()
+    }
+
     /// The `RejectedBusy` flips currently awaiting (re)try.
     pub(crate) fn due_reject_flips(&self) -> Vec<QueuedMessageStatusUpdate> {
         self.pending_reject_flips.clone()
@@ -550,6 +631,7 @@ impl RunQueueModel {
         self.closed
             && self.entries.is_empty()
             && self.pending_submit_flips.is_empty()
+            && self.pending_ack_effects.is_empty()
             && self.pending_reject_flips.is_empty()
     }
 }
@@ -690,6 +772,7 @@ fn poisoned_lock(operation: &'static str) -> HostInputQueueError {
 pub struct InMemoryHostInputQueue {
     state: Arc<Mutex<HashMap<TurnRunId, RunQueueModel>>>,
     thread_service: Arc<dyn SessionThreadService>,
+    ack_effect_handler: OnceLock<Arc<dyn HostInputAckEffectHandler>>,
 }
 
 impl std::fmt::Debug for InMemoryHostInputQueue {
@@ -705,7 +788,75 @@ impl InMemoryHostInputQueue {
         Self {
             state: Arc::new(Mutex::new(HashMap::new())),
             thread_service,
+            ack_effect_handler: OnceLock::new(),
         }
+    }
+
+    /// Bind the callback used for deferred queue acknowledgment effects.
+    /// Composition performs this once after both the queue and resolver exist.
+    pub fn bind_ack_effect_handler(
+        &self,
+        handler: Arc<dyn HostInputAckEffectHandler>,
+    ) -> Result<(), HostInputQueueError> {
+        self.ack_effect_handler
+            .set(handler)
+            .map_err(|rejected_handler| {
+                tracing::debug!(
+                    handler_type = std::any::type_name_of_val(rejected_handler.as_ref()),
+                    "input queue ack effect handler already bound"
+                );
+                HostInputQueueError::Unavailable {
+                    reason: "input queue ack effect handler already bound".to_string(),
+                }
+            })
+    }
+
+    async fn retry_pending_ack_effects(
+        &self,
+        run_id: TurnRunId,
+        due: &[PendingAckEffect],
+    ) -> Result<(), HostInputQueueError> {
+        let Some(handler) = self.ack_effect_handler.get().cloned() else {
+            return Ok(());
+        };
+        let pending = if due.is_empty() {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| poisoned_lock("retry_ack_effects"))?;
+            state
+                .get(&run_id)
+                .map(|model| model.pending_ack_effects.clone())
+                .unwrap_or_default()
+        } else {
+            due.to_vec()
+        };
+        let mut confirmed = Vec::new();
+        for pending in pending {
+            match handler.handle_ack_effect(pending.effect.clone()).await {
+                Ok(()) => confirmed.push(pending.sequence),
+                Err(error) => tracing::debug!(
+                    component = "host_input_queue",
+                    operation = "retry_ack_effects",
+                    %run_id,
+                    %error,
+                    "input acknowledgment effect failed; retaining it for retry"
+                ),
+            }
+        }
+        if !confirmed.is_empty() {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| poisoned_lock("confirm_ack_effects"))?;
+            if let Some(model) = state.get_mut(&run_id) {
+                model.confirm_ack_effects(&confirmed);
+                if model.is_settled() {
+                    state.remove(&run_id);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -717,7 +868,8 @@ impl HostInputEnqueuePort for InMemoryHostInputQueue {
     ) -> Result<HostInputEnvelope, HostInputQueueError> {
         let disposition = {
             let mut state = self.state.lock().map_err(|_| poisoned_lock("enqueue"))?;
-            state.entry(request.run_id).or_default().enqueue_dedup(
+            let model = state.entry(request.run_id).or_default();
+            let disposition = model.enqueue_dedup(
                 request.input.clone(),
                 QueuedMessageStatusUpdate {
                     turn_id: request.turn_id,
@@ -725,9 +877,13 @@ impl HostInputEnqueuePort for InMemoryHostInputQueue {
                     thread_id: request.thread_id,
                     message_id: request.message_id,
                 },
-            )?
+            )?;
+            if let EnqueueDisposition::Inserted { sequence } = &disposition {
+                model.attach_ack_effect(*sequence, request.ack_effect.clone())?;
+            }
+            disposition
         };
-        match disposition {
+        let envelope = match disposition {
             EnqueueDisposition::Inserted { sequence }
             | EnqueueDisposition::Duplicate { sequence } => envelope_for(sequence, request.input),
             EnqueueDisposition::AlreadyConsumed { flip } => {
@@ -745,7 +901,9 @@ impl HostInputEnqueuePort for InMemoryHostInputQueue {
                 }
                 envelope_for(sequence, request.input)
             }
-        }
+        }?;
+        self.retry_pending_ack_effects(request.run_id, &[]).await?;
+        Ok(envelope)
     }
 }
 
@@ -777,7 +935,7 @@ impl HostInputQueue for InMemoryHostInputQueue {
         // await: a concurrent `next_after` must never observe a consumed input
         // as unacked and redeliver it while the (async) transcript flip below
         // is still in flight.
-        let due_flips = {
+        let (due_flips, due_ack_effects) = {
             let mut state = self
                 .state
                 .lock()
@@ -785,11 +943,9 @@ impl HostInputQueue for InMemoryHostInputQueue {
             let Some(model) = state.get_mut(&run_id) else {
                 return Ok(());
             };
-            model.validate_and_ack(&tokens)?.due_flips
+            let outcome = model.validate_and_ack(&tokens)?;
+            (outcome.due_flips, outcome.due_ack_effects)
         };
-        if due_flips.is_empty() {
-            return Ok(());
-        }
         let flipped = flip_submitted(self.thread_service.as_ref(), run_id, due_flips).await;
         if !flipped.is_empty() {
             let mut state = self
@@ -800,6 +956,8 @@ impl HostInputQueue for InMemoryHostInputQueue {
                 model.confirm_submit_flips(&flipped);
             }
         }
+        self.retry_pending_ack_effects(run_id, &due_ack_effects)
+            .await?;
         Ok(())
     }
 }
@@ -843,6 +1001,7 @@ impl HostInputQueueReconcile for InMemoryHostInputQueue {
                 }
             }
         }
+        self.retry_pending_ack_effects(run_id, &[]).await?;
         Ok(reject_outcome.flipped)
     }
 }
@@ -924,7 +1083,7 @@ pub(crate) fn ack_sequence(token: &LoopInputAckToken) -> Result<u64, HostInputQu
 mod tests {
     use super::*;
     use ironclaw_host_api::ids::{AgentId, TenantId};
-    use ironclaw_turns::LoopMessageRef;
+    use ironclaw_turns::{LoopMessageRef, TurnScope};
 
     #[test]
     fn recently_consumed_dedup_window_stays_bounded() {
@@ -979,5 +1138,90 @@ mod tests {
                 .any(|consumed| Some(consumed.message_id) == oldest_message_id),
             "the oldest consumed identity must be evicted when the window is full"
         );
+    }
+
+    #[test]
+    fn ack_effect_moves_to_pending_and_survives_rehydration() {
+        let mut model = RunQueueModel::default();
+        let scope = ThreadScope {
+            tenant_id: TenantId::new("tenant-iq").unwrap(),
+            agent_id: AgentId::new("agent-iq").unwrap(),
+            project_id: None,
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let thread_id = ThreadId::new("thread-iq").unwrap();
+        let message_id = ThreadMessageId::new();
+        let effect = LoopInputAckEffect {
+            child_scope: TurnScope::new(
+                TenantId::new("tenant-iq").unwrap(),
+                Some(AgentId::new("agent-iq").unwrap()),
+                None,
+                thread_id.clone(),
+            ),
+            parent_run_id: TurnRunId::new(),
+            child_run_id: TurnRunId::new(),
+        };
+        let disposition = model
+            .enqueue_dedup(
+                LoopInput::Steering {
+                    message_ref: LoopMessageRef::new("msg:effect").unwrap(),
+                },
+                QueuedMessageStatusUpdate {
+                    turn_id: TurnId::new(),
+                    scope: scope.clone(),
+                    thread_id: thread_id.clone(),
+                    message_id,
+                },
+            )
+            .expect("enqueue");
+        let EnqueueDisposition::Inserted { sequence } = disposition else {
+            panic!("effect entry must insert");
+        };
+        model.entries[0].ack_effect = Some(effect.clone());
+
+        let outcome = model
+            .validate_and_ack(&[ack_token(sequence).unwrap()])
+            .expect("ack");
+        assert_eq!(outcome.due_ack_effects.len(), 1);
+        assert_eq!(outcome.due_ack_effects[0].effect, effect);
+
+        let mut rehydrated: RunQueueModel =
+            serde_json::from_slice(&serde_json::to_vec(&model).unwrap()).unwrap();
+        assert_eq!(rehydrated.pending_ack_effects, outcome.due_ack_effects);
+
+        // The transcript flip and callback are two obligations for the same
+        // consumed input, so they occupy one capacity slot, not two.
+        rehydrated.confirm_submit_flips(&[sequence]);
+        for index in 1..MAX_QUEUED_INPUTS_PER_RUN {
+            rehydrated
+                .enqueue_dedup(
+                    LoopInput::Steering {
+                        message_ref: LoopMessageRef::new(format!("msg:effect-{index}")).unwrap(),
+                    },
+                    QueuedMessageStatusUpdate {
+                        turn_id: TurnId::new(),
+                        scope: scope.clone(),
+                        thread_id: thread_id.clone(),
+                        message_id: ThreadMessageId::new(),
+                    },
+                )
+                .expect("each distinct tracked input gets one capacity slot");
+        }
+        let overflow = rehydrated.enqueue_dedup(
+            LoopInput::Steering {
+                message_ref: LoopMessageRef::new("msg:effect-overflow").unwrap(),
+            },
+            QueuedMessageStatusUpdate {
+                turn_id: TurnId::new(),
+                scope,
+                thread_id,
+                message_id: ThreadMessageId::new(),
+            },
+        );
+        assert!(matches!(
+            overflow,
+            Err(HostInputQueueError::CapacityExhausted)
+        ));
     }
 }

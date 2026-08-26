@@ -379,7 +379,7 @@
     <div class="phases">
       <div class="phase gate"><span class="pk">F0</span><span class="pt">De-risk &amp; unblock</span><span class="pd">Gate the mock carousel (D-F5) so #6994 can merge; reconcile the contract.</span></div>
       <div class="phase f"><span class="pk">F1</span><span class="pt">Task backend</span><span class="pd">5 events · projection + isolation test · 5 routes · 5 facade methods. <span class="tag new">D-F1</span></span></div>
-      <div class="phase f"><span class="pk">F2</span><span class="pt">Suggestion producer</span><span class="pd">Fresh users get real proposals. Gated on decision. <span class="tag new">D-F2</span></span></div>
+      <div class="phase f"><span class="pk">F2</span><span class="pt">Suggestion producer</span><span class="pd">Complete in PR #7694. Fresh users get durable proposals. <span class="tag new">D-F2</span></span></div>
       <div class="phase f"><span class="pk">F3</span><span class="pt">Connect + mode</span><span class="pd">Reuse ext-auth; wire the 3 modes into the gate. <span class="tag new">D-F3 D-F4</span></span></div>
       <div class="phase f"><span class="pk">F4</span><span class="pt">E2E + CUJ</span><span class="pd">Full decision loop; add the onboarding Critical User Journey.</span></div>
       <div class="phase f"><span class="pk">F5</span><span class="pt">Design track</span><span class="pd">Optional, parallel: DESIGN.md + card workbench. <span class="tag new">D-F6</span></span></div>
@@ -405,7 +405,7 @@
         <div class="dep load"><div class="dep-top"><span class="dc">D-F2</span><span class="dt">Suggestion producer</span><span class="warn">⚠ load-bearing</span></div><p><b>Needs:</b> something must emit the first proposals — not covered by the existing contract. <b>Approach:</b> ship a deterministic starter set gated on admin-whitelisted tools; design the triggers-hosted suggester as the Vision upgrade.</p></div>
         <div class="dep"><div class="dep-top"><span class="dc">D-F3</span><span class="dt">Connect wiring</span></div><p><b>Needs:</b> authorize the user's account per tool. <b>Approach:</b> route the card into the <b>existing</b> extension-auth flow via the shared <code>extension_name</code> resolver — no new auth path, no frontend-only fallback.</p></div>
         <div class="dep"><div class="dep-top"><span class="dc">D-F4</span><span class="dt">Agent mode + gate</span></div><p><b>Needs:</b> durable mode + real gate behavior. <b>Approach:</b> settings endpoint + session hydration; <code>auto</code> = typed per-kind generalization of <code>global_auto_approve</code>, with gate-suppression tests + audit trail.</p></div>
-        <div class="dep"><div class="dep-top"><span class="dc">D-F5</span><span class="dt">Carousel de-risk</span></div><p><b>Needs:</b> stop showing mock cards to real users (the merge blocker). <b>Approach:</b> read the real projection (empty until tasks exist) or DEV/flag-gate until D-F1 lands.</p></div>
+        <div class="dep"><div class="dep-top"><span class="dc">D-F5</span><span class="dt">Carousel data safety</span></div><p><b>Resolved:</b> the always-available surface reads the durable projection and renders no fabricated cards when the feed is empty.</p></div>
         <div class="dep"><div class="dep-top"><span class="dc">D-F6</span><span class="dt">DESIGN.md + tokens</span></div><p><b>Needs:</b> IronClaw has no design constitution yet. <b>Approach:</b> seed <code>DESIGN.md</code> with the v2 tokens + card taxonomy; the OOBE cards are the natural pilot. Cross-cutting, deferrable.</p></div>
       </div>
       <div class="depcol v">
@@ -457,13 +457,13 @@
       <div class="dec"><span class="n"></span><div class="q"><strong>Phase boundary.</strong><p>Is the Foundational cut correct, or should a Vision piece (docked drawer, reveal) graduate into Foundational?</p></div></div>
       <div class="dec"><span class="n"></span><div class="q"><strong>The suggestion producer (D-F2).</strong><p>Deterministic starter set vs. triggers-hosted suggester vs. agent-driven — the one genuinely new mechanism and biggest open question.</p></div></div>
       <div class="dec"><span class="n"></span><div class="q"><strong>Agent-mode gate semantics (D-F4).</strong><p>Confirm <code>auto</code> as the typed generalization of <code>global_auto_approve</code>, and the bounds of “approved task types” (per-tool / per-action / caps).</p></div></div>
-      <div class="dec"><span class="n"></span><div class="q"><strong>Carousel gating (D-F5).</strong><p>The merge blocker on #6994 — real projection now, or DEV/flag gate first?</p></div></div>
+      <div class="dec"><span class="n"></span><div class="q"><strong>Carousel data safety (D-F5).</strong><p>Resolved: real durable suggestions only; the mock path is removed.</p></div></div>
       <div class="dec"><span class="n"></span><div class="q"><strong>DESIGN.md pilot (D-F6).</strong><p>Adopt the APDD design track here (DESIGN.md + tokens now, Storybook later), or defer?</p></div></div>
     </div>
   </section>
 
   <footer>
-    <p>Package: <span class="mono">docs/design/oobe/</span> — README · PROPOSAL · PLAN · CHECKLIST, beside the interactive <span class="mono">mockup.html</span>. Prototype: PR #6994 · backend tracking: Issue #6993. Benchmarked on merged PR #6918 and the APDD governance kit.</p>
+    <p>Package: <span class="mono">docs/internal/design/oobe/</span> — README · PROPOSAL · PLAN · CHECKLIST, beside the interactive <span class="mono">mockup.html</span>. Prototype: PR #6994 · backend tracking: Issue #6993. Benchmarked on merged PR #6918 and the APDD governance kit.</p>
   </footer>
 </main>
 

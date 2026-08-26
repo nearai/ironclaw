@@ -588,7 +588,7 @@ pub fn agent_messages_from_chat_messages(
             Role::System => {
                 return Err(AgentMessageError::SystemRoleUnsupported { index });
             }
-            Role::User => {
+            Role::User | Role::HostReminder => {
                 converted.push(AgentMessage {
                     role: AgentMessageRole::User,
                     content: vec![ContentPart::text(message.content.clone())],

@@ -46,9 +46,6 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
         className="w-full max-w-md p-6 shadow-none sm:p-8"
       >
         <div className="mb-8">
-          <p className="mb-3 font-mono text-xs uppercase tracking-[0.2em] text-[var(--v2-accent-text)]">
-            {t("login.tagline")}
-          </p>
           <h1
             className="text-5xl font-semibold leading-none tracking-[-0.04em] text-[var(--v2-text-strong)]"
           >

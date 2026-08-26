@@ -1,4 +1,5 @@
 import { Card } from "../../../design-system/card";
+import { Skeleton } from "../../../design-system/skeleton";
 import { AGENT_FIELDS } from "../lib/settings-schema";
 import { filterSettingsSections } from "../lib/settings-search";
 import { SettingsGroup } from "./settings-field";
@@ -48,7 +49,7 @@ function AgentSkeleton() {
         (i) =>
           (
             <Card key={i} padding="md">
-              <div className="mb-4 h-3 w-20 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+              <Skeleton className="mb-4 h-3 w-20 rounded" />
               {[1, 2, 3, 4].map(
                 (j) =>
                   (
@@ -57,10 +58,10 @@ function AgentSkeleton() {
                       className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-4 first:border-0"
                     >
                       <div>
-                        <div className="h-4 w-32 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
-                        <div className="mt-1 h-3 w-48 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+                        <Skeleton className="h-4 w-32 rounded" />
+                        <Skeleton className="mt-1 h-3 w-48 rounded" />
                       </div>
-                      <div className="h-9 w-36 animate-pulse rounded bg-[var(--v2-surface-muted)]" />
+                      <Skeleton className="h-9 w-36 rounded" />
                     </div>
                   )
               )}

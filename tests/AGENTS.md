@@ -36,8 +36,8 @@ them in the same commit; re-derive any of them with:
   | wc -l`.
 - Top-level Rust bins: `ls tests/*.rs | wc -l`.
 - E2E files: `ls tests/e2e/scenarios/test_*.py | wc -l`.
-- E2E test *functions* (the §2 "870" figure — every `test_*` function or
-  method, top-level or in a class, across all 102 files; this is an exhaustive
+- E2E test *functions* (the §2 "889" figure — every `test_*` function or
+  method, top-level or in a class, across all 103 files; this is an exhaustive
   syntactic count, not filtered by active/legacy status):
   ```
   python3 -c "
@@ -50,7 +50,7 @@ them in the same commit; re-derive any of them with:
   print(n)
   "
   ```
-- E2E collected pytest items (the §6 "797 top-level tests" figure — pytest's
+- E2E collected pytest items (the §6 "1180 top-level tests" figure — pytest's
   own collection count, which differs from the syntactic function count above
   when a function is parametrized, skipped at collection, or a class groups
   several `test_*` methods under one node): `cd tests/e2e && python3 -m pytest
@@ -102,7 +102,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 
 Totals: **61** group scenarios · **62** flat integration bins (55 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**870** test functions) registered in the active
+**103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
 
@@ -238,6 +238,11 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
+| Two background children settle independently while the parent keeps running: each gets its own framed transcript row and its own queued `SubagentSettled` input, in settle order (D6) | `subagent_await_edge.rs::background_child_result_is_delivered_per_child_while_parent_runs` |
+| A background result's live-run enqueue racing `RunClosed` (the parent terminalized mid-delivery) is healed by a System-provenance `activate`, not lost | `subagent_await_edge.rs::run_closed_race_is_healed_by_activation` |
+| A background result settling against a parked/completed parent wakes it via `activate` with `ActivationProvenance::System`, pinned on the submitted run's journaled `subagent_activation_provenance` | `subagent_await_edge.rs::parked_parent_is_activated_with_system_provenance` |
+| Re-driving background delivery after a scripted crash mid-append replays idempotently — exactly one transcript row and one queued attention outcome, never two | `subagent_await_edge.rs::background_delivery_replay_is_idempotent` |
+| A background result parked by the autonomous-wake streak cap (`AttentionDeferredStreakCap`) stays unclosed and immune to autonomous re-drive until a human-provenance run start sweeps, drains, and closes it | `subagent_await_edge.rs::streak_capped_result_waits_for_human` |
 | A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread belongs to the calling user (stored under their owner scope, foreign-owner run-state reads rejected) yet never appears in conversation listings | `unbound_turns.rs` |
 
 **Suggestions**
@@ -249,6 +254,12 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Keep suggestion cards and their start/dismiss actions isolated to the authenticated tenant and user scope | `suggestions.rs::suggestions_are_isolated_by_authenticated_scope` |
 | Dismiss a started suggestion across restart without deleting its thread or timeline | `suggestions.rs::dismissing_a_started_suggestion_persists_across_restart` |
 | Settle failed or contract-invalid suggestion generation as failed with no visible cards | `suggestions.rs::failed_suggestion_run_settles_failed_and_retryable_via_list_view`, `suggestions.rs::semantically_invalid_completed_suggestion_output_settles_failed`, `suggestions.rs::unknown_field_in_completed_suggestion_output_settles_failed` |
+| Reach the user's connected extension tools in an autonomous run under the system default, and lose exactly one of them to a per-tool override — the only row of these six needing disclosure forced off, since two connected extensions' full authorized set would otherwise defer behind `tool_search` | `suggestions.rs::connected_extensions_are_reachable_under_the_system_default` |
+| Shrink the autonomous surface when the user turns the global auto-approve toggle off, leaving only the synthetic capabilities that bypass surface policy — a distinct settings-store write from the per-tool override rows below, and the baseline the excluded-call refusal row reuses | `suggestions.rs::disabling_global_auto_approve_shrinks_the_autonomous_surface` |
+| Remove exactly one capability from an autonomous run when the user sets it to ask-each-time — a per-tool override rather than the global toggle above, and a different override value than the disabled row below | `suggestions.rs::per_tool_ask_each_time_override_removes_only_that_tool` |
+| Keep a disabled capability out of an autonomous run even while global auto-approve is on — `Disabled` outranks the default-on toggle, a precedence ask-each-time doesn't claim | `suggestions.rs::per_tool_disabled_override_removes_the_tool_even_with_auto_approve_on` |
+| Reach a connected extension's capability in an autonomous run only through the user's own always-allow grant when auto-approve is off — combines a connected extension, the global toggle, and an explicit persistent grant, a fixture no single row above exercises | `suggestions.rs::connected_gmail_tool_is_reachable_only_via_the_users_own_grant` |
+| Refuse rather than dispatch a capability the autonomous surface excluded, when the model calls it anyway — proves the model-gateway dispatch seam, not just the advertised tool list the rows above check | `suggestions.rs::excluded_capability_call_is_refused_not_dispatched` |
 
 **Tools**
 | Behavior | Evidence |
@@ -394,7 +405,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 797 top-level tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1180 top-level tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -449,7 +460,7 @@ entries.
 | Cancel mid-auth, submit an empty/invalid token, and recover | `test_v2_engine_auth_cancel.py`, `test_v2_engine_auth_flow.py` (19) |
 | Trust OAuth URLs are well-formed and identical across channels (bug #992) | `test_oauth_url_parameters.py` (8) |
 | Have credentials stay per-user and per-thread scoped | `test_v2_kernel_auth_gateway_flow.py` (3), `test_skill_oauth_flow.py` (6), `test_oauth_credential_fallback.py` |
-| Sign in with Google-shaped SSO and have two users keep separate threads | `test_reborn_webui_v2_sso.py` |
+| Sign in with Google-shaped SSO and have two users keep separate threads and notification inboxes | `test_reborn_webui_v2_sso.py` |
 
 ### 6.4 Extensions & MCP (UI + API)
 | The user can… | Evidence |
@@ -486,7 +497,7 @@ entries.
 | Use the Missions tab instead of the removed Routines tab and activity strip | `test_v2_activity_shell.py` (2; pending legacy migration #6369) |
 | See routines created in one surface from another (owner scope) | `test_owner_scope.py` (3) |
 | Browse projects, create one, open a scoped chat, list and download workspace files | `test_reborn_webui_v2_legacy_projects.py` (6), `test_project_detail.py` (3), `test_reborn_v2_file_download.py` (4) |
-| Read generic server-backed notifications, mark one or all as read, wait for a matching final reply before acknowledging completion, and open the source thread | `test_reborn_webui_v2_notifications.py` (6) |
+| Open notifications with immediate feedback while its lazy chunk loads; read approval, authentication, completed, and failed notifications from the generic server-backed Inbox; drive real scheduled approval/auth gates through resolution; persist read state across a fresh client; mark one or all as read; wait for a matching final reply before acknowledging completion; and open the source thread | `test_reborn_webui_v2_notifications.py` (12) |
 
 ### 6.7 Settings, skills & admin
 | The user can… | Evidence |

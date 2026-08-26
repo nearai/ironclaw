@@ -157,10 +157,10 @@ pub async fn run() -> HarnessResult<()> {
         .submit_turn("Can you help me draft a short note?")
         .await?;
     reader
-        .assert_system_prompt_contains("merged from two entries")
+        .assert_model_request_contains("merged from two entries")
         .await?;
     reader
-        .assert_system_prompt_excludes(FIRST_SAVED_FACT)
+        .assert_model_request_excludes(FIRST_SAVED_FACT)
         .await?;
 
     Ok(())

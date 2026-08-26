@@ -331,6 +331,13 @@ impl MemoryScheduledOpRunner {
                 content: vec![ContentPart::text(SCHEDULED_PASS_KICKOFF)],
             }],
             tools: pass.tools.clone(),
+            // Deliberately NOT the unattended narrowing (#7812): the pass's
+            // surface is already the manifest's declared tool list — narrowed
+            // above via `tools` — and dropping an approval-gated declared tool
+            // here would silently break the pass (its write is the whole
+            // point) instead of surfacing the misconfiguration. If a declared
+            // tool requires approval, parking visibly is the better failure.
+            require_no_approval: false,
             output,
             // A background chore nobody is watching needs a ceiling. Without
             // one it inherits the unbound profile's 1024-iteration budget and

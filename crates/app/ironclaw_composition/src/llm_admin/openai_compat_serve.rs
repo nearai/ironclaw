@@ -296,6 +296,9 @@ impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPrepar
                 system_prompt: request.system_prompt,
                 messages: request.messages,
                 tools: Vec::new(),
+                // The OpenAI-compatible chat lane keeps its normal surface:
+                // it is a caller-driven API, not an unattended run.
+                require_no_approval: false,
                 output: request.output,
                 // Unchanged behavior: OpenAI-compat keeps the profile's own ceilings.
                 limits: Default::default(),

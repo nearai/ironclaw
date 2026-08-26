@@ -39,14 +39,27 @@ export function useSuggestions() {
     onSuccess: (data) => {
       if (data) queryClient.setQueryData(SUGGESTIONS_QUERY_KEY, data);
     },
+    // A generation claimed by another tab/device rejects this one with 409
+    // (`GenerationInProgress`). Without this the cache keeps whatever it last
+    // read — typically the superseded `ready` set — and nothing refetches it:
+    // polling only runs while the cached status is `generating`, and the query
+    // client sets `refetchOnWindowFocus: false`. So re-read authoritative
+    // state on any failure; the refetched `generating` status restarts polling
+    // and this client converges on the winning generation.
+    onError: () => {
+      queryClient.invalidateQueries({ queryKey: SUGGESTIONS_QUERY_KEY });
+    },
   });
 
   const start = useMutation({
     mutationFn: (suggestionId: string) => startSuggestion(suggestionId),
     // The started card gains a durable thread/run binding; refresh so it
-    // renders as started if the user comes back to the landing.
+    // renders as started if the user comes back to the landing. Starting also
+    // creates a thread server-side, outside useThreads, so refresh the
+    // non-polling sidebar query at the same boundary.
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: SUGGESTIONS_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: ["threads"] });
     },
   });
 

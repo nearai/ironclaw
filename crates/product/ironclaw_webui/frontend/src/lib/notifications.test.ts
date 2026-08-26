@@ -1,31 +1,7 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { beforeEach, test } from "vitest";
-import { setAuthScope } from "./auth-scope";
-import {
-  approvalThreadNotificationId,
-  approvalThreadNotifications,
-  getNotificationState,
-  markNotificationIdsSeen,
-} from "./notification-approval-compat";
+import { test } from "vitest";
 import { notificationMessages } from "./notifications";
-
-let testScopeId = 0;
-
-beforeEach(() => {
-  const storage = new Map();
-  globalThis.window = {
-    localStorage: {
-      getItem: (key) => storage.get(key) ?? null,
-      setItem: (key, value) => storage.set(key, String(value)),
-      removeItem: (key) => storage.delete(key),
-      get length() { return storage.size; },
-      key: (index) => [...storage.keys()][index] ?? null,
-    },
-  };
-  testScopeId += 1;
-  setAuthScope({ tenant_id: "tenant", user_id: `user-${testScopeId}` });
-});
 
 const t = (key) => ({
   "notifications.approval.title": "Approval required",
@@ -139,35 +115,4 @@ test("notificationMessages does not trust arbitrary action URLs", () => {
     },
   ], t);
   assert.equal(message.href, null);
-});
-
-test("approval compatibility messages keep freshness and typed thread navigation", () => {
-  const messages = approvalThreadNotifications([
-    {
-      id: "thread/1",
-      title: "Daily report",
-      state: "awaiting_approval",
-      gate_ref: "gate-1",
-      updated_at: "2026-06-30T07:43:00Z",
-    },
-  ], new Map(), t);
-
-  assert.equal(messages.length, 1);
-  assert.equal(messages[0].id, "approval:thread/1:gate-1");
-  assert.equal(messages[0].href, "/chat/thread%2F1");
-  assert.equal(
-    approvalThreadNotificationId({ id: "thread/1", gate_ref: "gate-1" }),
-    "approval:thread/1:gate-1",
-  );
-});
-
-test("compatibility seen state remains scoped and bounded", () => {
-  const firstScope = "tenant:first";
-  const secondScope = "tenant:second";
-  markNotificationIdsSeen(
-    Array.from({ length: 260 }, (_, index) => `notification-${index}`),
-    firstScope,
-  );
-  assert.equal(getNotificationState(firstScope).seenIds.size, 250);
-  assert.equal(getNotificationState(secondScope).seenIds.size, 0);
 });

@@ -23,11 +23,12 @@ use ironclaw_host_api::{
     scope::Principal,
 };
 use ironclaw_loop_contracts::{
-    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+    LoopCapabilityPort, LoopRunContext, ProviderToolCall, RegisterProviderToolCallRequest,
+    RunProfileResolutionRequest, RunProfileResolver,
 };
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, ToolDisclosureMode,
+    AwaitEdgeSettler, HostInputQueue, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse, ToolDisclosureMode,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,
@@ -243,6 +244,280 @@ impl HostManagedModelGateway for AlwaysReplyGateway {
             "done".to_string(),
         ))
     }
+}
+
+#[tokio::test]
+async fn production_background_delivery_wires_result_queue_ack_and_edge_close() {
+    let _guard = runtime_composition_test_guard().await;
+    let root = tempfile::tempdir().unwrap();
+    let input = RebornRuntimeInput::from_build_input(
+        ironclaw_composition::local_filesystem_build_input(
+            "runtime-background-delivery-owner",
+            root.path().join("standalone"),
+        )
+        .with_runtime_policy(standalone_runtime_policy()),
+    )
+    .with_tool_disclosure(ToolDisclosureMode::Off)
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-background-delivery-tenant".to_string(),
+        agent_id: "runtime-background-delivery-agent".to_string(),
+        source_binding_id: "runtime-background-delivery-source".to_string(),
+        reply_target_binding_id: "runtime-background-delivery-reply".to_string(),
+    });
+
+    let runtime = build_reborn_runtime(input).await.unwrap();
+    let delivery = ironclaw_composition::test_support::subagent_delivery_test_parts(&runtime).await;
+    let parent_thread = runtime.new_conversation().await.unwrap();
+    let parent_scope = TurnScope::new_with_owner(
+        TenantId::new("runtime-background-delivery-tenant").unwrap(),
+        Some(AgentId::new("runtime-background-delivery-agent").unwrap()),
+        None,
+        parent_thread.0.clone(),
+        Some(UserId::new("runtime-background-delivery-owner").unwrap()),
+    );
+    let parent_thread_scope = ironclaw_threads::ThreadScope {
+        tenant_id: parent_scope.tenant_id.clone(),
+        agent_id: parent_scope.agent_id.clone().unwrap(),
+        project_id: None,
+        owner_user_id: parent_scope.explicit_owner_user_id().cloned(),
+        mission_id: None,
+    };
+    let thread_service = runtime.standalone_thread_service_for_test().unwrap();
+    let actor = TurnActor::new(parent_scope.explicit_owner_user_id().unwrap().clone());
+    let parent_message = thread_service
+        .accept_inbound_message(ironclaw_threads::AcceptInboundMessageRequest {
+            scope: parent_thread_scope.clone(),
+            thread_id: parent_scope.thread_id.clone(),
+            actor_id: actor.user_id.as_str().to_string(),
+            source_binding_id: Some("runtime-background-delivery".to_string()),
+            reply_target_binding_id: None,
+            external_event_id: Some("parent".to_string()),
+            content: ironclaw_threads::MessageContent::text("parent"),
+        })
+        .await
+        .unwrap();
+    let run_profile_resolver = ironclaw_loop_contracts::InMemoryRunProfileResolver::default();
+    let resolved_profile = run_profile_resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let parent_context = LoopRunContext::new(
+        parent_scope.clone(),
+        ironclaw_turns::TurnId::new(),
+        TurnRunId::new(),
+        resolved_profile,
+    )
+    .with_actor(actor.clone());
+    let parent = delivery
+        .turn_tree_store
+        .submit_turn(
+            ironclaw_turns::SubmitTurnRequest {
+                scope: parent_scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new(format!(
+                    "msg:{}",
+                    parent_message.message_id
+                ))
+                .unwrap(),
+                requested_run_profile: None,
+                output_contract: None,
+                requested_model: None,
+                idempotency_key: ironclaw_turns::IdempotencyKey::new("runtime-parent").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: Some(parent_context.run_id),
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
+                product_context: None,
+                subagent_activation_provenance: None,
+            },
+            &ironclaw_turns::AllowAllTurnAdmissionPolicy,
+            &run_profile_resolver,
+        )
+        .await
+        .unwrap();
+    let SubmitTurnResponse::Accepted {
+        run_id: parent_run_id,
+        ..
+    } = parent;
+    assert_eq!(parent_run_id, parent_context.run_id);
+
+    let child_run_id = TurnRunId::new();
+    let child_thread_id =
+        ThreadId::new(format!("subagent-{}", child_run_id.as_uuid().simple())).unwrap();
+    let child_scope = TurnScope::new_with_owner(
+        parent_scope.tenant_id.clone(),
+        parent_scope.agent_id.clone(),
+        None,
+        child_thread_id.clone(),
+        parent_scope.explicit_owner_user_id().cloned(),
+    );
+    let child_thread_scope = ironclaw_threads::ThreadScope {
+        tenant_id: child_scope.tenant_id.clone(),
+        agent_id: child_scope.agent_id.clone().unwrap(),
+        project_id: None,
+        owner_user_id: child_scope.explicit_owner_user_id().cloned(),
+        mission_id: None,
+    };
+    thread_service
+        .ensure_thread(ironclaw_threads::EnsureThreadRequest {
+            scope: child_thread_scope.clone(),
+            thread_id: Some(child_thread_id.clone()),
+            created_by_actor_id: actor.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let child_message = thread_service
+        .accept_inbound_message(ironclaw_threads::AcceptInboundMessageRequest {
+            scope: child_thread_scope.clone(),
+            thread_id: child_thread_id.clone(),
+            actor_id: actor.user_id.as_str().to_string(),
+            source_binding_id: Some("runtime-background-delivery".to_string()),
+            reply_target_binding_id: None,
+            external_event_id: Some("child".to_string()),
+            content: ironclaw_threads::MessageContent::text("child"),
+        })
+        .await
+        .unwrap();
+    thread_service
+        .append_finalized_assistant_message(
+            ironclaw_threads::AppendFinalizedAssistantMessageRequest {
+                scope: child_thread_scope.clone(),
+                thread_id: child_thread_id.clone(),
+                turn_run_id: child_run_id.to_string(),
+                content: ironclaw_threads::MessageContent::text("child result"),
+            },
+        )
+        .await
+        .unwrap();
+
+    let result_ref =
+        ironclaw_host_api::turn::LoopResultRef::new(format!("result:{parent_run_id}.spawn"))
+            .unwrap();
+    thread_service
+        .put_tool_result_record(ironclaw_threads::PutToolResultRecordRequest {
+            scope: parent_thread_scope.clone(),
+            thread_id: parent_scope.thread_id.clone(),
+            result_ref: result_ref.as_str().to_string(),
+            content: b"{}".to_vec(),
+        })
+        .await
+        .unwrap();
+    let gate_ref =
+        ironclaw_host_api::turn::TurnGateRef::new("gate:runtime-background-delivery").unwrap();
+    let edge_metadata = ironclaw_loop_host::AwaitedChildSetRecord {
+        gate_ref,
+        parent_run_context: parent_context.clone(),
+        tree_root_run_id: parent_run_id,
+        child_scope: child_scope.clone(),
+        child_run_id,
+        child_thread_id: child_thread_id.clone(),
+        subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
+        spawn_capability_id: CapabilityId::new("builtin.spawn_subagent").unwrap(),
+        spawn_provider_call_id: Some("runtime-background-spawn".to_string()),
+        result_ref: result_ref.clone(),
+        mode: ironclaw_loop_host::SpawnSubagentMode::Background,
+    };
+    let child = delivery
+        .turn_tree_store
+        .submit_child_turn(
+            ironclaw_turns::SubmitChildRunRequest {
+                parent_scope: parent_scope.clone(),
+                parent_run_id,
+                child_scope: child_scope.clone(),
+                actor: actor.clone(),
+                accepted_message_ref: ironclaw_host_api::turn::AcceptedMessageRef::new(format!(
+                    "msg:{}",
+                    child_message.message_id
+                ))
+                .unwrap(),
+                requested_run_profile: None,
+                output_contract: None,
+                idempotency_key: ironclaw_turns::IdempotencyKey::new("runtime-child").unwrap(),
+                received_at: chrono::Utc::now(),
+                requested_run_id: Some(child_run_id),
+                process_dependency: Some(ironclaw_processes::ProcessDependencySubmission {
+                    dependent_process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
+                        parent_run_id.as_uuid(),
+                    ),
+                    root_process_id: ironclaw_host_api::ids::ProcessId::from_uuid(
+                        parent_run_id.as_uuid(),
+                    ),
+                    group_ref: Some(format!("bg:{}", parent_scope.thread_id)),
+                    metadata: serde_json::to_value(edge_metadata).unwrap(),
+                }),
+                process_input: None,
+                spawn_tree_descendant_cap: 4,
+            },
+            &ironclaw_turns::AllowAllTurnAdmissionPolicy,
+            &run_profile_resolver,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(child, SubmitTurnResponse::Accepted { run_id, .. } if run_id == child_run_id));
+
+    let outcome = delivery
+        .resolver
+        .on_child_terminal(&ironclaw_turns::TurnLifecycleEvent {
+            cursor: ironclaw_host_api::turn::EventCursor(1),
+            scope: child_scope.clone(),
+            occurred_at: Some(chrono::Utc::now()),
+            owner_user_id: Some(actor.user_id.clone()),
+            run_id: child_run_id,
+            status: TurnStatus::Completed,
+            kind: ironclaw_turns::TurnEventKind::Completed,
+            blocked_gate: None,
+            sanitized_reason: None,
+            retryable: None,
+            detail: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, ironclaw_loop_host::ResolveOutcome::Drained);
+    let envelope = delivery
+        .input_queue
+        .next_after(
+            parent_run_id,
+            ironclaw_loop_contracts::LoopInputCursorToken::origin(),
+            8,
+        )
+        .await
+        .unwrap()
+        .inputs
+        .into_iter()
+        .next()
+        .expect("production resolver enqueued child result");
+    assert!(matches!(
+        envelope.input,
+        ironclaw_loop_contracts::LoopInput::SubagentSettled {
+            child_run_id: queued_child_run_id,
+            ..
+        } if queued_child_run_id == child_run_id
+    ));
+    assert!(
+        delivery
+            .store
+            .peek(&child_scope, parent_run_id, child_run_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    delivery
+        .input_queue
+        .ack_consumed(parent_run_id, vec![envelope.ack_token])
+        .await
+        .unwrap();
+    assert!(
+        delivery
+            .store
+            .peek(&child_scope, parent_run_id, child_run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    runtime.shutdown().await.unwrap();
 }
 
 #[derive(Default)]

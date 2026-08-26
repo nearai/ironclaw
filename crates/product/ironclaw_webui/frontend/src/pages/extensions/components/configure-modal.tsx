@@ -2,6 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { SkeletonList } from "../../../design-system/skeleton";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {
@@ -43,6 +44,10 @@ export function ConfigureModal({
   onClose,
   onSaved,
   returnFocusTo,
+  // Preselects one of the two setup paths, so a `?setup=` deep link lands on
+  // the ceremony it named instead of the choice screen. `null` keeps the
+  // choice screen, which is what the Configure button has always shown.
+  initialConnection = null,
 }) {
   const t = useT();
   const extensionName = extension?.displayName || extension?.packageRef?.id || t("extensions.defaultName");
@@ -60,7 +65,7 @@ export function ConfigureModal({
   const [values, setValues] = React.useState({});
   const [hostedMcpAuthSelection, setHostedMcpAuthSelection] = React.useState(null);
   const [connectionChoice, setConnectionChoice] = React.useState(null);
-  const [activeConnection, setActiveConnection] = React.useState(null);
+  const [activeConnection, setActiveConnection] = React.useState(initialConnection);
   const queryClient = useQueryClient();
   const packageId =
     typeof extension?.packageRef === "string"
@@ -317,15 +322,11 @@ export function ConfigureModal({
         returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <div className="space-y-3">
-          {[1, 2].map(
-            (i) =>
-              (<div
-                key={i}
-                className="v2-skeleton h-10 w-full rounded-md"
-              />)
-          )}
-        </div>
+        <SkeletonList
+          count={2}
+          className="space-y-3"
+          itemClassName="h-10 w-full rounded-md"
+        />
       </ModalShell>
     );
   }

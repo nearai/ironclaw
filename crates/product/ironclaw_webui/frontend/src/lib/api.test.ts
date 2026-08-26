@@ -182,7 +182,7 @@ test("log queries forward abort signals to both caller and operator endpoints", 
   assert.equal(calls[1].options.signal, controller.signal);
 });
 
-test("listThreads can request approval-only threads", async () => {
+test("listThreads passes pagination and candidate-thread filters", async () => {
   const calls = [];
   const controller = new AbortController();
   globalThis.sessionStorage = {
@@ -200,7 +200,6 @@ test("listThreads can request approval-only threads", async () => {
 
   const response = await listThreads({
     limit: 100,
-    needsApproval: true,
     candidateThreadId: "thread-active",
     signal: controller.signal,
   });
@@ -209,7 +208,7 @@ test("listThreads can request approval-only threads", async () => {
   assert.equal(calls.length, 1);
   assert.equal(
     calls[0].path,
-    "/api/webchat/v2/threads?limit=100&needs_approval=true&candidate_thread_id=thread-active",
+    "/api/webchat/v2/threads?limit=100&candidate_thread_id=thread-active",
   );
   assert.equal(calls[0].options.signal, controller.signal);
 });

@@ -110,7 +110,6 @@ pub struct WebUiV2State {
     services: Arc<dyn ProductSurface>,
     sse_capacity: Arc<SseCapacity>,
     reborn_projects_enabled: bool,
-    oobe_suggestions_enabled: bool,
     workspace_requires_scoped_projection: bool,
     regression_artifact_export_enabled: bool,
     admin_thread_scrape_enabled: bool,
@@ -131,7 +130,6 @@ impl WebUiV2State {
             services,
             sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
             reborn_projects_enabled: false,
-            oobe_suggestions_enabled: false,
             workspace_requires_scoped_projection: false,
             regression_artifact_export_enabled: false,
             admin_thread_scrape_enabled: false,
@@ -163,19 +161,6 @@ impl WebUiV2State {
 
     pub fn reborn_projects_enabled(&self) -> bool {
         self.reborn_projects_enabled
-    }
-
-    /// Deployment gate for the OOBE first-run suggestion surface. Off by
-    /// default while the surface is still being finished; host composition
-    /// reads the `IRONCLAW_OOBE_SUGGESTIONS` env flag and feeds it here, and
-    /// the browser learns it from `GET /session`'s `features.oobe_suggestions`.
-    pub fn with_oobe_suggestions_enabled(mut self, enabled: bool) -> Self {
-        self.oobe_suggestions_enabled = enabled;
-        self
-    }
-
-    pub fn oobe_suggestions_enabled(&self) -> bool {
-        self.oobe_suggestions_enabled
     }
 
     /// Deployment gate for WebUI workspace fallback behavior. Hosted

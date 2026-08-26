@@ -112,6 +112,7 @@ fn structured_declarations() -> PreparedTurnDeclarations {
             }),
         },
         limits: Default::default(),
+        require_no_approval: false,
     }
 }
 
@@ -255,13 +256,13 @@ async fn structured_unbound_run_completes_by_recording_a_validated_result() -> H
     let requests = run.scripted_llm.captured_requests();
     assert!(
         requests[0].iter().any(|message| {
-            message.role == Role::System
+            message.role == Role::HostReminder
                 && message
                     .content
                     .contains("work phase for a structured response")
                 && message.content.contains("\"sentiment\"")
         }),
-        "the initial work-phase prompt must embed the durable schema guidance"
+        "the initial work-phase request must retain the durable schema guidance as a host reminder"
     );
     for expected in [
         "You are a background extraction task.",
@@ -670,6 +671,7 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
             limits: Default::default(),
             requested_model: None,
             idempotency_key: "unbound-owner-accept".to_string(),
+            require_no_approval: false,
         })
         .await?;
     let ironclaw_product_contracts::inbound::ProductInboundAck::Accepted {

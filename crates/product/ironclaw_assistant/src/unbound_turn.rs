@@ -83,6 +83,13 @@ pub struct UnboundTurnSubmission {
     /// Optional visible-surface selection journaled with the declarations.
     /// Empty means no caller-selected tools.
     pub tools: Vec<ironclaw_host_api::ids::CapabilityId>,
+    /// No human is present for this run: drop capabilities whose
+    /// authorization resolves to `RequireApproval`, so the run does not park
+    /// on a gate nobody can answer. This does NOT restrict effects — the
+    /// surface can still include write-effect capabilities the caller has
+    /// auto-approved. Narrowing-only; `false` keeps the caller's normal
+    /// surface.
+    pub require_no_approval: bool,
     pub output: OutputContract,
     /// Narrowing-only per-run ceilings. Default is unlimited (the profile's own
     /// ceilings apply); a caller that knows its work should be bounded — a
@@ -178,6 +185,7 @@ impl UnboundTurnService {
                     tools: submission.tools,
                     output: submission.output,
                     limits: submission.limits,
+                    require_no_approval: submission.require_no_approval,
                 },
                 idempotency_key: submission.idempotency_key.clone(),
                 thread_id: thread_id.clone(),
@@ -475,6 +483,7 @@ mod tests {
                     tools: Vec::new(),
                     output,
                     limits: Default::default(),
+                    require_no_approval: false,
                 },
                 idempotency_key: "native-readback-accept".to_string(),
                 thread_id: thread_id.clone(),
@@ -677,6 +686,7 @@ mod tests {
                 limits: Default::default(),
                 requested_model: None,
                 idempotency_key: "forwarded-output-contract-key".to_string(),
+                require_no_approval: false,
             })
             .await
             .expect("unbound submission");
@@ -724,6 +734,7 @@ mod tests {
                 limits,
                 requested_model: None,
                 idempotency_key: "declared-limits-key".to_string(),
+                require_no_approval: false,
             })
             .await
             .expect("unbound submission");

@@ -4298,6 +4298,7 @@ dependencies = [
  "ironclaw_skills",
  "ironclaw_triggers",
  "ironclaw_trust",
+ "percent-encoding",
  "secrecy",
  "serde",
  "serde_json",

@@ -1559,6 +1559,7 @@ async fn ack_consumed_is_non_fatal_when_queued_status_flip_fails() {
             input: LoopInput::Steering {
                 message_ref: ironclaw_turns::LoopMessageRef::new("msg:ghost").unwrap(),
             },
+            ack_effect: None,
         })
         .await
         .expect("enqueue");
@@ -1609,6 +1610,7 @@ async fn ack_rejects_unknown_token_instead_of_poisoning_state() {
             input: LoopInput::Steering {
                 message_ref: ironclaw_turns::LoopMessageRef::new("msg:live").unwrap(),
             },
+            ack_effect: None,
         })
         .await
         .expect("enqueue");

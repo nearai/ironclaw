@@ -231,6 +231,10 @@ impl InstructionBundleBuilder {
         &self,
         request: InstructionBundleRequest,
     ) -> Result<InstructionBundle, AgentLoopHostError> {
+        let (leading_inline_messages, tail_inline_messages): (Vec<_>, Vec<_>) = request
+            .inline_messages
+            .into_iter()
+            .partition(|message| message.role.is_leading());
         let mut messages = Vec::new();
         let mut materialized_messages = Vec::new();
         let mut skill_context = Vec::new();
@@ -253,20 +257,6 @@ impl InstructionBundleBuilder {
                 .as_bytes(),
         );
 
-        if !request.inline_messages.is_empty() {
-            requires_materialization_store = true;
-        }
-        for (ordinal, message) in request.inline_messages.into_iter().enumerate() {
-            push_inline_message(
-                &mut messages,
-                &mut materialized_messages,
-                &mut fingerprint,
-                ordinal,
-                message,
-                &mut synthetic_refs,
-            )?;
-        }
-
         if !request.context_bundle.identity_messages.is_empty() {
             requires_materialization_store = true;
         }
@@ -287,17 +277,6 @@ impl InstructionBundleBuilder {
                 },
                 &mut synthetic_refs,
                 message,
-            )?;
-        }
-
-        if let Some(runtime_context) = request.runtime_context {
-            requires_materialization_store = true;
-            push_runtime_context(
-                &mut messages,
-                &mut materialized_messages,
-                &mut fingerprint,
-                runtime_context,
-                &mut synthetic_refs,
             )?;
         }
 
@@ -350,37 +329,7 @@ impl InstructionBundleBuilder {
             }
         }
 
-        // Memory snippets arrive already ordered by the host's two-lane retrieval
-        // (short-term before long-term) so the active conversation keeps priority
-        // under the shared budget. Preserve that insertion order — do NOT re-sort
-        // by opaque ref like instruction snippets do, which would scramble the lane
-        // priority before the model sees it. (CR review: lane priority at the
-        // render boundary.)
         let memory_snippets = request.context_bundle.memory_snippets;
-        if !memory_snippets.is_empty() {
-            requires_materialization_store = true;
-            // Open the memory section with the recall framing (#7294): the
-            // snippets below are recollections to verify, not live state.
-            push_memory_recall_framing(
-                &mut messages,
-                &mut materialized_messages,
-                &mut fingerprint,
-                &mut synthetic_refs,
-            )?;
-        }
-        for (ordinal, snippet) in memory_snippets.into_iter().enumerate() {
-            let content_ref =
-                snippet_message_ref("memory", &snippet, ordinal, &mut synthetic_refs)?;
-            push_snippet_message(
-                &mut messages,
-                &mut materialized_messages,
-                &mut fingerprint,
-                "memory",
-                ordinal,
-                content_ref,
-                &snippet,
-            )?;
-        }
 
         if let Some(safety_context) = request.safety_context {
             requires_materialization_store = true;
@@ -407,6 +356,24 @@ impl InstructionBundleBuilder {
             )?;
         }
 
+        // Subagent direction and task material are host-supplied initial
+        // context, not per-iteration loop control. Keep them ahead of the
+        // persisted transcript so the direction retains system authority and
+        // the goal remains the subagent's first user message.
+        if !leading_inline_messages.is_empty() {
+            requires_materialization_store = true;
+        }
+        for (ordinal, message) in leading_inline_messages.into_iter().enumerate() {
+            push_inline_message(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                ordinal,
+                message,
+                &mut synthetic_refs,
+            )?;
+        }
+
         for (ordinal, message) in request.context_bundle.messages.into_iter().enumerate() {
             requires_materialization_store |= push_context_message(
                 &mut messages,
@@ -419,6 +386,68 @@ impl InstructionBundleBuilder {
                 },
                 &mut synthetic_refs,
                 message,
+            )?;
+        }
+
+        // Recalled memory is turn-dependent context, so it follows the durable
+        // transcript and reaches the provider as tail-positioned host reminders.
+        // Putting it in the leading system run would invalidate the provider
+        // prompt cache whenever retrieval changes across turns. Preserve the
+        // host's two-lane ordering (short-term before long-term) within the
+        // memory section; do not sort by opaque ref.
+        if !memory_snippets.is_empty() {
+            requires_materialization_store = true;
+            push_memory_recall_framing(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                &mut synthetic_refs,
+            )?;
+        }
+        for (ordinal, snippet) in memory_snippets.into_iter().enumerate() {
+            let content_ref =
+                snippet_message_ref("memory", &snippet, ordinal, &mut synthetic_refs)?;
+            push_snippet_message(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                "memory",
+                ordinal,
+                content_ref,
+                &snippet,
+            )?;
+        }
+
+        // Per-call context rides the conversation tail, after the thread
+        // messages, so the leading system-role run — the provider-cached
+        // prompt prefix — stays byte-stable while the loop runs (#6985).
+        // Runtime context (the clock, channel state) re-renders every run;
+        // inline loop-control messages (repeated-call warnings, admission
+        // rejections, model-error observations) appear on individual
+        // iterations. Both would invalidate the whole cached prefix if they
+        // sat ahead of the identity/instruction sections.
+        if let Some(runtime_context) = request.runtime_context {
+            requires_materialization_store = true;
+            push_runtime_context(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                runtime_context,
+                &mut synthetic_refs,
+            )?;
+        }
+
+        if !tail_inline_messages.is_empty() {
+            requires_materialization_store = true;
+        }
+        for (ordinal, message) in tail_inline_messages.into_iter().enumerate() {
+            push_inline_message(
+                &mut messages,
+                &mut materialized_messages,
+                &mut fingerprint,
+                ordinal,
+                message,
+                &mut synthetic_refs,
             )?;
         }
 
@@ -693,8 +722,8 @@ fn push_inline_message(
 
 fn inline_role(role: LoopInlineMessageRole) -> &'static str {
     match role {
-        LoopInlineMessageRole::System => "system",
-        LoopInlineMessageRole::User => "user",
+        LoopInlineMessageRole::LeadingSystem | LoopInlineMessageRole::System => "system",
+        LoopInlineMessageRole::LeadingUser | LoopInlineMessageRole::User => "user",
         LoopInlineMessageRole::Assistant => "assistant",
     }
 }
@@ -1084,6 +1113,50 @@ mod tests {
     }
 
     #[test]
+    fn leading_inline_material_precedes_thread_while_loop_control_rides_tail() {
+        let inline = |role, body| LoopInlineMessage {
+            role,
+            safe_body: LoopInlineMessageBody::new(body).expect("safe inline body"),
+        };
+        let bundle = InstructionBundleBuilder::new(test_context())
+            .build(InstructionBundleRequest {
+                context_bundle: LoopContextBundle {
+                    messages: vec![LoopContextMessage {
+                        message_ref: None,
+                        role: "user".to_string(),
+                        safe_summary: "persisted thread message".to_string(),
+                        compaction: None,
+                    }],
+                    ..LoopContextBundle::default()
+                },
+                visible_surface: None,
+                safety_context: None,
+                runtime_context: None,
+                inline_messages: vec![
+                    inline(LoopInlineMessageRole::System, "loop control"),
+                    inline(LoopInlineMessageRole::LeadingSystem, "subagent direction"),
+                    inline(LoopInlineMessageRole::LeadingUser, "subagent goal"),
+                ],
+            })
+            .expect("instruction bundle builds");
+
+        let rendered = bundle
+            .materialized_messages
+            .iter()
+            .map(|message| (message.role.as_str(), message.model_content.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![
+                ("system", "subagent direction"),
+                ("user", "subagent goal"),
+                ("user", "persisted thread message"),
+                ("system", "loop control"),
+            ]
+        );
+    }
+
+    #[test]
     fn instruction_bundle_replays_security_context_without_blocking_thread_recovery() {
         let model_content = concat!(
             "The report documents an authorization flow and API key rotation.\n",
@@ -1268,6 +1341,54 @@ mod tests {
              {:?}",
             contents[framing_index]
         );
+    }
+
+    /// Recalled memory changes with the active turn. It must follow the
+    /// persisted transcript so the gateway can frame it as a host reminder
+    /// instead of folding it into the provider-cached leading system block.
+    #[test]
+    fn recalled_memory_follows_the_persisted_transcript() {
+        let bundle = InstructionBundleBuilder::new(test_context())
+            .build(InstructionBundleRequest {
+                context_bundle: LoopContextBundle {
+                    memory_snippets: vec![memory_snippet(
+                        "Untrusted memory content: remembered preference",
+                    )],
+                    messages: vec![LoopContextMessage {
+                        message_ref: None,
+                        role: "user".to_string(),
+                        safe_summary: "current user turn".to_string(),
+                        compaction: None,
+                    }],
+                    ..LoopContextBundle::default()
+                },
+                visible_surface: None,
+                safety_context: None,
+                runtime_context: None,
+                inline_messages: Vec::new(),
+            })
+            .expect("instruction bundle builds");
+
+        let contents = bundle
+            .materialized_messages
+            .iter()
+            .map(|message| message.model_content.as_str())
+            .collect::<Vec<_>>();
+        let thread_index = contents
+            .iter()
+            .position(|content| *content == "current user turn")
+            .expect("thread message is materialized");
+        let framing_index = contents
+            .iter()
+            .position(|content| content.starts_with("Recalled memory notice:"))
+            .expect("memory recall framing is materialized");
+        let snippet_index = contents
+            .iter()
+            .position(|content| content.contains("remembered preference"))
+            .expect("memory snippet is materialized");
+
+        assert!(thread_index < framing_index);
+        assert!(framing_index < snippet_index);
     }
 
     /// The framing is a memory-section header: with no memory snippets it must

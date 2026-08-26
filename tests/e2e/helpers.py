@@ -355,6 +355,7 @@ SEL_V2 = {
     "message_list_load_older": "[data-testid='message-list-load-older']",
     "notification_bell": "[data-testid='notification-bell']",
     "notification_panel": "[data-testid='notification-panel']",
+    "notification_panel_loading": "[data-testid='notification-panel-loading']",
     "notification_row": "[data-testid='notification-row']",
     "notification_unread_dot": "[data-testid='notification-unread-dot']",
     "notification_mark_all_read": "[data-testid='notification-mark-all-read']",
