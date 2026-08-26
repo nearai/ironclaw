@@ -217,6 +217,31 @@ the agent connect a Google credential:
 IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/product-auth/oauth/google/callback
 ```
 
+## SSH Access
+
+The image ships `sshd` but the listener stays off unless
+`IRONCLAW_REBORN_SSH_PUBLIC_KEY` is set. When it is, the entrypoint (running as
+root at container start) writes that key as the sole `authorized_keys` entry
+and starts `sshd` on container port 2222 before dropping to the `ironclaw`
+user. Leaving the variable unset leaves no SSH listener running at all.
+
+Container port 2222 is `EXPOSE`d in the image but is not published by
+default — publish it explicitly to reach it, for example `docker run -p
+2222:2222` locally, or a Railway TCP proxy for a hosted deployment.
+
+Login is public-key-only, as user `agent`. The generated `sshd_config` sets
+`AllowUsers agent`, `AuthenticationMethods publickey`, `PubkeyAuthentication
+yes`, `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+`PermitEmptyPasswords no`, and `PermitRootLogin no` — there is no password or
+keyboard-interactive fallback for any account, including `agent`.
+
+`agent` is not a lower-privileged account: the runtime image creates it as a
+non-unique alias of uid 1000, the same uid as the `ironclaw` runtime user. An
+SSH session therefore holds the full runtime identity and can read and write
+everything the IronClaw process owns. Treat distributing the corresponding
+private key with the same care as granting shell access to the running
+service.
+
 ## Slack
 
 Slack routes are compiled into the image and mounted unconditionally. No
