@@ -14,8 +14,9 @@ use ironclaw_notifications::{
     NotificationSource, PublishNotificationRequest,
 };
 use ironclaw_processes::{
-    JournaledProcessSnapshot, ProcessJournalCommit, ProcessJournalCommitObserver,
-    ProcessJournalKind, ProcessKind, ProcessLifecycleStatus, ProcessSuspensionKind,
+    GetProcessSnapshotRequest, JournaledProcessSnapshot, ProcessJournalCommit,
+    ProcessJournalCommitObserver, ProcessJournalKind, ProcessJournalSource, ProcessKind,
+    ProcessLifecycleStatus, ProcessSuspensionKind,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use serde::Deserialize;
@@ -251,7 +252,9 @@ impl RunOutcomeProcessCommitObserver {
 #[async_trait]
 impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
     fn process_observer_id(&self) -> &'static str {
-        "run-outcome-inbox-commit-observer-v2"
+        // Keep the original cursor: changing this observer's identity would
+        // replay every historical terminal outcome, not just resource gates.
+        "run-outcome-inbox-commit-observer-v1"
     }
 
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
@@ -340,6 +343,85 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
     }
 }
 
+/// One-time durable replay for resource suspensions introduced after the
+/// primary outcome observer had already advanced past them. Its separate
+/// cursor is intentionally narrow: terminal outcomes remain owned by the v1
+/// observer and cannot consume Inbox capacity during an upgrade.
+pub struct ResourceBlockBackfillProcessCommitObserver {
+    outcome_observer: RunOutcomeProcessCommitObserver,
+    process_journal_source: Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+}
+
+impl ResourceBlockBackfillProcessCommitObserver {
+    pub fn new(
+        inbox: Arc<dyn NotificationInboxStorePort>,
+        thread_service: Arc<dyn SessionThreadService>,
+        process_journal_source: Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+    ) -> Self {
+        Self {
+            outcome_observer: RunOutcomeProcessCommitObserver::new(inbox, thread_service),
+            process_journal_source,
+        }
+    }
+
+    async fn current_snapshot(
+        &self,
+        snapshot: &JournaledProcessSnapshot,
+    ) -> Result<JournaledProcessSnapshot, String> {
+        self.process_journal_source
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: snapshot.scope.clone(),
+                process_id: snapshot.process_id,
+            })
+            .await
+            .map_err(|error| format!("read current resource-block process state failed: {error}"))
+    }
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for ResourceBlockBackfillProcessCommitObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "run-resource-block-inbox-backfill-observer-v1"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        if commit.kind != ProcessJournalKind::Suspended
+            || commit.state.status != ProcessLifecycleStatus::Suspended
+            || eligible_top_level_owned_run(&commit.state).is_none()
+        {
+            return Ok(());
+        }
+        let Some(historical_gate_ref) = commit.state.suspension.as_ref().and_then(|suspension| {
+            (suspension.kind == ProcessSuspensionKind::Resource)
+                .then_some(suspension.gate_ref.as_ref())
+                .flatten()
+        }) else {
+            return Ok(());
+        };
+        let current = self.current_snapshot(&commit.state).await?;
+        if current_resource_gate_ref(&current) != Some(historical_gate_ref.as_str()) {
+            return Ok(());
+        }
+
+        let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
+        let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        self.outcome_observer
+            .reconcile_resource_block(&current, run_id, occurred_at)
+            .await?;
+
+        // Recovery can win between the pre-publication state read and the
+        // Inbox CAS. Re-read after the write and retire the just-published
+        // record (or move it to the new gate) if the process changed.
+        let latest = self.current_snapshot(&commit.state).await?;
+        if current_resource_gate_ref(&latest) != Some(historical_gate_ref.as_str()) {
+            self.outcome_observer
+                .reconcile_resource_block(&latest, run_id, chrono::Utc::now())
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct OutcomeMetadataEnvelope {
     agent_turn: OutcomeMetadata,
@@ -419,6 +501,17 @@ fn resource_block_reconciliation_needed(commit: &ProcessJournalCommit) -> bool {
     )
 }
 
+fn current_resource_gate_ref(snapshot: &JournaledProcessSnapshot) -> Option<&str> {
+    match (snapshot.status, snapshot.suspension.as_ref()) {
+        (ProcessLifecycleStatus::Suspended, Some(suspension))
+            if suspension.kind == ProcessSuspensionKind::Resource =>
+        {
+            suspension.gate_ref.as_ref().map(|gate| gate.as_str())
+        }
+        _ => None,
+    }
+}
+
 fn resource_block_lifecycle_ref(gate_ref: &str) -> Result<LifecycleRef, String> {
     LifecycleRef::new(gate_ref)
         .map_err(|error| format!("build resource-block lifecycle reference failed: {error}"))
@@ -454,8 +547,12 @@ fn outcome_notification_id(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
+    use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
@@ -474,10 +571,10 @@ mod tests {
     use ironclaw_processes::{
         ClaimProcessesRequest, JournaledProcessSnapshot, ProcessJournalCommit,
         ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalKind,
-        ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore, ProcessKind,
-        ProcessLeaseRequest, ProcessLifecycleStatus, ProcessStateTransitionRequest,
-        ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTransitionPort,
-        ProcessWorkerId, SubmitProcessRequest,
+        ProcessJournalObserverRegistry, ProcessJournalPage, ProcessJournalSource,
+        ProcessJournalStore, ProcessKind, ProcessLeaseRequest, ProcessLifecycleStatus,
+        ProcessStateTransitionRequest, ProcessSubmissionPort, ProcessSuspension,
+        ProcessSuspensionKind, ProcessTransitionPort, ProcessWorkerId, SubmitProcessRequest,
     };
     use ironclaw_threads::{
         AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
@@ -485,7 +582,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::RunOutcomeProcessCommitObserver;
+    use super::{ResourceBlockBackfillProcessCommitObserver, RunOutcomeProcessCommitObserver};
 
     fn tenant() -> TenantId {
         TenantId::new("outcome-observer-tenant").expect("tenant")
@@ -634,6 +731,73 @@ mod tests {
             detail: Some("sensitive budget policy detail".to_string()),
         });
         commit
+    }
+
+    struct CurrentProcessJournalSource {
+        current: Mutex<VecDeque<JournaledProcessSnapshot>>,
+    }
+
+    impl CurrentProcessJournalSource {
+        fn new(current: JournaledProcessSnapshot) -> Self {
+            Self {
+                current: Mutex::new(VecDeque::from([current])),
+            }
+        }
+
+        fn set_current(&self, current: JournaledProcessSnapshot) {
+            *self.current.lock().expect("current process lock") = VecDeque::from([current]);
+        }
+
+        fn set_sequence(&self, current: impl IntoIterator<Item = JournaledProcessSnapshot>) {
+            let current = current.into_iter().collect::<VecDeque<_>>();
+            assert!(!current.is_empty(), "current process sequence is non-empty");
+            *self.current.lock().expect("current process lock") = current;
+        }
+    }
+
+    #[async_trait]
+    impl ProcessJournalSource for CurrentProcessJournalSource {
+        type Error = ironclaw_turns::TurnError;
+
+        async fn get_process_snapshot(
+            &self,
+            _request: ironclaw_processes::GetProcessSnapshotRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            let mut current = self.current.lock().expect("current process lock");
+            let snapshot = current.front().expect("current process snapshot").clone();
+            if current.len() > 1 {
+                current.pop_front();
+            }
+            Ok(snapshot)
+        }
+
+        async fn read_process_journal_after(
+            &self,
+            _scope: &ResourceScope,
+            _owner_user_id: Option<&UserId>,
+            _after: Option<ProcessJournalCursor>,
+            _limit: usize,
+        ) -> Result<ProcessJournalPage, Self::Error> {
+            Ok(ProcessJournalPage {
+                entries: Vec::new(),
+                next_cursor: ProcessJournalCursor(0),
+                truncated: false,
+                rebase_required: None,
+            })
+        }
+
+        async fn read_process_journal_log_after(
+            &self,
+            _after: Option<ProcessJournalCursor>,
+            _limit: usize,
+        ) -> Result<ProcessJournalPage, Self::Error> {
+            Ok(ProcessJournalPage {
+                entries: Vec::new(),
+                next_cursor: ProcessJournalCursor(0),
+                truncated: false,
+                rebase_required: None,
+            })
+        }
     }
 
     async fn records(inbox: &dyn NotificationInboxStorePort) -> Vec<NotificationKind> {
@@ -834,6 +998,98 @@ mod tests {
         assert!(
             recovered.notifications[0].resolved_at.is_some(),
             "durable recovery must resolve the resource block after restart"
+        );
+    }
+
+    #[test]
+    fn primary_outcome_observer_preserves_its_v1_cursor_identity() {
+        let observer = RunOutcomeProcessCommitObserver::new(
+            inbox() as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+
+        assert_eq!(
+            observer.process_observer_id(),
+            "run-outcome-inbox-commit-observer-v1",
+            "resource-block rollout must not replay every historical terminal outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_backfill_only_materializes_a_still_current_resource_gate() {
+        const GATE: &str = "gate:budget-00000000-0000-0000-0000-000000000002";
+        let notification_inbox = inbox();
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let run_id = TurnRunId::new();
+        let blocked = resource_block_commit(run_id, "web_ui", GATE);
+        let recovered = commit(
+            run_id,
+            ProcessLifecycleStatus::Queued,
+            ProcessJournalKind::Resumed,
+            "web_ui",
+        );
+        let source = Arc::new(CurrentProcessJournalSource::new(recovered.state.clone()));
+        let observer = ResourceBlockBackfillProcessCommitObserver::new(
+            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+            Arc::clone(&source) as Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+        );
+
+        observer
+            .observe_process_commit(blocked.clone())
+            .await
+            .expect("settled historical resource block is ignored");
+        observer
+            .observe_process_commit(commit(
+                run_id,
+                ProcessLifecycleStatus::Failed,
+                ProcessJournalKind::Failed,
+                "scheduled_trigger",
+            ))
+            .await
+            .expect("terminal outcomes are outside the narrow backfill");
+        assert!(
+            records(notification_inbox.as_ref()).await.is_empty(),
+            "upgrade replay must not resurrect settled blocks or terminal notifications"
+        );
+
+        source.set_current(blocked.state.clone());
+        observer
+            .observe_process_commit(blocked.clone())
+            .await
+            .expect("current resource block is backfilled");
+        assert_eq!(
+            records(notification_inbox.as_ref()).await,
+            vec![NotificationKind::RunBlocked]
+        );
+
+        let race_inbox = inbox();
+        source.set_sequence([blocked.state, recovered.state]);
+        let race_observer = ResourceBlockBackfillProcessCommitObserver::new(
+            Arc::clone(&race_inbox) as Arc<dyn NotificationInboxStorePort>,
+            threads as Arc<dyn SessionThreadService>,
+            source as Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+        );
+        race_observer
+            .observe_process_commit(resource_block_commit(run_id, "web_ui", GATE))
+            .await
+            .expect("recovery racing the backfill is reconciled");
+        let raced = race_inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list raced resource block");
+        assert_eq!(raced.notifications.len(), 1);
+        assert!(
+            raced.notifications[0].resolved_at.is_some(),
+            "a block recovered during backfill must not remain actionable"
         );
     }
 

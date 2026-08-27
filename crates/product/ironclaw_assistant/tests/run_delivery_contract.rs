@@ -1984,6 +1984,36 @@ async fn observer_keeps_resource_block_off_channels_and_continues_after_recovery
 }
 
 #[tokio::test]
+async fn observer_does_not_treat_gate_less_resource_block_as_surfaced() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::BlockedResource, None),
+        ],
+        false,
+        None,
+        Duration::from_millis(40),
+    );
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-gate-less-resource"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("taking longer than expected")),
+        "a resource block without a stable gate cannot claim durable notification; the live path must retain timeout feedback: {texts:?}"
+    );
+}
+
+#[tokio::test]
 async fn observer_records_gate_route_after_approval_prompt() {
     let harness = build_harness(
         vec![scripted_state(
@@ -4170,6 +4200,31 @@ async fn triggered_persistent_resource_block_does_not_claim_external_delivery() 
             .is_empty(),
         "no adapter call means no durable external-delivery attempt"
     );
+}
+
+#[tokio::test]
+async fn triggered_gate_less_resource_block_delivers_timeout_notice() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::BlockedResource, None)],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Delivered,
+        "a gate-less resource block has no durable Inbox identity, so timeout feedback must be externally delivered"
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "one timeout notice is delivered: {texts:?}");
+    assert!(texts[0].contains("taking longer than expected"));
 }
 
 #[tokio::test]

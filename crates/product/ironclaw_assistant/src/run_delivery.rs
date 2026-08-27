@@ -255,12 +255,13 @@ pub(crate) fn blocked_status_notification_kind(status: TurnStatus) -> Option<Not
 pub(crate) fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedActionableMarker> {
     match state.status {
         TurnStatus::BlockedApproval | TurnStatus::BlockedAuth | TurnStatus::BlockedResource => {
+            let gate_ref = state
+                .gate_ref
+                .as_ref()
+                .map(|gate| gate.as_str().to_string())?;
             Some(BlockedActionableMarker {
                 status: state.status,
-                gate_ref: state
-                    .gate_ref
-                    .as_ref()
-                    .map(|gate| gate.as_str().to_string()),
+                gate_ref: Some(gate_ref),
             })
         }
         _ => None,
