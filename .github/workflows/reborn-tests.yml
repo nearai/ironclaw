@@ -588,14 +588,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.run_integration_tests == 'true'
     runs-on: ubuntu-latest
-    # Pull requests and merge groups batch the affected integration lanes for
-    # fast pass/fail feedback. Main keeps one instrumented batch per lane so
-    # the five coverage tracefiles remain mergeable.
-    # Generous backstop: a cold-cache instrumented build of the Reborn closure
-    # is heavier than a plain build (see the retired reborn-coverage.yml's
-    # 180m budget for the same closure, run as a single job); each of these 5
-    # lanes only carries a slice of the 34 int-tier suites, so 120m is ample.
-    timeout-minutes: 120
+    # Push runs one instrumented lane per job (120m); non-push events combine
+    # lanes, so 300m covers their summed lane budgets and shared setup.
+    timeout-minutes: ${{ github.event_name == 'push' && 120 || 300 }}
     env:
       ANTHROPIC_API_KEY: ""
       LLM_BACKEND: ""

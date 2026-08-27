@@ -2417,6 +2417,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         integration_job = workflow.split("  reborn-integration-coverage:", 1)[1].split(
             "  coverage-report:", 1
         )[0]
+        self.assertIn(
+            "timeout-minutes: ${{ github.event_name == 'push' && 120 || 300 }}",
+            integration_job,
+        )
         self.assertIn("cargo-nextest@0.9.143", integration_job)
         self.assertNotIn("setup-sccache-dist", integration_job)
         self.assertIn("github.event.merge_group.base_sha", workflow)
