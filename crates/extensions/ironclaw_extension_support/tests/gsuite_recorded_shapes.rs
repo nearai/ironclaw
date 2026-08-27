@@ -453,6 +453,117 @@ async fn gmail_get_message_converts_owned_html_to_safe_markdown() {
 }
 
 #[tokio::test]
+async fn gmail_get_message_excludes_content_disposition_attachments_from_body() {
+    let (message, _) = GsuiteShapeCase::new(
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({ "message_id": "msg-content-disposition" }),
+        &[GOOGLE_GMAIL_READONLY_SCOPE],
+        vec![RecordingEgress::json(json!({
+            "id": "msg-content-disposition",
+            "threadId": "thr-content-disposition",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "parts": [
+                    {
+                        "mimeType": "text/plain",
+                        "headers": [{
+                            "name": "Content-Disposition",
+                            "value": "Attachment; size=14"
+                        }],
+                        "body": {
+                            "size": 14,
+                            "data": URL_SAFE_NO_PAD.encode(b"hidden payload")
+                        }
+                    },
+                    {
+                        "mimeType": "text/plain",
+                        "headers": [{
+                            "name": "Content-Disposition",
+                            "value": "inline"
+                        }],
+                        "body": {
+                            "data": URL_SAFE_NO_PAD.encode(b"readable body")
+                        }
+                    }
+                ]
+            }
+        }))],
+    )
+    .dispatch()
+    .await;
+
+    assert_eq!(message["body"]["body"]["kind"], "text");
+    assert_eq!(message["body"]["body"]["text"], "readable body");
+    assert_eq!(message["body"]["attachments"].as_array().unwrap().len(), 1);
+    assert_eq!(message["body"]["attachments"][0]["filename"], "");
+    assert_eq!(message["body"]["attachments"][0]["mime_type"], "text/plain");
+}
+
+#[tokio::test]
+async fn gmail_get_message_uses_plaintext_after_failed_html_alternative() {
+    let too_deep_html = format!("{}body{}", "<div>".repeat(65), "</div>".repeat(65));
+    let (message, _) = GsuiteShapeCase::new(
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({ "message_id": "msg-failed-html-alternative" }),
+        &[GOOGLE_GMAIL_READONLY_SCOPE],
+        vec![RecordingEgress::json(json!({
+            "id": "msg-failed-html-alternative",
+            "threadId": "thr-failed-html-alternative",
+            "payload": {
+                "mimeType": "multipart/alternative",
+                "parts": [
+                    {
+                        "mimeType": "text/html",
+                        "body": { "data": URL_SAFE_NO_PAD.encode(too_deep_html.as_bytes()) }
+                    },
+                    {
+                        "mimeType": "text/plain",
+                        "body": { "data": URL_SAFE_NO_PAD.encode(b"plain fallback") }
+                    }
+                ]
+            }
+        }))],
+    )
+    .dispatch()
+    .await;
+
+    assert_eq!(message["body"]["body"]["kind"], "text");
+    assert_eq!(message["body"]["body"]["text"], "plain fallback");
+}
+
+#[tokio::test]
+async fn gmail_get_message_filters_data_urls_from_all_html_output_paths() {
+    let html = r#"
+        <p>Readable message.</p>
+        <a href="https://example.com">Details</a>
+        <a href="https://example.com/tracking" title="data:image/png;base64,AAAA">Tracking</a>
+        <noscript><img src="data:image/png;base64,BBBB" alt="tracking"></noscript>
+    "#;
+    let (message, _) = GsuiteShapeCase::new(
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({ "message_id": "msg-data-url-paths" }),
+        &[GOOGLE_GMAIL_READONLY_SCOPE],
+        vec![RecordingEgress::json(json!({
+            "id": "msg-data-url-paths",
+            "threadId": "thr-data-url-paths",
+            "payload": {
+                "mimeType": "text/html",
+                "body": { "data": URL_SAFE_NO_PAD.encode(html.as_bytes()) }
+            }
+        }))],
+    )
+    .dispatch()
+    .await;
+
+    let serialized = serde_json::to_string(&message).expect("data URL result serializes");
+    assert!(
+        !serialized.contains("data:image"),
+        "leaked data URL: {serialized}"
+    );
+    assert!(serialized.contains("https://example.com"), "{serialized}");
+}
+
+#[tokio::test]
 async fn gmail_get_message_reports_encrypted_content_without_exposing_ciphertext() {
     let (message, _) = GsuiteShapeCase::new(
         GMAIL_GET_MESSAGE_CAPABILITY_ID,

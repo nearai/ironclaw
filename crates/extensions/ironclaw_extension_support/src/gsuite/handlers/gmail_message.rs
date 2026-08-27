@@ -74,6 +74,11 @@ struct TraversalBudget {
     parts_seen: usize,
 }
 
+enum BodySelectionError {
+    Fatal(GsuiteDispatchError),
+    Candidate(GsuiteDispatchError),
+}
+
 pub(super) fn normalize(value: Value) -> Result<Value, GsuiteDispatchError> {
     let message: GmailMessage = serde_json::from_value(value)
         .map_err(|error| output_decode_with("parse message JSON", error))?;
@@ -86,7 +91,10 @@ pub(super) fn normalize(value: Value) -> Result<Value, GsuiteDispatchError> {
         &mut attachments,
         &mut attachments_truncated,
     )?;
-    let selected = select_body(&message.payload, 0, &mut TraversalBudget { parts_seen: 0 })?;
+    let selected = select_body(&message.payload, 0, &mut TraversalBudget { parts_seen: 0 })
+        .map_err(|error| match error {
+            BodySelectionError::Fatal(error) | BodySelectionError::Candidate(error) => error,
+        })?;
 
     let mut output = Map::new();
     output.insert("id".to_string(), Value::String(message.id));
@@ -154,7 +162,7 @@ fn collect_attachments(
     truncated: &mut bool,
 ) -> Result<(), GsuiteDispatchError> {
     visit_part(depth, budget)?;
-    let is_attachment = !part.filename.is_empty() || part.body.attachment_id.is_some();
+    let is_attachment = is_attachment_part(part);
     if is_attachment {
         if attachments.len() == MAX_ATTACHMENTS {
             *truncated = true;
@@ -188,45 +196,79 @@ fn select_body(
     part: &MessagePart,
     depth: usize,
     budget: &mut TraversalBudget,
-) -> Result<Option<ReadableBody>, GsuiteDispatchError> {
-    visit_part(depth, budget)?;
+) -> Result<Option<ReadableBody>, BodySelectionError> {
+    visit_part(depth, budget).map_err(BodySelectionError::Fatal)?;
     let mime_type = normalize_mime_type(&part.mime_type);
     if is_encrypted_mime(&mime_type) {
         return Ok(Some(ReadableBody::Encrypted));
     }
-    if !part.filename.is_empty() || part.body.attachment_id.is_some() {
+    if is_attachment_part(part) {
         return Ok(None);
     }
     if mime_type == "text/plain" || mime_type == "text/html" {
         if part.body.data.as_deref().is_none_or(str::is_empty) {
             return Ok(None);
         }
-        return decode_text_part(part, &mime_type).map(Some);
+        return decode_text_part(part, &mime_type)
+            .map(Some)
+            .map_err(BodySelectionError::Candidate);
     }
 
     if mime_type == "multipart/alternative" {
         let mut html = None;
         let mut encrypted = None;
+        let mut candidate_error = None;
         for child in &part.parts {
-            match select_body(child, depth + 1, budget)? {
+            let selected = match select_body(child, depth + 1, budget) {
+                Ok(selected) => selected,
+                Err(BodySelectionError::Fatal(error)) => {
+                    return Err(BodySelectionError::Fatal(error));
+                }
+                Err(BodySelectionError::Candidate(error)) => {
+                    candidate_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            match selected {
                 Some(body @ ReadableBody::Text { kind: "text", .. }) => return Ok(Some(body)),
                 Some(body @ ReadableBody::Text { .. }) => html = html.or(Some(body)),
                 Some(body @ ReadableBody::Encrypted) => encrypted = encrypted.or(Some(body)),
                 None => {}
             }
         }
-        return Ok(html.or(encrypted));
+        return match html.or(encrypted) {
+            Some(body) => Ok(Some(body)),
+            None => candidate_error
+                .map(BodySelectionError::Candidate)
+                .map_or(Ok(None), Err),
+        };
     }
 
     let mut encrypted = None;
+    let mut candidate_error = None;
     for child in &part.parts {
-        match select_body(child, depth + 1, budget)? {
+        let selected = match select_body(child, depth + 1, budget) {
+            Ok(selected) => selected,
+            Err(BodySelectionError::Fatal(error)) => {
+                return Err(BodySelectionError::Fatal(error));
+            }
+            Err(BodySelectionError::Candidate(error)) => {
+                candidate_error.get_or_insert(error);
+                continue;
+            }
+        };
+        match selected {
             Some(body @ ReadableBody::Text { .. }) => return Ok(Some(body)),
             Some(body @ ReadableBody::Encrypted) => encrypted = encrypted.or(Some(body)),
             None => {}
         }
     }
-    Ok(encrypted)
+    match encrypted {
+        Some(body) => Ok(Some(body)),
+        None => candidate_error
+            .map(BodySelectionError::Candidate)
+            .map_or(Ok(None), Err),
+    }
 }
 
 fn decode_text_part(
@@ -239,7 +281,7 @@ fn decode_text_part(
     if mime_type == "text/html" {
         let (text, input_truncated) = truncate_utf8(&text, MAX_BODY_BYTES);
         let converter = HtmlToMarkdown::builder()
-            .skip_tags(vec!["script", "style"])
+            .skip_tags(vec!["script", "style", "noscript"])
             .add_handler(
                 vec!["img"],
                 |_handlers: &dyn htmd::element_handler::Handlers, _element: htmd::Element| {
@@ -250,7 +292,7 @@ fn decode_text_part(
                 vec!["a"],
                 |handlers: &dyn htmd::element_handler::Handlers, element: htmd::Element| {
                     let has_inline_data = element.attrs.iter().any(|attribute| {
-                        attribute.name.local.as_ref() == "href"
+                        matches!(attribute.name.local.as_ref(), "href" | "title")
                             && attribute
                                 .value
                                 .trim_start()
@@ -344,6 +386,17 @@ fn header<'a>(headers: &'a [MessageHeader], name: &str) -> Option<&'a str> {
         .iter()
         .find(|header| header.name.eq_ignore_ascii_case(name))
         .map(|header| header.value.as_str())
+}
+
+fn is_attachment_part(part: &MessagePart) -> bool {
+    !part.filename.is_empty()
+        || part.body.attachment_id.is_some()
+        || header(&part.headers, "Content-Disposition").is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|disposition| disposition.trim().eq_ignore_ascii_case("attachment"))
+        })
 }
 
 fn is_encrypted_mime(mime_type: &str) -> bool {

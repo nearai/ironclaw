@@ -492,7 +492,7 @@ impl GsuiteExecutor {
             }
         };
         let shape_output_started_at = gsuite_latency_started_at();
-        let output = match response_output(capability.operation, &response) {
+        let output = match response_output(capability.operation, &response).await {
             Ok(output) => output,
             Err(error) => {
                 let error = add_network_usage(error, network_egress_bytes);
@@ -812,7 +812,7 @@ async fn execute_runtime_http(
         .map_err(map_egress_error)
 }
 
-fn response_output(
+async fn response_output(
     operation: GsuiteCapabilityOperation,
     response: &ironclaw_host_api::http::RuntimeHttpEgressResponse,
 ) -> Result<Value, GsuiteDispatchError> {
@@ -820,7 +820,12 @@ fn response_output(
     if (200..300).contains(&response.status)
         && operation == GsuiteCapabilityOperation::GmailGetMessage
     {
-        body = gmail_message::normalize(body)?;
+        body = tokio::task::spawn_blocking(move || gmail_message::normalize(body))
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Gmail response normalization task failed");
+                GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+            })??;
     }
     Ok(json!({
         "status": response.status,
