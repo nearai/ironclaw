@@ -500,14 +500,24 @@ for slash_var in IRONCLAW_REBORN_HOME IRONCLAW_REBORN_WORKSPACE_ROOT; do
   fi
 done
 
-# 9b. The root pass must repair ownership of pre-existing home CONTENTS, not
-#     just the home directory itself -- and must leave the `ssh` state
-#     directory alone. A persistent volume outlives the image, and this image
-#     ran as `ironclaw` until in-worker SSH required a root entrypoint, so a
-#     volume can carry root-written files. One unreadable file is fatal rather
-#     than degraded: the provider-registry overlay is fail-closed, so a
-#     root-owned providers.json crash-loops the container. `ssh` is excluded
-#     because start-sshd.sh refuses to start unless it owns that directory.
+# 9b. The root pass must repair ownership of pre-existing home CONTENTS --
+#     including NESTED ones -- while leaving the `ssh` state directory alone.
+#     A persistent volume outlives the image, and this image ran as `ironclaw`
+#     until in-worker SSH required a root entrypoint, so a volume can carry
+#     files a root run wrote. One unreadable file is fatal rather than
+#     degraded: the provider-registry overlay is fail-closed, so an
+#     unreadable providers.json crash-loops the container.
+#
+#     Two properties are easy to assert weakly and are therefore asserted
+#     explicitly here:
+#       - the NESTED file must appear, not just its top-level parent. A repair
+#         that passed only top-level entries to a non-recursive chown would
+#         still leave `nested/deep.db` broken while a parent-only assertion
+#         stayed green.
+#       - `ssh` must NOT appear: start-sshd.sh refuses to start unless it owns
+#         that directory, so over-repairing trades a boot loop for dead SSH.
+#     The run is also required to SUCCEED; swallowing its exit status would
+#     let a broken root boot path pass as long as the argv looked right.
 own_home="${WORK}/own-repair"
 mkdir -p "$own_home/ssh" "$own_home/nested"
 printf '%s' "$LEGACY_DISABLED" > "${own_home}/config.toml"
@@ -518,7 +528,7 @@ own_chown_record="${WORK}/own-chown-argv"
 
 rm -f "$own_chown_record"
 touch "$own_chown_record"
-(
+if ! (
   export PATH="${WORK}/root-bin:${WORK}/bin:${PATH}"
   export IRONCLAW_REBORN_HOME="$own_home"
   export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
@@ -530,11 +540,15 @@ touch "$own_chown_record"
   unset IRONCLAW_REBORN_WORKSPACE_ROOT
   unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID RAILWAY_VOLUME_MOUNT_PATH
   sh "$ENTRYPOINT" >/dev/null 2>"${own_home}/entrypoint.err"
-) || true
+); then
+  echo "FAIL[home_contents_ownership]: entrypoint failed during the root pass" >&2
+  cat "${own_home}/entrypoint.err" >&2
+  failures=$((failures + 1))
+fi
 
-# The chown stub records its argv rather than executing, so assert on what the
-# root pass asked for: every top-level home entry except `ssh`.
-for own_expected in config.toml providers.json nested; do
+# The chown stub records argv rather than executing, so assert on what the root
+# pass asked for. `nested/deep.db` is the discriminating one.
+for own_expected in config.toml providers.json nested/deep.db; do
   if ! grep -q "${own_home}/${own_expected}" "$own_chown_record"; then
     echo "FAIL[home_contents_ownership]: root pass never chowned ${own_expected}; a root-written file would crash-loop the container" >&2
     cat "$own_chown_record" >&2
@@ -544,6 +558,44 @@ done
 if grep -q "${own_home}/ssh" "$own_chown_record"; then
   echo "FAIL[home_contents_ownership]: root pass chowned the ssh state directory; start-sshd.sh requires it to stay root-owned" >&2
   cat "$own_chown_record" >&2
+  failures=$((failures + 1))
+fi
+
+# 9c. The home may itself be a SYMLINK. `find` defaults to a physical walk, so
+#     a symlinked start path has no descendants under -mindepth 1 and the
+#     repair silently does nothing -- the boot loop would persist with no
+#     diagnostic. `-H` follows the start path only, which is why symlinks
+#     planted *inside* the home still cannot redirect ownership outward.
+link_home_real="${WORK}/own-link-real"
+link_home="${WORK}/own-link"
+mkdir -p "$link_home_real"
+printf '%s' "$LEGACY_DISABLED" > "${link_home_real}/config.toml"
+printf '{}' > "${link_home_real}/providers.json"
+ln -sfn "$link_home_real" "$link_home"
+link_chown_record="${WORK}/own-link-chown-argv"
+
+rm -f "$link_chown_record"
+touch "$link_chown_record"
+if ! (
+  export PATH="${WORK}/root-bin:${WORK}/bin:${PATH}"
+  export IRONCLAW_REBORN_HOME="$link_home"
+  export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
+  export IRONCLAW_STUB_ARGV_PATH="${link_home}/argv"
+  export IRONCLAW_STUB_WORKSPACE_PATH="${link_home}/workspace-root"
+  export IRONCLAW_STUB_CHOWN_PATH="$link_chown_record"
+  export IRONCLAW_STUB_GOSU_PATH="${link_home}/gosu-argv"
+  export IRONCLAW_STUB_UID=0
+  unset IRONCLAW_REBORN_WORKSPACE_ROOT
+  unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID RAILWAY_VOLUME_MOUNT_PATH
+  sh "$ENTRYPOINT" >/dev/null 2>"${link_home}/entrypoint.err"
+); then
+  echo "FAIL[symlinked_home_ownership]: entrypoint failed with a symlinked home" >&2
+  cat "${link_home}/entrypoint.err" >&2
+  failures=$((failures + 1))
+fi
+if ! grep -q "providers.json" "$link_chown_record"; then
+  echo "FAIL[symlinked_home_ownership]: repair walked nothing through a symlinked home; the boot loop would persist silently" >&2
+  cat "$link_chown_record" >&2
   failures=$((failures + 1))
 fi
 
