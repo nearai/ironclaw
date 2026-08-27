@@ -39,6 +39,12 @@ mkdir -p "${sandbox}/without-nextest-bin"
 cp "${sandbox}/bin/cargo" "${sandbox}/bin/timeout" "${sandbox}/without-nextest-bin/"
 chmod +x "${sandbox}/without-nextest-bin/cargo" "${sandbox}/without-nextest-bin/timeout"
 
+missing_nextest_path="${sandbox}/without-nextest-bin:/usr/bin:/bin"
+if PATH="${missing_nextest_path}" command -v cargo-nextest >/dev/null 2>&1; then
+  echo "FAIL: missing-nextest probe PATH unexpectedly contains cargo-nextest" >&2
+  exit 1
+fi
+
 status=0
 mkdir -p "${sandbox}/group-only"
 cp "${under_test}" "${sandbox}/group-only/reborn-coverage-lane-run.sh"
@@ -95,7 +101,7 @@ fi
 ci_missing_output="${sandbox}/ci-missing-nextest.log"
 if (
   cd "${repo_root}"
-  PATH="${sandbox}/without-nextest-bin:/usr/bin:/bin" \
+  PATH="${missing_nextest_path}" \
     CI=true \
     INTEGRATION_BATCH_LOG="${sandbox}/ci-missing-nextest.commands" \
     REBORN_COV_COLLECT=false \
@@ -114,7 +120,7 @@ local_fallback_log="${sandbox}/local-fallback.commands"
 if ! (
   cd "${repo_root}"
   env -u CI \
-    PATH="${sandbox}/without-nextest-bin:/usr/bin:/bin" \
+    PATH="${missing_nextest_path}" \
     INTEGRATION_BATCH_LOG="${local_fallback_log}" \
     REBORN_COV_COLLECT=false \
     REBORN_COV_LANES_JSON='[0]' \
