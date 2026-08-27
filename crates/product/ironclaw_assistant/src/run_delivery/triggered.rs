@@ -1,9 +1,7 @@
-//! The background-run notifier: watches a trigger-submitted run and tells the
-//! creator's **notification channels** when it needs them — an approval gate,
-//! an expired credential, or a failure — through the [`DeliveryCoordinator`].
-//!
-//! It deliberately does NOT push results. A background run's answer lives in
-//! the fire's own run thread; putting it on a channel is the model's explicit
+//! Watches a trigger-submitted run and tells the creator's notification channels
+//! when it needs them through the [`DeliveryCoordinator`]. It deliberately does
+//! NOT push results: answers live in the fire's own run thread, and channel
+//! delivery is the model's explicit
 //! `builtin.outbound_deliver` call, never an automatic push (spec §8).
 
 use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
@@ -16,11 +14,7 @@ use ironclaw_extension_contracts::channel_adapter::OutboundPart;
 use ironclaw_host_api::execution_policy::ResultDeliveryPolicy;
 use ironclaw_host_api::failure::summary::reborn_failure_summary_for_category;
 use ironclaw_host_api::ids::{AgentId, TenantId, UserId};
-use ironclaw_notifications::{
-    LifecycleRef, NotificationAction, NotificationId, NotificationInboxStorePort,
-    NotificationInitialState, NotificationKind, NotificationRecipient, NotificationSeverity,
-    NotificationSource, PublishNotificationRequest,
-};
+use ironclaw_notifications::NotificationKind;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     OutboundError, OutboundPolicyService, PrepareCommunicationDeliveryRequest, ProjectionUpdateRef,
@@ -74,59 +68,7 @@ use ironclaw_extension_contracts::preference_target::{
 /// configurations (and tests) stay fast.
 const TERMINAL_RACE_GRACE: Duration = Duration::from_secs(5);
 
-/// Inbox persistence is best-effort on a detached settlement path. A stalled
-/// storage backend must not hold external channel delivery indefinitely.
-const PRE_SUBMIT_INBOX_PUBLISH_TIMEOUT: Duration = Duration::from_secs(2);
-
 const TRACE_TARGET: &str = "ironclaw::reborn::run_delivery";
-
-/// Publishes permanently settled pre-submit failures to the durable Inbox.
-///
-/// This notifier is intentionally independent from [`TriggeredRunDeliveryDriver`]:
-/// runtimes without a channel egress coordinator still have an Inbox, and a
-/// stalled Inbox must remain bounded when the generic settlement hook fans out
-/// to external delivery concurrently.
-pub struct PreSubmitFailureInboxNotifier {
-    inbox: Arc<dyn NotificationInboxStorePort>,
-    publish_timeout: Duration,
-}
-
-impl PreSubmitFailureInboxNotifier {
-    pub fn new(inbox: Arc<dyn NotificationInboxStorePort>) -> Self {
-        Self::with_publish_timeout(inbox, PRE_SUBMIT_INBOX_PUBLISH_TIMEOUT)
-    }
-
-    /// Override the persistence deadline for deployments with a known storage
-    /// latency budget and for deterministic contract tests.
-    pub fn with_publish_timeout(
-        inbox: Arc<dyn NotificationInboxStorePort>,
-        publish_timeout: Duration,
-    ) -> Self {
-        Self {
-            inbox,
-            publish_timeout,
-        }
-    }
-}
-
-#[async_trait]
-impl TriggeredRunDelivery for PreSubmitFailureInboxNotifier {
-    async fn on_trigger_submitted(&self, _request: TriggeredRunDeliveryRequest) {}
-
-    async fn on_trigger_failed_before_submit(&self, request: TriggeredFireFailureDeliveryRequest) {
-        if request.project_scoped {
-            return;
-        }
-        publish_pre_submit_failure_inbox_notification(
-            self.inbox.as_ref(),
-            &request.creator_user_id,
-            &request.scope.tenant_id,
-            &request.failure_ref,
-            self.publish_timeout,
-        )
-        .await;
-    }
-}
 
 /// One effective notification target, resolved at fire time from the
 /// creator's stored notification-channel set.
@@ -539,74 +481,6 @@ async fn notify_pre_submit_failure(
                 extension_id = %target.extension_id,
                 reason = %error,
                 "background fire failure notification failed for one channel"
-            );
-        }
-    }
-}
-
-/// Persist one metadata-only failure record for a permanently settled fire.
-///
-/// A pre-submit failure has no run id, so the stable, opaque fire reference is
-/// hashed into the notification identity. Inbox publication remains
-/// best-effort and independent from configured external notification channels.
-async fn publish_pre_submit_failure_inbox_notification(
-    inbox: &dyn NotificationInboxStorePort,
-    user_id: &UserId,
-    tenant_id: &TenantId,
-    failure_ref: &ProjectionUpdateRef,
-    publish_timeout: Duration,
-) {
-    let fire_key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, failure_ref.as_str().as_bytes());
-    let notification_id = match NotificationId::new(format!(
-        "trigger-fire:{fire_key}:{}",
-        NotificationKind::RunFailed.stable_key()
-    )) {
-        Ok(id) => id,
-        Err(error) => {
-            tracing::debug!(target: TRACE_TARGET, %error, "invalid pre-submit failure Inbox id");
-            return;
-        }
-    };
-    let lifecycle_ref = match LifecycleRef::new(format!("trigger-fire:{fire_key}")) {
-        Ok(reference) => reference,
-        Err(error) => {
-            tracing::debug!(target: TRACE_TARGET, %error, "invalid pre-submit failure lifecycle ref");
-            return;
-        }
-    };
-    let publication = inbox.publish(PublishNotificationRequest {
-        id: notification_id,
-        recipient: NotificationRecipient {
-            tenant_id: tenant_id.clone(),
-            user_id: user_id.clone(),
-        },
-        kind: NotificationKind::RunFailed,
-        severity: NotificationSeverity::Error,
-        source: NotificationSource {
-            thread_id: None,
-            turn_run_id: None,
-            lifecycle_ref: Some(lifecycle_ref),
-        },
-        action: NotificationAction::None,
-        initial_state: NotificationInitialState::Resolved,
-        occurred_at: Utc::now(),
-    });
-    match tokio::time::timeout(publish_timeout, publication).await {
-        Ok(Ok(_record)) => {}
-        Ok(Err(error)) => {
-            tracing::debug!(
-                target: TRACE_TARGET,
-                %error,
-                fire_key = %fire_key,
-                "failed to publish pre-submit failure to durable Inbox"
-            );
-        }
-        Err(_elapsed) => {
-            tracing::debug!(
-                target: TRACE_TARGET,
-                fire_key = %fire_key,
-                timeout_ms = publish_timeout.as_millis(),
-                "timed out publishing pre-submit failure to durable Inbox"
             );
         }
     }

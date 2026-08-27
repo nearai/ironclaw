@@ -63,11 +63,13 @@ mod gate_routes;
 mod inbox_gate_observer;
 pub mod notifications;
 mod observer;
+mod pre_submit_failure;
 pub(crate) mod prompts;
 mod triggered;
 
 pub use observer::RunDeliveryObserver;
-pub use triggered::{PreSubmitFailureInboxNotifier, TriggeredRunDeliveryDriver};
+pub use pre_submit_failure::PreSubmitFailureInboxNotifier;
+pub use triggered::TriggeredRunDeliveryDriver;
 
 const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
