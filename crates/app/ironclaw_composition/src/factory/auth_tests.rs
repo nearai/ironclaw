@@ -22,6 +22,11 @@ use ironclaw_host_api::{
     ids::{AgentId, InvocationId, ProjectId, TenantId, ThreadId, UserId},
     resource::ResourceScope,
 };
+use ironclaw_notifications::{
+    LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInitialState,
+    NotificationKind, NotificationRecipient, NotificationSeverity, NotificationSource,
+    PublishNotificationRequest,
+};
 use ironclaw_processes::{
     ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,
     ProcessSuspensionKind, ProcessTransitionPort, ProcessWorkerId, SuspendProcessRequest,
@@ -219,6 +224,35 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
         Vec::new(),
     )
     .await;
+    let notification_recipient = NotificationRecipient {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: actor.user_id.clone(),
+    };
+    services
+        .notification_inbox
+        .publish(PublishNotificationRequest {
+            id: ironclaw_assistant::run_notification_inbox_id_for_test(
+                run_id,
+                NotificationKind::AuthenticationRequired,
+                Some(gate_ref.as_str()),
+            )
+            .expect("notification id"),
+            recipient: notification_recipient.clone(),
+            kind: NotificationKind::AuthenticationRequired,
+            severity: NotificationSeverity::Warning,
+            source: NotificationSource {
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: Some(run_id),
+                lifecycle_ref: Some(LifecycleRef::new(gate_ref.as_str()).expect("lifecycle ref")),
+            },
+            action: NotificationAction::OpenThread {
+                thread_id: scope.thread_id.clone(),
+            },
+            initial_state: NotificationInitialState::Open,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .expect("seed durable auth notification");
     let auth_scope = auth_scope_for_turn(&scope, &actor);
     let flow = product_auth
         .flow_manager()
@@ -278,6 +312,18 @@ async fn standalone_oauth_turn_gate_callback_resumes_default_turn_coordinator() 
         .expect("run state");
     assert_eq!(state.status, TurnStatus::Queued);
     assert_eq!(state.gate_ref, None);
+    let notifications = services
+        .notification_inbox
+        .list(ListNotificationsRequest {
+            recipient: notification_recipient,
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list durable auth notifications");
+    assert_eq!(notifications.notifications.len(), 1);
+    assert!(notifications.notifications[0].resolved_at.is_some());
 }
 
 #[tokio::test]

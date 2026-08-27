@@ -1318,8 +1318,11 @@ impl RebornRuntime {
         };
         if let Some(user_id) = paired_user.as_ref() {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
-            let continuation =
-                crate::factory::auth_continuation_dispatcher(turn_coordinator, Some(turn_state));
+            let continuation = crate::factory::auth_continuation_dispatcher(
+                turn_coordinator,
+                Some(turn_state),
+                None,
+            );
             service
                 .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
                 .await
@@ -3266,10 +3269,13 @@ pub(crate) async fn build_runtime_with_resource_governor(
             reason: format!("suggestion generation observer wiring failed: {error}"),
         })?;
     processes
-        .subscribe_process_observer(Arc::new(RunOutcomeProcessCommitObserver::new(
-            Arc::clone(&services.notification_inbox),
-            Arc::clone(&thread_service),
-        )))
+        .subscribe_process_observer(Arc::new(
+            RunOutcomeProcessCommitObserver::new(
+                Arc::clone(&services.notification_inbox),
+                Arc::clone(&thread_service),
+            )
+            .with_process_journal_source(Arc::clone(&process_journal_source)),
+        ))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("run outcome notification observer wiring failed: {error}"),
         })?;

@@ -617,10 +617,14 @@ pub(crate) fn auth_continuation_dispatcher(
     blocked_auth_gate_source: Option<
         Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>,
     >,
+    notification_inbox: Option<super::ComposedNotificationInbox>,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
-    let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
-        ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
-    );
+    let dispatcher = ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator));
+    let dispatcher = match notification_inbox {
+        Some(inbox) => dispatcher.with_notification_inbox(inbox),
+        None => dispatcher,
+    };
+    let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(dispatcher);
     match blocked_auth_gate_source {
         // Local paths fan a completed flow out to the caller's other
         // provider-blocked runs (pair/authorize once, all waiting chats
@@ -649,6 +653,7 @@ pub(super) struct ProductAuthServicesCompositionInput {
         Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
     /// Durable auth-flow records for composition-owned product auth.
     pub(super) flow_record_source: Option<Arc<dyn ironclaw_auth::AuthFlowRecordSource>>,
+    pub(super) notification_inbox: Option<super::ComposedNotificationInbox>,
 }
 
 pub(super) fn compose_product_auth_services(
@@ -670,6 +675,7 @@ pub(super) fn compose_product_auth_services(
         nearai_mcp_host_managed_scope,
         credential_account_visibility_policy,
         flow_record_source,
+        notification_inbox,
     } = input;
     let builder_owned_durable_auth = flow_record_source.is_some();
     let ports = match provider_composition.client {
@@ -677,8 +683,11 @@ pub(super) fn compose_product_auth_services(
         None if builder_owned_durable_auth => ports.with_current_provider_client(),
         None => ports,
     };
-    let base_continuation =
-        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source);
+    let base_continuation = auth_continuation_dispatcher(
+        turn_coordinator,
+        blocked_auth_snapshot_source,
+        notification_inbox,
+    );
     let mut services = ports.into_services(Arc::clone(&base_continuation), secret_store);
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);

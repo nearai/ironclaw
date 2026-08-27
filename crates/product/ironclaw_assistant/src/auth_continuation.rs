@@ -15,6 +15,10 @@ use async_trait::async_trait;
 pub use ironclaw_auth::RebornAuthContinuationDispatcher as ProductAuthContinuationDispatcher;
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
 use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_notifications::{
+    NotificationInboxError, NotificationInboxStorePort, NotificationKind,
+    NotificationMutationRequest, NotificationRecipient,
+};
 use ironclaw_turns::{
     GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
     TurnCoordinator, TurnError, TurnErrorCategory,
@@ -85,11 +89,23 @@ impl ProductAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
 #[derive(Clone)]
 pub struct ProductAuthTurnGateResumeDispatcher {
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    notification_inbox: Option<Arc<dyn NotificationInboxStorePort>>,
 }
 
 impl ProductAuthTurnGateResumeDispatcher {
     pub fn new(turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
-        Self { turn_coordinator }
+        Self {
+            turn_coordinator,
+            notification_inbox: None,
+        }
+    }
+
+    pub fn with_notification_inbox(
+        mut self,
+        notification_inbox: Arc<dyn NotificationInboxStorePort>,
+    ) -> Self {
+        self.notification_inbox = Some(notification_inbox);
+        self
     }
 
     pub async fn dispatch_auth_continuation(
@@ -192,10 +208,16 @@ impl ProductAuthTurnGateResumeDispatcher {
             .await
             .map_err(map_auth_resume_error)?;
         let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
-        if ignore_stale_gate
-            && (state.status != TurnStatus::BlockedAuth
-                || state.gate_ref.as_ref() != Some(&gate_resolution_ref))
-        {
+        let gate_is_current = state.status == TurnStatus::BlockedAuth
+            && state.gate_ref.as_ref() == Some(&gate_resolution_ref);
+        if ignore_stale_gate && !gate_is_current {
+            self.resolve_auth_notification(
+                &state.scope,
+                &event.scope.resource.user_id,
+                run_id,
+                &gate_resolution_ref,
+            )
+            .await?;
             return Ok(run_id);
         }
         let actor = state
@@ -215,7 +237,7 @@ impl ProductAuthTurnGateResumeDispatcher {
                 scope,
                 actor,
                 run_id,
-                gate_resolution_ref,
+                gate_resolution_ref: gate_resolution_ref.clone(),
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
                 resume_disposition,
@@ -223,7 +245,55 @@ impl ProductAuthTurnGateResumeDispatcher {
             .await
             .map_err(map_auth_resume_error)?;
 
+        self.resolve_auth_notification(
+            &state.scope,
+            &event.scope.resource.user_id,
+            run_id,
+            &gate_resolution_ref,
+        )
+        .await?;
+
         Ok(run_id)
+    }
+
+    async fn resolve_auth_notification(
+        &self,
+        scope: &TurnScope,
+        fallback_user_id: &ironclaw_host_api::ids::UserId,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> Result<(), ProductSurfaceFailure> {
+        let Some(inbox) = self.notification_inbox.as_ref() else {
+            return Ok(());
+        };
+        let notification_id = crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::AuthenticationRequired,
+            Some(gate_ref.as_str()),
+        )
+        .map_err(|error| ProductSurfaceFailure::Transient {
+            reason: format!("build auth Inbox notification id failed: {error}"),
+        })?;
+        let owner_user_id = scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| fallback_user_id.clone());
+        match inbox
+            .resolve(NotificationMutationRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: owner_user_id,
+                },
+                notification_id,
+                occurred_at: chrono::Utc::now(),
+            })
+            .await
+        {
+            Ok(_) | Err(NotificationInboxError::NotificationNotFound) => Ok(()),
+            Err(error) => Err(ProductSurfaceFailure::Transient {
+                reason: format!("resolve auth Inbox notification failed: {error}"),
+            }),
+        }
     }
 }
 
@@ -435,10 +505,19 @@ mod tests {
         AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
         LifecyclePackageRef, TurnRunRef,
     };
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
         ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
         resource::ResourceScope,
         turn::TurnGateRef,
+    };
+    use ironclaw_notifications::{
+        LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInboxStore,
+        NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+        NotificationRecipient, NotificationSeverity, NotificationSource,
+        PublishNotificationRequest,
     };
     use ironclaw_processes::{
         ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,
@@ -483,6 +562,23 @@ mod tests {
         fn fail_resume_with(&self, error: TurnError) {
             *self.resume_error.lock().expect("resume error lock") = Some(error);
         }
+    }
+
+    fn notification_inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/auth-continuation-notifications")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(InMemoryBackend::new()),
+                mounts,
+            )),
+            ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
     }
 
     #[async_trait]
@@ -699,6 +795,74 @@ mod tests {
         assert!(resumes[0].idempotency_key.as_str().contains("flow:"));
         assert!(resumes[0].idempotency_key.as_str().contains("run:"));
         assert!(resumes[0].idempotency_key.as_str().contains("gate:"));
+    }
+
+    #[tokio::test]
+    async fn oauth_turn_gate_continuation_resolves_the_durable_auth_notification() {
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let inbox = notification_inbox();
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:oauth-callback").expect("gate ref");
+        coordinator.set_state(run_state(
+            run_id,
+            TurnStatus::BlockedAuth,
+            Some(gate_ref.as_str()),
+        ));
+        let notification_id = crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::AuthenticationRequired,
+            Some(gate_ref.as_str()),
+        )
+        .expect("notification id");
+        inbox
+            .publish(PublishNotificationRequest {
+                id: notification_id,
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: ThreadId::new("thread-auth").expect("thread"),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(
+                        LifecycleRef::new(gate_ref.as_str()).expect("lifecycle ref"),
+                    ),
+                },
+                action: NotificationAction::OpenThread {
+                    thread_id: ThreadId::new("thread-auth").expect("thread"),
+                },
+                initial_state: NotificationInitialState::Open,
+                occurred_at: Utc::now(),
+            })
+            .await
+            .expect("seed auth notification");
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator)
+            .with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
+
+        dispatcher
+            .dispatch_auth_continuation(scoped_event(AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).expect("run ref"),
+                gate_ref: AuthGateRef::new(gate_ref.as_str()).expect("auth gate ref"),
+            }))
+            .await
+            .expect("OAuth continuation resumes the gate");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list notifications");
+        assert_eq!(page.notifications.len(), 1);
+        assert!(page.notifications[0].resolved_at.is_some());
     }
 
     #[tokio::test]

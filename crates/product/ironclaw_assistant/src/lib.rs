@@ -64,6 +64,18 @@ mod project_create_capability;
 pub mod projection;
 mod reborn_services;
 mod run_delivery;
+
+/// Test-only access to the stable Inbox identity used by production run
+/// notification publishers and lifecycle resolvers.
+#[cfg(any(test, feature = "test-support"))]
+pub fn run_notification_inbox_id_for_test(
+    run_id: ironclaw_host_api::turn::TurnRunId,
+    kind: ironclaw_notifications::NotificationKind,
+    lifecycle_ref: Option<&str>,
+) -> Result<ironclaw_notifications::NotificationId, ironclaw_notifications::NotificationInboxError>
+{
+    run_delivery::run_notification_inbox_id(run_id, kind, lifecycle_ref)
+}
 mod run_outcome_observer;
 mod scoped_fs;
 mod steering;
