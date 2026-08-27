@@ -6,8 +6,8 @@ use ironclaw_turns::LoopResultRef;
 
 pub(super) const RESULT_PREVIEW_MAX_BYTES: usize = 3 * 1024;
 const RESULT_OBSERVATION_MAX_BYTES: usize = 4 * 1024;
-const RESULT_PREVIEW_ESCAPED_MAX_BYTES: usize = 2 * 1024;
-const RESULT_PREVIEW_RETRY_BYTES: usize = 2 * 1024;
+const RESULT_JSON_VIEW_MIN_BYTES: usize = 4;
+const RESULT_LEGACY_PREVIEW_MAX_BYTES: usize = 2 * 1024;
 
 /// A bounded, UTF-8-safe first-look slice of a serialized result payload.
 pub(super) struct FirstLookResultPreview {
@@ -23,6 +23,7 @@ pub(super) struct FirstLookResultPreview {
 pub(super) fn first_look_result_preview(
     serialized: &[u8],
     result_ref: &str,
+    item_count: Option<u64>,
 ) -> Option<FirstLookResultPreview> {
     let Ok(full_text) = std::str::from_utf8(serialized) else {
         return None;
@@ -34,57 +35,99 @@ pub(super) fn first_look_result_preview(
             structured_json_view: false,
         });
     }
-    for budget in [RESULT_PREVIEW_MAX_BYTES, RESULT_PREVIEW_RETRY_BYTES] {
-        match ironclaw_threads::render_json_tool_result_page(
+    let mut lower = RESULT_JSON_VIEW_MIN_BYTES;
+    let mut upper = RESULT_PREVIEW_MAX_BYTES;
+    let mut best = None;
+    while lower <= upper {
+        let budget = lower + (upper - lower) / 2;
+        let page = match ironclaw_threads::render_json_tool_result_page(
             result_ref, serialized, "", 0, budget, None,
         ) {
-            Ok(page) => match ironclaw_threads::model_result_preview_from_json_page(&page) {
-                Ok(redacted) => {
-                    let text = redacted.into_inner();
-                    let escaped_fits = serde_json::to_vec(&text)
-                        .is_ok_and(|encoded| encoded.len() <= RESULT_PREVIEW_ESCAPED_MAX_BYTES);
-                    if text.len() > RESULT_PREVIEW_MAX_BYTES || !escaped_fits {
-                        continue;
-                    }
-                    return Some(FirstLookResultPreview {
-                        text,
-                        // JSON continuation metadata is carried inside the
-                        // self-describing page. The outer offset remains reserved
-                        // for exact legacy byte continuation.
-                        next_offset: None,
-                        structured_json_view: true,
-                    });
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "large JSON first-look redaction failed; retaining legacy byte continuation"
-                    );
-                }
-            },
-            Err(ironclaw_threads::ToolResultRecordReadError::MalformedStoredJson { .. }) => break,
+            Ok(page) => page,
             Err(ironclaw_threads::ToolResultRecordReadError::JsonViewBudgetTooSmall { .. }) => {
+                lower = budget.saturating_add(1);
                 continue;
             }
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     error = %error,
-                    "large JSON first-look rendering failed; retaining legacy byte continuation"
+                    "large JSON first-look rendering unavailable; retaining legacy byte continuation"
                 );
                 break;
             }
+        };
+        let text = match ironclaw_threads::model_result_preview_from_json_page(&page) {
+            Ok(redacted) => redacted.into_inner(),
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "large JSON first-look redaction unavailable; retaining legacy byte continuation"
+                );
+                break;
+            }
+        };
+        if text.len() <= RESULT_PREVIEW_MAX_BYTES
+            && structured_preview_fits_observation(result_ref, serialized.len(), &text, item_count)
+        {
+            best = Some(FirstLookResultPreview {
+                text,
+                // JSON continuation metadata is carried inside the
+                // self-describing page. The outer offset remains reserved
+                // for exact legacy byte continuation.
+                next_offset: None,
+                structured_json_view: true,
+            });
+            lower = budget.saturating_add(1);
+        } else {
+            upper = budget.saturating_sub(1);
         }
-        break;
     }
-    // Legacy byte previews can expand when replay applies credential masking.
-    // Leave the same bounded headroom used by the structured retry so the
-    // reconstructed preview still fits the independent first-look budget.
-    let end = floor_char_boundary(full_text, RESULT_PREVIEW_RETRY_BYTES);
+    if let Some(preview) = best {
+        return Some(preview);
+    }
+    // Legacy byte previews can expand when replay applies credential masking;
+    // keep the raw slice within the independent first-look budget.
+    let end = floor_char_boundary(full_text, RESULT_LEGACY_PREVIEW_MAX_BYTES);
+    let text = full_text.get(..end)?.to_string();
     Some(FirstLookResultPreview {
-        text: full_text[..end].to_string(),
+        text,
         next_offset: Some(end as u64),
         structured_json_view: false,
     })
+}
+
+fn structured_preview_fits_observation(
+    result_ref: &str,
+    byte_len: usize,
+    preview: &str,
+    item_count: Option<u64>,
+) -> bool {
+    let Ok(result_ref) = LoopResultRef::new(result_ref.to_string()) else {
+        return false;
+    };
+    let empty_preview = FirstLookResultPreview {
+        text: String::new(),
+        next_offset: None,
+        structured_json_view: true,
+    };
+    let observation = result_reference_observation(
+        &result_ref,
+        byte_len as u64,
+        Some(empty_preview),
+        item_count,
+    );
+    let Some(empty_size) = serde_json::to_vec(&observation)
+        .ok()
+        .map(|value| value.len())
+    else {
+        return false;
+    };
+    let Some(encoded_preview_size) = serde_json::to_vec(preview).ok().map(|value| value.len())
+    else {
+        return false;
+    };
+    empty_size.saturating_add(encoded_preview_size.saturating_sub(2))
+        <= RESULT_OBSERVATION_MAX_BYTES
 }
 
 fn floor_char_boundary(value: &str, index: usize) -> usize {
@@ -189,7 +232,7 @@ pub(super) fn result_reference_observation(
     if !serde_json::to_vec(&observation)
         .is_ok_and(|encoded| encoded.len() <= RESULT_OBSERVATION_MAX_BYTES)
     {
-        tracing::warn!(
+        tracing::debug!(
             max_bytes = RESULT_OBSERVATION_MAX_BYTES,
             "automatic tool-result observation exceeded its budget; falling back to reference-only"
         );

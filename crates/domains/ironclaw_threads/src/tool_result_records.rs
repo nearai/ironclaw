@@ -36,11 +36,8 @@ pub fn model_result_preview_from_json_page(
         page.next_offset = None;
         page.next = None;
     } else {
-        let encoded_content = serde_json::to_string(&page.content).map_err(|e| e.to_string())?;
-        let redacted_content = ModelResultPreview::redacted(encoded_content)
-            .map_err(|error| error.to_string())?
-            .into_inner();
-        page.content = serde_json::from_str(&redacted_content).map_err(|e| e.to_string())?;
+        redact_json_page_content(&mut page.content)?;
+        redact_omitted_descriptors(&mut page.omitted);
     }
     ModelResultPreview::from_redacted_json_page(page).map_err(|error| error.to_string())
 }
@@ -50,6 +47,52 @@ fn json_pointer_is_sensitive(pointer: &str) -> bool {
         let decoded = segment.replace("~1", "/").replace("~0", "~");
         json_field_name_requires_redaction(&decoded)
     })
+}
+
+fn redact_json_page_content(content: &mut Value) -> Result<(), String> {
+    match content {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if json_field_name_requires_redaction(key) {
+                    *value = Value::String("[redacted]".to_string());
+                } else {
+                    redact_json_page_content(value)?;
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_json_page_content(value)?;
+            }
+        }
+        Value::String(text) => {
+            *text = ModelResultPreview::redacted(text.clone())
+                .map_err(|error| error.to_string())?
+                .into_inner();
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn redact_omitted_descriptors(omitted: &mut [ModelResultJsonOmittedDescriptor]) {
+    for descriptor in omitted {
+        match descriptor {
+            ModelResultJsonOmittedDescriptor::Object(descriptor) => {
+                if json_field_name_requires_redaction(&descriptor.key)
+                    || json_pointer_is_sensitive(&descriptor.json_pointer)
+                {
+                    descriptor.key = "[redacted]".to_string();
+                    descriptor.json_pointer = "[redacted]".to_string();
+                }
+            }
+            ModelResultJsonOmittedDescriptor::Array(descriptor) => {
+                if json_pointer_is_sensitive(&descriptor.json_pointer) {
+                    descriptor.json_pointer = "[redacted]".to_string();
+                }
+            }
+        }
+    }
 }
 
 /// Errors in the model-selected JSON view are separate from storage failures
@@ -303,10 +346,11 @@ fn render_object_page(
             omitted.push(descriptor);
             continue;
         }
-        if absolute_index == start && content.is_empty() && omitted.is_empty() {
-            return Err(ToolResultRecordReadError::JsonViewBudgetTooSmall { max_bytes: budget });
-        }
-        next_offset = Some(absolute_index as u64);
+        // The provider-controlled key itself can be larger than the entire
+        // page budget, making even its omission descriptor unrepresentable.
+        // Skip that one child so continuation always makes progress and later
+        // object fields remain reachable.
+        next_offset = Some((absolute_index + 1) as u64);
         break;
     }
     if next_offset.is_none() && end < object.len() {
@@ -377,10 +421,9 @@ fn render_array_page(
             omitted.push(descriptor);
             continue;
         }
-        if index == start && content.is_empty() && omitted.is_empty() {
-            return Err(ToolResultRecordReadError::JsonViewBudgetTooSmall { max_bytes: budget });
-        }
-        next_offset = Some(index as u64);
+        // Keep collection continuation monotonic even when the envelope plus
+        // this omission descriptor cannot fit in the caller's budget.
+        next_offset = Some((index + 1) as u64);
         break;
     }
     if next_offset.is_none() && end < array.len() {
@@ -410,8 +453,10 @@ fn render_string_page(
         max_bytes: budget,
         limit: None,
     };
-    let requested_start = usize::try_from(offset)
-        .map_err(|_| ToolResultRecordReadError::InvalidJsonOffset { offset })?;
+    let requested_start = usize::try_from(offset).map_err(|error| {
+        tracing::debug!(offset, error = %error, "JSON string offset does not fit in usize");
+        ToolResultRecordReadError::InvalidJsonOffset { offset }
+    })?;
     if requested_start > string.len() || !string.is_char_boundary(requested_start) {
         return Err(ToolResultRecordReadError::InvalidJsonOffset { offset });
     }
@@ -466,8 +511,10 @@ fn checked_collection_offset(
     offset: u64,
     length: usize,
 ) -> Result<usize, ToolResultRecordReadError> {
-    let index = usize::try_from(offset)
-        .map_err(|_| ToolResultRecordReadError::InvalidJsonOffset { offset })?;
+    let index = usize::try_from(offset).map_err(|error| {
+        tracing::debug!(offset, error = %error, "JSON collection offset does not fit in usize");
+        ToolResultRecordReadError::InvalidJsonOffset { offset }
+    })?;
     if index > length {
         return Err(ToolResultRecordReadError::InvalidJsonOffset { offset });
     }
@@ -485,13 +532,27 @@ fn omitted_descriptor(
     match index {
         Some(index) => ModelResultJsonOmittedDescriptor::Array(ModelResultJsonOmittedArray {
             index: u64::try_from(index).unwrap_or(u64::MAX),
-            json_pointer: pointer,
+            json_pointer: if json_pointer_is_sensitive(&pointer) {
+                "[redacted]".to_string()
+            } else {
+                pointer
+            },
             node_type,
             item_count,
         }),
         None => ModelResultJsonOmittedDescriptor::Object(ModelResultJsonOmittedObject {
-            key: key.to_string(),
-            json_pointer: pointer,
+            key: if json_field_name_requires_redaction(key) || json_pointer_is_sensitive(&pointer) {
+                "[redacted]".to_string()
+            } else {
+                key.to_string()
+            },
+            json_pointer: if json_field_name_requires_redaction(key)
+                || json_pointer_is_sensitive(&pointer)
+            {
+                "[redacted]".to_string()
+            } else {
+                pointer
+            },
             node_type,
             item_count,
         }),
@@ -722,5 +783,67 @@ mod tests {
             error,
             ToolResultRecordReadError::JsonLimitRequiresCollection
         ));
+    }
+
+    #[test]
+    fn json_pages_redact_credential_labeled_omission_descriptors() {
+        let mut object = serde_json::Map::new();
+        object.insert("safe".to_string(), serde_json::json!("visible"));
+        object.insert("api_key".to_string(), serde_json::json!("x".repeat(2_000)));
+        let serialized = serde_json::to_vec(&object).expect("JSON result serializes");
+
+        let page =
+            render_json_tool_result_page("result:redacted-omission", &serialized, "", 0, 512, None)
+                .expect("the safe key and redacted omission descriptor fit");
+
+        let omitted = page
+            .omitted
+            .first()
+            .expect("large credential field omitted");
+        let descriptor = match omitted {
+            ironclaw_host_api::model_result_preview::ModelResultJsonOmittedDescriptor::Object(
+                descriptor,
+            ) => descriptor,
+            _ => panic!("object page must use an object omission descriptor"),
+        };
+        assert_eq!(descriptor.key, "[redacted]");
+        assert_eq!(descriptor.json_pointer, "[redacted]");
+        let encoded = serde_json::to_string(&page).expect("page serializes");
+        assert!(!encoded.contains("api_key"));
+        assert!(!encoded.contains("/api_key"));
+    }
+
+    #[test]
+    fn json_pages_advance_past_an_object_key_whose_descriptor_cannot_fit() {
+        let mut object = serde_json::Map::new();
+        object.insert("a".to_string(), serde_json::json!("visible"));
+        object.insert("m".repeat(1_000), serde_json::json!("value"));
+        object.insert("z".to_string(), serde_json::json!("later"));
+        let serialized = serde_json::to_vec(&object).expect("JSON result serializes");
+
+        let first = render_json_tool_result_page(
+            "result:oversized-object-key",
+            &serialized,
+            "",
+            0,
+            512,
+            None,
+        )
+        .expect("an unrepresentable key must not block the page");
+        let next_offset = first
+            .next_offset
+            .expect("the page advances past the unrepresentable key");
+        assert_eq!(next_offset, 2);
+
+        let second = render_json_tool_result_page(
+            "result:oversized-object-key",
+            &serialized,
+            "",
+            next_offset,
+            512,
+            None,
+        )
+        .expect("later object fields remain reachable");
+        assert_eq!(second.content["z"], "later");
     }
 }

@@ -603,16 +603,24 @@ fn result_preview_parts(
     // The result ref and paging metadata are independent host-authored authority:
     // keep them even when no preview was supplied or the remaining content is
     // rejected, so replay can continue against the durable source.
-    let preview = preview.and_then(|text| {
-        if structured_json_view {
-            let page =
-                ironclaw_host_api::model_result_preview::ModelResultJsonPage::from_json_str(&text)
-                    .ok()?;
-            ModelResultPreview::from_redacted_json_page(page).ok()
-        } else {
-            ModelResultPreview::redacted(text).ok()
+    let (preview, structured_json_view) = match (preview, structured_json_view) {
+        (None, structured_json_view) => (None, structured_json_view),
+        (Some(text), false) => (ordinary_result_preview(text), false),
+        (Some(text), true) => {
+            match ironclaw_host_api::model_result_preview::ModelResultJsonPage::from_json_str(&text)
+                .map_err(|error| error.to_string())
+                .and_then(|page| {
+                    ModelResultPreview::from_redacted_json_page(page)
+                        .map_err(|error| error.to_string())
+                }) {
+                Ok(preview) => (Some(preview), true),
+                Err(error) => {
+                    tracing::debug!(%error, "structured result preview failed validation");
+                    (ordinary_result_preview(text), false)
+                }
+            }
         }
-    });
+    };
     let referenced_result_ref = if result_ref == own_result_ref.as_str() {
         None
     } else {
@@ -629,6 +637,20 @@ fn result_preview_parts(
             summary,
         },
     )
+}
+
+/// Preserve ordinary result content when a structured-page claim cannot be
+/// validated. The fallback is deliberately untrusted and therefore does not
+/// retain the structured provenance bit.
+fn ordinary_result_preview(text: String) -> Option<ModelResultPreview> {
+    ModelResultPreview::redacted(text)
+        .inspect_err(|error| {
+            // silent-ok: a preview that still contains forbidden control or
+            // credential material is omitted; continuation metadata remains
+            // authoritative and lets the model request a safe page later.
+            tracing::debug!(%error, "model-visible result preview rejected after redaction");
+        })
+        .ok()
 }
 
 /// The observation's generic `summary` as a bounded [`SafeSummary`] caption — the

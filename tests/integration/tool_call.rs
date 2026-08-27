@@ -1078,8 +1078,15 @@ async fn durable_read_file_result_redacts_structured_credential_value() {
 /// identity and offset must survive independently of preview content. The
 /// first explicit byte read starts at the historical 24 KiB boundary because
 /// the automatic first look now carries continuation inside its JSON page.
-#[tokio::test]
-async fn result_read_continues_a_durable_result_byte_exactly() {
+#[test]
+fn result_read_continues_a_durable_result_byte_exactly() {
+    run_async_test_with_stack(
+        "result_read_continues_a_durable_result_byte_exactly",
+        result_read_continues_a_durable_result_byte_exactly_impl,
+    );
+}
+
+async fn result_read_continues_a_durable_result_byte_exactly_impl() {
     let h = RebornIntegrationHarness::test_default()
         .with_durable_capability_io_file_tools()
         .script([
@@ -1277,19 +1284,13 @@ async fn result_read_continues_a_durable_result_byte_exactly() {
     );
 }
 
-/// A large structured capability result must get a bounded, parseable first
-/// look. The follow-up selection is additive to the legacy byte reader: it
-/// returns a self-describing JSON page, while the old offset/max_bytes request
-/// below still returns the exact serialized bytes.
-#[test]
-fn result_read_selects_json_pointer_from_large_nested_result() {
-    run_async_test_with_stack(
-        "result_read_selects_json_pointer_from_large_nested_result",
-        result_read_selects_json_pointer_from_large_nested_result_impl,
-    );
+struct LargeNestedResultFixture {
+    harness: RebornIntegrationHarness,
+    serialized: Vec<u8>,
+    result_ref: String,
 }
 
-async fn result_read_selects_json_pointer_from_large_nested_result_impl() {
+async fn large_nested_result_fixture() -> LargeNestedResultFixture {
     let result = large_nested_json_capability_result();
     let serialized = serde_json::to_vec(&result).expect("nested result serializes");
     let h = RebornIntegrationHarness::test_default()
@@ -1321,7 +1322,63 @@ async fn result_read_selects_json_pointer_from_large_nested_result_impl() {
     h.submit_turn("inspect the large nested result")
         .await
         .expect("first turn completes");
-    let envelopes = h
+    let result_ref = h
+        .latest_tool_result_ref()
+        .await
+        .expect("large result has a durable result reference");
+
+    LargeNestedResultFixture {
+        harness: h,
+        serialized,
+        result_ref,
+    }
+}
+
+async fn read_large_nested_result(
+    h: &RebornIntegrationHarness,
+    result_ref: &str,
+    offset: u64,
+    max_bytes: usize,
+    json_pointer: Option<&str>,
+    limit: Option<usize>,
+) -> serde_json::Value {
+    let mut arguments = json!({
+        "result_ref": result_ref,
+        "offset": offset,
+        "max_bytes": max_bytes,
+    });
+    if let Some(json_pointer) = json_pointer {
+        arguments["json_pointer"] = json!(json_pointer);
+    }
+    if let Some(limit) = limit {
+        arguments["limit"] = json!(limit);
+    }
+    h.push_script([
+        RebornScriptedReply::tool_call("builtin.result_read", arguments),
+        RebornScriptedReply::text("result read complete"),
+    ]);
+    h.submit_turn("read the requested result view")
+        .await
+        .expect("result_read turn completes");
+    h.tool_result_output("builtin.result_read")
+        .await
+        .expect("result_read output is recorded")
+}
+
+/// A large structured capability result must get a bounded, parseable first
+/// look before the model asks for a more specific JSON view.
+#[test]
+fn result_read_large_nested_result_first_look_is_bounded_and_parseable() {
+    run_async_test_with_stack(
+        "result_read_large_nested_result_first_look_is_bounded_and_parseable",
+        result_read_large_nested_result_first_look_is_bounded_and_parseable_impl,
+    );
+}
+
+async fn result_read_large_nested_result_first_look_is_bounded_and_parseable_impl() {
+    let fixture = large_nested_result_fixture().await;
+    let envelopes = fixture
+        .harness
         .persisted_tool_result_envelopes()
         .await
         .expect("tool-result envelopes persist");
@@ -1332,7 +1389,7 @@ async fn result_read_selects_json_pointer_from_large_nested_result_impl() {
     let detail = &observation["detail"];
     assert_eq!(
         detail["total_bytes"].as_u64(),
-        Some(serialized.len() as u64)
+        Some(fixture.serialized.len() as u64)
     );
     let preview = detail["preview"]
         .as_str()
@@ -1350,7 +1407,10 @@ async fn result_read_selects_json_pointer_from_large_nested_result_impl() {
     );
     let preview_value = serde_json::from_str::<serde_json::Value>(preview)
         .expect("first look must be a complete JSON value, not a blind prefix");
-    assert_eq!(preview_value["total_bytes"], serialized.len() as u64);
+    assert_eq!(
+        preview_value["total_bytes"],
+        fixture.serialized.len() as u64
+    );
     assert!(
         preview_value["total_bytes"]
             .as_u64()
@@ -1364,114 +1424,114 @@ async fn result_read_selects_json_pointer_from_large_nested_result_impl() {
         "large-nested-json"
     );
     assert_eq!(preview_value["omitted"][0]["json_pointer"], "/payload");
+}
 
-    let result_ref = h
-        .latest_tool_result_ref()
-        .await
-        .expect("large result has a durable result reference");
-    h.push_script([
-        RebornScriptedReply::tool_call(
-            "builtin.result_read",
-            json!({
-                "result_ref": result_ref,
-                "offset": 0,
-                "max_bytes": ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
-                "json_pointer": "/payload/items/2345",
-            }),
-        ),
-        RebornScriptedReply::text("selected"),
-    ]);
-    h.submit_turn("select item 2345 from the nested result")
-        .await
-        .expect("JSON selection turn completes");
-    let selected = h
-        .tool_result_output("builtin.result_read")
-        .await
-        .expect("selected result is recorded");
-    assert_eq!(selected["result_ref"].as_str(), Some(result_ref.as_str()));
+/// A nested JSON pointer selects an object or a scalar without returning the
+/// surrounding large result.
+#[test]
+fn result_read_selects_nested_json_node_and_scalar() {
+    run_async_test_with_stack(
+        "result_read_selects_nested_json_node_and_scalar",
+        result_read_selects_nested_json_node_and_scalar_impl,
+    );
+}
+
+async fn result_read_selects_nested_json_node_and_scalar_impl() {
+    let fixture = large_nested_result_fixture().await;
+
+    let selected = read_large_nested_result(
+        &fixture.harness,
+        &fixture.result_ref,
+        0,
+        ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
+        Some("/payload/items/2345"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        selected["result_ref"].as_str(),
+        Some(fixture.result_ref.as_str())
+    );
     assert_eq!(
         selected["json_pointer"].as_str(),
         Some("/payload/items/2345")
     );
     assert_eq!(
         selected["total_bytes"].as_u64(),
-        Some(serialized.len() as u64)
+        Some(fixture.serialized.len() as u64)
     );
     let selected_value = &selected["content"];
     assert_eq!(selected_value["id"], 2345);
     assert_eq!(selected_value["label"], "nested-item-2345");
     assert!(selected["next_offset"].is_null());
 
-    h.push_script([
-        RebornScriptedReply::tool_call(
-            "builtin.result_read",
-            json!({
-                "result_ref": result_ref,
-                "offset": 2345,
-                "max_bytes": ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
-                "json_pointer": "/payload/items",
-                "limit": 2,
-            }),
-        ),
-        RebornScriptedReply::text("array page inspected"),
-    ]);
-    h.submit_turn("page through the nested item array")
-        .await
-        .expect("JSON collection page turn completes");
-    let array_page = h
-        .tool_result_output("builtin.result_read")
-        .await
-        .expect("JSON collection page is recorded");
+    let scalar_page = read_large_nested_result(
+        &fixture.harness,
+        &fixture.result_ref,
+        0,
+        ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
+        Some("/payload/items/2345/id"),
+        None,
+    )
+    .await;
+    assert_eq!(scalar_page["node_type"], "number");
+    assert_eq!(scalar_page["content"], 2345);
+    assert!(scalar_page["next_offset"].is_null());
+}
+
+/// Collection pointers page by item index while preserving the selected JSON
+/// node across continuation reads.
+#[test]
+fn result_read_pages_nested_json_collection() {
+    run_async_test_with_stack(
+        "result_read_pages_nested_json_collection",
+        result_read_pages_nested_json_collection_impl,
+    );
+}
+
+async fn result_read_pages_nested_json_collection_impl() {
+    let fixture = large_nested_result_fixture().await;
+    let array_page = read_large_nested_result(
+        &fixture.harness,
+        &fixture.result_ref,
+        2345,
+        ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
+        Some("/payload/items"),
+        Some(2),
+    )
+    .await;
     assert_eq!(array_page["content"][0]["id"], 2345);
     assert_eq!(array_page["content"][1]["id"], 2346);
     let array_next_offset = array_page["next_offset"]
         .as_u64()
         .expect("limited collection page has a continuation");
 
-    h.push_script([
-        RebornScriptedReply::tool_call(
-            "builtin.result_read",
-            json!({
-                "result_ref": result_ref,
-                "offset": array_next_offset,
-                "max_bytes": ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
-                "json_pointer": "/payload/items",
-                "limit": 2,
-            }),
-        ),
-        RebornScriptedReply::text("next array page inspected"),
-    ]);
-    h.submit_turn("continue the nested item array")
-        .await
-        .expect("JSON collection continuation completes");
-    let next_array_page = h
-        .tool_result_output("builtin.result_read")
-        .await
-        .expect("continued JSON collection page is recorded");
+    let next_array_page = read_large_nested_result(
+        &fixture.harness,
+        &fixture.result_ref,
+        array_next_offset,
+        ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
+        Some("/payload/items"),
+        Some(2),
+    )
+    .await;
     assert_eq!(next_array_page["content"][0]["id"], array_next_offset);
+}
 
-    h.push_script([
-        RebornScriptedReply::tool_call(
-            "builtin.result_read",
-            json!({
-                "result_ref": result_ref,
-                "offset": 0,
-                "max_bytes": ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
-                "json_pointer": "/payload/items/2345/id",
-            }),
-        ),
-        RebornScriptedReply::text("scalar inspected"),
-    ]);
-    h.submit_turn("select the nested scalar")
-        .await
-        .expect("scalar JSON selection completes");
-    let scalar_page = h
-        .tool_result_output("builtin.result_read")
-        .await
-        .expect("scalar JSON page is recorded");
-    assert_eq!(scalar_page["node_type"], "number");
-    assert_eq!(scalar_page["content"], 2345);
-    assert!(scalar_page["next_offset"].is_null());
+/// Credential-labeled selections remain usable while provider credential
+/// values are masked and the caller's post-redaction byte budget is honored.
+#[test]
+fn result_read_redacts_credential_json_within_requested_budget() {
+    run_async_test_with_stack(
+        "result_read_redacts_credential_json_within_requested_budget",
+        result_read_redacts_credential_json_within_requested_budget_impl,
+    );
+}
+
+async fn result_read_redacts_credential_json_within_requested_budget_impl() {
+    let fixture = large_nested_result_fixture().await;
+    let h = &fixture.harness;
+    let result_ref = &fixture.result_ref;
 
     h.push_script([
         RebornScriptedReply::tool_call(
@@ -1568,6 +1628,22 @@ async fn result_read_selects_json_pointer_from_large_nested_result_impl() {
         bounded_redacted_page.to_string().contains("[redacted]"),
         "the bounded page must expose redacted provider content"
     );
+}
+
+/// Invalid pointer, offset, and collection-limit combinations remain typed,
+/// model-correctable tool outcomes rather than terminal host failures.
+#[test]
+fn invalid_json_result_selections_remain_model_correctable() {
+    run_async_test_with_stack(
+        "invalid_json_result_selections_remain_model_correctable",
+        invalid_json_result_selections_remain_model_correctable_impl,
+    );
+}
+
+async fn invalid_json_result_selections_remain_model_correctable_impl() {
+    let fixture = large_nested_result_fixture().await;
+    let h = &fixture.harness;
+    let result_ref = &fixture.result_ref;
 
     h.push_script([
         RebornScriptedReply::tool_call(
@@ -1626,6 +1702,23 @@ async fn result_read_selects_json_pointer_from_large_nested_result_impl() {
     h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "invalid_input")
         .await
         .expect("invalid JSON offset is a structured model-visible input failure");
+}
+
+/// JSON selection is additive: omitting `json_pointer` keeps the exact legacy
+/// byte reader and its durable total-size continuation contract.
+#[test]
+fn result_read_preserves_exact_legacy_byte_reads() {
+    run_async_test_with_stack(
+        "result_read_preserves_exact_legacy_byte_reads",
+        result_read_preserves_exact_legacy_byte_reads_impl,
+    );
+}
+
+async fn result_read_preserves_exact_legacy_byte_reads_impl() {
+    let fixture = large_nested_result_fixture().await;
+    let h = &fixture.harness;
+    let result_ref = &fixture.result_ref;
+    let serialized = &fixture.serialized;
 
     h.push_script([
         RebornScriptedReply::tool_call(

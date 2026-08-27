@@ -478,7 +478,9 @@ async def test_reborn_models_v1_lists_configured_mock_model(reborn_responses_cli
     models = body["data"]
     assert models
 
-    mock_model = next(model for model in models if model["id"] == "mock-model")
+    mock_models = [model for model in models if model.get("id") == "mock-model"]
+    assert len(mock_models) == 1, body
+    mock_model = mock_models[0]
     assert mock_model["object"] == "model"
     assert mock_model["owned_by"] == "openai"
     assert isinstance(mock_model["created"], int)
@@ -652,24 +654,27 @@ async def test_reborn_responses_external_success_round_trips_through_result_read
     assert len(result_read_calls) == 1
     result_read_arguments = json.loads(result_read_calls[0]["function"]["arguments"])
     assert result_read_arguments["json_pointer"] == "/items"
-    external_result_output = next(
-        message["content"]
+    external_messages = [
+        message
         for message in messages
-        if message.get("role") == "tool"
-        and "lookup_weather" in message.get("content", "")
-    )
+        if message.get("role") == "tool" and message.get("name") == "lookup_weather"
+    ]
+    assert len(external_messages) == 1, messages
+    external_result_output = external_messages[0]["content"]
     external_result_ref = re.search(
         r'"result_ref"\s*:\s*"([^"\\]+)"', external_result_output
     )
     assert external_result_ref is not None
     assert result_read_arguments["result_ref"] == external_result_ref.group(1)
 
-    result_read_output = next(
-        message["content"]
+    result_read_messages = [
+        message
         for message in messages
         if message.get("role") == "tool"
-        and "builtin__result_read" in message.get("content", "")
-    )
+        and message.get("name") == "builtin__result_read"
+    ]
+    assert len(result_read_messages) == 1, messages
+    result_read_output = result_read_messages[0]["content"]
     assert '"node_type":"array"' in result_read_output
     assert "external-success-result-read" in result_read_output
 
@@ -765,7 +770,9 @@ async def test_reborn_responses_mixed_internal_and_external_tools_same_assistant
     call_names = [call["name"] for call in calls]
     assert "lookup_weather" in call_names, response
 
-    weather_call = next(call for call in calls if call["name"] == "lookup_weather")
+    weather_calls = [call for call in calls if call.get("name") == "lookup_weather"]
+    assert len(weather_calls) == 1, response
+    weather_call = weather_calls[0]
     assert json.loads(weather_call["arguments"]) == {"city": "Boston"}
 
     output_items = _function_call_outputs(response)

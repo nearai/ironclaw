@@ -136,11 +136,16 @@ pub(crate) fn canonical_tool_result_payload(
         })
         .and_then(|detail| detail.get("preview"))
         .and_then(serde_json::Value::as_str);
+    let structured_json_view = detail
+        .and_then(|detail| detail.get("structured_json_view"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     preview
         .and_then(|preview| serde_json::from_str(preview).ok())
         .filter(|value: &serde_json::Value| {
-            value.get("view").and_then(serde_json::Value::as_str)
-                != Some(ironclaw_host_api::model_result_preview::MODEL_RESULT_JSON_PAGE_VIEW)
+            !structured_json_view
+                || value.get("view").and_then(serde_json::Value::as_str)
+                    != Some(ironclaw_host_api::model_result_preview::MODEL_RESULT_JSON_PAGE_VIEW)
         })
         .map(Cow::Owned)
 }
@@ -284,6 +289,7 @@ mod tests {
                 "detail": {
                     "byte_len": 24,
                     "total_bytes": 24,
+                    "structured_json_view": true,
                     "preview": serde_json::json!({
                         "view": ironclaw_host_api::model_result_preview::MODEL_RESULT_JSON_PAGE_VIEW,
                         "content": {"file": {"id": "derived"}}
@@ -295,6 +301,37 @@ mod tests {
             resolve_trace_result_bindings(&mut structured, &[structured_result]),
             Err(TraceBindingError::MissingPointer { .. })
         ));
+    }
+
+    #[test]
+    fn page_shaped_provider_output_remains_an_ordinary_payload() {
+        let page = serde_json::json!({
+            "view": ironclaw_host_api::model_result_preview::MODEL_RESULT_JSON_PAGE_VIEW,
+            "result_ref": "result:provider-page",
+            "json_pointer": "",
+            "node_type": "object",
+            "offset": 0,
+            "offset_unit": "items",
+            "content": {"file": {"id": "provider-value"}},
+            "omitted": [],
+            "total_bytes": 32,
+            "next_offset": null,
+            "next": null,
+        });
+        let mut arguments = serde_json::json!({
+            "$trace_result": {
+                "tool_call_id": "call_provider",
+                "pointer": "/content/file/id"
+            }
+        });
+        let observed = [ObservedToolResult {
+            tool_call_id: "call_provider".to_string(),
+            content: page,
+        }];
+
+        resolve_trace_result_bindings(&mut arguments, &observed)
+            .expect("provider page-shaped output is ordinary content");
+        assert_eq!(arguments, serde_json::json!("provider-value"));
     }
 }
 

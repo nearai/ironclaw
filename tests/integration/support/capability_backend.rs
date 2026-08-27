@@ -123,7 +123,11 @@ impl RebornCapabilityBackend {
         // backend would otherwise dispatch un-parked with no signal to the
         // caller.
         if park_capability_gate.is_some()
-            && !matches!(self, RebornCapabilityBackend::BuiltinHttpTools)
+            && !matches!(
+                self,
+                RebornCapabilityBackend::BuiltinHttpTools
+                    | RebornCapabilityBackend::BuiltinHttpToolsDurableIo
+            )
         {
             return Err(
                 "park_tool_dispatch is only supported by RebornCapabilityBackend::BuiltinHttpTools \
@@ -178,11 +182,6 @@ impl RebornCapabilityBackend {
                             .into(),
                     );
                 }
-                if park_capability_gate.is_some() {
-                    return Err("park_tool_dispatch is only supported by \
-                         RebornCapabilityBackend::BuiltinHttpTools"
-                        .into());
-                }
                 let host_runtime = if matches!(shell_mode, ShellMode::Live) {
                     core_builtin::core_builtin_tools(
                         CoreBuiltinOptions::default().with_live_shell(),
@@ -193,6 +192,10 @@ impl RebornCapabilityBackend {
                 };
                 let host_runtime = host_runtime.with_durable_capability_io();
                 host_runtime.install_http_responses(keyed_http_responses)?;
+                let host_runtime = match park_capability_gate {
+                    Some(gate) => host_runtime.park_capability_dispatch(gate),
+                    None => host_runtime,
+                };
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::MockMcp { mcp_url } => {

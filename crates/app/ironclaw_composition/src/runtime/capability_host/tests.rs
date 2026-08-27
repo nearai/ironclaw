@@ -2052,7 +2052,7 @@ mod tests {
             "padding": "x".repeat(10_000),
         });
         let serialized = serde_json::to_vec(&output).expect("fixture serializes");
-        let preview = first_look_result_preview(&serialized, "result:redaction-growth")
+        let preview = first_look_result_preview(&serialized, "result:redaction-growth", None)
             .expect("text result has a first look");
 
         assert!(
@@ -2147,9 +2147,15 @@ mod tests {
             .detail
         {
             ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
-                next_offset: Some(next_offset),
+                preview: Some(preview),
+                structured_json_view: true,
                 ..
-            } => *next_offset,
+            } => {
+                ironclaw_host_api::model_result_preview::ModelResultJsonPage::from_json_str(preview)
+                    .expect("structured first look is a valid JSON page")
+                    .next_offset
+                    .expect("structured first look carries continuation")
+            }
             detail => panic!("expected a truncated result reference preview, got {detail:?}"),
         };
 

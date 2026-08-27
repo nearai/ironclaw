@@ -905,7 +905,7 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         // Snapshot the first-look preview from the same bytes the durable
         // record stores, before `output_content` is moved into persistence,
         // so its offsets line up exactly with what `result_read` returns.
-        let preview = first_look_result_preview(&output_content, result_ref.as_str());
+        let preview = first_look_result_preview(&output_content, result_ref.as_str(), item_count);
         let diagnostic_result = self
             .tool_diagnostics
             .prepare_result(&output_content, TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);

@@ -61,7 +61,6 @@ pub use contract::{
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
 pub use in_memory::InMemorySessionThreadService;
-pub use ironclaw_host_api::model_result_preview::ModelResultJsonPage;
 pub use prepared_context::{
     AcceptedPreparedContext, PREPARED_CONTEXT_METADATA_MARKER_KEY,
     PREPARED_CONTEXT_RECORD_SCHEMA_VERSION, PREPARED_OUTPUT_SCHEMA_MAX_BYTES,

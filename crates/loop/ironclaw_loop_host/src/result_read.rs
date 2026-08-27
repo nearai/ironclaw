@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     dispatch::DispatchInputIssueCode,
     ids::{InvocationId, UserId},
-    model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
+    model_result_preview::{MODEL_RESULT_PREVIEW_MAX_BYTES, ModelResultJsonPage},
     resolution::Resolution,
     result_meta::FailureKind,
     turn::LoopResultRef,
@@ -264,53 +264,63 @@ impl SyntheticCapabilityHandler for ResultReadHandler {
             }
             ToolResultRecordRead::Json(page) => {
                 let original_total_bytes = page.total_bytes;
-                let (output, preview) =
-                    match model_visible_json_page(page, input.max_bytes as usize) {
-                        Ok(visible) => visible,
-                        Err(ModelVisibleJsonPageError::TooLarge) => {
-                            // Credential placeholders can be longer than the values
-                            // they replace. Retry once with fixed headroom rather
-                            // than letting post-read redaction terminalize the run.
-                            let retry_max_bytes =
-                                (input.max_bytes / 3).max(RESULT_READ_MIN_BYTES) as usize;
-                            let page = match self
-                                .thread_service
-                                .read_tool_result_record(ReadToolResultRecordRequest {
-                                    scope,
-                                    thread_id: invocation.run_context.thread_id.clone(),
-                                    result_ref: input.result_ref.clone(),
-                                    offset: input.offset,
-                                    max_bytes: retry_max_bytes,
-                                    selection,
-                                })
-                                .await
-                            {
-                                Ok(Some(ToolResultRecordRead::Json(page))) => page,
-                                Ok(Some(ToolResultRecordRead::Bytes(_))) => {
-                                    return Err(AgentLoopHostError::new(
-                                        AgentLoopHostErrorKind::Internal,
-                                        "JSON result retry returned a byte page",
-                                    ));
-                                }
-                                Ok(None) | Err(SessionThreadError::UnknownThread { .. }) => {
-                                    return Ok(unavailable_result_reference());
-                                }
-                                Err(SessionThreadError::ToolResultRecordRead(error)) => {
-                                    return Ok(tool_result_read_failure(error));
-                                }
-                                Err(error) => {
-                                    return Err(storage_unavailable_error(error, "record retry"));
-                                }
-                            };
-                            match model_visible_json_page(page, retry_max_bytes) {
-                                Ok(visible) => visible,
-                                Err(_) => return Ok(json_page_visibility_failure()),
+                let (output, preview) = match model_visible_json_page(
+                    page,
+                    input.max_bytes as usize,
+                ) {
+                    Ok(visible) => visible,
+                    Err(ModelVisibleJsonPageError::TooLarge { cause }) => {
+                        // Credential placeholders can be longer than the values
+                        // they replace. Retry once with fixed headroom rather
+                        // than letting post-read redaction terminalize the run.
+                        tracing::debug!(%cause, "JSON result page exceeds visible budget; retrying with headroom");
+                        let retry_max_bytes =
+                            (input.max_bytes / 3).max(RESULT_READ_MIN_BYTES) as usize;
+                        let page = match self
+                            .thread_service
+                            .read_tool_result_record(ReadToolResultRecordRequest {
+                                scope,
+                                thread_id: invocation.run_context.thread_id.clone(),
+                                result_ref: input.result_ref.clone(),
+                                offset: input.offset,
+                                max_bytes: retry_max_bytes,
+                                selection,
+                            })
+                            .await
+                        {
+                            Ok(Some(ToolResultRecordRead::Json(page))) => page,
+                            Ok(Some(ToolResultRecordRead::Bytes(_))) => {
+                                return Err(AgentLoopHostError::new(
+                                    AgentLoopHostErrorKind::Internal,
+                                    "JSON result retry returned a byte page",
+                                ));
+                            }
+                            Ok(None) | Err(SessionThreadError::UnknownThread { .. }) => {
+                                return Ok(unavailable_result_reference());
+                            }
+                            Err(SessionThreadError::ToolResultRecordRead(error)) => {
+                                return Ok(tool_result_read_failure(error));
+                            }
+                            Err(error) => {
+                                return Err(storage_unavailable_error(error, "record retry"));
+                            }
+                        };
+                        match model_visible_json_page(page, retry_max_bytes) {
+                            Ok(visible) => visible,
+                            Err(error) => {
+                                tracing::debug!(
+                                    ?error,
+                                    "JSON result page remains unavailable after bounded retry"
+                                );
+                                return Ok(json_page_visibility_failure());
                             }
                         }
-                        Err(ModelVisibleJsonPageError::Invalid) => {
-                            return Ok(json_page_visibility_failure());
-                        }
-                    };
+                    }
+                    Err(ModelVisibleJsonPageError::Invalid { cause }) => {
+                        tracing::debug!(%cause, "JSON result page is invalid after redaction");
+                        return Ok(json_page_visibility_failure());
+                    }
+                };
                 // Structured pages carry selection continuation and durable
                 // byte totals inside the page itself. Do not project their
                 // item/string offsets into the legacy outer byte fields.
@@ -367,30 +377,54 @@ impl SyntheticCapabilityHandler for ResultReadHandler {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelVisibleJsonPageError {
-    TooLarge,
-    Invalid,
+    TooLarge { cause: String },
+    Invalid { cause: String },
 }
 
 fn model_visible_json_page(
-    page: ironclaw_threads::ModelResultJsonPage,
+    page: ModelResultJsonPage,
     max_bytes: usize,
 ) -> Result<(serde_json::Value, String), ModelVisibleJsonPageError> {
-    let encoded = serde_json::to_string(&page).map_err(|_| ModelVisibleJsonPageError::Invalid)?;
+    let encoded = serde_json::to_string(&page).map_err(|error| {
+        let cause = sanitized_issue_text(error.to_string());
+        tracing::debug!(%cause, "JSON result page serialization failed");
+        ModelVisibleJsonPageError::Invalid { cause }
+    })?;
     if encoded.len() > max_bytes || encoded.len() > MODEL_RESULT_PREVIEW_MAX_BYTES {
-        return Err(ModelVisibleJsonPageError::TooLarge);
+        return Err(ModelVisibleJsonPageError::TooLarge {
+            cause: format!(
+                "serialized JSON result page is {} bytes, over the {}-byte preview budget",
+                encoded.len(),
+                max_bytes.min(MODEL_RESULT_PREVIEW_MAX_BYTES)
+            ),
+        });
     }
     let preview = ironclaw_threads::model_result_preview_from_json_page(&page)
         // A threads-rendered page is structurally valid. Redaction is the only
         // step that can grow it after the renderer applied `max_bytes`, so a
         // refusal here is retried with a smaller source page before failing.
-        .map_err(|_| ModelVisibleJsonPageError::TooLarge)?
+        .map_err(|error| {
+            let cause = sanitized_issue_text(error);
+            tracing::debug!(%cause, "JSON result page redaction failed");
+            ModelVisibleJsonPageError::TooLarge { cause }
+        })?
         .into_inner();
     if preview.len() > max_bytes || preview.len() > MODEL_RESULT_PREVIEW_MAX_BYTES {
-        return Err(ModelVisibleJsonPageError::TooLarge);
+        return Err(ModelVisibleJsonPageError::TooLarge {
+            cause: format!(
+                "redacted JSON result page is {} bytes, over the {}-byte preview budget",
+                preview.len(),
+                max_bytes.min(MODEL_RESULT_PREVIEW_MAX_BYTES)
+            ),
+        });
     }
-    let output = serde_json::from_str(&preview).map_err(|_| ModelVisibleJsonPageError::Invalid)?;
+    let output = serde_json::from_str(&preview).map_err(|error| {
+        let cause = sanitized_issue_text(error.to_string());
+        tracing::debug!(%cause, "redacted JSON result page could not be decoded");
+        ModelVisibleJsonPageError::Invalid { cause }
+    })?;
     Ok((output, preview))
 }
 
@@ -453,6 +487,8 @@ fn non_text_result_content() -> Resolution {
 }
 
 fn tool_result_read_failure(error: ToolResultRecordReadError) -> Resolution {
+    let cause = sanitized_issue_text(error.to_string());
+    tracing::debug!(%cause, "typed result-read failure is model-visible");
     let (summary, path, expected) = match error {
         ToolResultRecordReadError::MalformedStoredJson { .. } => {
             return diagnostic_failure(
@@ -788,6 +824,27 @@ fn parse_result_read_input(value: &serde_json::Value) -> Result<ResultReadInput,
             },
         ));
     }
+    // Presence is the primary contract error for byte reads. Check it before
+    // parsing the collection range so an invalid value cannot obscure the
+    // reason `limit` is unsupported without a JSON selection.
+    if let Some(value) = object.get("limit")
+        && json_pointer.is_none()
+    {
+        return Err(invalid_input_failure(
+            "result_read limit requires json_pointer",
+            CapabilityInputIssue {
+                path: "limit".to_string(),
+                code: DispatchInputIssueCode::InvalidValue,
+                expected: Some("omit limit for byte reads".to_string()),
+                received: Some(if value.is_number() {
+                    sanitized_issue_text(value.to_string())
+                } else {
+                    json_value_kind(value).to_string()
+                }),
+                schema_path: Some("properties/limit".to_string()),
+            },
+        ));
+    }
     let limit = match object.get("limit") {
         None => None,
         Some(value) => match value
@@ -817,18 +874,6 @@ fn parse_result_read_input(value: &serde_json::Value) -> Result<ResultReadInput,
             }
         },
     };
-    if object.contains_key("limit") && json_pointer.is_none() {
-        return Err(invalid_input_failure(
-            "result_read limit requires json_pointer",
-            CapabilityInputIssue {
-                path: "limit".to_string(),
-                code: DispatchInputIssueCode::InvalidValue,
-                expected: Some("omit limit for byte reads".to_string()),
-                received: Some(limit.unwrap_or_default().to_string()),
-                schema_path: Some("properties/limit".to_string()),
-            },
-        ));
-    }
     Ok(ResultReadInput {
         result_ref,
         offset,
@@ -949,6 +994,22 @@ mod tests {
         }));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn pointerless_limit_presence_is_reported_before_range_validation() {
+        let Err(result) = parse_result_read_input(&serde_json::json!({
+            "result_ref": "result:byte-selection",
+            "offset": 0,
+            "max_bytes": 32,
+            "limit": 0
+        })) else {
+            panic!("limit must not be valid for byte reads");
+        };
+        let rendered = serde_json::to_string(result.as_ref()).expect("resolution serializes");
+
+        assert!(rendered.contains("limit requires json_pointer"));
+        assert!(!rendered.contains("limit is outside the allowed range"));
     }
 
     #[test]

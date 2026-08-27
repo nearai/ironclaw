@@ -1773,9 +1773,7 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     # E2E scenario proves both halves of that contract. The result reference
     # is intentionally discovered from the model-visible observation, just as
     # a real model would discover it.
-    if _conversation_has_user_trigger(
-        messages, REBORN_EXTERNAL_TOOL_RESULT_READ_TRIGGER
-    ):
+    if REBORN_EXTERNAL_TOOL_RESULT_READ_TRIGGER.search(content):
         external_result = next(
             (
                 result

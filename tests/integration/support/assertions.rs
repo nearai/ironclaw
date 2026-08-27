@@ -168,7 +168,23 @@ impl RebornIntegrationHarness {
         if page["json_pointer"].as_str() != Some("") {
             return Err("result_read did not return the requested JSON root view".into());
         }
+        if page["omitted"]
+            .as_array()
+            .is_some_and(|omitted| !omitted.is_empty())
+        {
+            return Err(format!(
+                "{capability_id} output exceeds the JSON page budget; the root view is bounded: {}",
+                page["omitted"]
+            )
+            .into());
+        }
         if page["content"] != expected {
+            if page["content"].to_string().contains("\"[redacted]\"") {
+                return Err(format!(
+                    "{capability_id} output is credential-redacted in the model-visible JSON view"
+                )
+                .into());
+            }
             return Err(format!(
                 "result_read JSON root differed from {capability_id} output: expected {expected}, got {}",
                 page["content"]
