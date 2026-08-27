@@ -35,6 +35,10 @@ STUB
 
 chmod +x "${sandbox}/bin/cargo-nextest" "${sandbox}/bin/cargo" "${sandbox}/bin/timeout"
 
+mkdir -p "${sandbox}/without-nextest-bin"
+cp "${sandbox}/bin/cargo" "${sandbox}/bin/timeout" "${sandbox}/without-nextest-bin/"
+chmod +x "${sandbox}/without-nextest-bin/cargo" "${sandbox}/without-nextest-bin/timeout"
+
 status=0
 mkdir -p "${sandbox}/group-only"
 cp "${under_test}" "${sandbox}/group-only/reborn-coverage-lane-run.sh"
@@ -67,7 +71,6 @@ if (
   cd "${repo_root}"
   PATH="${sandbox}/bin:/usr/bin:/bin" \
     CI=true \
-    IRONCLAW_GATE_TEST_RUNNER=nextest \
     INTEGRATION_BATCH_LOG="${sandbox}/commands.log" \
     REBORN_COV_COLLECT=false \
     REBORN_COV_LANES_JSON='[0,"groups"]' \
@@ -87,6 +90,45 @@ if [[ "${status}" -eq 0 ]]; then
     echo "FAIL: group suites did not run after the flat batch failed" >&2
     status=1
   fi
+fi
+
+ci_missing_output="${sandbox}/ci-missing-nextest.log"
+if (
+  cd "${repo_root}"
+  PATH="${sandbox}/without-nextest-bin:/usr/bin:/bin" \
+    CI=true \
+    INTEGRATION_BATCH_LOG="${sandbox}/ci-missing-nextest.commands" \
+    REBORN_COV_COLLECT=false \
+    REBORN_COV_LANES_JSON='[0]' \
+    REBORN_COV_LANE_PARTITIONS=4 \
+    bash "${under_test}" "${sandbox}/ci-missing-nextest.lcov"
+) >"${ci_missing_output}" 2>&1; then
+  echo "FAIL: CI accepted a flat batch without cargo-nextest" >&2
+  status=1
+elif ! grep -qx 'cargo-nextest is required in CI but was not found on PATH' "${ci_missing_output}"; then
+  echo "FAIL: CI missing-nextest failure did not emit the required diagnostic" >&2
+  status=1
+fi
+
+local_fallback_log="${sandbox}/local-fallback.commands"
+if ! (
+  cd "${repo_root}"
+  env -u CI \
+    PATH="${sandbox}/without-nextest-bin:/usr/bin:/bin" \
+    INTEGRATION_BATCH_LOG="${local_fallback_log}" \
+    REBORN_COV_COLLECT=false \
+    REBORN_COV_LANES_JSON='[0]' \
+    REBORN_COV_LANE_PARTITIONS=4 \
+    bash "${under_test}" "${sandbox}/local-fallback.lcov"
+); then
+  echo "FAIL: local flat batch without cargo-nextest did not use cargo test" >&2
+  status=1
+elif ! grep -q '^test -p ironclaw_integration_tests .* --no-fail-fast' "${local_fallback_log}"; then
+  echo "FAIL: local flat batch did not run cargo test with --no-fail-fast" >&2
+  status=1
+elif grep -q 'nextest' "${local_fallback_log}"; then
+  echo "FAIL: local flat batch without cargo-nextest logged nextest" >&2
+  status=1
 fi
 
 coverage_output="${sandbox}/coverage-output.log"
