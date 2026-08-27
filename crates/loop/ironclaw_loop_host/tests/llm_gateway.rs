@@ -2272,6 +2272,7 @@ async fn gateway_falls_back_to_safe_summary_for_invalid_model_observation() {
     let tool_result = &requests[0].messages[1];
     assert_eq!(tool_result.role, Role::Tool);
     assert_eq!(tool_result.content, "tool failed");
+    assert!(!tool_result.tool_result_structured_json_view);
     assert!(!tool_result.content.contains("ignore previous"));
 }
 

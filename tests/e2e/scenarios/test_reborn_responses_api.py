@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import re
 import signal
 import socket
 from pathlib import Path
@@ -639,11 +638,15 @@ async def test_reborn_responses_external_success_round_trips_through_result_read
 
     assert final["status"] == "completed"
     chat_requests = await _mock_chat_requests(mock_llm_server)
-    messages = [
-        message
-        for request in chat_requests
-        for message in request.get("messages", [])
+    messages = chat_requests[-1].get("messages", [])
+    external_calls = [
+        call
+        for message in messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls", [])
+        if call.get("function", {}).get("name") == "lookup_weather"
     ]
+    assert len(external_calls) == 1, messages
     result_read_calls = [
         call
         for message in messages
@@ -657,26 +660,25 @@ async def test_reborn_responses_external_success_round_trips_through_result_read
     external_messages = [
         message
         for message in messages
-        if message.get("role") == "tool" and message.get("name") == "lookup_weather"
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == external_calls[0]["id"]
     ]
     assert len(external_messages) == 1, messages
-    external_result_output = external_messages[0]["content"]
-    external_result_ref = re.search(
-        r'"result_ref"\s*:\s*"([^"\\]+)"', external_result_output
-    )
-    assert external_result_ref is not None
-    assert result_read_arguments["result_ref"] == external_result_ref.group(1)
+    external_result = json.loads(external_messages[0]["content"])
+    assert external_result["detail"]["result_ref"] == result_read_arguments["result_ref"]
 
     result_read_messages = [
         message
         for message in messages
         if message.get("role") == "tool"
-        and message.get("name") == "builtin__result_read"
+        and message.get("tool_call_id") == result_read_calls[0]["id"]
     ]
     assert len(result_read_messages) == 1, messages
-    result_read_output = result_read_messages[0]["content"]
-    assert '"node_type":"array"' in result_read_output
-    assert "external-success-result-read" in result_read_output
+    result_read_observation = json.loads(result_read_messages[0]["content"])
+    result_read_page = json.loads(result_read_observation["detail"]["preview"])
+    assert result_read_page["node_type"] == "array"
+    assert result_read_page["result_ref"] == result_read_arguments["result_ref"]
+    assert result_read_page["content"][0]["marker"] == "external-success-result-read"
 
 
 async def test_reborn_responses_external_tool_failure_output_reaches_llm(

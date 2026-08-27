@@ -2569,25 +2569,21 @@ fn tool_result_replay_message(
                     .model_observation
                     .as_ref()
                     .map(|value| {
-                        serde_json::from_value::<ModelVisibleToolObservation>(value.clone())
-                    })
-                    .transpose()
-                    .map_err(|error| {
-                        debug!(error = %error, "stored tool-result observation failed typed replay decoding");
-                        HostManagedModelError::safe(
-                            HostManagedModelErrorKind::InvalidRequest,
-                            "stored tool-result observation is invalid",
-                        )
-                    })?
-                    .is_some_and(|observation| {
-                        matches!(
-                            observation.detail,
-                            ToolObservationDetail::ResultReference {
-                                structured_json_view: true,
-                                ..
+                        match serde_json::from_value::<ModelVisibleToolObservation>(value.clone()) {
+                            Ok(observation) => matches!(
+                                observation.detail,
+                                ToolObservationDetail::ResultReference {
+                                    structured_json_view: true,
+                                    ..
+                                }
+                            ),
+                            Err(error) => {
+                                debug!(error = %error, "stored tool-result observation failed typed replay decoding; using safe summary");
+                                false
                             }
-                        )
-                    });
+                        }
+                    })
+                    .unwrap_or(false);
                 (safe_summary, model_content, true, structured_json_view)
             }
             Some(HostManagedToolResultContent::Resolved { safe_summary }) => (
