@@ -1248,12 +1248,27 @@ async fn compaction_task_rejects_zero_drop_through_seq_before_inference() {
 }
 
 #[tokio::test]
-async fn incremental_compaction_reads_only_messages_since_last_compacted_seq() {
+async fn incremental_compaction_folds_the_previous_checkpoint_into_a_cumulative_barrier() {
+    const PREVIOUS_SUMMARY: &str =
+        "previous checkpoint with artifact result:alpha inspected at bytes 10-20";
     let fixture = CompactionFixture::new().await;
-    fixture.append_user("already summarized").await;
+    fixture
+        .append_user("already summarized raw transcript")
+        .await;
+    fixture
+        .port(
+            PREVIOUS_SUMMARY,
+            Arc::new(CleanInjectionScanner),
+            Arc::new(CleanLeakScanner),
+        )
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect("first compaction should persist a checkpoint");
     fixture.append_user("new one").await;
     fixture.append_user("new two").await;
-    let inference = Arc::new(CapturingInference::new("summary"));
+    let inference = Arc::new(CapturingInference::new(
+        "cumulative checkpoint preserving result:alpha bytes 10-20",
+    ));
     let port = fixture.port_with_inference(
         inference.clone(),
         Arc::new(CleanInjectionScanner),
@@ -1268,9 +1283,29 @@ async fn incremental_compaction_reads_only_messages_since_last_compacted_seq() {
         .expect("incremental compaction should succeed");
 
     let input = inference.last_input();
-    assert!(!input.contains("already summarized"));
+    assert!(input.contains(PREVIOUS_SUMMARY));
+    assert!(!input.contains("already summarized raw transcript"));
     assert!(input.contains("new one"));
     assert!(input.contains("new two"));
+
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .expect("history should load");
+    assert_eq!(history.summary_artifacts.len(), 2);
+    let newest = history.summary_artifacts.last().expect("newest summary");
+    assert_eq!(newest.start_sequence, 1);
+    assert_eq!(newest.end_sequence, 3);
+    assert_eq!(
+        newest.model_context_policy,
+        Some(SummaryModelContextPolicy::CumulativeBarrier)
+    );
+    assert!(newest.content.contains("result:alpha"));
+    assert!(newest.content.contains("bytes 10-20"));
 }
 
 #[tokio::test]
@@ -1548,7 +1583,7 @@ async fn compaction_task_persists_escaped_summary_with_anti_injection_prefix() {
     );
     assert_eq!(
         summary.model_context_policy,
-        Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+        Some(SummaryModelContextPolicy::CumulativeBarrier)
     );
 }
 
@@ -1592,7 +1627,7 @@ async fn compaction_task_maps_summary_persistence_failure_after_inference() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("visible").await;
     fixture
-        .create_replacement_summary(1, 1, "existing summary")
+        .create_cumulative_barrier(1, 1, "existing summary")
         .await;
     let inference = Arc::new(CapturingInference::new("summary"));
     let port = fixture.port_with_inference(
@@ -1620,7 +1655,7 @@ async fn compaction_task_reuses_exact_persisted_summary_on_retry() {
     fixture.append_user("visible").await;
     let expected_summary = format!("{EXPECTED_ANTI_INJECTION_PREFIX}<summary>summary</summary>");
     let existing = fixture
-        .create_replacement_summary(1, 1, &expected_summary)
+        .create_cumulative_barrier(1, 1, &expected_summary)
         .await;
     let inference = Arc::new(CapturingInference::new("summary"));
     let port = fixture.port_with_inference(
@@ -2070,7 +2105,7 @@ impl CompactionFixture {
             .unwrap();
     }
 
-    async fn create_replacement_summary(
+    async fn create_cumulative_barrier(
         &self,
         start_sequence: u64,
         end_sequence: u64,
@@ -2084,7 +2119,7 @@ impl CompactionFixture {
                 end_sequence,
                 summary_kind: SummaryKind::Compaction,
                 content: MessageContent::text(content),
-                model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+                model_context_policy: Some(SummaryModelContextPolicy::CumulativeBarrier),
             })
             .await
             .unwrap()

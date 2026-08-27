@@ -381,7 +381,14 @@ pub enum SummaryKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SummaryModelContextPolicy {
+    /// Replace only this artifact's disjoint transcript range.
     ReplaceRangeWhenSelected,
+    /// Replace all model context through this artifact's end sequence.
+    ///
+    /// The summary content must cumulatively carry every earlier checkpoint.
+    /// Older transcript rows and summary artifacts remain durable but do not
+    /// enter model context while this barrier is eligible.
+    CumulativeBarrier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

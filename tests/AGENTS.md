@@ -232,7 +232,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
-| Incremental compaction summaries preserve every disjoint compacted range while raw covered history remains stored | `model_recovery.rs::compaction_summary_chain_preserves_earlier_compacted_history` |
+| A cumulative compaction barrier supersedes earlier summaries and raw covered history in the model prompt while every original row remains durable | `model_recovery.rs::cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_history` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
 | Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs` |

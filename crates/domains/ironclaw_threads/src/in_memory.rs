@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::stored_message::serialize_stored_thread_message;
-use crate::summary_artifacts::{find_overlapping_summary, sorted_context_summaries};
+use crate::summary_artifacts::{
+    find_overlapping_summary, newest_context_barrier, sorted_context_summaries,
+};
 use crate::title::derive_thread_title;
 use crate::tool_result_records::{
     validate_tool_result_record_content, validate_tool_result_record_ref,
@@ -1857,6 +1859,33 @@ fn ensure_user_accepted(
 }
 
 fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<ContextMessage> {
+    if let Some(barrier) = newest_context_barrier(&thread.summary_artifacts, |summary| {
+        !summary_covers_hidden_content(thread, summary)
+    }) {
+        let mut context = vec![ContextMessage {
+            message_id: None,
+            summary_id: Some(barrier.summary_id),
+            sequence: barrier.end_sequence,
+            kind: MessageKind::Summary,
+            tool_result_provider_call: None,
+            content: barrier.content.clone(),
+            image_attachments: Vec::new(),
+        }];
+        context.extend(
+            thread
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.sequence > barrier.end_sequence && is_model_context_visible(message)
+                })
+                .filter_map(|message| {
+                    let content = message.content.clone()?;
+                    Some(ContextMessage::from_transcript_message(message, content))
+                }),
+        );
+        return context;
+    }
+
     let replacement_summaries = sorted_context_summaries(&thread.summary_artifacts, |summary| {
         summary.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
             && !summary_covers_hidden_content(thread, summary)

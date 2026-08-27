@@ -20,6 +20,25 @@ pub(crate) fn sorted_context_summaries(
     });
     selected
 }
+
+pub(crate) fn newest_context_barrier(
+    summaries: &[SummaryArtifact],
+    mut eligible: impl FnMut(&SummaryArtifact) -> bool,
+) -> Option<&SummaryArtifact> {
+    summaries
+        .iter()
+        .filter(|summary| {
+            summary.model_context_policy == Some(SummaryModelContextPolicy::CumulativeBarrier)
+                && eligible(summary)
+        })
+        .max_by(|left, right| {
+            left.end_sequence
+                .cmp(&right.end_sequence)
+                .then_with(|| left.start_sequence.cmp(&right.start_sequence))
+                .then_with(|| left.content.cmp(&right.content))
+                .then_with(|| left.summary_id.as_uuid().cmp(&right.summary_id.as_uuid()))
+        })
+}
 pub(crate) fn is_exact_compaction_summary_replay(
     summary: &SummaryArtifact,
     request: &CreateSummaryArtifactRequest,
@@ -31,14 +50,37 @@ pub(crate) fn is_exact_compaction_summary_replay(
         && summary.content == content
 }
 
-/// Callers with `model_context_policy != ReplaceRangeWhenSelected` skip overlap
-/// checks by design.
+/// Disjoint replacement summaries reject non-idempotent overlaps. Cumulative
+/// barriers intentionally overlap their predecessors: a newer barrier
+/// supersedes every earlier context projection while durable artifacts remain
+/// append-only.
 pub(crate) fn find_overlapping_summary<'a>(
     summaries: &'a [SummaryArtifact],
     request: &CreateSummaryArtifactRequest,
     content: &str,
 ) -> Result<Option<&'a SummaryArtifact>, SessionThreadError> {
-    if request.model_context_policy != Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected) {
+    let Some(policy) = request.model_context_policy else {
+        return Ok(None);
+    };
+
+    if policy == SummaryModelContextPolicy::CumulativeBarrier {
+        let mut barriers = summaries.iter().filter(|summary| {
+            summary.model_context_policy == Some(SummaryModelContextPolicy::CumulativeBarrier)
+                && request.summary_kind == SummaryKind::Compaction
+                && summary.summary_kind == request.summary_kind
+        });
+        if let Some(replayed) = barriers
+            .clone()
+            .find(|summary| is_exact_compaction_summary_replay(summary, request, content))
+        {
+            return Ok(Some(replayed));
+        }
+        if barriers.any(|summary| summary.end_sequence >= request.end_sequence) {
+            return Err(SessionThreadError::OverlappingSummaryRange {
+                start_sequence: request.start_sequence,
+                end_sequence: request.end_sequence,
+            });
+        }
         return Ok(None);
     }
 
@@ -133,6 +175,13 @@ mod tests {
         }
     }
 
+    fn barrier_with(start_sequence: u64, end_sequence: u64, content: &str) -> SummaryArtifact {
+        SummaryArtifact {
+            model_context_policy: Some(SummaryModelContextPolicy::CumulativeBarrier),
+            ..summary_with(start_sequence, end_sequence, content)
+        }
+    }
+
     #[test]
     fn context_summaries_sort_stably_by_persisted_coordinates() {
         let older = summary_with(1, 5, "older");
@@ -151,6 +200,21 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(selected_reverse, selected_forward);
+    }
+
+    #[test]
+    fn newest_context_barrier_selects_the_furthest_eligible_checkpoint() {
+        let older = barrier_with(1, 5, "older");
+        let newest = barrier_with(1, 9, "newest");
+        let hidden = barrier_with(1, 12, "hidden");
+        let summaries = vec![newest.clone(), hidden.clone(), older];
+
+        let selected = newest_context_barrier(&summaries, |summary| {
+            summary.summary_id != hidden.summary_id
+        })
+        .expect("eligible barrier");
+
+        assert_eq!(selected.summary_id, newest.summary_id);
     }
     #[test]
     fn exact_compaction_summary_replay_matches_on_coordinates_and_content() {
@@ -263,6 +327,42 @@ mod tests {
             SessionThreadError::OverlappingSummaryRange {
                 start_sequence: 2,
                 end_sequence: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn cumulative_barrier_allows_superseding_overlap_and_replays_exact_retry() {
+        let older = barrier_with(1, 4, "older checkpoint");
+        let summaries = vec![older];
+        let mut superseding = request();
+        superseding.start_sequence = 1;
+        superseding.end_sequence = 8;
+        superseding.content = crate::MessageContent::text("cumulative checkpoint");
+        superseding.model_context_policy = Some(SummaryModelContextPolicy::CumulativeBarrier);
+
+        assert!(
+            find_overlapping_summary(&summaries, &superseding, "cumulative checkpoint")
+                .expect("superseding barriers may overlap")
+                .is_none()
+        );
+
+        let persisted = barrier_with(1, 8, "cumulative checkpoint");
+        let persisted_summaries = [persisted.clone()];
+        let replay =
+            find_overlapping_summary(&persisted_summaries, &superseding, "cumulative checkpoint")
+                .expect("exact retry is valid")
+                .expect("exact retry returns existing barrier");
+        assert_eq!(replay.summary_id, persisted.summary_id);
+
+        let error =
+            find_overlapping_summary(&persisted_summaries, &superseding, "different checkpoint")
+                .expect_err("the same barrier range cannot fork");
+        assert!(matches!(
+            error,
+            SessionThreadError::OverlappingSummaryRange {
+                start_sequence: 1,
+                end_sequence: 8
             }
         ));
     }
