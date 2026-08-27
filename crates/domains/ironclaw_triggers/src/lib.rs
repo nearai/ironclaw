@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 mod automation;
+mod capability_facts;
 mod execution_spec;
 mod fire_access;
 mod in_memory;
@@ -40,6 +41,12 @@ mod worker;
 /// `ironclaw_common`, which must hold no domain vocabulary); `MAX_TRIGGER_NAME_BYTES`
 /// below is the same bound under this crate's own noun.
 pub use automation::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
+pub use capability_facts::{
+    MissingTriggerCapabilityCallFactsSource, TriggerCapabilityCallFact,
+    TriggerCapabilityCallFactsCompleteness, TriggerCapabilityCallFactsError,
+    TriggerCapabilityCallFactsRead, TriggerCapabilityCallFactsScope,
+    TriggerCapabilityCallFactsSource, TriggerCapabilityCallStatus,
+};
 pub use execution_spec::TriggerExecutionSpec;
 /// Fire-time access: the check contract plus the checkers that are pure
 /// trigger-scope policy. The deployment *grant* value and the identity-directory
@@ -60,7 +67,7 @@ pub use trusted_submit::{
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const MAX_TRIGGER_LIST_LIMIT: usize = 100;
-const MAX_TRIGGER_RUN_HISTORY_LIMIT: usize = 500;
+pub const MAX_TRIGGER_RUN_HISTORY_LIMIT: usize = 500;
 const MAX_TRIGGER_RUN_HISTORY_RETAINED: usize = 500;
 pub const MAX_TRIGGER_NAME_BYTES: usize = MAX_AUTOMATION_NAME_BYTES;
 pub const MAX_TRIGGER_PROMPT_BYTES: usize = 32 * 1024;

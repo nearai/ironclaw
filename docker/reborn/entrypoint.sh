@@ -24,6 +24,15 @@ fi
 
 if [ -n "${IRONCLAW_REBORN_HOME:-}" ]; then
   IRONCLAW_REBORN_HOME="${IRONCLAW_REBORN_HOME%/}"
+  # `${VAR%/}` turns a bare "/" into an empty string, which used to reach
+  # `mkdir -p "" /workspace` and die with a confusing diagnostic. Reject the
+  # filesystem root outright rather than restoring it: the root pass chowns
+  # this path to the runtime uid, so honoring "/" would hand uid 1000
+  # ownership of the container's entire root filesystem.
+  if [ -z "$IRONCLAW_REBORN_HOME" ]; then
+    echo "IRONCLAW_REBORN_HOME must not be the filesystem root (/); it is chowned to the unprivileged runtime user at startup." >&2
+    exit 1
+  fi
 elif [ -n "$railway_volume_mount" ]; then
   case "$railway_volume_mount" in
     */ironclaw-reborn) IRONCLAW_REBORN_HOME="$railway_volume_mount" ;;
@@ -33,6 +42,95 @@ else
   IRONCLAW_REBORN_HOME="/data/ironclaw-reborn"
 fi
 export IRONCLAW_REBORN_HOME
+
+if [ -n "${IRONCLAW_REBORN_WORKSPACE_ROOT:-}" ]; then
+  IRONCLAW_REBORN_WORKSPACE_ROOT="${IRONCLAW_REBORN_WORKSPACE_ROOT%/}"
+  # Same reasoning as IRONCLAW_REBORN_HOME above. Without this the empty value
+  # reached `readlink -m ""`, which exits non-zero and, under `set -eu`, killed
+  # the boot with no diagnostic at all.
+  if [ -z "$IRONCLAW_REBORN_WORKSPACE_ROOT" ]; then
+    echo "IRONCLAW_REBORN_WORKSPACE_ROOT must not be the filesystem root (/)." >&2
+    exit 1
+  fi
+else
+  IRONCLAW_REBORN_WORKSPACE_ROOT="$IRONCLAW_REBORN_HOME/workspace"
+fi
+export IRONCLAW_REBORN_WORKSPACE_ROOT
+
+ssh_public_key="${IRONCLAW_REBORN_SSH_PUBLIC_KEY:-}"
+if [ "$(id -u)" = "0" ]; then
+  # The workspace root is created and chowned here too (not just at
+  # $IRONCLAW_REBORN_HOME and /workspace) because an explicit
+  # IRONCLAW_REBORN_WORKSPACE_ROOT override can point at a path whose parent
+  # is a fresh, root-owned volume mount. Left until the later unprivileged
+  # `mkdir -p` (below, after the privilege drop), that call would fail closed
+  # with EACCES under `set -eu` and abort the container at boot. This chown
+  # is intentionally non-recursive (no `-R`): start-sshd.sh relies on
+  # $IRONCLAW_REBORN_HOME/ssh staying root-owned.
+  mkdir -p "$IRONCLAW_REBORN_HOME" /workspace
+  chown ironclaw:ironclaw "$IRONCLAW_REBORN_HOME" /workspace
+  # Repair ownership of pre-existing home CONTENTS, not just the directory.
+  # A persistent volume outlives the image, and this image ran as `ironclaw`
+  # until in-worker SSH required a root entrypoint -- so a volume can carry
+  # files a root-run wrote. One unreadable file is fatal rather than
+  # degraded: the provider-registry overlay is fail-closed, so a root-owned
+  # `providers.json` crash-loops the container with
+  # "failed to read provider registry overlay ...: Permission denied", while
+  # a sibling `config.toml` written earlier still loads fine.
+  #
+  # `ssh` is excluded deliberately: start-sshd.sh refuses to start when its
+  # state directory is not root-owned, so recursing into it would trade this
+  # crash loop for a broken SSH listener.
+  # `-H` follows the start path only: $IRONCLAW_REBORN_HOME may itself be a
+  # symlink (find's default physical walk would then match nothing under
+  # -mindepth 1 and silently repair nothing), while symlinks encountered
+  # *during* the walk are still never followed -- combined with `chown -h`,
+  # a symlink planted in the home cannot redirect ownership outside it.
+  # Deliberately NOT filtered with `! -user ironclaw`: that predicate resolves
+  # the name at find time and aborts the whole boot under `set -e` wherever it
+  # does not resolve, trading a rare ownership repair for a guaranteed crash.
+  find -H "$IRONCLAW_REBORN_HOME" -mindepth 1 \
+    -path "$IRONCLAW_REBORN_HOME/ssh" -prune -o \
+    -exec chown -h ironclaw:ironclaw {} +
+  # ...but ONLY when the override provably lives inside a directory this
+  # entrypoint already manages. The Railway containment check that validates an
+  # operator-supplied workspace root runs after the privilege drop (it needs
+  # $effective_profile, resolved from the config file further down), so
+  # chowning the raw value here would hand the runtime uid ownership of an
+  # arbitrary path -- `IRONCLAW_REBORN_WORKSPACE_ROOT=/etc` chowns /etc to
+  # ironclaw before anything rejects it. Paths outside are left untouched: the
+  # containment check rejects them shortly afterwards, and off-Railway the
+  # later unprivileged `mkdir -p` reports the failure as it did before.
+  # Compare canonicalized paths so `$IRONCLAW_REBORN_HOME/../../etc` cannot
+  # spell its way in.
+  canonical_home="$(readlink -m "$IRONCLAW_REBORN_HOME")"
+  canonical_ws_root="$(readlink -m "$IRONCLAW_REBORN_WORKSPACE_ROOT")"
+  workspace_root_managed=false
+  case "$canonical_ws_root" in
+    "$canonical_home"|"$canonical_home"/*) workspace_root_managed=true ;;
+  esac
+  if [ "$workspace_root_managed" = false ] \
+    && [ -n "$railway_volume_mount" ] && [ "$railway_volume_mount" != "/" ]; then
+    canonical_mount="$(readlink -m "$railway_volume_mount")"
+    case "$canonical_ws_root" in
+      "$canonical_mount"/*) workspace_root_managed=true ;;
+    esac
+  fi
+  if [ "$workspace_root_managed" = true ]; then
+    mkdir -p "$IRONCLAW_REBORN_WORKSPACE_ROOT"
+    chown ironclaw:ironclaw "$IRONCLAW_REBORN_WORKSPACE_ROOT"
+  fi
+  if [ -n "$ssh_public_key" ]; then
+    ironclaw-reborn-start-sshd
+  fi
+  unset IRONCLAW_REBORN_SSH_PUBLIC_KEY
+  exec gosu ironclaw "$0" "$@"
+fi
+if [ -n "$ssh_public_key" ]; then
+  echo "direct SSH requires the container entrypoint to start as root" >&2
+  exit 1
+fi
+
 if [ -n "${IRONCLAW_REBORN_DEFAULT_CONFIG:-}" ]; then
   default_config="$IRONCLAW_REBORN_DEFAULT_CONFIG"
 else
@@ -237,9 +335,47 @@ then
           exit 1
           ;;
       esac
+      # Compare canonicalized paths, not their original spelling. A symlink
+      # beneath the mount whose target is outside it, or a `..` segment such as
+      # `/volume/../ephemeral`, passes a purely lexical prefix test while the
+      # runtime resolves the real (ephemeral) target — booting a deployment
+      # whose project files silently do not persist, which is the exact failure
+      # this guard exists to prevent. `readlink -m` canonicalizes symlinks and
+      # `.`/`..` segments even when a path (or an intermediate component of it)
+      # does not exist yet. `readlink -f` requires every component but the
+      # last to already exist and otherwise fails outright, which used to send
+      # a not-yet-created path (routine for a fresh volume) down a fallback to
+      # its raw, unresolved spelling — and a raw spelling containing `..` can
+      # lexically match the containment check below while actually resolving
+      # outside the mount, defeating this guard. There is deliberately no
+      # fallback to the raw spelling any more: failing closed on a
+      # canonicalization error is safe, silently comparing an unresolved path
+      # is not.
+      if ! canonical_workspace_root="$(readlink -m "$IRONCLAW_REBORN_WORKSPACE_ROOT" 2>/dev/null)"; then
+        echo "Failed to resolve IRONCLAW_REBORN_WORKSPACE_ROOT=$IRONCLAW_REBORN_WORKSPACE_ROOT for the Railway containment check." >&2
+        exit 1
+      fi
+      if ! canonical_volume_mount="$(readlink -m "$railway_volume_mount" 2>/dev/null)"; then
+        echo "Failed to resolve RAILWAY_VOLUME_MOUNT_PATH=$railway_volume_mount for the Railway containment check." >&2
+        exit 1
+      fi
+      case "$canonical_workspace_root" in
+        "$canonical_volume_mount"|"$canonical_volume_mount"/*) ;;
+        *)
+          echo "Railway deployment using profile=$effective_profile requires IRONCLAW_REBORN_WORKSPACE_ROOT=$IRONCLAW_REBORN_WORKSPACE_ROOT (resolved: $canonical_workspace_root) to be under RAILWAY_VOLUME_MOUNT_PATH=$railway_volume_mount (resolved: $canonical_volume_mount)." >&2
+          echo "Unset IRONCLAW_REBORN_WORKSPACE_ROOT to use $IRONCLAW_REBORN_HOME/workspace, or set IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY=true only for disposable tests." >&2
+          exit 1
+          ;;
+      esac
       ;;
   esac
 fi
+
+case "$effective_profile" in
+  local-dev|local-dev-yolo|hosted-single-tenant|hosted-single-tenant-volume|hosted-single-tenant-volume-sandboxed|hosted-single-tenant-volume-sandboxed-railway)
+    mkdir -p "$IRONCLAW_REBORN_WORKSPACE_ROOT"
+    ;;
+esac
 
 # Serve-host resolution: an explicit IRONCLAW_REBORN_SERVE_HOST always wins.
 # Otherwise, on Railway (and any platform that sets the RAILWAY_* markers) the

@@ -100,6 +100,44 @@ fn runtime_secret_injection_store_isolates_agent_scope() {
     );
 }
 
+#[test]
+fn runtime_secret_injection_store_takes_multiple_handles_atomically() {
+    let store = RuntimeSecretInjectionStore::new();
+    let scope = resource_scope_with_agent("agent-a");
+    let capability_id = capability_id();
+    let staged = SecretHandle::new("staged_token").unwrap();
+    let missing = SecretHandle::new("missing_token").unwrap();
+    store
+        .insert(
+            &scope,
+            &capability_id,
+            &staged,
+            SecretMaterial::from("runtime-secret"),
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .take_many(&scope, &capability_id, &[staged.clone(), missing.clone()])
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .take_many(&scope, &capability_id, &[staged.clone(), staged.clone()])
+            .unwrap()
+            .is_none(),
+        "a duplicate handle must not consume one staged value twice"
+    );
+    assert!(
+        store
+            .take(&scope, &capability_id, &staged)
+            .unwrap()
+            .is_some(),
+        "a failed multi-handle take must not consume the staged subset"
+    );
+}
+
 #[tokio::test]
 async fn builtin_obligation_handler_satisfy_release_preserves_staged_handoffs() {
     let network_policies = Arc::new(NetworkObligationPolicyStore::new());

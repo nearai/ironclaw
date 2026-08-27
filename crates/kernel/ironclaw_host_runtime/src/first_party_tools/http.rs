@@ -683,6 +683,7 @@ mod tests {
             authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: Some(workspace_mount()),
+            runtime_credentials: Vec::new(),
             services: InvocationServices {
                 filesystem: Arc::new(InMemoryBackend::new()),
                 runtime_http_egress: Some(runtime_http_egress),

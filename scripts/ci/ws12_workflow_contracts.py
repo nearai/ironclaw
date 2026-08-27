@@ -91,6 +91,13 @@ REQUIRED_MARKERS: dict[str, tuple[str, ...]] = {
         "python3 scripts/ci/test_docs_publication_boundary.py",
         "python3 scripts/ci/docs_publication_boundary.py",
         '"${{ needs.docs-publication-boundary.result }}" != "success"',
+        "docker/reborn/(entrypoint|start-sshd)",
+    ),
+    ".github/workflows/platform-and-compat.yml": (
+        "docker/reborn/(entrypoint|start-sshd)",
+        "Verify in-worker SSH",
+        "IRONCLAW_REBORN_WEBUI_TOKEN=ssh-ci-webui-token-",
+        "agent@127.0.0.1",
     ),
     ".github/workflows/reborn-playwright.yml": (
         "python3 scripts/ci/ws12_suite_shards.py --github-output",

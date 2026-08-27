@@ -2224,13 +2224,19 @@ impl SessionThreadService for ScopeMismatchThreadStub {
     }
 }
 
+enum BoundedReadOutcome {
+    Complete,
+    BackendError,
+    LimitExceeded,
+}
+
 enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
     ThreadArtifact {
         history: Box<ThreadHistory>,
         snapshot: Box<BoundedThreadMessageSnapshot>,
-        bounded_error: bool,
+        bounded_read_outcome: BoundedReadOutcome,
     },
     ListPages,
     SubmittedReplay {
@@ -2298,7 +2304,7 @@ impl ScriptedThreadService {
             behavior: ScriptedThreadBehavior::ThreadArtifact {
                 history: Box::new(history),
                 snapshot: Box::new(snapshot),
-                bounded_error: false,
+                bounded_read_outcome: BoundedReadOutcome::Complete,
             },
             history_requests: Mutex::new(Vec::new()),
             bounded_requests: Mutex::new(Vec::new()),
@@ -2316,7 +2322,25 @@ impl ScriptedThreadService {
             behavior: ScriptedThreadBehavior::ThreadArtifact {
                 history: Box::new(history),
                 snapshot: Box::new(snapshot),
-                bounded_error: true,
+                bounded_read_outcome: BoundedReadOutcome::BackendError,
+            },
+            history_requests: Mutex::new(Vec::new()),
+            bounded_requests: Mutex::new(Vec::new()),
+            list_requests: Mutex::new(Vec::new()),
+            list_responses: Mutex::new(Vec::new()),
+            replay_call_count: Mutex::new(0),
+        }
+    }
+
+    fn thread_artifact_limit_exceeded(
+        history: ThreadHistory,
+        snapshot: BoundedThreadMessageSnapshot,
+    ) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::ThreadArtifact {
+                history: Box::new(history),
+                snapshot: Box::new(snapshot),
+                bounded_read_outcome: BoundedReadOutcome::LimitExceeded,
             },
             history_requests: Mutex::new(Vec::new()),
             bounded_requests: Mutex::new(Vec::new()),
@@ -2706,19 +2730,17 @@ impl SessionThreadService for ScriptedThreadService {
         match &self.behavior {
             ScriptedThreadBehavior::ThreadArtifact {
                 snapshot,
-                bounded_error,
+                bounded_read_outcome,
                 ..
-            } => {
-                if *bounded_error {
-                    Err(SessionThreadError::Backend(
-                        "bounded query unsupported".to_string(),
-                    ))
-                } else {
-                    Ok(BoundedThreadMessages::Complete(Box::new(
-                        snapshot.as_ref().clone(),
-                    )))
-                }
-            }
+            } => match bounded_read_outcome {
+                BoundedReadOutcome::Complete => Ok(BoundedThreadMessages::Complete(Box::new(
+                    snapshot.as_ref().clone(),
+                ))),
+                BoundedReadOutcome::BackendError => Err(SessionThreadError::Backend(
+                    "bounded query unsupported".to_string(),
+                )),
+                BoundedReadOutcome::LimitExceeded => Ok(BoundedThreadMessages::LimitExceeded),
+            },
             _ => scripted_stub_unreachable("list_thread_messages_bounded"),
         }
     }
@@ -9342,10 +9364,10 @@ async fn thread_artifact_projects_messages_from_the_bounded_snapshot() {
 }
 
 #[tokio::test]
-async fn thread_artifact_rejects_oversized_thread_before_context_or_log_reads() {
+async fn thread_artifact_accepts_more_than_one_thousand_small_messages() {
     let owner = caller();
     let thread_scope = thread_scope_for(&owner);
-    let thread_id = ThreadId::new("thread-artifact-over-budget").expect("thread id");
+    let thread_id = ThreadId::new("thread-artifact-many-messages").expect("thread id");
     let run_id = TurnRunId::new();
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     thread_service
@@ -9358,7 +9380,7 @@ async fn thread_artifact_rejects_oversized_thread_before_context_or_log_reads() 
         })
         .await
         .expect("thread");
-    for sequence in 0..(THREAD_ARTIFACT_MAX_MESSAGES + 1) {
+    for sequence in 0..=1_000 {
         seed_submitted_message(
             &thread_service,
             &thread_scope,
@@ -9368,11 +9390,10 @@ async fn thread_artifact_rejects_oversized_thread_before_context_or_log_reads() 
         )
         .await;
     }
-    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
     let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
-        .with_operator_logs_service(operator_logs.clone());
+        .with_operator_logs_service(Arc::new(RecordingOperatorLogsService::default()));
 
-    let error = services
+    let page = services
         .query(
             owner,
             RebornViewQuery {
@@ -9385,7 +9406,48 @@ async fn thread_artifact_rejects_oversized_thread_before_context_or_log_reads() 
             },
         )
         .await
-        .expect_err("oversized thread artifact must fail closed");
+        .expect("a small trajectory must not fail only because it has many messages");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert_eq!(artifact.messages.len(), 1_001);
+}
+
+#[tokio::test]
+async fn thread_artifact_still_maps_bounded_read_limit_to_413() {
+    let owner = caller();
+    let history = fake_thread_history(&owner, "thread-artifact-over-byte-budget");
+    let snapshot = BoundedThreadMessageSnapshot {
+        history: ThreadMessageRange {
+            thread: history.thread.clone(),
+            messages: Vec::new(),
+        },
+        context: ContextMessages {
+            thread_id: history.thread.thread_id.clone(),
+            messages: Vec::new(),
+        },
+    };
+    let thread_service = Arc::new(ScriptedThreadService::thread_artifact_limit_exceeded(
+        history, snapshot,
+    ));
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = session_services(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let error = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: "thread-artifact-over-byte-budget".to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("a snapshot over the unchanged bounded-read budgets must fail closed");
 
     assert_eq!(error.status_code, 413);
     assert_eq!(error.kind, ProductSurfaceErrorKind::Validation);

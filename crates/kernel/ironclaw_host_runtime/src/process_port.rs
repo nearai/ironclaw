@@ -6,15 +6,28 @@
 //! existing local-host behavior behind an explicit port without changing
 //! placement semantics.
 
-use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
-use ironclaw_host_api::process::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+use ironclaw_host_api::{
+    action::NetworkScheme,
+    http::RuntimeCredentialTarget,
+    process::{
+        CommandExecutionOutput, CommandExecutionRequest, CredentialedSandboxCommandRequest,
+        RuntimeProcessError, SandboxCommandCredential, SandboxCommandCredentialBinding,
+        SandboxCommandTransport,
+    },
+    resource::ResourceScope,
 };
-use ironclaw_host_api::resource::ResourceScope;
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
+use secrecy::ExposeSecret;
 use tokio::process::Command;
 
 use crate::process_aliases::{
@@ -73,6 +86,20 @@ pub trait RuntimeProcessPort: Send + Sync {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError>;
+
+    async fn run_credentialed_command(
+        &self,
+        _request: CredentialedSandboxCommandRequest,
+        _credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        Err(RuntimeProcessError::ExecutionFailed(
+            "process port does not support credentialed shell execution".to_string(),
+        ))
+    }
+
+    fn supports_credentialed_command(&self) -> bool {
+        false
+    }
 }
 
 /// Tenant-isolated process port backed by a sandbox command transport.
@@ -117,6 +144,182 @@ impl RuntimeProcessPort for UserSandboxProcessPort {
         output.sandboxed = true;
         Ok(output)
     }
+
+    async fn run_credentialed_command(
+        &self,
+        mut request: CredentialedSandboxCommandRequest,
+        credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        let timeout = request
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+        request.timeout_secs = Some(timeout.as_secs());
+        let mut output = self
+            .transport
+            .run_credentialed_command(request, credentials)
+            .await?;
+        output.output = truncate_output(&output.output);
+        output.sandboxed = true;
+        Ok(output)
+    }
+
+    fn supports_credentialed_command(&self) -> bool {
+        self.transport.supports_credentialed_command()
+    }
+}
+
+/// Consumes the one-shot credentials staged by the normal capability
+/// obligation path and converts authorized bindings to sandbox placeholders.
+///
+/// Credential selection remains with the capability adapter. This port only
+/// materializes the exact descriptor requirements carried by the authorized
+/// shell request; it never discovers credentials from the secret store.
+#[derive(Clone)]
+pub(crate) struct StagedCredentialProcessPort {
+    inner: Arc<dyn RuntimeProcessPort>,
+    secret_injection_store: Arc<crate::obligations::RuntimeSecretInjectionStore>,
+}
+
+impl StagedCredentialProcessPort {
+    pub(crate) fn new(
+        inner: Arc<dyn RuntimeProcessPort>,
+        secret_injection_store: Arc<crate::obligations::RuntimeSecretInjectionStore>,
+    ) -> Self {
+        Self {
+            inner,
+            secret_injection_store,
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeProcessPort for StagedCredentialProcessPort {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        self.inner.run_command(request).await
+    }
+
+    fn supports_credentialed_command(&self) -> bool {
+        self.inner.supports_credentialed_command()
+    }
+
+    async fn run_credentialed_command(
+        &self,
+        mut request: CredentialedSandboxCommandRequest,
+        credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        if !credentials.is_empty() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "caller-supplied sandbox credentials are forbidden".to_string(),
+            ));
+        }
+        let bindings = std::mem::take(&mut request.credential_bindings);
+        validate_credential_bindings(&request, &bindings)?;
+        let handles = bindings
+            .iter()
+            .map(|binding| binding.requirement.handle.clone())
+            .collect::<Vec<_>>();
+        let materials = self
+            .secret_injection_store
+            .take_many(&request.scope, &request.capability_id, &handles)
+            .map_err(|error| {
+                tracing::debug!(?error, "sandbox credential staging lookup failed");
+                RuntimeProcessError::ExecutionFailed(
+                    "sandbox credential staging is unavailable".to_string(),
+                )
+            })?
+            .ok_or_else(|| {
+                RuntimeProcessError::ExecutionFailed(
+                    "an authorized sandbox credential was not staged for this invocation"
+                        .to_string(),
+                )
+            })?;
+        let mut credentials = Vec::with_capacity(bindings.len());
+        for (binding, material) in bindings.into_iter().zip(materials) {
+            let RuntimeCredentialTarget::Header { name, prefix } = binding.requirement.target
+            else {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "sandbox process credentials require a header injection target".to_string(),
+                ));
+            };
+            let placeholder = format!(
+                "{}{}",
+                ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+                uuid::Uuid::new_v4().simple()
+            );
+            request
+                .extra_env
+                .insert(binding.placeholder_env.clone(), placeholder.clone());
+            credentials.push(SandboxCommandCredential::new(
+                binding.requirement.handle,
+                binding.placeholder_env,
+                placeholder,
+                binding.requirement.audience.host_pattern,
+                name,
+                prefix,
+                material.expose_secret().to_string(),
+            ));
+        }
+        self.inner
+            .run_credentialed_command(request, credentials)
+            .await
+    }
+}
+
+fn validate_credential_bindings(
+    request: &CredentialedSandboxCommandRequest,
+    bindings: &[SandboxCommandCredentialBinding],
+) -> Result<(), RuntimeProcessError> {
+    let mut handles = HashSet::with_capacity(bindings.len());
+    let mut env_names = HashSet::with_capacity(bindings.len());
+    for binding in bindings {
+        let requirement = &binding.requirement;
+        let RuntimeCredentialTarget::Header { name, prefix } = &requirement.target else {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox process credentials require a header injection target".to_string(),
+            ));
+        };
+        if requirement.audience.scheme != Some(NetworkScheme::Https)
+            || requirement.audience.port.is_some()
+            || requirement.audience.host_pattern.contains('*')
+            || requirement.audience.host_pattern.is_empty()
+            || requirement
+                .audience
+                .host_pattern
+                .chars()
+                .any(char::is_control)
+            || name.is_empty()
+            || name.chars().any(char::is_control)
+            || prefix
+                .as_ref()
+                .is_some_and(|value| value.chars().any(char::is_control))
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox process credential binding is not an exact HTTPS header target"
+                    .to_string(),
+            ));
+        }
+        if requirement.placeholder_env.as_deref() != Some(binding.placeholder_env.as_str()) {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "authorized shell credential does not match its placeholder environment"
+                    .to_string(),
+            ));
+        }
+        if !ironclaw_host_api::process::is_valid_sandbox_credential_env_name(
+            &binding.placeholder_env,
+        ) || request.extra_env.contains_key(&binding.placeholder_env)
+            || !handles.insert(&requirement.handle)
+            || !env_names.insert(&binding.placeholder_env)
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox process credential binding is ambiguous".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Host-process command environment handling.
@@ -370,11 +573,29 @@ mod tests {
     use crate::process_output::COMMAND_MAX_OUTPUT_SIZE;
     #[cfg(unix)]
     use ironclaw_host_api::process::SavedCommandOutputSanitization;
-    use std::sync::Mutex;
+    use ironclaw_host_api::{
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+        http::RuntimeCredentialTarget,
+        ids::{CapabilityId, SecretHandle},
+    };
+    use parking_lot::Mutex;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct RecordedCredential {
+        placeholder_env: String,
+        placeholder: String,
+        approved_host: String,
+        header_name: String,
+        header_prefix: Option<String>,
+        secret: String,
+    }
 
     #[derive(Debug)]
     struct RecordingSandboxTransport {
         requests: Mutex<Vec<CommandExecutionRequest>>,
+        credentialed_requests:
+            Mutex<Vec<(CredentialedSandboxCommandRequest, Vec<RecordedCredential>)>>,
         output: String,
     }
 
@@ -382,6 +603,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 requests: Mutex::new(Vec::new()),
+                credentialed_requests: Mutex::new(Vec::new()),
                 output: "echo sandbox".to_string(),
             }
         }
@@ -399,7 +621,7 @@ mod tests {
             &self,
             request: CommandExecutionRequest,
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-            self.requests.lock().unwrap().push(request);
+            self.requests.lock().push(request);
             Ok(CommandExecutionOutput {
                 output: self.output.clone(),
                 saved_output: None,
@@ -407,6 +629,38 @@ mod tests {
                 sandboxed: false,
                 duration: Duration::from_millis(3),
             })
+        }
+
+        async fn run_credentialed_command(
+            &self,
+            request: CredentialedSandboxCommandRequest,
+            credentials: Vec<SandboxCommandCredential>,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            let credentials = credentials
+                .iter()
+                .map(|credential| RecordedCredential {
+                    placeholder_env: credential.placeholder_env.clone(),
+                    placeholder: credential.placeholder.clone(),
+                    approved_host: credential.approved_host.clone(),
+                    header_name: credential.header_name.clone(),
+                    header_prefix: credential.header_prefix.clone(),
+                    secret: credential.expose_secret().to_string(),
+                })
+                .collect();
+            self.credentialed_requests
+                .lock()
+                .push((request, credentials));
+            Ok(CommandExecutionOutput {
+                output: self.output.clone(),
+                saved_output: None,
+                exit_code: 0,
+                sandboxed: false,
+                duration: Duration::from_millis(3),
+            })
+        }
+
+        fn supports_credentialed_command(&self) -> bool {
+            true
         }
     }
 
@@ -432,6 +686,290 @@ mod tests {
                 request.timeout_secs.unwrap_or_default(),
             )))
         }
+    }
+
+    #[tokio::test]
+    async fn staged_credential_process_port_materializes_invocation_placeholders_for_compound_shell()
+     {
+        use ironclaw_secrets::SecretMaterial;
+
+        let transport = Arc::new(RecordingSandboxTransport::default());
+        let sandbox_port: Arc<dyn RuntimeProcessPort> =
+            Arc::new(UserSandboxProcessPort::new(transport.clone()));
+        let store = Arc::new(crate::obligations::RuntimeSecretInjectionStore::new());
+        let scope = ResourceScope::system();
+        let capability_id = CapabilityId::new(crate::SHELL_CAPABILITY_ID).unwrap();
+        let atlas = credential_binding(
+            "atlas_runtime_token",
+            "ATLAS_TOKEN",
+            "api.atlas.test",
+            "authorization",
+            Some("Bearer "),
+        );
+        let acme = credential_binding(
+            "acme_runtime_token",
+            "ACME_TOKEN",
+            "api.acme.test",
+            "x-api-key",
+            None,
+        );
+        for (binding, secret) in [(&atlas, "atlas_real_token"), (&acme, "acme_real_token")] {
+            store
+                .insert(
+                    &scope,
+                    &capability_id,
+                    &binding.requirement.handle,
+                    SecretMaterial::from(secret),
+                )
+                .unwrap();
+        }
+        let port = StagedCredentialProcessPort::new(sandbox_port, store);
+
+        port.run_credentialed_command(
+            CredentialedSandboxCommandRequest {
+                capability_id: capability_id.clone(),
+                scope,
+                mounts: None,
+                command: "set -e; api-client resource list | jq '.items'; api-client audit"
+                    .to_string(),
+                workdir: None,
+                timeout_secs: Some(10),
+                extra_env: HashMap::new(),
+                credential_bindings: vec![atlas, acme],
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let requests = transport.credentialed_requests.lock();
+        let (request, credentials) = &requests[0];
+        assert_eq!(
+            request.command,
+            "set -e; api-client resource list | jq '.items'; api-client audit"
+        );
+        assert!(request.credential_bindings.is_empty());
+        assert_eq!(
+            credentials,
+            &[
+                RecordedCredential {
+                    placeholder_env: "ATLAS_TOKEN".to_string(),
+                    placeholder: request.extra_env["ATLAS_TOKEN"].clone(),
+                    approved_host: "api.atlas.test".to_string(),
+                    header_name: "authorization".to_string(),
+                    header_prefix: Some("Bearer ".to_string()),
+                    secret: "atlas_real_token".to_string(),
+                },
+                RecordedCredential {
+                    placeholder_env: "ACME_TOKEN".to_string(),
+                    placeholder: request.extra_env["ACME_TOKEN"].clone(),
+                    approved_host: "api.acme.test".to_string(),
+                    header_name: "x-api-key".to_string(),
+                    header_prefix: None,
+                    secret: "acme_real_token".to_string(),
+                },
+            ]
+        );
+        for (credential, name) in credentials.iter().zip(["ATLAS_TOKEN", "ACME_TOKEN"]) {
+            let placeholder = request.extra_env.get(name).unwrap();
+            assert_eq!(credential.placeholder, *placeholder);
+            assert!(placeholder.starts_with(ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX));
+            assert!(!placeholder.contains("real_token"));
+        }
+    }
+
+    fn credential_binding(
+        handle: &str,
+        placeholder_env: &str,
+        approved_host: &str,
+        header_name: &str,
+        header_prefix: Option<&str>,
+    ) -> SandboxCommandCredentialBinding {
+        SandboxCommandCredentialBinding {
+            placeholder_env: placeholder_env.to_string(),
+            requirement: RuntimeCredentialRequirement {
+                handle: SecretHandle::new(handle).unwrap(),
+                source: RuntimeCredentialRequirementSource::SecretHandle,
+                provider_scopes: Vec::new(),
+                audience: NetworkTargetPattern {
+                    scheme: Some(NetworkScheme::Https),
+                    host_pattern: approved_host.to_string(),
+                    port: None,
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: header_name.to_string(),
+                    prefix: header_prefix.map(str::to_string),
+                },
+                placeholder_env: Some(placeholder_env.to_string()),
+                required: true,
+            },
+        }
+    }
+
+    fn credentialed_request(
+        bindings: Vec<SandboxCommandCredentialBinding>,
+    ) -> CredentialedSandboxCommandRequest {
+        CredentialedSandboxCommandRequest {
+            capability_id: CapabilityId::new(crate::SHELL_CAPABILITY_ID).unwrap(),
+            scope: ResourceScope::system(),
+            mounts: None,
+            command: "api-client resource list".to_string(),
+            workdir: None,
+            timeout_secs: Some(10),
+            extra_env: HashMap::new(),
+            credential_bindings: bindings,
+        }
+    }
+
+    #[test]
+    fn user_sandbox_process_port_delegates_credential_support_to_transport() {
+        let supported = UserSandboxProcessPort::new(Arc::new(RecordingSandboxTransport::default()));
+        let unsupported = UserSandboxProcessPort::new(Arc::new(FailingSandboxTransport));
+
+        assert!(supported.supports_credentialed_command());
+        assert!(!unsupported.supports_credentialed_command());
+    }
+
+    #[tokio::test]
+    async fn user_sandbox_process_port_defaults_credentialed_timeout_to_120_seconds() {
+        let transport = Arc::new(RecordingSandboxTransport::default());
+        let port = UserSandboxProcessPort::new(transport.clone());
+        let mut request = credentialed_request(Vec::new());
+        request.timeout_secs = None;
+
+        port.run_credentialed_command(request, Vec::new())
+            .await
+            .unwrap();
+
+        let requests = transport.credentialed_requests.lock();
+        assert_eq!(requests[0].0.timeout_secs, Some(120));
+    }
+    #[tokio::test]
+    async fn staged_port_rejects_invalid_bindings_without_consuming_staged_material() {
+        use ironclaw_secrets::SecretMaterial;
+
+        let base = credential_binding(
+            "atlas_runtime_token",
+            "ATLAS_TOKEN",
+            "api.atlas.test",
+            "authorization",
+            Some("Bearer "),
+        );
+        let mut wildcard = base.clone();
+        wildcard.requirement.audience.host_pattern = "*.atlas.test".to_string();
+        let mut empty_host = base.clone();
+        empty_host.requirement.audience.host_pattern.clear();
+        let mut query_target = base.clone();
+        query_target.requirement.target = RuntimeCredentialTarget::QueryParam {
+            name: "access_token".to_string(),
+        };
+        let mut missing_placeholder_env = base.clone();
+        missing_placeholder_env.requirement.placeholder_env = None;
+
+        for (case, binding) in [
+            ("wildcard host", wildcard),
+            ("empty host", empty_host),
+            ("non-header target", query_target),
+            ("missing placeholder env", missing_placeholder_env),
+        ] {
+            let transport = Arc::new(RecordingSandboxTransport::default());
+            let inner: Arc<dyn RuntimeProcessPort> =
+                Arc::new(UserSandboxProcessPort::new(transport.clone()));
+            let store = Arc::new(crate::obligations::RuntimeSecretInjectionStore::new());
+            let request = credentialed_request(vec![binding.clone()]);
+            store
+                .insert(
+                    &request.scope,
+                    &request.capability_id,
+                    &binding.requirement.handle,
+                    SecretMaterial::from("atlas_real_token"),
+                )
+                .unwrap();
+            let port = StagedCredentialProcessPort::new(inner, store.clone());
+
+            let error = port
+                .run_credentialed_command(request.clone(), Vec::new())
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(error, RuntimeProcessError::ExecutionFailed(_)),
+                "expected fail-closed binding rejection for {case}: {error}"
+            );
+            assert!(
+                transport.credentialed_requests.lock().is_empty(),
+                "invalid binding reached the sandbox transport: {case}"
+            );
+            assert!(
+                store
+                    .take(
+                        &request.scope,
+                        &request.capability_id,
+                        &binding.requirement.handle,
+                    )
+                    .unwrap()
+                    .is_some(),
+                "invalid binding consumed staged material: {case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn staged_port_keeps_present_material_when_another_handle_is_unstaged() {
+        use ironclaw_secrets::SecretMaterial;
+
+        let staged = credential_binding(
+            "atlas_runtime_token",
+            "ATLAS_TOKEN",
+            "api.atlas.test",
+            "authorization",
+            Some("Bearer "),
+        );
+        let unstaged = credential_binding(
+            "acme_runtime_token",
+            "ACME_TOKEN",
+            "api.acme.test",
+            "x-api-key",
+            None,
+        );
+        let request = credentialed_request(vec![staged.clone(), unstaged]);
+        let transport = Arc::new(RecordingSandboxTransport::default());
+        let inner: Arc<dyn RuntimeProcessPort> =
+            Arc::new(UserSandboxProcessPort::new(transport.clone()));
+        let store = Arc::new(crate::obligations::RuntimeSecretInjectionStore::new());
+        store
+            .insert(
+                &request.scope,
+                &request.capability_id,
+                &staged.requirement.handle,
+                SecretMaterial::from("atlas_real_token"),
+            )
+            .unwrap();
+        let port = StagedCredentialProcessPort::new(inner, store.clone());
+
+        let error = port
+            .run_credentialed_command(request.clone(), Vec::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RuntimeProcessError::ExecutionFailed(
+                "an authorized sandbox credential was not staged for this invocation".to_string()
+            )
+        );
+        assert!(transport.credentialed_requests.lock().is_empty());
+        assert!(
+            store
+                .take(
+                    &request.scope,
+                    &request.capability_id,
+                    &staged.requirement.handle,
+                )
+                .unwrap()
+                .is_some(),
+            "atomic take_many must preserve already staged material"
+        );
     }
 
     #[tokio::test]
@@ -471,7 +1009,7 @@ mod tests {
         .await
         .unwrap();
 
-        let requests = transport.requests.lock().unwrap();
+        let requests = transport.requests.lock();
         assert_eq!(
             requests[0].timeout_secs,
             Some(DEFAULT_COMMAND_TIMEOUT.as_secs())
@@ -523,6 +1061,7 @@ mod tests {
     async fn user_sandbox_process_port_truncates_transport_output() {
         let transport = std::sync::Arc::new(RecordingSandboxTransport {
             requests: Mutex::new(Vec::new()),
+            credentialed_requests: Mutex::new(Vec::new()),
             output: "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1),
         });
         let port = UserSandboxProcessPort::new(transport);

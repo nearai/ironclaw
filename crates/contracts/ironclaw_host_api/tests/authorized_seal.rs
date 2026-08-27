@@ -11,15 +11,17 @@ use ironclaw_host_api::{
     authorized::{
         AuthorizeResult, Authorized, CapabilityAuthorizer, ProcessAuthorizedContinuation,
     },
+    capability::{CapabilityDescriptor, PermissionMode},
     ids::{
-        ActivityId, CapabilityId, CorrelationId, DenyRef, GateRef, ProcessId, ProductKind,
-        ResourceReservationId, UserId,
+        ActivityId, CapabilityId, CorrelationId, DenyRef, ExtensionId, GateRef, ProcessId,
+        ProductKind, ResourceReservationId, UserId,
     },
     invocation::{Actor, Invocation, InvocationOrigin},
     lane::RuntimeLane,
     mount::MountView,
     resolution::{Blocked, GateWaypoint},
     resource::{ResourceEstimate, ResourceReservation, ResourceScope},
+    runtime::{RuntimeKind, TrustClass},
 };
 
 /// A stand-in kernel authorizer. In production the sole impl lives in
@@ -39,6 +41,25 @@ fn invocation() -> Invocation {
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
+    }
+}
+
+fn descriptor() -> CapabilityDescriptor {
+    CapabilityDescriptor {
+        id: CapabilityId::new("shell.exec").unwrap(),
+        provider: ExtensionId::new("builtin").unwrap(),
+        runtime: RuntimeKind::FirstParty,
+        trust_ceiling: TrustClass::FirstParty,
+        description: "test shell".to_string(),
+        parameters_schema: serde_json::json!({}),
+        effects: Vec::new(),
+        default_permission: PermissionMode::Ask,
+        runtime_credentials: Vec::new(),
+        network_targets: Vec::new(),
+        max_egress_bytes: None,
+        resource_profile: None,
+        origin_gate_matrix: None,
+        standard_op: None,
     }
 }
 
@@ -70,11 +91,13 @@ fn seal_with_mounts_and_reservation(
     Authorized::seal(
         grant,
         invocation(),
+        descriptor(),
         RuntimeLane::Process,
         mounts,
         reservation,
         deadline,
     )
+    .expect("matching capability ids seal")
 }
 
 fn seal_invocation(invocation: Invocation) -> Authorized {
@@ -82,11 +105,36 @@ fn seal_invocation(invocation: Invocation) -> Authorized {
     Authorized::seal(
         grant,
         invocation,
+        descriptor(),
         RuntimeLane::Process,
         Some(MountView::default()),
         Some(reservation()),
         ts(1000),
     )
+    .expect("matching capability ids seal")
+}
+
+#[test]
+fn seal_rejects_mismatched_descriptor_in_release_builds() {
+    let grant = TestAuthorizer.authorization_grant();
+    let mut invocation = invocation();
+    invocation.capability = CapabilityId::new("other.capability").unwrap();
+
+    let error = Authorized::seal(
+        grant,
+        invocation,
+        descriptor(),
+        RuntimeLane::Process,
+        None,
+        None,
+        ts(1000),
+    )
+    .expect_err("mismatched capability ids must fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::authorized::AuthorizedSealError::CapabilityMismatch { .. }
+    ));
 }
 
 fn ts(secs: i64) -> Timestamp {
@@ -98,6 +146,7 @@ fn authorized_is_lane_bound_and_carries_its_invocation() {
     let auth = seal_one(ts(1000));
     assert_eq!(auth.lane(), RuntimeLane::Process);
     assert_eq!(auth.invocation().capability.as_str(), "shell.exec");
+    assert_eq!(auth.descriptor(), Some(&descriptor()));
 }
 
 #[test]
@@ -111,12 +160,13 @@ fn deadline_fails_closed_past_the_frozen_facts() {
 #[test]
 fn single_use_consumes_into_parts_before_deadline() {
     let auth = seal_one(ts(1000));
-    let (inv, lane, _mounts, res) = auth
+    let (inv, frozen_descriptor, lane, _mounts, res) = auth
         .into_parts(ts(999))
         .expect("unexpired witness must consume");
     // `auth` is moved — a second dispatch is a compile error, not a runtime bug.
     assert_eq!(lane, RuntimeLane::Process);
     assert_eq!(inv.capability.as_str(), "shell.exec");
+    assert_eq!(frozen_descriptor, Some(descriptor()));
     // The real obligation-produced reservation flows through consumption.
     assert!(res.is_some());
 }
@@ -148,6 +198,44 @@ fn process_authorized_continuation_preserves_direct_spawner_lineage() {
 
     assert_eq!(continuation.invocation.process_id, spawned);
     assert_eq!(continuation.invocation.parent_process_id, Some(spawner));
+    assert_eq!(continuation.descriptor, Some(descriptor()));
+}
+
+#[test]
+fn process_authorized_continuation_round_trips_host_assigned_descriptor() {
+    let continuation = ProcessAuthorizedContinuation::from_authorized(
+        seal_invocation(invocation()),
+        ts(999),
+        ProcessId::new(),
+    )
+    .expect("unexpired process authorization converts");
+
+    let encoded = serde_json::to_value(&continuation).unwrap();
+    let decoded: ProcessAuthorizedContinuation = serde_json::from_value(encoded).unwrap();
+
+    assert_eq!(decoded.descriptor, Some(descriptor()));
+}
+
+#[test]
+fn process_authorized_continuation_accepts_legacy_records_without_a_descriptor() {
+    let continuation = ProcessAuthorizedContinuation::from_authorized(
+        seal_invocation(invocation()),
+        ts(999),
+        ProcessId::new(),
+    )
+    .expect("unexpired process authorization converts");
+    let mut encoded = serde_json::to_value(continuation).unwrap();
+    encoded
+        .as_object_mut()
+        .unwrap()
+        .remove("descriptor")
+        .expect("new records include the descriptor");
+
+    let decoded: ProcessAuthorizedContinuation = serde_json::from_value(encoded).unwrap();
+    assert!(
+        decoded.descriptor.is_none(),
+        "legacy records must deserialize into the explicit registry-fallback state"
+    );
 }
 
 #[test]
@@ -156,7 +244,7 @@ fn reservation_is_none_when_the_capability_declares_no_resource_obligation() {
     // synthesized placeholder. Consumption and abort surface `None`.
     let auth = seal_with_reservation(ts(1000), None);
     assert!(auth.reservation().is_none());
-    let (_inv, _lane, _mounts, res) = auth
+    let (_inv, _descriptor, _lane, _mounts, res) = auth
         .into_parts(ts(999))
         .expect("unexpired witness must consume");
     assert!(res.is_none());
@@ -195,12 +283,12 @@ fn mounts_are_carried_and_consumed_as_an_option_not_a_collapsed_default() {
     // an empty one does not). Collapsing `None` to a default would erase that.
     let some = seal_with_mounts_and_reservation(ts(1000), Some(MountView::default()), None);
     assert_eq!(some.mounts(), Some(&MountView::default()));
-    let (_inv, _lane, mounts, _res) = some.into_parts(ts(999)).expect("unexpired");
+    let (_inv, _descriptor, _lane, mounts, _res) = some.into_parts(ts(999)).expect("unexpired");
     assert_eq!(mounts, Some(MountView::default()));
 
     let none = seal_with_mounts_and_reservation(ts(1000), None, None);
     assert!(none.mounts().is_none());
-    let (_inv, _lane, mounts, _res) = none.into_parts(ts(999)).expect("unexpired");
+    let (_inv, _descriptor, _lane, mounts, _res) = none.into_parts(ts(999)).expect("unexpired");
     assert!(
         mounts.is_none(),
         "a `None` mount must not become an empty default"

@@ -605,6 +605,7 @@ pub struct RuntimeCredentialRequirement {
     pub source: RuntimeCredentialRequirementSource,
     pub audience: NetworkTargetPattern,
     pub target: RuntimeCredentialTarget,
+    pub placeholder_env: Option<String>,
     pub required: bool,
 }
 
@@ -616,11 +617,31 @@ pub enum RuntimeCredentialRequirementSource {
 
 `runtime_credentials` is declarative host-owned injection metadata only. A
 credential requirement names the runtime credential slot handle, material source,
-HTTPS audience, injection target, and required/optional behavior; authorization
-and runtime egress still decide whether material is staged and consumed for a
-specific invocation. Account-backed sources resolve through product auth before
-runtime egress and stage material under the runtime slot handle, so the WASM
-guest never sees account ids or backend secret handles.
+HTTPS audience, injection target, required/optional behavior, and optional shell
+placeholder environment variable. Authorization and runtime egress still decide
+whether material is staged and consumed for a specific invocation. Account-backed
+sources resolve through product auth before runtime egress and stage material
+under the runtime slot handle, so the sandbox never sees account ids or backend
+secret handles.
+
+`builtin.shell` input can select at most eight active extensions through the
+`credential_contexts` array. The values are extension ids, not secret handles,
+provider names, environment-variable names, or executable names. Before approval
+or credential staging, authorization copies the selected extensions' complete
+manifest-declared runtime credential requirements into the invocation descriptor.
+Unknown, inactive, duplicate, over-limit, conflicting, non-privileged, or
+non-sandbox contexts fail closed. An ordinary shell invocation with no contexts
+receives no credential authority.
+
+The authorized descriptor requirements are copied into the first-party process
+request without secret material. The host process port atomically consumes the
+staged handles and creates a fresh invocation-scoped opaque placeholder for each
+requirement. Only those placeholders enter the sandbox process environment. The
+sandbox proxy loads one invocation-scoped credential bundle and replaces a
+placeholder only in its manifest-approved HTTPS header at its approved host.
+This supports compound shell scripts and subprocesses without parsing commands or
+making executable identity an authorization boundary. Authorization, staging,
+and sandbox transport never branch on a provider.
 
 The `required` field applies uniformly across sources: when `required = false`,
 the obligation is skipped entirely. For `SecretHandle`, a missing grant secret

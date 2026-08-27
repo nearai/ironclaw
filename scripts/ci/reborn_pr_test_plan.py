@@ -538,18 +538,16 @@ PR_STATIC_CONTROL_PATHS = {
     "ironclaw.png",
     "LICENSE-APACHE",
     "LICENSE-MIT",
-    # The Reborn container entrypoint is shell, not Rust: no Reborn test lane
-    # executes it. Code Style owns it end to end — `code_style.yml`'s `has_code`
-    # filter names `docker/reborn/entrypoint.sh` and its "Self-test CI scripts"
-    # step runs `scripts/ci/test-reborn-docker-entrypoint.sh`, which drives the
-    # real script. (`platform-and-compat.yml`'s `has_docker_risk` deliberately
-    # does not cover it — that filter is keyed to `Dockerfile`/`.dockerignore`
-    # and owns the image build, not the entrypoint's behaviour. `docker/` stays
-    # per-file, never a prefix: it mixes classes, and the shipped runtime
+    # The Reborn container startup scripts are shell, not Rust: no Reborn test
+    # lane executes them. Code Style owns their fast self-tests, while
+    # `platform-and-compat.yml` classifies both as Docker risk and exercises
+    # them through the built runtime image. `docker/` stays per-file, never a
+    # prefix: it mixes classes, and the shipped runtime
     # configs beside this script belong to a Rust lane instead — see
     # `DOCKER_RUNTIME_CONFIG_OWNERS` below. `docker/process-sandbox-entrypoint.sh`
     # has no owning lane and must keep refusing.)
     "docker/reborn/entrypoint.sh",
+    "docker/reborn/start-sshd.sh",
 }
 # Shipped container configs a Reborn Rust test parses and asserts on, mapped to
 # the test source that owns them. They are NOT static control: the membership

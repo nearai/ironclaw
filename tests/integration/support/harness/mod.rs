@@ -2048,6 +2048,7 @@ impl HostRuntimeCapabilityHarness {
             .collect();
         let parts = ironclaw_composition::test_support::RefreshingCapabilityPortTestParts {
             runtime: self.runtime.lock().unwrap().clone(),
+            process_backend: ironclaw_host_api::runtime_policy::ProcessBackendKind::LocalHost,
             run_context: run_context.clone(),
             surface_policy,
             fallback_user_id: dispatch_user,
@@ -2100,6 +2101,7 @@ impl HostRuntimeCapabilityHarness {
             extension_management: self.reborn_services.as_ref().and_then(|services| {
                 ironclaw_composition::test_support::build_extension_management_for_test(services)
             }),
+            extension_surface_override: None,
             outbound_preferences_service,
             outbound_preference_write_requires_approval,
             tool_permission_overrides,

@@ -8,7 +8,7 @@
 use ironclaw_host_api::{
     Timestamp,
     authorized::{AuthorizeResult, Authorized, CapabilityAuthorizer},
-    capability::{CapabilityDescriptor, PermissionMode},
+    capability::{CapabilityDescriptor, EffectKind, PermissionMode, RuntimeCredentialRequirement},
     decision::{Decision, DenyReason},
     dispatch::{CapabilityDispatcher, DispatchAuthRequirement},
     ids::{ActivityId, CapabilityId, DenyRef, GateRef},
@@ -16,6 +16,7 @@ use ironclaw_host_api::{
     lane::RuntimeLane,
     resolution::{Blocked, GateWaypoint},
     resource::ResourceEstimate,
+    runtime_policy::ProcessBackendKind,
     scope::ExecutionContext,
 };
 use ironclaw_processes::ProcessInvocationStart;
@@ -34,7 +35,7 @@ use crate::helpers::{
     validate_approval_request_matches_invocation,
 };
 use crate::ports::{CredentialPresence, PolicyAction};
-use crate::trust::evaluate_invocation_trust;
+use crate::trust::{evaluate_invocation_trust, evaluate_package_trust};
 use crate::{CapabilityInvocationError, CapabilityObligationOutcome, CapabilityObligationPhase};
 
 impl<'a, D> CapabilityHost<'a, D>
@@ -66,6 +67,110 @@ where
                 error,
             )),
         }
+    }
+    /// Add explicitly selected, manifest-declared credentials to a sandboxed
+    /// shell invocation before authorization.
+    ///
+    /// `credential_contexts` contains active extension IDs. Each selected
+    /// extension contributes only requirements that declare `placeholder_env`;
+    /// ordinary command text never acquires credentials implicitly. The frozen
+    /// descriptor then drives approval, credential staging, and proxy policy.
+    pub(super) async fn enrich_invocation_descriptor(
+        &self,
+        descriptor: &CapabilityDescriptor,
+        capability_id: &CapabilityId,
+        input: &serde_json::Value,
+    ) -> Result<CapabilityDescriptor, CapabilityInvocationError> {
+        if capability_id.as_str() != "builtin.shell" {
+            return Ok(descriptor.clone());
+        }
+        let contexts =
+            ironclaw_host_api::process::shell_credential_contexts(input).map_err(|error| {
+                CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::PolicyDenied,
+                    detail: Some(error.to_string()),
+                }
+            })?;
+        if contexts.is_empty() {
+            return Ok(descriptor.clone());
+        }
+        if self.runtime_policy.process_backend != ProcessBackendKind::UserSandbox {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: capability_id.clone(),
+                reason: DenyReason::PolicyDenied,
+                detail: Some(
+                    "shell credential contexts require the managed user sandbox".to_string(),
+                ),
+            });
+        }
+
+        let mut selected: Vec<RuntimeCredentialRequirement> = Vec::new();
+        for context in contexts {
+            let Some(package) = self.registry.get_extension(&context) else {
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::PolicyDenied,
+                    detail: Some(format!(
+                        "shell credential context `{context}` is not an active extension"
+                    )),
+                });
+            };
+            let package_trust = evaluate_package_trust(self.registry, self.trust_policy, &context)
+                .map_err(|error| trust_error_to_invocation_error(capability_id, error))?;
+            if !package_trust.effective_trust.is_privileged() {
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::PolicyDenied,
+                    detail: Some(format!(
+                        "shell credential context `{context}` is not trusted for host execution"
+                    )),
+                });
+            }
+            let mut context_selected = 0usize;
+            for declared in package
+                .capabilities
+                .iter()
+                .flat_map(|candidate| candidate.runtime_credentials.iter())
+                .filter(|requirement| requirement.placeholder_env.is_some())
+            {
+                context_selected += 1;
+                if let Some(existing) = selected
+                    .iter()
+                    .find(|existing| existing.handle == declared.handle)
+                {
+                    if existing != declared {
+                        return Err(CapabilityInvocationError::AuthorizationDenied {
+                            capability: capability_id.clone(),
+                            reason: DenyReason::PolicyDenied,
+                            detail: Some(format!(
+                                "shell credential context `{context}` has conflicting declarations \
+                                 for handle `{}`",
+                                declared.handle
+                            )),
+                        });
+                    }
+                } else {
+                    selected.push(declared.clone());
+                }
+            }
+            if context_selected == 0 {
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::PolicyDenied,
+                    detail: Some(format!(
+                        "shell credential context `{context}` declares no shell credentials"
+                    )),
+                });
+            }
+        }
+
+        let mut descriptor = descriptor.clone();
+        if !descriptor.effects.contains(&EffectKind::UseSecret) {
+            descriptor.effects.push(EffectKind::UseSecret);
+        }
+        descriptor.runtime_credentials = selected;
+        Ok(descriptor)
     }
 
     /// Persistent-approval fold (§5.2.7/§5.3.2): a prior scoped approval may
@@ -194,12 +299,15 @@ where
         // fingerprint above nor `invocation_state.start` below needs the descriptor, so
         // hoisting this lookup is safe; everything from `start` onward keeps its
         // original order (the credential pre-flight still runs after `start`).
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+        let Some(base_descriptor) = self.registry.get_capability(&request.capability_id) else {
             debug!("capability invocation failed before authorization: unknown capability");
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id.clone(),
             });
         };
+        let descriptor = self
+            .enrich_invocation_descriptor(base_descriptor, &request.capability_id, &request.input)
+            .await?;
 
         if let Some(invocation_state) = self.invocation_state {
             invocation_state
@@ -233,7 +341,7 @@ where
                 return Err(error);
             }
         };
-        if let Err(error) = self.enforce_runtime_policy(descriptor) {
+        if let Err(error) = self.enforce_runtime_policy(&descriptor) {
             apply_invocation_state_transition_if_configured(
                 self.invocation_state,
                 &scope,
@@ -254,7 +362,7 @@ where
         // enforcing backstop and a fault must not burn a user auth interaction.
         match self
             .policy_facts
-            .credential_presence(&request.capability_id, &scope)
+            .credential_presence(&descriptor, &scope)
             .await
         {
             CredentialPresence::Satisfied | CredentialPresence::Indeterminate => {}
@@ -287,7 +395,7 @@ where
         let frozen_deadline = self
             .apply_persistent_approval(
                 &mut authorize_context,
-                descriptor,
+                &descriptor,
                 &request.capability_id,
                 &request.estimate,
                 &trust_decision,
@@ -299,7 +407,7 @@ where
             .authorizer
             .authorize_dispatch_with_trust(
                 &authorize_context,
-                descriptor,
+                &descriptor,
                 &request.estimate,
                 &trust_decision,
             )
@@ -347,10 +455,10 @@ where
                     &request.capability_id,
                     &request.estimate,
                     &request.input,
-                    descriptor,
+                    &descriptor,
                     &obligation_outcome,
                     frozen_deadline,
-                );
+                )?;
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
                     result,
                     frozen_deadline: None,
@@ -559,7 +667,7 @@ where
         descriptor: &CapabilityDescriptor,
         obligation_outcome: &CapabilityObligationOutcome,
         frozen_deadline: Option<Timestamp>,
-    ) -> Option<AuthorizeResult> {
+    ) -> Result<Option<AuthorizeResult>, CapabilityInvocationError> {
         // Actor is sealed at the membrane; NO fallback to `user_id`. An
         // actor-less (system service / one-shot) context seals `Actor::System`
         // as its own class.
@@ -569,12 +677,16 @@ where
         };
         // Lane resolved from the descriptor's runtime kind; `System` runtimes
         // have no untrusted execution lane (`None`) and are not sealed here.
-        let lane = RuntimeLane::from_runtime_kind(descriptor.runtime)?;
+        let Some(lane) = RuntimeLane::from_runtime_kind(descriptor.runtime) else {
+            return Ok(None);
+        };
         let scope = &context.resource_scope;
         // Origin is the ingress-stamped authority fact (§5.2.1). The loop path
         // also carries `run_id`, so a context that stamped only `run_id` still
         // reconstructs `LoopRun` for transitional compatibility.
-        let origin = context.resolved_origin()?;
+        let Some(origin) = context.resolved_origin() else {
+            return Ok(None);
+        };
         let invocation = Invocation {
             activity_id: ActivityId::from_uuid(context.invocation_id.as_uuid()),
             capability: capability_id.clone(),
@@ -601,14 +713,21 @@ where
         // candidates into `frozen_deadline`), or a bounded default TTL. See
         // [`witness_deadline`].
         let deadline = witness_deadline([frozen_deadline]);
-        Some(AuthorizeResult::Authorized(Box::new(Authorized::seal(
+        Authorized::seal(
             self.authorization_grant(),
             invocation,
+            descriptor.clone(),
             lane,
             mounts,
             reservation,
             deadline,
-        ))))
+        )
+        .map(|authorized| Some(AuthorizeResult::Authorized(Box::new(authorized))))
+        .map_err(|error| CapabilityInvocationError::AuthorizationDenied {
+            capability: capability_id.clone(),
+            reason: DenyReason::PolicyDenied,
+            detail: Some(error.to_string()),
+        })
     }
 }
 

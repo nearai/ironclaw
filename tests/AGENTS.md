@@ -89,7 +89,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Extension lifecycle | 14 | 6 | ✓ | ✓ |
 | Channels (Slack/Telegram/webhook) | 5 | 3 | ✓ | ✓ |
 | Triggers / automations / routines | 10 | 2 | ✓ | ✓ |
-| Memory & workspace | 8 | 2 | — | ✓ |
+| Memory & workspace | 11 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
 | Multi-user / scope isolation | 5 | 4 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
@@ -100,7 +100,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **59** group scenarios · **62** flat integration bins (55 in
+Totals: **61** group scenarios · **62** flat integration bins (55 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -108,7 +108,7 @@ Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (59)
+## 3. Group scenarios — `tests/integration/group_*/` (61)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -156,7 +156,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a stored-but-expired credential rejected, reconnect, and have the tool retry **with the new credential** | `scenario_expired_credential_resume.rs` |
 | Not resolve another person's approval prompt — each user answers their own | `scenario_multi_actor_gate_isolation.rs` |
 
-### 3.4 Memory — `group_memory/` (9)
+### 3.4 Memory — `group_memory/` (11)
 
 | The user can… | Evidence |
 |---|---|
@@ -169,6 +169,8 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have the assistant remember a preference you mentioned in passing and still know it in a later chat that opens on a completely unrelated subject — full-text retrieval cannot cover this, because it matches on the current message's words | `scenario_always_on_memory_recall_libsql.rs` |
 | Ask about a stored fact in their OWN words rather than the words it was saved in, and still have it recalled — the paraphrase shares only some of the saved sentence's terms and adds one it never contained (#7185) | `scenario_paraphrased_prompt_recall_libsql.rs` |
 | Tell from the run itself that memory retrieval BROKE rather than simply having nothing to say — the two used to be the same silent empty section (#7185/#7275) | `scenario_memory_retrieval_failure_is_visible.rs` |
+| Have their standing memory document tidied for them every so often — redundant entries merged, superseded facts resolved — by a background pass that runs with nobody present, as them and only them (#7276) | `scenario_memory_curation_rewrites_standing_document.rs` |
+| Not pay for that tidying on every single turn: below the configured interval no pass is submitted at all (#7276) | `scenario_memory_curation_below_threshold_never_fires.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 
@@ -230,6 +232,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
+| Incremental compaction summaries preserve every disjoint compacted range while raw covered history remains stored | `model_recovery.rs::compaction_summary_chain_preserves_earlier_compacted_history` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
 | Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs` |
@@ -372,7 +375,7 @@ channel-delivery journeys (two-lane model):
 |---|---|
 | A provider failure yields a sanitized, *retryable* failure and the user can retry and resume | `reborn_failure_retry_resume_e2e.rs` (6) |
 | Sub-agents spawn end-to-end | `reborn_subagent_spawn_e2e.rs` (5) |
-| The shipped Docker image has a usable runtime home | `dockerfile_runtime_home.rs` (19) |
+| The shipped Docker image has a usable runtime home and an in-worker public-key SSH shell | `dockerfile_runtime_home.rs` (21) |
 | Live GitHub API contracts still hold (ignored canary, needs a real PAT) | `reborn_live_github_pat_contract.rs` |
 
 **Scope isolation parity** — one bin per boundary; each proves data from one scope is
@@ -390,8 +393,8 @@ unreachable from another: `reborn_agent_scope_isolation_parity.rs`,
 `reborn_trace_core_builtin_tools_parity.rs`, `reborn_trace_file_tools_parity.rs`,
 `reborn_trace_coding_read_tools_parity.rs`, `reborn_trace_error_path_parity.rs`,
 `reborn_trace_wasm_github_fixture_parity.rs`,
-`reborn_trace_first_party_tool_coverage.rs` (10; including the product-triggered
-manual-run and scheduled-run denial evidence),
+`reborn_trace_first_party_tool_coverage.rs` (10; including model-visible trigger
+status reads, product-triggered manual runs, and scheduled-run denial evidence),
 `reborn_recorded_trace_parity.rs`, `reborn_minimal_dispatch_parity.rs`,
 `reborn_response_order_parity.rs`, `reborn_tool_param_coercion_parity.rs`,
 `reborn_approval_traces_parity.rs`, `reborn_turn_state_lock_free_submit_parity.rs`.

@@ -1,10 +1,13 @@
 //! Real-Docker proof for persistent per-user containers and workspaces.
 
-use std::{process::Command, sync::Arc, time::Duration};
+use std::{collections::HashMap, process::Command, sync::Arc, time::Duration};
 
 use ironclaw_host_api::{
     ids::InvocationId,
-    process::{RuntimeProcessError, SandboxCommandTransport},
+    process::{
+        CredentialedSandboxCommandRequest, RuntimeProcessError, SandboxCommandCredential,
+        SandboxCommandTransport,
+    },
 };
 use ironclaw_sandbox::{RebornSandboxConfig, RebornScopedSandboxCommandTransport};
 

@@ -125,7 +125,7 @@ pub(crate) struct PermissiveHostPolicyFacts;
 impl HostPolicyFacts for PermissiveHostPolicyFacts {
     async fn credential_presence(
         &self,
-        _capability_id: &CapabilityId,
+        _descriptor: &CapabilityDescriptor,
         _scope: &ResourceScope,
     ) -> CredentialPresence {
         CredentialPresence::Satisfied

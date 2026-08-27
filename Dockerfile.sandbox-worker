@@ -7,6 +7,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        gh \
         jq \
         nodejs \
         npm \
@@ -20,8 +21,8 @@ RUN groupadd --gid 1000 sandbox \
 COPY --chmod=0755 docker/sandbox/ironclaw-exec \
     docker/sandbox/ironclaw-sandbox-idle \
     /usr/local/bin/
-
-ENV HOME=/home/sandbox
+ENV HOME=/home/sandbox \
+    GH_CONFIG_DIR=/workspace/.config/gh
 WORKDIR /workspace
 USER 1000:1000
 

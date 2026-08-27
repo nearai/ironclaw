@@ -241,7 +241,7 @@ impl OriginGateMatrix {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDescriptor {
     pub id: CapabilityId,
     pub provider: ExtensionId,
@@ -290,6 +290,13 @@ pub struct RuntimeCredentialRequirement {
     pub provider_scopes: Vec<String>,
     pub audience: NetworkTargetPattern,
     pub target: RuntimeCredentialTarget,
+    /// Environment variable that receives a fresh invocation-scoped
+    /// placeholder when this requirement is selected as part of an authorized
+    /// shell credential context. The real credential remains proxy-side.
+    /// `None` means the requirement is not available to generic shell
+    /// execution.
+    #[serde(default)]
+    pub placeholder_env: Option<String>,
     pub required: bool,
 }
 
@@ -513,6 +520,35 @@ mod credential_setup_wire_tests {
                 "{wire} must fold to Retired"
             );
         }
+    }
+
+    #[test]
+    fn shell_placeholder_field_defaults_and_round_trips() {
+        let legacy: super::RuntimeCredentialRequirement =
+            serde_json::from_value(serde_json::json!({
+                "handle": "atlas_runtime_token",
+                "audience": {
+                    "scheme": "https",
+                    "host_pattern": "api.atlas.test",
+                    "port": null
+                },
+                "target": {
+                    "type": "header",
+                    "name": "authorization",
+                    "prefix": "Bearer "
+                },
+                "required": true
+            }))
+            .expect("legacy credential requirement");
+        assert_eq!(legacy.placeholder_env, None);
+
+        let mut declared = legacy;
+        declared.placeholder_env = Some("ATLAS_TOKEN".to_string());
+        let round_trip: super::RuntimeCredentialRequirement = serde_json::from_value(
+            serde_json::to_value(&declared).expect("declared requirement serializes"),
+        )
+        .expect("declared requirement deserializes");
+        assert_eq!(round_trip, declared);
     }
 }
 

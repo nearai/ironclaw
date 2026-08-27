@@ -74,6 +74,7 @@ use crate::obligations::{
     NetworkObligationPolicyStore, RuntimeCredentialAccountResolver, RuntimeSecretInjectionStore,
     SharedSecretStore,
 };
+use crate::process_port::StagedCredentialProcessPort;
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, ConfiguredInvocationServicesResolver,
     DefaultHostRuntime, FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostProcessPort,
@@ -619,8 +620,13 @@ where
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
         }
         if let Some(process_port) = &self.user_sandbox_process_port {
-            invocation_services_resolver = invocation_services_resolver
-                .with_user_sandbox_process_port(Arc::clone(process_port));
+            let process_port: Arc<dyn RuntimeProcessPort> =
+                Arc::new(StagedCredentialProcessPort::new(
+                    Arc::clone(process_port),
+                    Arc::clone(&self.secret_injection_store),
+                ));
+            invocation_services_resolver =
+                invocation_services_resolver.with_user_sandbox_process_port(process_port);
         }
         if let Some(post_edit_check) = &self.post_edit_check {
             invocation_services_resolver =

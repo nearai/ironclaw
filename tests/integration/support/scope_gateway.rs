@@ -26,13 +26,34 @@ use ironclaw_turns::TurnScope;
 #[derive(Default)]
 pub struct ScopeRegistryGateway {
     map: Mutex<HashMap<TurnScope, Arc<dyn HostManagedModelGateway>>>,
+    /// Thread-id-prefix fallbacks, consulted only when the exact map misses.
+    ///
+    /// For runs whose thread id a test cannot know in advance because it is
+    /// derived from the run that triggers them — a background pass keyed on its
+    /// triggering run id, say. The exact map stays authoritative, so an
+    /// explicitly registered scope is never shadowed by a prefix.
+    prefixes: Mutex<Vec<(String, Arc<dyn HostManagedModelGateway>)>>,
 }
 
 impl ScopeRegistryGateway {
     pub fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
+            prefixes: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Register `gateway` for every scope whose thread id starts with
+    /// `thread_id_prefix`. Same `&self` reason as `register` below.
+    pub fn register_prefix(
+        &self,
+        thread_id_prefix: impl Into<String>,
+        gateway: Arc<dyn HostManagedModelGateway>,
+    ) {
+        self.prefixes
+            .lock()
+            .expect("ScopeRegistryGateway prefix lock poisoned")
+            .push((thread_id_prefix.into(), gateway));
     }
 
     /// Register `gateway` for `scope`. `&self` (not `&mut self`) so callers holding an
@@ -76,11 +97,21 @@ impl HostManagedModelGateway for ScopeRegistryGateway {
     /// time (off the model hot path); `None` makes the host fall back to `Arc::clone(self)`,
     /// so the next `stream_model` call emits the sentinel error above.
     fn resolve_for_scope(&self, scope: &TurnScope) -> Option<Arc<dyn HostManagedModelGateway>> {
-        self.map
+        if let Some(gateway) = self
+            .map
             .lock()
             .expect("ScopeRegistryGateway map lock poisoned")
             .get(scope)
             .cloned()
+        {
+            return Some(gateway);
+        }
+        self.prefixes
+            .lock()
+            .expect("ScopeRegistryGateway prefix lock poisoned")
+            .iter()
+            .find(|(prefix, _)| scope.thread_id.as_str().starts_with(prefix.as_str()))
+            .map(|(_, gateway)| Arc::clone(gateway))
     }
 }
 
@@ -117,6 +148,44 @@ mod tests {
         assert!(
             Arc::ptr_eq(&gw, resolved.as_ref().unwrap()),
             "resolved gateway must be the exact Arc that was registered"
+        );
+    }
+
+    /// A run whose thread id a test cannot know in advance still needs a
+    /// scripted model. The prefix fallback is how it gets one — and the exact
+    /// map must keep winning, so a prefix can never shadow a thread a test
+    /// registered by hand.
+    #[test]
+    fn a_prefix_matches_unregistered_scopes_without_shadowing_exact_ones() {
+        let registry = ScopeRegistryGateway::new();
+        let exact_scope = make_scope("pass-abc");
+        let exact = stub_gateway();
+        let by_prefix = stub_gateway();
+
+        registry.register(exact_scope.clone(), Arc::clone(&exact));
+        registry.register_prefix("pass-", Arc::clone(&by_prefix));
+
+        let resolved = registry
+            .resolve_for_scope(&make_scope("pass-xyz"))
+            .expect("a prefix match resolves");
+        assert!(
+            Arc::ptr_eq(&by_prefix, &resolved),
+            "an unregistered scope under the prefix routes to the prefix gateway"
+        );
+
+        let resolved = registry
+            .resolve_for_scope(&exact_scope)
+            .expect("the exact registration still resolves");
+        assert!(
+            Arc::ptr_eq(&exact, &resolved),
+            "an exactly registered scope must never be shadowed by a prefix"
+        );
+
+        assert!(
+            registry
+                .resolve_for_scope(&make_scope("other-xyz"))
+                .is_none(),
+            "a scope outside the prefix stays unregistered"
         );
     }
 

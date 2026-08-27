@@ -592,6 +592,7 @@ mod tests {
             authenticated_actor_user_id: None,
             estimate: ironclaw_host_api::resource::ResourceEstimate::default(),
             mounts: Some(memory_mount()),
+            runtime_credentials: Vec::new(),
             services: InvocationServices {
                 filesystem,
                 runtime_http_egress: None,

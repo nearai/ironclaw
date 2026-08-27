@@ -174,7 +174,7 @@ where
         &self,
         authorized: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let (invocation, lane, mounts, resource_reservation) =
+        let (invocation, authorized_descriptor, lane, mounts, resource_reservation) =
             match authorized.into_parts(chrono::Utc::now()) {
                 Ok(parts) => parts,
                 Err(authorized) => {
@@ -206,6 +206,7 @@ where
         };
         let parent_invocation_id = run_id.map(|run_id| InvocationId::from_uuid(run_id.as_uuid()));
         let mut request = CapabilityDispatchRequest {
+            authorized_descriptor,
             capability_id: invocation.capability,
             scope: invocation.scope,
             origin,

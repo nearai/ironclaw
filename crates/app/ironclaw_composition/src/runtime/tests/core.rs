@@ -1263,7 +1263,10 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
                 turn_id: Some("provider-turn-shell".to_string()),
                 id: "shell-call-1".to_string(),
                 name: shell_tool.name,
-                arguments: serde_json::json!({"command": "printf railway-sandbox-marker"}),
+                arguments: serde_json::json!({
+                    "command": "printf railway-sandbox-marker",
+                    "credential_contexts": []
+                }),
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,

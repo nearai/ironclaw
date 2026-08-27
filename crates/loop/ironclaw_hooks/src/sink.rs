@@ -23,8 +23,8 @@ use crate::kinds::gate::{BeforeCapabilityHookDecision, GateDecisionInner};
 use crate::kinds::mutator::{HookPatch, PatchOrdinalHint};
 use crate::kinds::observer::{NoteCategory, ObserverFact};
 use crate::points::{
-    BeforeCapabilityHookContext, BeforePromptHookContext, EventTriggeredHookContext,
-    ObserverHookContext,
+    AfterTurnHookContext, BeforeCapabilityHookContext, BeforePromptHookContext,
+    EventTriggeredHookContext, ObserverHookContext,
 };
 use crate::trust::HookTrustClass;
 
@@ -374,6 +374,31 @@ pub trait RestrictedBeforePromptHook: Send + Sync {
 #[async_trait]
 pub trait ObserverHook: Send + Sync {
     async fn observe(&self, ctx: &ObserverHookContext, sink: &mut dyn ObserverSink);
+}
+
+/// An `after_turn` hook supplied by a Builtin or Trusted source.
+///
+/// Privileged-only: `Installed` and `SelfAuthored` hooks are refused at
+/// install time, so there is no restricted counterpart to this trait.
+///
+/// Unlike the observer traits, this one takes no sink. An `AfterTurn` hook is
+/// a plain trait object that may hold its own collaborators and start
+/// follow-on work as a side effect — the sealed-return-type law exists to stop
+/// an untrusted author from forging a trusted decision, and stays scoped to
+/// the points untrusted tiers can reach.
+///
+/// Contract for implementors:
+///
+/// - It runs **post-terminal**. Nothing it does can affect the turn that
+///   fired it.
+/// - It must never log above `debug!`. This is a background path, and
+///   `info!`/`warn!` corrupt the REPL's terminal UI.
+/// - The dispatcher bounds each invocation with
+///   [`crate::dispatch::AFTER_TURN_HOOK_TIMEOUT`]; work that outlives that
+///   budget must be handed to its own task, not awaited here.
+#[async_trait]
+pub trait PrivilegedAfterTurnHook: Send + Sync {
+    async fn on_turn(&self, ctx: &AfterTurnHookContext);
 }
 
 /// An event-triggered observer hook. Same observer-only authority as
