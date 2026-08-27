@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0-rc.1] - 2026-08-26
+
+First release candidate for 1.4.0, covering the 81 commits since
+`ironclaw-v1.3.0`.
+
+### Added
+
+- Durable notification inbox: runs publish authoritative outcomes and
+  actionable gates to a per-user inbox, surfaced by the WebUI notification
+  center, so approvals and auth prompts survive a missed session.
+- Background subagents: a parent turn can spawn children that run and deliver
+  on their own, with per-child delivery, activation provenance, a derived cap
+  on autonomous wakes, and healing sweeps for orphaned children.
+- Persistent per-user sandbox containers on the local-Docker profile, reached
+  over Docker Exec so container-local installs and state survive between
+  commands. The Railway preview profile still runs an ephemeral worker per
+  command and keeps only its checkpointed workspace.
+- Managed per-user sandbox egress proxy, with manifest-declared direct-exec
+  credential bindings that stay behind it so secrets are never handed to
+  sandboxed code.
+- Run-now for automations, plus exact run capability facts.
+- Durable backend suggestions generated over the user's own no-approval,
+  read-only tools and gated on connected extensions.
+- Google Docs semantic editing tools; run timing evidence in downloadable
+  conversation artifacts.
+- Opt-in in-worker SSH in the runtime image (see Operators below).
+
+### Fixed
+
+- Structured finalization stalls are bounded, and OpenAI-compatible
+  reasoning-only responses are preserved.
+- Provider failures and auth diagnostics reach the model as readable context
+  instead of opaque errors.
+- libSQL write-lane starvation no longer cascades through the resource
+  governor as unrelated tool failures.
+- Telegram separates workspace-bot pairing from personal device linking, and
+  keeps paired channels ready while collapsing streaming reply drafts.
+- Slack delivers the unlinked-user connect nudge privately with a one-click
+  connect link.
+- Installation state written by 1.2.x is accepted and preserved, so a
+  deployment that skipped 1.3 upgrades directly.
+- Incremental compaction summary context is preserved.
+
+### Operators
+
+- The runtime image can start an in-worker SSH listener. It is **off unless**
+  `IRONCLAW_REBORN_SSH_PUBLIC_KEY` is set to an OpenSSH *public* key, which
+  enables public-key-only login as user `agent` on container port 2222; that
+  port must be published to be reachable. `agent` shares uid 1000 with the
+  `ironclaw` runtime user, so an SSH session holds the full runtime identity --
+  treat the private key like shell access to the service.
+- `IRONCLAW_REBORN_WORKSPACE_ROOT` is honored on both CLI boot paths. Neither
+  it nor `IRONCLAW_REBORN_HOME` may be set to the filesystem root.
+- New sandbox knobs: `IRONCLAW_REBORN_SANDBOX_PROXY_IMAGE` and
+  `IRONCLAW_SANDBOX_EXTRA_ALLOWED_DOMAINS`.
+
+### Upgrading
+
+No migration steps from 1.3.0.
+
 ## [1.3.0] - 2026-08-19
 
 Stable promotion of `1.3.0-rc.2`, including the upgrade and container fixes
