@@ -179,6 +179,16 @@ impl RunOutcomeProcessCommitObserver {
         let Some(source) = process_journal_source else {
             return Ok(true);
         };
+        Ok(Self::current_auth_gate_ref(source, snapshot)
+            .await?
+            .as_ref()
+            == Some(gate_ref))
+    }
+
+    async fn current_auth_gate_ref(
+        source: &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
+        snapshot: &JournaledProcessSnapshot,
+    ) -> Result<Option<ironclaw_host_api::turn::TurnGateRef>, String> {
         let current = source
             .get_process_snapshot(GetProcessSnapshotRequest {
                 scope: snapshot.scope.clone(),
@@ -186,11 +196,16 @@ impl RunOutcomeProcessCommitObserver {
             })
             .await
             .map_err(|error| format!("read current auth process state failed: {error}"))?;
-        Ok(current.status == ProcessLifecycleStatus::Suspended
-            && current.suspension.as_ref().is_some_and(|suspension| {
-                suspension.kind == ProcessSuspensionKind::Authorization
-                    && suspension.gate_ref.as_ref() == Some(gate_ref)
-            }))
+        if current.status != ProcessLifecycleStatus::Suspended {
+            return Ok(None);
+        }
+        let Some(suspension) = current.suspension else {
+            return Ok(None);
+        };
+        if suspension.kind != ProcessSuspensionKind::Authorization {
+            return Ok(None);
+        }
+        Ok(suspension.gate_ref)
     }
 
     async fn resolve_authentication_required(
@@ -241,6 +256,14 @@ impl RunOutcomeProcessCommitObserver {
             tenant_id: snapshot.scope.tenant_id.clone(),
             user_id: owner_user_id,
         };
+        // A later auth gate can already be current by the time this older
+        // Resumed commit reaches the observer. Preserve that gate's stable
+        // record: actionable retries intentionally do not reopen records that
+        // were resolved by an earlier lifecycle transition.
+        let current_auth_gate_ref = match self.process_journal_source.as_deref() {
+            Some(source) => Self::current_auth_gate_ref(source, snapshot).await?,
+            None => None,
+        };
         let mut cursor = None;
         loop {
             let page = self
@@ -256,9 +279,17 @@ impl RunOutcomeProcessCommitObserver {
                     format!("list auth notifications for resumed run failed: {error}")
                 })?;
             for notification in page.notifications {
+                let is_current_auth_gate = current_auth_gate_ref.as_ref().is_some_and(|gate_ref| {
+                    notification
+                        .source
+                        .lifecycle_ref
+                        .as_ref()
+                        .is_some_and(|lifecycle_ref| lifecycle_ref.as_str() == gate_ref.as_str())
+                });
                 if notification.kind == NotificationKind::AuthenticationRequired
                     && notification.source.turn_run_id == Some(run_id)
                     && notification.resolved_at.is_none()
+                    && !is_current_auth_gate
                 {
                     self.inbox
                         .resolve(NotificationMutationRequest {
@@ -1112,6 +1143,96 @@ mod tests {
             .expect("list reconciled auth notification");
         assert_eq!(page.notifications.len(), 1);
         assert!(page.notifications[0].resolved_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn resumed_old_gate_does_not_resolve_the_current_auth_gate() {
+        let inbox = inbox();
+        let run_id = TurnRunId::new();
+        let old_gate = TurnGateRef::new("gate:old-auth").expect("old gate");
+        let current_gate = TurnGateRef::new("gate:current-auth").expect("current gate");
+
+        let mut old_suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        old_suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(old_gate),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let publisher = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        publisher
+            .observe_process_commit(old_suspended.clone())
+            .await
+            .expect("publish old gate");
+
+        let mut current_suspended = old_suspended.clone();
+        current_suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(current_gate.clone()),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        publisher
+            .observe_process_commit(current_suspended.clone())
+            .await
+            .expect("publish current gate before old resume is delivered");
+
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        )
+        .with_process_journal_source(Arc::new(CurrentProcessSource::new(current_suspended.state)));
+        let mut resumed_old = old_suspended;
+        resumed_old.kind = ProcessJournalKind::Resumed;
+        resumed_old.state.status = ProcessLifecycleStatus::Queued;
+        resumed_old.state.suspension = None;
+        observer
+            .observe_process_commit(resumed_old)
+            .await
+            .expect("reconcile old resume");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list auth notifications");
+        let mut old_is_resolved = false;
+        let mut current_is_open = false;
+        for notification in page.notifications {
+            let lifecycle_ref = notification
+                .source
+                .lifecycle_ref
+                .as_ref()
+                .map(LifecycleRef::as_str);
+            if lifecycle_ref == Some("gate:old-auth") {
+                old_is_resolved = notification.resolved_at.is_some();
+            }
+            if lifecycle_ref == Some(current_gate.as_str()) {
+                current_is_open = notification.resolved_at.is_none();
+            }
+        }
+        assert!(old_is_resolved, "the resumed old gate must be closed");
+        assert!(
+            current_is_open,
+            "an older resume must not close the current gate notification"
+        );
     }
 
     /// A timed-out fire publishes an actionable block and the delivery watcher
