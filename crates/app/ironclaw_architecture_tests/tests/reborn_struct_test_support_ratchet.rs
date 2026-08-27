@@ -72,7 +72,7 @@ struct FrozenPathCount {
 /// test-support-only, then #7171 did the same for the skill mount view once
 /// `skill_mounts_for` began deriving it per gate.
 const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 270;
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 269;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -112,7 +112,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         count: 1,
     },
     // Unwired sandbox credential-firewall primitives (W5/W8). Retire these
-    // four entries when the egress proxy consumer (W6) lands on main and the
+    // three entries when the remaining consumers land and the
     // `#[allow(dead_code)]` attributes come off — the `removed` assertion
     // below only shrinks this baseline if the attributes are actually
     // deleted, not merely left in place.
@@ -120,7 +120,7 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "dead-code",
         item_kind: "method",
         path: "crates/ironclaw_sandbox/src/sandbox_process/ca.rs",
-        count: 4,
+        count: 3,
     },
     // Same W6 retirement trigger as the `ca.rs` entry above.
     FrozenPathCount {

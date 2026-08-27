@@ -1,5 +1,6 @@
 """Reborn WebUI v2 notification center E2E coverage."""
 
+import asyncio
 import json
 import re
 import uuid
@@ -239,6 +240,54 @@ async def _open_v2(page, base_url, path="/"):
     separator = "&" if "?" in path else "?"
     await page.goto(f"{base_url}{path}{separator}token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.locator(SEL_V2["notification_bell"])).to_be_visible(timeout=15000)
+
+
+async def test_reborn_v2_notification_chunk_shows_loading_shell(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    viewport = {"width": 1280, "height": 720}
+    context = await reborn_v2_browser.new_context(viewport=viewport)
+    page = await context.new_page()
+    release_chunk = asyncio.Event()
+
+    async def delay_notification_chunk(route):
+        await release_chunk.wait()
+        await route.continue_()
+
+    try:
+        await page.route("**/assets/notification-panel-*.js", delay_notification_chunk)
+        await _route_notification_inbox(page)
+        await _open_v2(page, reborn_v2_server)
+
+        bell = page.locator(SEL_V2["notification_bell"])
+        await bell.click()
+        loading = page.locator(SEL_V2["notification_panel_loading"])
+        await expect(loading).to_be_visible(timeout=5000)
+        await expect(loading).to_have_attribute("role", "status")
+        await expect(loading).to_have_attribute("aria-busy", "true")
+
+        box = await loading.bounding_box()
+        assert box is not None
+        assert box["x"] > viewport["width"] / 2
+        assert box["y"] >= 60
+        assert box["height"] > 150
+
+        await page.keyboard.press("Escape")
+        await expect(loading).to_have_count(0)
+        await expect(bell).to_have_attribute("aria-expanded", "false")
+        assert await bell.evaluate("element => element === document.activeElement")
+
+        await bell.click()
+        await expect(loading).to_be_visible(timeout=5000)
+        release_chunk.set()
+        await expect(page.locator(SEL_V2["notification_panel"])).to_be_visible(
+            timeout=5000
+        )
+        await expect(loading).to_have_count(0)
+    finally:
+        release_chunk.set()
+        await context.close()
 
 
 async def test_reborn_v2_notification_popover_opens_server_inbox_thread(

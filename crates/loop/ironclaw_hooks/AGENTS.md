@@ -123,8 +123,14 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
   policy, secrets policy, filesystem policy, or network policy.
 - Hooks cannot receive ambient secrets, filesystem handles, network clients,
   process handles, or raw runtime authority.
-- Hook side effects must route through existing `HostRuntime` / capability
-  dispatch paths.
+- Hook side effects must route through existing mediated paths: `HostRuntime`
+  / capability dispatch, or — for `Lifecycle` hooks only (amended 2026-08-20,
+  #7770 phase 1) — prepared-context turn submission
+  (`accept_prepared_context` → `TurnCoordinator::submit_turn`), which is
+  admission-checked at accept and capability-authorized at execution. A
+  lifecycle hook starting an unbound run is mediated work, not ambient
+  authority; every capability that run invokes still crosses the normal
+  authorization stages.
 - Inline hooks run before behavior and may block/change behavior.
 - Event hooks run after durable facts and must not retroactively deny
   completed behavior.
@@ -135,6 +141,12 @@ the `tier_specific_installers_are_documented_as_loader_contract` test in
   `ironclaw_prompt_envelope` crate, which this crate already depends on).
 - A hook that demonstrates protocol violation (timeout, panic, malformed
   decision) gets its slot poisoned for the rest of the current turn run.
+  Poison is therefore RUN-scoped, and every consumer must hold a dispatcher
+  *factory* rather than a dispatcher: the `after_turn` seam mints one per
+  terminal run (`RebornTurnRunExecutor::with_after_turn_hook_dispatcher_factory`),
+  exactly as the loop middleware mints one per host build. A process-lifetime
+  dispatcher would silently turn one bad run into a hook that stays dead until
+  the process restarts.
 - **The tier-specific installer *names* are load-bearing. Do not collapse the
   trust-class x hook-point installers into one generic,
   trust-class-parameterized installer.**

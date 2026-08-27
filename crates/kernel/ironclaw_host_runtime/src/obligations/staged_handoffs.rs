@@ -137,6 +137,39 @@ impl RuntimeSecretInjectionStore {
             ))
             .map(|entry| entry.material))
     }
+    /// Atomically consumes every requested handle or leaves all of them staged
+    /// when any handle is absent. Callers use this for one process invocation
+    /// that requires several credentials.
+    pub(crate) fn take_many(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handles: &[SecretHandle],
+    ) -> Result<Option<Vec<SecretMaterial>>, RuntimeSecretInjectionStoreError> {
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        let keys = handles
+            .iter()
+            .map(|handle| RuntimeSecretInjectionKey::new(scope, capability_id, handle))
+            .collect::<Vec<_>>();
+        if keys
+            .iter()
+            .enumerate()
+            .any(|(index, key)| keys[..index].contains(key))
+            || keys.iter().any(|key| !secrets.contains_key(key))
+        {
+            return Ok(None);
+        }
+        let mut materials = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(entry) = secrets.remove(&key) else {
+                return Err(RuntimeSecretInjectionStoreError::Unavailable);
+            };
+            materials.push(entry.material);
+        }
+        Ok(Some(materials))
+    }
 
     pub(crate) fn clone_material(
         &self,

@@ -31,7 +31,8 @@
         "language": "en",
         "tabs": [
           {
-            "tab": " ",
+            "tab": "Docs",
+            "icon": "book-open",
             "groups": [
               {
                 "group": " ",
@@ -160,14 +161,14 @@
                     ]
                   }
                 ]
-              },
-              {
-                "group": "Releases",
-                "icon": "clock-rotate-left",
-                "pages": [
-                  "changelog"
-                ]
               }
+            ]
+          },
+          {
+            "tab": "Changelog",
+            "icon": "clock-rotate-left",
+            "pages": [
+              "changelog"
             ]
           }
         ]

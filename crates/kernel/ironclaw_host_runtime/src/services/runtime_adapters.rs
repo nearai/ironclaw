@@ -842,6 +842,7 @@ where
             origin: request.origin,
             estimate: request.estimate,
             mounts: request.mounts,
+            runtime_credentials: request.descriptor.runtime_credentials.clone(),
             services,
             input: request.input,
         }))

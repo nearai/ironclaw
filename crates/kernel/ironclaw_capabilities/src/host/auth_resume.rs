@@ -125,7 +125,7 @@ where
         // touching the lease at all — preventing a one-shot lease from being
         // permanently stranded in `Claimed`/`Dispatching` when the capability
         // was unregistered between the original invocation and this resume.
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+        let Some(base_descriptor) = self.registry.get_capability(&request.capability_id) else {
             fail_invocation_if_configured(
                 Some(invocation_state),
                 &scope,
@@ -137,6 +137,32 @@ where
                 capability: request.capability_id,
             });
         };
+        let descriptor = match self
+            .enrich_invocation_descriptor(base_descriptor, &request.capability_id, &request.input)
+            .await
+        {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                fail_invocation_if_configured(
+                    Some(invocation_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.enforce_runtime_policy(&descriptor) {
+            fail_invocation_if_configured(
+                Some(invocation_state),
+                &scope,
+                invocation_id,
+                "RuntimePolicyDenied",
+            )
+            .await;
+            return Err(error);
+        }
 
         // When the invocation previously passed an approval gate, validate and
         // claim the fingerprinted approval lease so the existing approval
@@ -378,7 +404,7 @@ where
             estimate: request.estimate,
             input: request.input,
             authorized_context,
-            descriptor,
+            descriptor: &descriptor,
             lease_state: match approval_lease_to_consume {
                 Some((leases, lease)) => ResumedLeaseState::AlreadyClaimed(leases, Box::new(lease)),
                 None => ResumedLeaseState::NoPriorLease,

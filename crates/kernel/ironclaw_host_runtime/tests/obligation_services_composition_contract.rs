@@ -259,7 +259,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
         &self,
         request: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let (invocation, _lane, _mounts, resource_reservation) = request
+        let (invocation, _descriptor, _lane, _mounts, resource_reservation) = request
             .into_parts(chrono::Utc::now())
             .map_err(|authorized| {
                 let capability = authorized.invocation().capability.clone();

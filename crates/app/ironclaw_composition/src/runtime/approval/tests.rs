@@ -111,6 +111,7 @@ async fn extension_spawn_capability_uses_extension_surface_terms_before_default_
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
                 },
+                placeholder_env: None,
                 required: true,
             }],
             network_targets: Vec::new(),

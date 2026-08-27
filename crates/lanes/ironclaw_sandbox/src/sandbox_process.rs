@@ -7,7 +7,7 @@
 //! different users to run in parallel.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -20,10 +20,12 @@ use bollard::{
     models::{HostConfig, HostConfigLogConfig},
 };
 use fs2::FileExt;
-use ironclaw_host_api::resource::ResourceScope;
-
-use ironclaw_host_api::process::{
-    CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
+use ironclaw_host_api::{
+    process::{
+        CommandExecutionOutput, CommandExecutionRequest, CredentialedSandboxCommandRequest,
+        RuntimeProcessError, SandboxCommandCredential, SandboxCommandTransport,
+    },
+    resource::ResourceScope,
 };
 
 mod broker;
@@ -41,6 +43,7 @@ pub(crate) mod shell_limits;
 mod user_container;
 mod worker_spec;
 
+use crate::validation::{validate_env_has_no_raw_sensitive_values, validate_env_name};
 use managed_egress::{ManagedEgressBundle, ManagedEgressConfig, ManagedEgressRuntime};
 
 // `user_key` is the shared per-user workspace and local Docker container
@@ -281,13 +284,19 @@ impl RebornSandboxConfig {
     fn command_env_for_bundle(
         &self,
         extra_env: HashMap<String, String>,
+        credentials: &[SandboxCommandCredential],
         managed: Option<&ManagedEgressRuntime>,
         bundle: Option<&ManagedEgressBundle>,
     ) -> Result<Vec<String>, RuntimeProcessError> {
         let (Some(managed), Some(bundle)) = (managed, bundle) else {
             return self.command_env(extra_env);
         };
-        let mut env = validate_env(&extra_env)?;
+        validate_credential_env(&extra_env, credentials)?;
+        let mut env = extra_env
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>();
+        env.sort();
         broker::push_broker_env(None, self.secret_broker.as_ref(), &mut env)?;
         let mode_prefix = format!("{}=", broker::REBORN_NETWORK_MODE_ENV);
         env.retain(|entry| !entry.starts_with(&mode_prefix));
@@ -374,6 +383,124 @@ pub struct RebornScopedSandboxCommandTransport {
     managed_egress: Option<Arc<ManagedEgressRuntime>>,
     sweeper: Arc<user_container::UserContainerSweeper>,
     _owner_lock: Arc<LocalDockerOwnerLock>,
+}
+struct SandboxExecutionRequest {
+    scope: ResourceScope,
+    mounts: Option<ironclaw_host_api::mount::MountView>,
+    executable: String,
+    args: Vec<String>,
+    workdir: Option<String>,
+    timeout_secs: Option<u64>,
+    extra_env: HashMap<String, String>,
+}
+
+struct CredentialCleanupGuard {
+    managed: Option<Arc<ManagedEgressRuntime>>,
+    docker: Docker,
+    bundle: Option<ManagedEgressBundle>,
+    lifecycle: Option<tokio::sync::OwnedMutexGuard<()>>,
+    armed: bool,
+}
+
+impl CredentialCleanupGuard {
+    fn new(docker: Docker, lifecycle: tokio::sync::OwnedMutexGuard<()>) -> Self {
+        Self {
+            managed: None,
+            docker,
+            bundle: None,
+            lifecycle: Some(lifecycle),
+            armed: false,
+        }
+    }
+
+    fn arm(&mut self, managed: Arc<ManagedEgressRuntime>, bundle: ManagedEgressBundle) {
+        self.managed = Some(managed);
+        self.bundle = Some(bundle);
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    async fn cleanup(&mut self) -> Result<(), RuntimeProcessError> {
+        if !self.armed {
+            return Ok(());
+        }
+        let managed = self.managed.as_ref().ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox credential cleanup guard is incomplete".to_string(),
+            )
+        })?;
+        let bundle = self.bundle.as_ref().ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox credential cleanup guard is incomplete".to_string(),
+            )
+        })?;
+        let result = managed.clear_credentials(&self.docker, bundle).await;
+        self.armed = false;
+        result
+    }
+}
+
+impl Drop for CredentialCleanupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let (Some(managed), Some(bundle), Some(lifecycle)) = (
+            self.managed.take(),
+            self.bundle.take(),
+            self.lifecycle.take(),
+        ) else {
+            tracing::error!("sandbox credential cleanup guard dropped without cleanup state");
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::error!("sandbox credential cleanup could not start after runtime shutdown");
+            return;
+        };
+        let docker = self.docker.clone();
+        // Tokio cancellation and Rust panic unwinding both run this Drop path.
+        // The owned lifecycle gate moves into the detached task, so another
+        // invocation cannot race credential replacement with cleanup. Process
+        // aborts do not run destructors and therefore remain outside this
+        // in-process guarantee.
+        runtime.spawn(async move {
+            let _lifecycle = lifecycle;
+            if let Err(error) = managed.clear_credentials(&docker, &bundle).await {
+                tracing::error!(?error, "sandbox detached credential cleanup failed");
+            }
+        });
+    }
+}
+
+impl From<CommandExecutionRequest> for SandboxExecutionRequest {
+    fn from(request: CommandExecutionRequest) -> Self {
+        Self {
+            scope: request.scope,
+            mounts: request.mounts,
+            executable: "sh".to_string(),
+            args: vec!["-c".to_string(), request.command],
+            workdir: request.workdir,
+            timeout_secs: request.timeout_secs,
+            extra_env: request.extra_env,
+        }
+    }
+}
+
+impl From<CredentialedSandboxCommandRequest> for SandboxExecutionRequest {
+    fn from(request: CredentialedSandboxCommandRequest) -> Self {
+        CommandExecutionRequest {
+            scope: request.scope,
+            mounts: request.mounts,
+            command: request.command,
+            workdir: request.workdir,
+            timeout_secs: request.timeout_secs,
+            extra_env: request.extra_env,
+        }
+        .into()
+    }
 }
 
 #[cfg(test)]
@@ -533,17 +660,21 @@ impl RebornScopedSandboxCommandTransport {
 
     fn user_container_launch_config(
         &self,
-        request: &CommandExecutionRequest,
+        scope: &ResourceScope,
         resolved_image: &str,
         bundle: Option<&ManagedEgressBundle>,
         container_user: String,
-        binds: Vec<String>,
+        mut binds: Vec<String>,
     ) -> Result<user_container::UserContainerLaunch, RuntimeProcessError> {
         let env = self.config.command_env_for_bundle(
-            request.extra_env.clone(),
+            HashMap::new(),
+            &[],
             self.managed_egress.as_deref(),
             bundle,
         )?;
+        if let (Some(managed), Some(bundle)) = (self.managed_egress.as_deref(), bundle) {
+            binds.push(managed.user_ca_bind(bundle)?);
+        }
         let security = worker_spec::DockerWorkerSecuritySpec::new(
             self.config.managed_container_network_mode(bundle),
         );
@@ -557,8 +688,8 @@ impl RebornScopedSandboxCommandTransport {
         );
         let labels = registry::build_user_container_launch_labels(
             user_container::LABEL_PREFIX,
-            &request.scope.tenant_id,
-            &request.scope.user_id,
+            &scope.tenant_id,
+            &scope.user_id,
             resolved_image,
             &posture,
         );
@@ -599,9 +730,10 @@ impl RebornScopedSandboxCommandTransport {
 
     async fn run_command_owned(
         self,
-        request: CommandExecutionRequest,
+        request: SandboxExecutionRequest,
+        credentials: Vec<SandboxCommandCredential>,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        reject_nul("sandbox command", &request.command)?;
+        reject_nul("sandbox executable", &request.executable)?;
         let user_key = RebornSandboxUserKey::from_scope(&request.scope);
         let workdir = Self::resolve_container_workdir(request.workdir.as_deref())?;
         let timeout = request
@@ -611,8 +743,11 @@ impl RebornScopedSandboxCommandTransport {
         if timeout.is_zero() {
             return Err(RuntimeProcessError::Timeout(timeout));
         }
+        for argument in &request.args {
+            reject_nul("sandbox command argument", argument)?;
+        }
         user_container::exec_helper_timeout_secs(timeout)?;
-        validate_env(&request.extra_env)?;
+        validate_credential_env(&request.extra_env, &credentials)?;
         let workspace = self.prepare_workspace(&request.scope).await?;
         let container_user = self
             .config
@@ -636,8 +771,10 @@ impl RebornScopedSandboxCommandTransport {
             )
         })?;
         let resolved_image = self.resolve_worker_image().await?;
-        let _user_lifecycle =
-            acquire_user_lifecycle_gate(&gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
+        let user_lifecycle =
+            acquire_user_lifecycle_gate(gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
+        let mut credential_cleanup =
+            CredentialCleanupGuard::new(self.docker.clone(), user_lifecycle);
         let bundle = match self.managed_egress.as_ref() {
             Some(managed) => Some(
                 managed
@@ -651,14 +788,24 @@ impl RebornScopedSandboxCommandTransport {
             ),
             None => None,
         };
+        if !credentials.is_empty()
+            && let (Some(managed), Some(bundle)) = (self.managed_egress.as_ref(), bundle.as_ref())
+        {
+            credential_cleanup.arm(Arc::clone(managed), bundle.clone());
+        }
         let setup = async {
             if let (Some(managed), Some(bundle)) = (self.managed_egress.as_ref(), bundle.as_ref()) {
                 managed
                     .set_invocation(bundle, &request.scope.invocation_id)
                     .await?;
+                if !credentials.is_empty() {
+                    managed
+                        .configure_credentials(&self.docker, bundle, &credentials)
+                        .await?;
+                }
             }
             let launch = self.user_container_launch_config(
-                &request,
+                &request.scope,
                 &resolved_image,
                 bundle.as_ref(),
                 container_user,
@@ -667,7 +814,8 @@ impl RebornScopedSandboxCommandTransport {
             let container_name =
                 user_container::ensure_user_container(&self, &user_key, launch).await?;
             let exec_env = self.config.command_env_for_bundle(
-                HashMap::new(),
+                request.extra_env.clone(),
+                &credentials,
                 self.managed_egress.as_deref(),
                 bundle.as_ref(),
             )?;
@@ -677,18 +825,22 @@ impl RebornScopedSandboxCommandTransport {
         let (container_name, exec_env) = match setup {
             Ok(setup) => setup,
             Err(setup_error) => {
-                if let Some(managed) = self.managed_egress.as_ref()
-                    && let Err(cleanup_error) = managed
+                if let Some(managed) = self.managed_egress.as_ref() {
+                    match managed
                         .rollback_provisioned_bundle(
                             &self.docker,
                             &user_key,
                             &user_key.container_name(),
                         )
                         .await
-                {
-                    return Err(RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox user container setup failed: {setup_error}; managed-egress rollback failed: {cleanup_error}"
-                    )));
+                    {
+                        Ok(()) => credential_cleanup.disarm(),
+                        Err(cleanup_error) => {
+                            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                                "sandbox user container setup failed: {setup_error}; managed-egress rollback failed: {cleanup_error}"
+                            )));
+                        }
+                    }
                 }
                 return Err(setup_error);
             }
@@ -697,22 +849,33 @@ impl RebornScopedSandboxCommandTransport {
             &self,
             &user_key,
             &container_name,
-            request.command,
-            workdir,
-            exec_env,
-            timeout,
+            user_container::UserContainerCommand {
+                command: request.executable,
+                args: request.args,
+                workdir,
+                env: exec_env,
+                timeout,
+            },
         )
         .await;
+        let cleanup = credential_cleanup.cleanup().await;
         drop(activity);
-        result
+        match (result, cleanup) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup_error)) => Err(RuntimeProcessError::ExecutionFailed(format!(
+                "{error}; sandbox credential cleanup failed: {cleanup_error}"
+            ))),
+        }
     }
 }
 
 async fn acquire_user_lifecycle_gate(
-    gate: &tokio::sync::Mutex<()>,
+    gate: Arc<tokio::sync::Mutex<()>>,
     timeout: Duration,
-) -> Result<tokio::sync::MutexGuard<'_, ()>, RuntimeProcessError> {
-    tokio::time::timeout(timeout, gate.lock())
+) -> Result<tokio::sync::OwnedMutexGuard<()>, RuntimeProcessError> {
+    tokio::time::timeout(timeout, gate.lock_owned())
         .await
         .map_err(|error| {
             tracing::debug!(?error, "sandbox user lifecycle gate acquisition timed out");
@@ -728,12 +891,40 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let execution = tokio::spawn(self.clone().run_command_owned(request));
+        let execution = tokio::spawn(
+            self.clone()
+                .run_command_owned(SandboxExecutionRequest::from(request), Vec::new()),
+        );
         execution.await.map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox command execution task failed: {error}"
             ))
         })?
+    }
+
+    async fn run_credentialed_command(
+        &self,
+        request: CredentialedSandboxCommandRequest,
+        credentials: Vec<SandboxCommandCredential>,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        if self.managed_egress.is_none() {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox transport requires managed egress for credential bindings".to_string(),
+            ));
+        }
+        let execution = tokio::spawn(
+            self.clone()
+                .run_command_owned(SandboxExecutionRequest::from(request), credentials),
+        );
+        execution.await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox credentialed command execution task failed: {error}"
+            ))
+        })?
+    }
+
+    fn supports_credentialed_command(&self) -> bool {
+        self.managed_egress.is_some()
     }
 
     async fn shutdown(&self) -> Result<(), RuntimeProcessError> {
@@ -850,12 +1041,65 @@ fn reject_nul(label: &str, value: &str) -> Result<(), RuntimeProcessError> {
 }
 
 fn validate_env(env: &HashMap<String, String>) -> Result<Vec<String>, RuntimeProcessError> {
-    if !env.is_empty() {
-        return Err(RuntimeProcessError::ExecutionFailed(
-            "user sandbox commands do not accept caller-provided environment variables".to_string(),
-        ));
+    validate_environment_entries(env, &[])?;
+    let mut rendered = env
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>();
+    rendered.sort();
+    Ok(rendered)
+}
+
+fn validate_credential_env(
+    env: &HashMap<String, String>,
+    credentials: &[SandboxCommandCredential],
+) -> Result<(), RuntimeProcessError> {
+    let placeholders = credentials
+        .iter()
+        .map(|credential| credential.placeholder.as_str())
+        .collect::<Vec<_>>();
+    validate_environment_entries(env, &placeholders)?;
+
+    let mut names = HashSet::with_capacity(credentials.len());
+    for credential in credentials {
+        if credential.placeholder_env.is_empty()
+            || credential.placeholder_env.contains(['=', '\0'])
+            || credential.placeholder.contains('\0')
+            || !names.insert(credential.placeholder_env.as_str())
+            || !credential
+                .placeholder
+                .starts_with(ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX)
+            || env.get(&credential.placeholder_env) != Some(&credential.placeholder)
+        {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "sandbox credential placeholders must match credential bindings".to_string(),
+            ));
+        }
     }
-    Ok(Vec::new())
+    Ok(())
+}
+
+fn validate_environment_entries(
+    env: &HashMap<String, String>,
+    allowed_placeholders: &[&str],
+) -> Result<(), RuntimeProcessError> {
+    for (name, value) in env {
+        validate_env_name(name).map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox command environment is invalid: {error}"
+            ))
+        })?;
+        if value.contains('\0') {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox command environment is invalid for {name}"
+            )));
+        }
+    }
+    validate_env_has_no_raw_sensitive_values(env, allowed_placeholders).map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox command environment is invalid: {error}"
+        ))
+    })
 }
 
 fn validate_relative_workdir(path: &Path) -> Result<(), RuntimeProcessError> {
@@ -877,9 +1121,14 @@ mod tests {
     use super::*;
     use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
     use ironclaw_host_api::{
+        action::{NetworkPolicy, NetworkTargetPattern},
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
+    fn inert_docker_client() -> Docker {
+        Docker::connect_with_http("http://127.0.0.1:9", 1, bollard::API_DEFAULT_VERSION)
+            .expect("construct inert Docker test client")
+    }
 
     #[test]
     fn transport_constructor_uses_canonical_bounded_docker_connector() {
@@ -908,19 +1157,51 @@ mod tests {
 
     #[test]
     fn test_constructor_works_without_tokio_runtime() {
-        let docker = Docker::connect_with_local_defaults().expect("construct Docker client");
+        let docker = inert_docker_client();
         let _transport = test_support::transport(
             docker,
             RebornSandboxConfig::new("/tmp/reborn-sandbox-pure-constructor"),
         );
     }
+    #[test]
+    fn command_environment_accepts_valid_non_sensitive_values() {
+        let env = HashMap::from([
+            ("RUST_LOG".to_string(), "debug".to_string()),
+            ("FEATURE_FLAG".to_string(), "enabled".to_string()),
+        ]);
+
+        assert_eq!(
+            validate_env(&env).unwrap(),
+            ["FEATURE_FLAG=enabled", "RUST_LOG=debug"]
+        );
+    }
+
+    #[test]
+    fn credential_environment_allows_benign_values_beside_bound_placeholders() {
+        let placeholder = format!("{}test", ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX);
+        let env = HashMap::from([
+            ("GH_TOKEN".to_string(), placeholder.clone()),
+            ("RUST_LOG".to_string(), "debug".to_string()),
+        ]);
+        let credentials = [SandboxCommandCredential::new(
+            ironclaw_host_api::ids::SecretHandle::new("github_runtime_token").unwrap(),
+            "GH_TOKEN".to_string(),
+            placeholder,
+            "api.github.com".to_string(),
+            "Authorization".to_string(),
+            Some("token ".to_string()),
+            "secret".to_string(),
+        )];
+
+        validate_credential_env(&env, &credentials).unwrap();
+    }
 
     #[tokio::test]
     async fn lifecycle_gate_wait_is_bounded() {
-        let gate = tokio::sync::Mutex::new(());
-        let _held = gate.lock().await;
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let _held = gate.clone().lock_owned().await;
 
-        let error = acquire_user_lifecycle_gate(&gate, Duration::from_millis(1))
+        let error = acquire_user_lifecycle_gate(gate, Duration::from_millis(1))
             .await
             .expect_err("contended lifecycle gate must time out");
 
@@ -930,6 +1211,49 @@ mod tests {
                 "sandbox is busy: timed out waiting for another command for this user".to_string()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_credential_task_detaches_cleanup_while_holding_lifecycle_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        let credential_bundle = directory.path().join("credentials.json");
+        tokio::fs::write(&credential_bundle, br#"{"atlas":"secret"}"#)
+            .await
+            .unwrap();
+        let managed = ManagedEgressRuntime::test_runtime(
+            NetworkPolicy {
+                allowed_targets: vec![NetworkTargetPattern {
+                    scheme: None,
+                    host_pattern: "github.com".to_string(),
+                    port: None,
+                }],
+                deny_private_ip_ranges: true,
+                max_egress_bytes: None,
+            },
+            directory.path().to_path_buf(),
+        )
+        .unwrap();
+        let bundle = ManagedEgressBundle::test_bundle(directory.path());
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let task_gate = Arc::clone(&gate);
+        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+        let execution = tokio::spawn(async move {
+            let lifecycle = task_gate.lock_owned().await;
+            let mut cleanup = CredentialCleanupGuard::new(inert_docker_client(), lifecycle);
+            cleanup.arm(managed, bundle);
+            armed_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        armed_rx.await.unwrap();
+
+        execution.abort();
+        assert!(execution.await.unwrap_err().is_cancelled());
+        let lifecycle = tokio::time::timeout(Duration::from_secs(2), gate.lock_owned())
+            .await
+            .expect("detached credential cleanup must release the lifecycle gate");
+        drop(lifecycle);
+
+        assert!(!credential_bundle.exists());
     }
 
     #[test]
@@ -1017,14 +1341,37 @@ mod tests {
     }
 
     #[test]
-    fn validate_env_rejects_all_caller_environment_injection() {
-        let error = validate_env(&HashMap::from([(
-            "PLACEHOLDER".to_string(),
-            "value".to_string(),
-        )]))
-        .unwrap_err();
-        assert!(error.to_string().contains("caller-provided environment"));
-        assert_eq!(validate_env(&HashMap::new()).unwrap(), Vec::<String>::new());
+    fn validate_credential_env_accepts_valid_caller_values_and_bound_placeholders() {
+        let caller_env = HashMap::from([("FEATURE_FLAG".to_string(), "enabled".to_string())]);
+        assert_eq!(validate_credential_env(&caller_env, &[]), Ok(()));
+        assert_eq!(validate_credential_env(&HashMap::new(), &[]), Ok(()));
+
+        let placeholder = format!("{}test", ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX);
+        let credential = SandboxCommandCredential::new(
+            ironclaw_host_api::ids::SecretHandle::new("github_runtime_token").unwrap(),
+            "GH_TOKEN".to_string(),
+            placeholder.clone(),
+            "api.github.com".to_string(),
+            "Authorization".to_string(),
+            Some("Bearer ".to_string()),
+            "real-secret".to_string(),
+        );
+        let bound_env = HashMap::from([("GH_TOKEN".to_string(), placeholder.clone())]);
+        assert_eq!(
+            validate_credential_env(&bound_env, std::slice::from_ref(&credential)),
+            Ok(())
+        );
+
+        let wrong_placeholder =
+            HashMap::from([("GH_TOKEN".to_string(), "caller-value".to_string())]);
+        assert!(
+            validate_credential_env(&wrong_placeholder, std::slice::from_ref(&credential)).is_err()
+        );
+        let extra_env = HashMap::from([
+            ("GH_TOKEN".to_string(), placeholder),
+            ("UNBOUND".to_string(), "value".to_string()),
+        ]);
+        assert_eq!(validate_credential_env(&extra_env, &[credential]), Ok(()));
     }
 
     #[test]
@@ -1098,15 +1445,47 @@ mod tests {
             .with_secret_broker_url("https://broker.internal/secrets")
             .unwrap();
         for key in broker::RESERVED_BROKER_ENV_KEYS {
-            let error = config
-                .command_env(HashMap::from([(
-                    (*key).to_string(),
-                    "caller-controlled".to_string(),
-                )]))
-                .unwrap_err();
-
             assert!(
-                format!("{error}").contains("caller-provided environment"),
+                config
+                    .command_env(HashMap::from([(
+                        (*key).to_string(),
+                        "caller-controlled".to_string(),
+                    )]))
+                    .is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_bundle_rejects_reserved_broker_environment_overrides() {
+        let directory = tempfile::tempdir().unwrap();
+        let managed = ManagedEgressRuntime::test_runtime(
+            NetworkPolicy {
+                allowed_targets: vec![NetworkTargetPattern {
+                    scheme: None,
+                    host_pattern: "example.com".to_string(),
+                    port: None,
+                }],
+                deny_private_ip_ranges: true,
+                max_egress_bytes: None,
+            },
+            directory.path().to_path_buf(),
+        )
+        .unwrap();
+        let bundle = ManagedEgressBundle::test_bundle(directory.path());
+        let config = RebornSandboxConfig::new("/tmp/reborn-sandbox");
+
+        for key in broker::RESERVED_BROKER_ENV_KEYS {
+            assert!(
+                config
+                    .command_env_for_bundle(
+                        HashMap::from([((*key).to_string(), "caller-controlled".to_string(),)]),
+                        &[],
+                        Some(&managed),
+                        Some(&bundle),
+                    )
+                    .is_err(),
                 "{key}"
             );
         }
@@ -1138,8 +1517,7 @@ mod tests {
             .unwrap()
             .with_secret_broker_unix_socket(&secret_socket)
             .unwrap();
-        let transport =
-            test_support::transport(Docker::connect_with_local_defaults().unwrap(), config);
+        let transport = test_support::transport(inert_docker_client(), config);
         // Config-shape tests inject an immutable identity directly; only the
         // real run path resolves the configured reference through Docker.
         let container_user = transport
@@ -1161,14 +1539,7 @@ mod tests {
         binds.sort();
         let launch = transport
             .user_container_launch_config(
-                &CommandExecutionRequest {
-                    scope: sandbox_scope(),
-                    mounts: None,
-                    command: "true".to_string(),
-                    workdir: None,
-                    timeout_secs: Some(1),
-                    extra_env: HashMap::new(),
-                },
+                &sandbox_scope(),
                 "sha256:test-worker",
                 None,
                 container_user,
@@ -1263,7 +1634,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_rejects_unconfigured_scoped_mount_before_container_create() {
         let temp = tempfile::tempdir().unwrap();
-        let docker = Docker::connect_with_local_defaults().unwrap();
+        let docker = inert_docker_client();
         let transport = test_support::transport(
             docker,
             RebornSandboxConfig::new(temp.path().join("workspaces")),

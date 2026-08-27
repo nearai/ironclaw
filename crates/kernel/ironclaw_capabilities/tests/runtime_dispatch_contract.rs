@@ -63,6 +63,7 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let result = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo.say").unwrap(),
@@ -148,6 +149,7 @@ async fn dispatcher_fails_unknown_capability_before_any_binding_work() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("missing.say").unwrap(),
@@ -180,6 +182,7 @@ async fn dispatcher_releases_prepared_reservation_when_resolution_fails() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("missing.say").unwrap(),
@@ -218,6 +221,7 @@ async fn dispatcher_hands_prepared_reservation_to_the_binding() {
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let result = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo.say").unwrap(),
@@ -260,6 +264,7 @@ async fn dispatcher_rejects_stale_authorized_lane_before_binding_dispatch() {
     let err = dispatcher
         .dispatch_json(authorized_with_lane(
             CapabilityDispatchRequest {
+                authorized_descriptor: None,
                 run_id: None,
                 origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
                 capability_id: CapabilityId::new("echo.say").unwrap(),
@@ -303,6 +308,7 @@ async fn dispatcher_fails_closed_when_prepared_reservation_was_revoked_before_bi
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref());
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo.say").unwrap(),
@@ -563,6 +569,7 @@ fn authorized_with_lane(request: CapabilityDispatchRequest, lane: RuntimeLane) -
     };
     Authorized::seal_for_test_with_mounts(
         invocation,
+        None,
         lane,
         request.mounts,
         request.resource_reservation,
@@ -572,6 +579,7 @@ fn authorized_with_lane(request: CapabilityDispatchRequest, lane: RuntimeLane) -
 
 fn sample_request(capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
+        authorized_descriptor: None,
         run_id: None,
         origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
         capability_id: CapabilityId::new(capability_id).unwrap(),

@@ -297,6 +297,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
 
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
@@ -383,6 +384,7 @@ async fn dispatcher_emits_failed_event_for_unknown_capability_without_reserving(
 
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
@@ -570,6 +572,7 @@ fn authorized_in_process(
     };
     Authorized::seal_for_test_with_mounts(
         invocation,
+        None,
         lane,
         request.mounts,
         request.resource_reservation,
@@ -579,6 +582,7 @@ fn authorized_in_process(
 
 fn sample_request(capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
+        authorized_descriptor: None,
         run_id: None,
         origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
         capability_id: CapabilityId::new(capability_id).unwrap(),
@@ -603,6 +607,7 @@ fn loop_run_request_in_process(
 ) -> Authorized {
     authorized_in_process(
         CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: Some(run_id),
             origin: InvocationOrigin::LoopRun(run_id),
             capability_id: CapabilityId::new(capability_id).unwrap(),
@@ -623,6 +628,7 @@ fn loop_run_request_in_process(
 
 fn loop_run_request(run_id: RunId, capability_id: &str, input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
+        authorized_descriptor: None,
         run_id: Some(run_id),
         origin: InvocationOrigin::LoopRun(run_id),
         capability_id: CapabilityId::new(capability_id).unwrap(),

@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -224,6 +225,12 @@ pub struct RebornHostBindings {
     /// build-time wiring can construct and register it. Selection stays in the
     /// binding policy; this only carries the chosen provider's connection.
     pub(crate) memory_provider_connection: Mem0ConnectionConfig,
+    /// Deployment override of the interval, in completed user turns, between
+    /// the bound memory provider's declared after-turn upkeep passes (#7276 /
+    /// #7664). `None` — the default — means that provider's own declared
+    /// cadence applies; a provider that declares no op schedules nothing
+    /// either way.
+    pub(crate) memory_curation_interval_turns: Option<NonZeroU32>,
 }
 
 /// One channel extension's binary-assembled vendor binding
@@ -413,6 +420,23 @@ impl RebornHostBindings {
     pub fn with_memory_provider_connection(mut self, connection: Mem0ConnectionConfig) -> Self {
         self.memory_provider_connection = connection;
         self
+    }
+
+    /// Override the bound memory provider's DECLARED upkeep cadence with this
+    /// interval, in completed turns (#7276 / #7664). Resolved by the CLI from
+    /// `[memory].curation_interval_turns`; leaving it unset lets the
+    /// provider's declaration decide. Never a sentinel interval — `NonZeroU32`
+    /// makes that unrepresentable rather than merely discouraged, and the
+    /// runtime build refuses an override below the contract's cost floor.
+    pub fn with_memory_curation_interval_turns(mut self, interval_turns: NonZeroU32) -> Self {
+        self.memory_curation_interval_turns = Some(interval_turns);
+        self
+    }
+
+    /// The configured interval override, if any. Read once at runtime build,
+    /// before this input is consumed by the substrate assembly.
+    pub(crate) fn memory_curation_interval_turns(&self) -> Option<NonZeroU32> {
+        self.memory_curation_interval_turns
     }
 
     /// Override the local runtime tenant/agent identity used by command-style
@@ -955,6 +979,7 @@ impl RebornHostBindings {
             credential_account_visibility_policy: None,
             memory_binding_policy: None,
             memory_provider_connection: Mem0ConnectionConfig::default(),
+            memory_curation_interval_turns: None,
         }
     }
 

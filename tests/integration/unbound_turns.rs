@@ -667,6 +667,8 @@ async fn unbound_service_threads_caller_as_thread_owner() -> HarnessResult<()> {
             }],
             tools: Vec::new(),
             output: OutputContract::AssistantMessage,
+            // Interactive product callers keep the profile's own ceilings.
+            limits: Default::default(),
             requested_model: None,
             idempotency_key: "unbound-owner-accept".to_string(),
             require_no_approval: false,

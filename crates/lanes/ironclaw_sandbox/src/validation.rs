@@ -30,13 +30,7 @@ pub(crate) fn validate_header_name(name: &str) -> Result<(), ProcessSandboxPlanE
 }
 
 pub(crate) fn validate_env_name(name: &str) -> Result<(), ProcessSandboxPlanError> {
-    if name.is_empty()
-        || name.starts_with(|ch: char| ch.is_ascii_digit())
-        || !name
-            .chars()
-            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
-        || is_dangerous_entrypoint_env_name(name)
-    {
+    if !ironclaw_host_api::process::is_valid_sandbox_credential_env_name(name) {
         return Err(ProcessSandboxPlanError::InvalidEnvName {
             env: name.to_string(),
         });
@@ -89,19 +83,4 @@ fn is_sensitive_env_name(name: &str) -> bool {
             "TOKEN" | "SECRET" | "PASSWORD" | "AUTH" | "CREDENTIAL" | "CREDENTIALS" | "BEARER"
         )
     })
-}
-
-fn is_dangerous_entrypoint_env_name(name: &str) -> bool {
-    matches!(
-        name,
-        "BASH_ENV"
-            | "CDPATH"
-            | "ENV"
-            | "IFS"
-            | "LD_AUDIT"
-            | "LD_LIBRARY_PATH"
-            | "LD_PRELOAD"
-            | "PATH"
-            | "SHELLOPTS"
-    )
 }

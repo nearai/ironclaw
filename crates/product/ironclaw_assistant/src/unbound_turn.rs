@@ -91,6 +91,10 @@ pub struct UnboundTurnSubmission {
     /// surface.
     pub require_no_approval: bool,
     pub output: OutputContract,
+    /// Narrowing-only per-run ceilings. Default is unlimited (the profile's own
+    /// ceilings apply); a caller that knows its work should be bounded — a
+    /// background chore nobody is watching, say — declares tighter ones here.
+    pub limits: ironclaw_host_api::prepared_context::TurnLimits,
     pub requested_model: Option<String>,
     /// Caller-owned idempotency key for the accept; the submit key derives
     /// from it (`{key}:submit`). The caller owns its namespace — this
@@ -180,7 +184,7 @@ impl UnboundTurnService {
                 declarations: PreparedTurnDeclarations {
                     tools: submission.tools,
                     output: submission.output,
-                    limits: Default::default(),
+                    limits: submission.limits,
                     require_no_approval: submission.require_no_approval,
                 },
                 idempotency_key: submission.idempotency_key.clone(),
@@ -679,6 +683,7 @@ mod tests {
                 }],
                 tools: Vec::new(),
                 output: output.clone(),
+                limits: Default::default(),
                 requested_model: None,
                 idempotency_key: "forwarded-output-contract-key".to_string(),
                 require_no_approval: false,
@@ -690,5 +695,62 @@ mod tests {
             .captured_submission()
             .expect("coordinator captured submit");
         assert_eq!(captured.output_contract, Some(output));
+    }
+
+    /// A caller that declares tighter ceilings is declaring a BOUND on the run:
+    /// a background chore nobody watches must not inherit the unbound profile's
+    /// 1024-iteration budget and no wall clock. The ceilings only bind if they
+    /// reach the journaled prepared context, which is what the loop reads — so
+    /// forwarding them is the whole property, and dropping them here would be
+    /// invisible until an unconverged run had already burned the tokens.
+    #[tokio::test]
+    async fn accept_and_submit_journals_the_declared_limits() {
+        let caller_scope = scope();
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let coordinator = Arc::new(StubTurnCoordinator::default());
+        let service = UnboundTurnService::new(
+            Arc::clone(&threads) as Arc<dyn ironclaw_threads::SessionThreadService>,
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            AgentId::from_trusted("agent-default".to_string()),
+            None,
+        );
+        let limits = ironclaw_host_api::prepared_context::TurnLimits {
+            max_model_calls: Some(6),
+            max_capability_invocations: Some(12),
+            max_wall_clock_seconds: Some(90),
+        };
+        let thread_id = ThreadId::from_trusted("declared-limits-thread".to_string());
+        service
+            .accept_and_submit(UnboundTurnSubmission {
+                caller: caller_scope.clone(),
+                public_id: thread_id.as_str().to_string(),
+                system_prompt: "Do a bounded chore.".to_string(),
+                messages: vec![AgentMessage {
+                    role: ironclaw_threads::agent_message::AgentMessageRole::User,
+                    content: vec![ironclaw_threads::agent_message::ContentPart::text("start")],
+                }],
+                tools: Vec::new(),
+                output: OutputContract::AssistantMessage,
+                limits,
+                requested_model: None,
+                idempotency_key: "declared-limits-key".to_string(),
+                require_no_approval: false,
+            })
+            .await
+            .expect("unbound submission");
+
+        let record = threads
+            .read_prepared_context(&service.resolved_thread_scope(&caller_scope), &thread_id)
+            .await
+            .expect("prepared context readable")
+            .expect("the accept journaled a prepared context");
+        assert_eq!(
+            record.declarations.limits, limits,
+            "the ceilings the caller declared must be the ceilings the run is held to"
+        );
+        assert!(
+            !record.declarations.limits.is_unlimited(),
+            "an unwatched background run must never be journaled as unbounded"
+        );
     }
 }

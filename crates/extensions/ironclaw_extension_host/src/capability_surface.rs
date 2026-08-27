@@ -7,7 +7,7 @@ use chrono::Utc;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     capability::{CapabilityGrant, EffectKind, GrantConstraints},
-    ids::{CapabilityGrantId, CapabilityId, ExtensionId},
+    ids::{CapabilityGrantId, CapabilityId, ExtensionId, SecretHandle},
     mount::MountView,
     scope::Principal,
 };
@@ -95,6 +95,28 @@ impl ExtensionCapabilitySurface {
                 constraints: Self::grant_constraints(capability),
             })
             .collect()
+    }
+
+    /// Credential handles that may back explicit model-selected shell
+    /// credential contexts for this caller. User-private extensions remain
+    /// owner-filtered, and credentials without placeholder substitution are
+    /// not shell-selectable.
+    pub fn placeholder_credential_handles(
+        &self,
+        caller: &ironclaw_host_api::ids::UserId,
+    ) -> Vec<SecretHandle> {
+        let mut handles = Vec::new();
+        for capability in &self.active_capabilities {
+            if !capability.owner.visible_to(caller) {
+                continue;
+            }
+            for credential in &capability.runtime_credentials {
+                if credential.placeholder_env.is_some() && !handles.contains(&credential.handle) {
+                    handles.push(credential.handle.clone());
+                }
+            }
+        }
+        handles
     }
 
     pub fn capability(&self, capability_id: &CapabilityId) -> Option<&ActiveExtensionCapability> {
@@ -445,6 +467,7 @@ mod tests {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
                 },
+                placeholder_env: None,
                 required: true,
             }],
             network_targets: vec![https(EXA_MCP_HOST)],
@@ -481,6 +504,7 @@ mod tests {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
                 },
+                placeholder_env: None,
                 required: true,
             }],
             network_targets: google_api_network_targets(),
@@ -515,6 +539,7 @@ mod tests {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
                 },
+                placeholder_env: None,
                 required: true,
             }],
             network_targets: google_api_network_targets(),

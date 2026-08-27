@@ -12,11 +12,13 @@
  */
 import type { ComponentPropsWithoutRef } from "react";
 
+import { useT } from "../lib/i18n";
 import { cn } from "../utils/cn";
 
 export type SpinnerProps = Omit<ComponentPropsWithoutRef<"svg">, "children">;
 
-export function Spinner({ className = "", ...rest }: SpinnerProps = {}) {
+export function Spinner({ className = "", "aria-label": ariaLabel, ...rest }: SpinnerProps = {}) {
+  const t = useT();
   return (
     <svg
       {...rest}
@@ -24,7 +26,7 @@ export function Spinner({ className = "", ...rest }: SpinnerProps = {}) {
       viewBox="0 0 24 24"
       fill="none"
       role="status"
-      aria-label="Loading"
+      aria-label={ariaLabel || t("common.loading")}
     >
       <circle
         cx="12"

@@ -1,4 +1,5 @@
 import { useNavigate } from "react-router";
+import { createPortal } from "react-dom";
 import { Icon } from "../design-system/icons";
 import React from "react";
 import { useT } from "../lib/i18n";
@@ -12,6 +13,56 @@ const NotificationPanel = React.lazy(() =>
     default: NotificationPanel,
   }))
 );
+
+function NotificationPanelLoading({ close }) {
+  const t = useT();
+
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <React.Fragment>
+      <button
+        type="button"
+        aria-label={t("notifications.close")}
+        onClick={close}
+        tabIndex={-1}
+        className="fixed inset-0 z-[9998] bg-black/35 lg:bg-transparent"
+      />
+      <section
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
+        data-testid="notification-panel-loading"
+        className={cn(
+          "fixed inset-x-0 bottom-0 z-[9999] overflow-hidden",
+          "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_24px_70px_-24px_rgba(0,0,0,0.8)]",
+          "lg:inset-auto lg:right-12 lg:top-16 lg:w-[24rem] lg:rounded-[12px]",
+        )}
+      >
+        <div className="border-b border-[var(--v2-panel-border)] px-4 py-3">
+          <div aria-hidden="true" className="v2-skeleton h-4 w-24 rounded" />
+        </div>
+        <div className="space-y-3 px-4 py-4">
+          <p className="text-xs text-[var(--v2-text-muted)]">
+            {t("notifications.loadingTitle")}
+          </p>
+          {Array.from({ length: 3 }, (_, index) => (
+            <div key={index} className="flex items-center gap-3 py-1">
+              <div
+                aria-hidden="true"
+                className="v2-skeleton h-8 w-8 shrink-0 rounded-[8px]"
+              />
+              <div className="min-w-0 flex-1 space-y-2">
+                <div aria-hidden="true" className="v2-skeleton h-3 w-2/5 rounded" />
+                <div aria-hidden="true" className="v2-skeleton h-3 w-4/5 rounded" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </React.Fragment>,
+    document.body,
+  );
+}
 
 export function NotificationCenter({ state }) {
   const t = useT();
@@ -103,7 +154,9 @@ export function NotificationCenter({ state }) {
 
       {open &&
       (
-        <React.Suspense fallback={null}>
+        <React.Suspense
+          fallback={<NotificationPanelLoading close={close} />}
+        >
           <NotificationPanel
             messages={messages}
             unreadIds={unreadIds}

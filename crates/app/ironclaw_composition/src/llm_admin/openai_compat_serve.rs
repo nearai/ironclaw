@@ -300,6 +300,8 @@ impl ironclaw_openai_compat::OpenAiCompatPreparedTurnPort for OpenAiCompatPrepar
                 // it is a caller-driven API, not an unattended run.
                 require_no_approval: false,
                 output: request.output,
+                // Unchanged behavior: OpenAI-compat keeps the profile's own ceilings.
+                limits: Default::default(),
                 requested_model: request.requested_model,
                 idempotency_key,
             })

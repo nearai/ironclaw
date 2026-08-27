@@ -233,11 +233,14 @@ where
         // Resolve the descriptor BEFORE starting a invocation record (see `authorize`):
         // an unknown capability short-circuits without creating a invocation record, so
         // no `fail_invocation_if_configured` is needed here.
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+        let Some(base_descriptor) = self.registry.get_capability(&request.capability_id) else {
             return Err(CapabilityInvocationError::UnknownCapability {
                 capability: request.capability_id.clone(),
             });
         };
+        let descriptor = self
+            .enrich_invocation_descriptor(base_descriptor, &request.capability_id, &request.input)
+            .await?;
 
         if let Some(invocation_state) = self.invocation_state {
             invocation_state
@@ -268,7 +271,7 @@ where
                 return Err(error);
             }
         };
-        if let Err(error) = self.enforce_runtime_policy(descriptor) {
+        if let Err(error) = self.enforce_runtime_policy(&descriptor) {
             apply_invocation_state_transition_if_configured(
                 self.invocation_state,
                 &scope,
@@ -284,7 +287,7 @@ where
         // before the spawn-approval decision. Facts only; `Indeterminate` skips.
         match self
             .policy_facts
-            .credential_presence(&request.capability_id, &scope)
+            .credential_presence(&descriptor, &scope)
             .await
         {
             CredentialPresence::Satisfied | CredentialPresence::Indeterminate => {}
@@ -317,7 +320,7 @@ where
         let frozen_deadline = self
             .apply_persistent_approval(
                 &mut authorize_context,
-                descriptor,
+                &descriptor,
                 &request.capability_id,
                 &request.estimate,
                 &trust_decision,
@@ -329,7 +332,7 @@ where
             .authorizer
             .authorize_spawn_with_trust(
                 &authorize_context,
-                descriptor,
+                &descriptor,
                 &request.estimate,
                 &trust_decision,
             )
@@ -366,10 +369,10 @@ where
                     &request.capability_id,
                     &request.estimate,
                     &request.input,
-                    descriptor,
+                    &descriptor,
                     &obligation_outcome,
                     frozen_deadline,
-                );
+                )?;
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
                     result,
                     frozen_deadline: None,

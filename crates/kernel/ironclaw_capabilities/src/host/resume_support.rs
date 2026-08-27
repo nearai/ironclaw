@@ -441,7 +441,7 @@ where
             descriptor,
             &obligation_outcome,
             frozen_deadline,
-        );
+        )?;
         let authorized = match authorized_dispatch_witness(result, &capability_id) {
             Ok(authorized) => authorized,
             Err(error) => {
