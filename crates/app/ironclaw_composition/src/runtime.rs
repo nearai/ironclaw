@@ -1321,7 +1321,7 @@ impl RebornRuntime {
             let continuation = crate::factory::auth_continuation_dispatcher(
                 turn_coordinator,
                 Some(turn_state),
-                None,
+                Some(Arc::clone(&self.notification_inbox)),
             );
             service
                 .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)

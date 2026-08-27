@@ -1,4 +1,5 @@
 use super::*;
+use crate::factory::ComposedNotificationInbox;
 
 /// Display name sent with RFC 7591 dynamic client registration.
 const DCR_CLIENT_NAME: &str = "Ironclaw";
@@ -617,7 +618,7 @@ pub(crate) fn auth_continuation_dispatcher(
     blocked_auth_gate_source: Option<
         Arc<dyn ironclaw_processes::ProcessGateQuerySource<Error = ironclaw_turns::TurnError>>,
     >,
-    notification_inbox: Option<super::ComposedNotificationInbox>,
+    notification_inbox: Option<ComposedNotificationInbox>,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
     let fanout_notification_inbox = notification_inbox.as_ref().map(Arc::clone);
     let dispatcher = ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator));
@@ -661,7 +662,7 @@ pub(super) struct ProductAuthServicesCompositionInput {
         Option<Arc<dyn ironclaw_auth::RuntimeCredentialAccountVisibilityPolicy>>,
     /// Durable auth-flow records for composition-owned product auth.
     pub(super) flow_record_source: Option<Arc<dyn ironclaw_auth::AuthFlowRecordSource>>,
-    pub(super) notification_inbox: Option<super::ComposedNotificationInbox>,
+    pub(super) notification_inbox: Option<ComposedNotificationInbox>,
 }
 
 pub(super) fn compose_product_auth_services(

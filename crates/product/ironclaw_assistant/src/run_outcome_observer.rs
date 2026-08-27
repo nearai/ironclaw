@@ -19,6 +19,7 @@ use ironclaw_processes::{
     ProcessLifecycleStatus, ProcessSuspensionKind,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
+use ironclaw_turns::GateResumeDisposition;
 use serde::Deserialize;
 
 /// Materializes durable background-run outcomes from the authoritative
@@ -369,7 +370,9 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
         };
         let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
-        if commit.kind == ProcessJournalKind::Resumed {
+        if commit.kind == ProcessJournalKind::Resumed
+            && metadata.resume_disposition != Some(GateResumeDisposition::Denied)
+        {
             self.resolve_run_authentication_required(&commit.state, run_id, occurred_at)
                 .await?;
         }
@@ -523,6 +526,8 @@ struct OutcomeMetadata {
     subagent_depth: u32,
     #[serde(default)]
     ownerless_thread: bool,
+    #[serde(rename = "auth_resume_disposition", default)]
+    resume_disposition: Option<GateResumeDisposition>,
     product_context: Option<OutcomeProductContext>,
 }
 
@@ -1232,6 +1237,88 @@ mod tests {
         assert!(
             current_is_open,
             "an older resume must not close the current gate notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_resume_keeps_auth_actionable_until_verified_recovery() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:denied-then-authorized").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("publish auth notification");
+
+        let mut denied = commit(
+            run_id,
+            ProcessLifecycleStatus::Queued,
+            ProcessJournalKind::Resumed,
+            "web_ui",
+        );
+        denied.state.metadata["agent_turn"]["auth_resume_disposition"] = json!("denied");
+        observer
+            .observe_process_commit(denied)
+            .await
+            .expect("observe denied resume");
+        let denied_page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list after denial");
+        assert!(
+            denied_page.notifications[0].resolved_at.is_none(),
+            "denial does not prove credential recovery"
+        );
+
+        observer
+            .observe_process_commit(commit(
+                run_id,
+                ProcessLifecycleStatus::Queued,
+                ProcessJournalKind::Resumed,
+                "web_ui",
+            ))
+            .await
+            .expect("observe verified resume");
+        let recovered_page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list after recovery");
+        assert!(
+            recovered_page.notifications[0].resolved_at.is_some(),
+            "verified recovery closes the notification"
         );
     }
 

@@ -18,8 +18,9 @@
 //! requirements satisfied. Fan-out is idempotent per (flow, run), and an
 //! incomplete sweep returns an error so the durable continuation remains
 //! undispatched and a re-drive (flow reconcile / lifecycle cleanup) retries
-//! it — resumed runs leave `BlockedAuth` and are skipped on replay, and the
-//! primary dispatcher settles idempotently on an already-settled gate.
+//! it — resumed runs leave `BlockedAuth`, while their durable unresolved Inbox
+//! records provide an independent retry inventory; the primary dispatcher
+//! settles idempotently on an already-settled gate.
 //!
 //! Scope safety mirrors the deleted read model: the scan is bounded to the
 //! completed flow's `tenant_id` + explicit owner `user_id`, so this can never
@@ -31,8 +32,14 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthProductError, RebornAuthContinuationDispatcher,
 };
-use ironclaw_notifications::NotificationInboxStorePort;
-use ironclaw_processes::{ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind};
+use ironclaw_notifications::{
+    ListNotificationsRequest, NOTIFICATION_PAGE_LIMIT_MAX, NotificationInboxError,
+    NotificationInboxStorePort, NotificationKind, NotificationMutationRequest,
+    NotificationRecipient,
+};
+use ironclaw_processes::{
+    ProcessGateQuery, ProcessGateQuerySource, ProcessGateRecord, ProcessSuspensionKind,
+};
 use ironclaw_turns::{
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor, TurnCoordinator,
     TurnError, TurnRunId,
@@ -72,6 +79,108 @@ impl BlockedAuthResumeFanout {
         self
     }
 
+    /// Retry notification resolutions whose run has already left its auth
+    /// gate. The Inbox is the durable retry inventory: once `resume_turn`
+    /// succeeds the non-historical gate query intentionally stops returning
+    /// that run, but an unresolved Inbox record still carries its stable
+    /// `(run_id, gate_ref)` identity. Current gates are retained, including a
+    /// newer gate on a run whose older gate is being reconciled.
+    async fn reconcile_stale_auth_notifications(
+        &self,
+        event: &AuthContinuationEvent,
+        active_gates: &[ProcessGateRecord],
+    ) -> Result<(), AuthProductError> {
+        let Some(inbox) = self.notification_inbox.as_ref() else {
+            return Ok(());
+        };
+        let recipient = NotificationRecipient {
+            tenant_id: event.scope.resource.tenant_id.clone(),
+            user_id: event.scope.resource.user_id.clone(),
+        };
+        let mut cursor = None;
+        let mut retryable = Vec::new();
+        loop {
+            let page = inbox
+                .list(ListNotificationsRequest {
+                    recipient: recipient.clone(),
+                    limit: NOTIFICATION_PAGE_LIMIT_MAX,
+                    cursor: cursor.clone(),
+                    include_archived: true,
+                })
+                .await
+                .map_err(|error| {
+                    tracing::debug!(
+                        flow_id = %event.flow_id,
+                        %error,
+                        "blocked-auth fan-out could not list retryable Inbox resolutions"
+                    );
+                    AuthProductError::BackendUnavailable
+                })?;
+            for notification in page.notifications {
+                if notification.kind != NotificationKind::AuthenticationRequired
+                    || notification.resolved_at.is_some()
+                {
+                    continue;
+                }
+                let Some(run_id) = notification.source.turn_run_id else {
+                    continue;
+                };
+                let Some(lifecycle_ref) = notification.source.lifecycle_ref.as_ref() else {
+                    continue;
+                };
+                let gate_is_active = active_gates.iter().any(|gate| {
+                    turn_run_id_from_process_id(gate.process_id) == run_id
+                        && gate
+                            .suspension
+                            .gate_ref
+                            .as_ref()
+                            .is_some_and(|gate_ref| gate_ref.as_str() == lifecycle_ref.as_str())
+                });
+                if gate_is_active {
+                    continue;
+                }
+                retryable.push((run_id, notification.id));
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            if cursor.as_ref() == Some(&next_cursor) {
+                tracing::debug!(
+                    flow_id = %event.flow_id,
+                    "blocked-auth fan-out Inbox pagination cursor did not advance"
+                );
+                return Err(AuthProductError::BackendUnavailable);
+            }
+            cursor = Some(next_cursor);
+        }
+        let mut incomplete = false;
+        for (run_id, notification_id) in retryable {
+            match inbox
+                .resolve(NotificationMutationRequest {
+                    recipient: recipient.clone(),
+                    notification_id,
+                    occurred_at: event.emitted_at,
+                })
+                .await
+            {
+                Ok(_) | Err(NotificationInboxError::NotificationNotFound) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        %run_id,
+                        flow_id = %event.flow_id,
+                        %error,
+                        "blocked-auth fan-out could not reconcile a stale Inbox notification"
+                    );
+                    incomplete = true;
+                }
+            }
+        }
+        if incomplete {
+            return Err(AuthProductError::BackendUnavailable);
+        }
+        Ok(())
+    }
+
     /// Sweep the caller's other provider-blocked runs. An incomplete sweep —
     /// unreadable process gate projection, or any retryable resume failure — returns an
     /// error so the caller leaves the durable continuation UNDISPATCHED and a
@@ -103,7 +212,10 @@ impl BlockedAuthResumeFanout {
                 AuthProductError::BackendUnavailable
             })?;
         let mut resumed = 0usize;
-        let mut incomplete = false;
+        let mut incomplete = self
+            .reconcile_stale_auth_notifications(event, &parked)
+            .await
+            .is_err();
         for run in parked {
             // Strict caller scoping: same tenant and same explicit owner user.
             if run.scope.tenant_id != *tenant_id || run.owner_user_id.as_ref() != Some(user_id) {
@@ -245,19 +357,29 @@ impl RebornAuthContinuationDispatcher for BlockedAuthResumeFanout {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{collections::VecDeque, sync::Mutex};
 
     use super::*;
     use chrono::Utc;
     use ironclaw_auth::{
         AuthFlowId, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface, TurnRunRef,
     };
+    use ironclaw_filesystem::{
+        Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
+    };
     use ironclaw_host_api::turn::{EventCursor, TurnGateRef, TurnScope, TurnStatus};
     use ironclaw_host_api::{
         capability::RuntimeCredentialAccountSetup,
         decision::RuntimeCredentialAuthRequirement,
         ids::{ExtensionId, InvocationId, ProcessId, TenantId, ThreadId, UserId, VendorId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
         resource::ResourceScope,
+    };
+    use ironclaw_notifications::{
+        LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInboxStore,
+        NotificationInitialState, NotificationKind, NotificationRecipient, NotificationSeverity,
+        NotificationSource, PublishNotificationRequest,
     };
     use ironclaw_processes::{ProcessGateRecord, ProcessSuspension};
     use ironclaw_turns::{
@@ -314,6 +436,27 @@ mod tests {
                 })
                 .cloned()
                 .collect())
+        }
+    }
+
+    struct SequencedGateSource {
+        responses: Mutex<VecDeque<Vec<ProcessGateRecord>>>,
+    }
+
+    #[async_trait]
+    impl ProcessGateQuerySource for SequencedGateSource {
+        type Error = TurnError;
+
+        async fn query_process_gates(
+            &self,
+            _request: ProcessGateQuery,
+        ) -> Result<Vec<ProcessGateRecord>, Self::Error> {
+            Ok(self
+                .responses
+                .lock()
+                .expect("gate responses")
+                .pop_front()
+                .unwrap_or_default())
         }
     }
 
@@ -476,6 +619,28 @@ mod tests {
         (fanout, coordinator, inner)
     }
 
+    fn inbox_failing_first_resolution()
+    -> Arc<NotificationInboxStore<FaultInjecting<InMemoryBackend>>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/blocked-auth-fanout-notifications")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .nth(2)
+                    .backend("notification backend temporarily unavailable"),
+            ),
+        );
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)),
+            ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
+    }
+
     #[tokio::test]
     async fn turn_gate_completion_fans_out_to_other_provider_blocked_runs_only() {
         let primary = blocked_run(OWNER, TurnRunId::new(), slack_requirement());
@@ -577,6 +742,100 @@ mod tests {
             coordinator.resumed.lock().expect("resumed").len(),
             1,
             "the parked run resumed exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn retried_fan_out_resolves_a_notification_after_resume_already_succeeded() {
+        let waiting = blocked_run(OWNER, TurnRunId::new(), slack_requirement());
+        let waiting_run_id = turn_run_id_from_process_id(waiting.process_id);
+        let waiting_gate_ref = waiting
+            .suspension
+            .gate_ref
+            .clone()
+            .expect("waiting gate ref");
+        let waiting_thread_id = waiting.scope.thread_id.clone().expect("waiting thread");
+        let inbox = inbox_failing_first_resolution();
+        inbox
+            .publish(PublishNotificationRequest {
+                id: crate::run_delivery::run_notification_inbox_id(
+                    waiting_run_id,
+                    NotificationKind::AuthenticationRequired,
+                    Some(waiting_gate_ref.as_str()),
+                )
+                .expect("notification id"),
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(OWNER).expect("owner"),
+                },
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: waiting_thread_id.clone(),
+                    turn_run_id: Some(waiting_run_id),
+                    lifecycle_ref: Some(
+                        LifecycleRef::new(waiting_gate_ref.as_str()).expect("lifecycle ref"),
+                    ),
+                },
+                action: NotificationAction::OpenThread {
+                    thread_id: waiting_thread_id,
+                },
+                initial_state: NotificationInitialState::Open,
+                occurred_at: Utc::now(),
+            })
+            .await
+            .expect("seed auth notification");
+
+        let inner = Arc::new(RecordingInnerDispatcher {
+            events: Mutex::new(Vec::new()),
+        });
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let gate_source = Arc::new(SequencedGateSource {
+            responses: Mutex::new(VecDeque::from([vec![waiting], Vec::new()])),
+        });
+        let fanout = BlockedAuthResumeFanout::new(
+            inner,
+            gate_source,
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+        )
+        .with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
+        let completion = event("slack", AuthContinuationRef::SetupOnly);
+
+        fanout
+            .dispatch_auth_continuation(completion.clone())
+            .await
+            .expect_err("the failed Inbox resolution keeps the continuation retryable");
+        assert_eq!(
+            coordinator.resumed.lock().expect("resumed").len(),
+            1,
+            "the run resumed before the Inbox outage"
+        );
+
+        fanout
+            .dispatch_auth_continuation(completion)
+            .await
+            .expect("the retry independently reconciles the stale notification");
+        assert_eq!(
+            coordinator.resumed.lock().expect("resumed").len(),
+            1,
+            "the already-resumed run is not resumed twice"
+        );
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(OWNER).expect("owner"),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list notification");
+        assert_eq!(page.notifications.len(), 1);
+        assert!(
+            page.notifications[0].resolved_at.is_some(),
+            "the retry must close the notification even though the run left BlockedAuth"
         );
     }
 }
