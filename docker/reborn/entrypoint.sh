@@ -24,6 +24,15 @@ fi
 
 if [ -n "${IRONCLAW_REBORN_HOME:-}" ]; then
   IRONCLAW_REBORN_HOME="${IRONCLAW_REBORN_HOME%/}"
+  # `${VAR%/}` turns a bare "/" into an empty string, which used to reach
+  # `mkdir -p "" /workspace` and die with a confusing diagnostic. Reject the
+  # filesystem root outright rather than restoring it: the root pass chowns
+  # this path to the runtime uid, so honoring "/" would hand uid 1000
+  # ownership of the container's entire root filesystem.
+  if [ -z "$IRONCLAW_REBORN_HOME" ]; then
+    echo "IRONCLAW_REBORN_HOME must not be the filesystem root (/); it is chowned to the unprivileged runtime user at startup." >&2
+    exit 1
+  fi
 elif [ -n "$railway_volume_mount" ]; then
   case "$railway_volume_mount" in
     */ironclaw-reborn) IRONCLAW_REBORN_HOME="$railway_volume_mount" ;;
@@ -36,6 +45,13 @@ export IRONCLAW_REBORN_HOME
 
 if [ -n "${IRONCLAW_REBORN_WORKSPACE_ROOT:-}" ]; then
   IRONCLAW_REBORN_WORKSPACE_ROOT="${IRONCLAW_REBORN_WORKSPACE_ROOT%/}"
+  # Same reasoning as IRONCLAW_REBORN_HOME above. Without this the empty value
+  # reached `readlink -m ""`, which exits non-zero and, under `set -eu`, killed
+  # the boot with no diagnostic at all.
+  if [ -z "$IRONCLAW_REBORN_WORKSPACE_ROOT" ]; then
+    echo "IRONCLAW_REBORN_WORKSPACE_ROOT must not be the filesystem root (/)." >&2
+    exit 1
+  fi
 else
   IRONCLAW_REBORN_WORKSPACE_ROOT="$IRONCLAW_REBORN_HOME/workspace"
 fi

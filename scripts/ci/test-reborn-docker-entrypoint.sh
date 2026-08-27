@@ -66,6 +66,16 @@ cat > "${WORK}/root-bin/mkdir" <<'STUB'
 # during the earlier root pass is unaffected (mkdir -p on an existing directory
 # is always a no-op), which is exactly what distinguishes the fixed entrypoint
 # (creates it while still root) from the broken one (only tries later).
+#
+# status tracks whether any real `mkdir` invocation below failed (e.g. a
+# blank path from an unfixed `IRONCLAW_REBORN_HOME=/` normalization bug) so
+# this stub's own exit code matches real `mkdir`'s: a failure on one operand
+# does not stop it from attempting the rest, but the overall call still
+# reports non-zero. Without this, a failing path processed before the last
+# loop iteration is silently swallowed -- the stub's exit status would be
+# whatever the final (successful) iteration returned, and a regression test
+# asserting on `set -eu` aborting the caller would pass for the wrong reason.
+status=0
 for path in "$@"; do
   case "$path" in
     -*) continue ;;
@@ -81,8 +91,9 @@ for path in "$@"; do
         ;;
     esac
   fi
-  /bin/mkdir -p "$path"
+  /bin/mkdir -p "$path" || status=1
 done
+exit "$status"
 STUB
 cat > "${WORK}/root-bin/gosu" <<'STUB'
 #!/bin/sh
@@ -432,7 +443,64 @@ elif ! grep -q 'IRONCLAW_REBORN_WORKSPACE_ROOT' "${railway_home}/railway.err"; t
   failures=$((failures + 1))
 fi
 
-# 8. The dead variable has no reader left anywhere in the tree.
+# 8/9. A bare "/" for either root path must be refused with a diagnostic.
+#      `${VAR%/}` turns the single-character input "/" into "", which used to
+#      reach `mkdir -p "" /workspace` (a confusing "cannot create directory ''"
+#      failure) for IRONCLAW_REBORN_HOME, and `readlink -m ""` for
+#      IRONCLAW_REBORN_WORKSPACE_ROOT -- the latter exits non-zero with NO
+#      output at all, so `set -eu` killed the boot silently, the worse half of
+#      the bug.
+#
+#      These are refused rather than normalized back to "/". The root pass
+#      chowns IRONCLAW_REBORN_HOME to the unprivileged runtime user, so
+#      honoring "/" would hand uid 1000 ownership of the container's entire
+#      root filesystem -- strictly worse than the crash it replaced. Nothing
+#      legitimately runs with either path set to the filesystem root, so the
+#      safe reading of "/" is "operator error, stop and say so".
+slash_root_home="${WORK}/slash-root"
+mkdir -p "$slash_root_home"
+printf '%s' "$LEGACY_DISABLED" > "${slash_root_home}/config.toml"
+slash_root_chown_record="${slash_root_home}/chown-argv"
+
+run_slash_root() { # $1 = variable name to set to "/"
+  (
+    export PATH="${WORK}/root-bin:${WORK}/bin:${PATH}"
+    export IRONCLAW_REBORN_HOME="$slash_root_home"
+    export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
+    export IRONCLAW_STUB_ARGV_PATH="${slash_root_home}/argv"
+    export IRONCLAW_STUB_WORKSPACE_PATH="${slash_root_home}/workspace-root"
+    export IRONCLAW_STUB_UID=0
+    export IRONCLAW_STUB_CHOWN_PATH="$slash_root_chown_record"
+    export IRONCLAW_STUB_GOSU_PATH="${slash_root_home}/gosu-argv"
+    unset IRONCLAW_REBORN_WORKSPACE_ROOT
+    unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID RAILWAY_VOLUME_MOUNT_PATH
+    export "$1=/"
+    sh "$ENTRYPOINT" >/dev/null 2>"${slash_root_home}/entrypoint.err"
+  )
+}
+
+for slash_var in IRONCLAW_REBORN_HOME IRONCLAW_REBORN_WORKSPACE_ROOT; do
+  rm -f "${slash_root_home}/argv" "$slash_root_chown_record"
+  touch "$slash_root_chown_record"
+  if run_slash_root "$slash_var"; then
+    echo "FAIL[slash_root]: ${slash_var}=/ was accepted instead of refused" >&2
+    failures=$((failures + 1))
+  elif ! grep -q "${slash_var} must not be the filesystem root" "${slash_root_home}/entrypoint.err"; then
+    # Catches BOTH original failure modes: the blank-operand mkdir error, and
+    # the silent `readlink -m ""` death that printed nothing whatsoever.
+    echo "FAIL[slash_root]: ${slash_var}=/ did not produce the expected diagnostic" >&2
+    cat "${slash_root_home}/entrypoint.err" >&2
+    failures=$((failures + 1))
+  fi
+  # Nothing may be chowned on the way to that refusal -- least of all "/".
+  if [ -s "$slash_root_chown_record" ]; then
+    echo "FAIL[slash_root]: ${slash_var}=/ reached a chown before being refused" >&2
+    cat "$slash_root_chown_record" >&2
+    failures=$((failures + 1))
+  fi
+done
+
+# 10. The dead variable has no reader left anywhere in the tree.
 if grep -rn 'IRONCLAW_REBORN_SLACK_ENABLED' \
   --include='*.rs' --include='*.sh' --include='*.toml' \
   "${ROOT}/crates" "${ROOT}/docker" "${ROOT}/scripts" 2>/dev/null \
