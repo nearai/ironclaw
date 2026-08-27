@@ -2,6 +2,7 @@
 use ironclaw_host_api::{
     dispatch::INPUT_ENCODE_HUMAN_SUMMARY,
     ids::{CapabilityId, ProviderToolName},
+    model_result_preview::{ModelResultJsonPage, json_field_name_requires_redaction},
 };
 use ironclaw_safety::{
     PROVIDER_METADATA_TEXT_MAX_BYTES, validate_optional_provider_metadata_text,
@@ -639,8 +640,8 @@ fn validate_model_observation_strings(
 }
 
 /// The `detail` subtree: `generic_failure.detail` carries the observation's own
-/// provenance; every other string inside `detail` — including the `preview` of
-/// a `result_reference`, which is capability OUTPUT — stays untrusted.
+/// provenance. Result JSON pages split provider content from their exact
+/// host-authored controls; every other string remains untrusted.
 fn validate_observation_detail_strings(
     value: &serde_json::Value,
     provenance: ObservationProvenance,
@@ -652,8 +653,27 @@ fn validate_observation_detail_strings(
         .get("kind")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|kind| kind == "generic_failure");
+    let is_result_reference = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind == "result_reference");
+    let has_structured_json_view = is_result_reference
+        && object
+            .get("structured_json_view")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
     for (key, child) in object {
         validate_model_observation_text(key, ObservationProvenance::Untrusted)?;
+        if has_structured_json_view
+            && key == "preview"
+            && let Some(text) = child.as_str()
+            && let Some(page) = validate_json_page_preview(text)?
+        {
+            validate_json_page_content(&page.content)?;
+            let page_value = page.to_value().map_err(|error| error.to_string())?;
+            validate_model_observation_value(&page_value, ObservationProvenance::HostAuthored)?;
+            continue;
+        }
         let field_provenance = if is_generic_failure && key == "detail" {
             provenance
         } else {
@@ -662,6 +682,52 @@ fn validate_observation_detail_strings(
         validate_model_observation_value(child, field_provenance)?;
     }
     Ok(())
+}
+
+fn validate_json_page_preview(text: &str) -> Result<Option<ModelResultJsonPage>, String> {
+    let Ok(page) = ModelResultJsonPage::from_json_str(text) else {
+        return Ok(None);
+    };
+    let normalized =
+        crate::model_result_preview_from_json_page(&page).map_err(|error| error.to_string())?;
+    let normalized_page = ModelResultJsonPage::from_json_str(normalized.as_str())
+        .map_err(|error| error.to_string())?;
+    if normalized_page != page {
+        return Err("JSON result page content is not credential-redacted".to_string());
+    }
+    Ok(Some(page))
+}
+
+fn validate_json_page_content(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if json_field_name_requires_redaction(key) {
+                    if child != &serde_json::Value::String("[redacted]".to_string()) {
+                        return Err(format!(
+                            "JSON result page credential field `{key}` must be `[redacted]`"
+                        ));
+                    }
+                    continue;
+                }
+                validate_model_observation_text(key, ObservationProvenance::Untrusted)?;
+                validate_json_page_content(child)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                validate_json_page_content(item)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::String(text) => {
+            validate_model_observation_text(text, ObservationProvenance::Untrusted)
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(())
+        }
+    }
 }
 
 /// The PROVENANCE of an observation, read once from its `trust` field.
@@ -892,6 +958,7 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                     "result_ref",
                     "byte_len",
                     "preview",
+                    "structured_json_view",
                     "total_bytes",
                     "next_offset",
                     "item_count",
@@ -904,6 +971,14 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                 MODEL_OBSERVATION_TEXT_MAX_BYTES,
             )?;
             required_u64(object, "byte_len", "model observation detail")?;
+            if let Some(value) = object.get("structured_json_view")
+                && value.as_bool().is_none()
+            {
+                return Err(
+                    "model observation detail field `structured_json_view` must be a boolean"
+                        .to_string(),
+                );
+            }
             for field in ["total_bytes", "next_offset", "item_count"] {
                 if let Some(value) = object.get(field)
                     && value.as_u64().is_none()
@@ -916,7 +991,23 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
             if let Some(preview) = optional_string(object, "preview", "model observation detail")? {
                 // A result-reference preview is capability OUTPUT — always
                 // untrusted, regardless of the enclosing observation's trust.
-                validate_model_observation_text(preview, ObservationProvenance::Untrusted)?;
+                // A validated JSON page is the one exception: its provider
+                // content was redacted before its host-authored paging controls
+                // were serialized, so re-scanning the controls as provider text
+                // would reject legitimate pointers such as `/payload/secret`.
+                let structured_json_view = object
+                    .get("structured_json_view")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if structured_json_view {
+                    if validate_json_page_preview(preview)?.is_none() {
+                        return Err(
+                            "structured JSON result preview must be a valid JSON page".to_string()
+                        );
+                    }
+                } else {
+                    validate_model_observation_text(preview, ObservationProvenance::Untrusted)?;
+                }
             }
             if object.contains_key("item_count") && !object.contains_key("next_offset") {
                 return Err("model observation item_count requires next_offset".to_string());
@@ -1031,7 +1122,9 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
     serde_json::from_value::<ironclaw_host_api::result_meta::SameCallRetryConstraint>(
         serde_json::Value::String(retry.to_string()),
     )
-    .map_err(|_| format!("model observation same-call retry `{retry}` is unsupported"))?;
+    .map_err(|error| {
+        format!("model observation same-call retry `{retry}` is unsupported: {error}")
+    })?;
     if let Some(repairs) = object.get("repairs") {
         validate_model_observation_repairs(repairs)?;
     }
@@ -1039,7 +1132,7 @@ fn validate_model_observation_recovery(value: &serde_json::Value) -> Result<(), 
     serde_json::from_value::<ironclaw_host_api::result_meta::CapabilityRecoveryHint>(
         serde_json::Value::String(hint.to_string()),
     )
-    .map_err(|_| format!("model observation recovery hint `{hint}` is unsupported"))?;
+    .map_err(|error| format!("model observation recovery hint `{hint}` is unsupported: {error}"))?;
     Ok(())
 }
 
@@ -1923,6 +2016,79 @@ mod tests {
         .expect("nested formatting whitespace is valid");
 
         assert!(envelope.model_observation.is_some());
+    }
+
+    #[test]
+    fn structured_json_page_allows_only_redacted_credential_labeled_content() {
+        let page = |content: serde_json::Value| {
+            serde_json::json!({
+                "view": "ironclaw.json_page.v1",
+                "result_ref": "result:structured-redaction",
+                "json_pointer": "",
+                "node_type": "object",
+                "offset": 0,
+                "offset_unit": "items",
+                "content": content,
+                "omitted": [],
+                "total_bytes": 64,
+                "next_offset": null,
+                "next": null,
+            })
+            .to_string()
+        };
+        let observation = |preview: String| {
+            serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:structured-redaction",
+                    "byte_len": 64,
+                    "preview": preview,
+                    "structured_json_view": true,
+                },
+                "trust": "untrusted_tool_output"
+            })
+        };
+
+        let accepted = ToolResultReferenceEnvelope::with_model_observation(
+            "result:structured-redaction",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            observation(page(serde_json::json!({
+                "api_key": "[redacted]",
+                "message": "visible provider content",
+            }))),
+        );
+        accepted.expect(
+            "a credential-labeled content key is safe when its value is canonical redaction",
+        );
+
+        let rejected_value = ToolResultReferenceEnvelope::with_model_observation(
+            "result:structured-redaction-value",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            observation(page(serde_json::json!({
+                "api_key": "still-secret",
+                "message": "visible provider content",
+            }))),
+        );
+        assert!(
+            rejected_value.is_err(),
+            "a credential-labeled content key must reject an unredacted value"
+        );
+
+        let rejected_other_value = ToolResultReferenceEnvelope::with_model_observation(
+            "result:structured-redaction-other",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            observation(page(serde_json::json!({
+                "api_key": "[redacted]",
+                "message": "the provider secret was exposed",
+            }))),
+        );
+        assert!(
+            rejected_other_value.is_err(),
+            "redacting one credential field must not disable scanning other content"
+        );
     }
 
     #[test]

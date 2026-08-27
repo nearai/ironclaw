@@ -311,6 +311,9 @@ async fn mcp_tool_call_reaches_mock_server() {
     // call to the loopback server, not just that the capability recorder fired
     // before the egress (the M4 gap).
     assert_recorded_tools_call(&server, "search", "needle-xyz-42");
+    h.assert_latest_result_json_round_trips("mock-mcp.search")
+        .await
+        .expect("MCP output round-trips through durable result_read");
 }
 
 /// Twin of `mcp_tool_call_reaches_mock_server`: same client `Accept:

@@ -139,6 +139,10 @@ REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER = re.compile(
     r"reborn external tool failure",
     re.IGNORECASE,
 )
+REBORN_EXTERNAL_TOOL_RESULT_READ_TRIGGER = re.compile(
+    r"reborn external tool result read",
+    re.IGNORECASE,
+)
 REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER = re.compile(
     r"reborn mixed internal external tools",
     re.IGNORECASE,
@@ -192,6 +196,11 @@ NOTION_SEARCH_LIFECYCLE_TRIGGER = re.compile(
 )
 
 TOOL_CALL_PATTERNS = [
+    (
+        re.compile(r"reborn external tool result read", re.IGNORECASE),
+        "lookup_weather",
+        lambda _: {"city": "Boston"},
+    ),
     # Reborn parallel tool-call port: the Reborn provider-visible builtin tool
     # names are namespaced/sanitized, while the legacy engine keeps using the
     # unqualified trigger below.
@@ -1758,6 +1767,39 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         return None
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
+    # The external-tool success path writes the client-submitted value through
+    # the same durable result writer as every other successful capability. Ask
+    # the real host `result_read` capability to select its nested JSON array so this
+    # E2E scenario proves both halves of that contract. The result reference
+    # is intentionally discovered from the model-visible observation, just as
+    # a real model would discover it.
+    if REBORN_EXTERNAL_TOOL_RESULT_READ_TRIGGER.search(content):
+        external_result = next(
+            (
+                result
+                for result in recent_tool_results
+                if result["name"] == "lookup_weather"
+            ),
+            None,
+        )
+        result_read_already_called = any(
+            result["name"] == "builtin__result_read" for result in recent_tool_results
+        )
+        if external_result is not None and not result_read_already_called:
+            result_ref = re.search(
+                r'"result_ref"\s*:\s*"([^"\\]+)"',
+                external_result["content"],
+            )
+            if result_ref:
+                return [{
+                    "tool_name": "builtin__result_read",
+                    "arguments": {
+                        "result_ref": result_ref.group(1),
+                        "offset": 0,
+                        "max_bytes": 24 * 1024,
+                        "json_pointer": "/items",
+                    },
+                }]
     # #3533: gmail-install-then-retry sequence.
     #
     # Turn 1: user says "check gmail unread" → match_tool_call below dispatches

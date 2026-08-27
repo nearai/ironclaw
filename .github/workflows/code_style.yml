@@ -45,6 +45,7 @@ jobs:
       has_docs: ${{ steps.non_pr.outputs.has_docs || steps.diff.outputs.has_docs }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
       has_clippy: ${{ steps.non_pr.outputs.has_clippy || steps.diff.outputs.has_clippy }}
+      clippy_scope: ${{ steps.non_pr.outputs.clippy_scope || steps.diff.outputs.clippy_scope }}
       clippy_packages: ${{ steps.non_pr.outputs.clippy_packages || steps.diff.outputs.clippy_packages }}
       clippy_matrix: ${{ steps.non_pr.outputs.clippy_matrix || steps.diff.outputs.clippy_matrix }}
     steps:
@@ -56,37 +57,52 @@ jobs:
           echo "has_docs=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           echo "has_clippy=true" >> "$GITHUB_OUTPUT"
+          echo "clippy_scope=full" >> "$GITHUB_OUTPUT"
           echo 'clippy_packages=[]' >> "$GITHUB_OUTPUT"
           echo 'clippy_matrix=[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""}]' >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
-          fetch-depth: 0
-          # The scope calculation needs merge-base ancestry for its three-dot
-          # diff, but no historical file contents.
+          # PR scope keeps full ancestry for its three-dot diff. A merge-group
+          # checkout is the candidate commit only; its base is fetched below.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           filter: blob:none
           persist-credentials: false
+      - name: Fetch merge-group base for scope diff
+        if: github.event_name == 'merge_group'
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: git fetch --no-tags --filter=blob:none --depth=1 origin "$BASE_SHA"
       - id: diff
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
-          CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
+          if [[ "${{ github.event_name }}" == "merge_group" ]]; then
+            CHANGED_FILES="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          else
+            CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
+          fi
           printf '%s\n' "$CHANGED_FILES" > "${RUNNER_TEMP}/changed-files.txt"
 
-          clippy_packages="$(
+          clippy_plan="$(
             python3 scripts/ci/changed_workspace_packages.py \
+              --event "${{ github.event_name }}" \
               --changed-files "${RUNNER_TEMP}/changed-files.txt"
           )"
+          clippy_scope="$(jq -r '.mode' <<< "${clippy_plan}")"
+          clippy_packages="$(jq -c '.packages' <<< "${clippy_plan}")"
+          echo "clippy_scope=${clippy_scope}" >> "$GITHUB_OUTPUT"
           echo "clippy_packages=${clippy_packages}" >> "$GITHUB_OUTPUT"
-          if jq -e 'length > 0' <<< "${clippy_packages}" > /dev/null; then
+          if [[ "${clippy_scope}" != "none" ]]; then
             echo "has_clippy=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_clippy=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|deny\.toml$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/(entrypoint|start-sshd)\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|scripts/(check|test-check)-type-duplicates\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$|\.github/workflows/ironclaw-release\.yml$|rust-toolchain\.toml$|\.github/actions/setup-rust/)'; then
+          if [[ "${clippy_scope}" == "full" ]] || \
+             printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|deny\.toml$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|docker/reborn/(entrypoint|start-sshd)\.sh$|scripts/reborn_webui_v2_live_qa/|scripts/live-canary/|\.github/workflows/(live-canary|reborn-e2e)\.yml$|scripts/check_no_panics\.py$|scripts/no_panics_reborn_baseline\.txt$|scripts/(check|test-check)-type-duplicates\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/(code_style|main-ci-slack-alerts)\.yml$|\.github/workflows/ironclaw-release\.yml$|rust-toolchain\.toml$|\.github/actions/setup-rust/)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
@@ -154,7 +170,8 @@ jobs:
     needs: changes
     # `has_guidance` OR-s in the guidance surfaces (.claude/, root
     # AGENTS.md/CLAUDE.md, docs/) so check-guidance.py runs for the files it
-    # governs; every other lane keys on `has_code` alone.
+    # governs. Clippy additionally follows `clippy_scope=full` for merge-group
+    # inputs that are outside the narrow `has_code` path filter.
     if: needs.changes.outputs.has_code == 'true' || needs.changes.outputs.has_guidance == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -369,8 +386,9 @@ jobs:
     name: Clippy (${{ matrix.name }})
     needs: changes
     if: >-
-      needs.changes.outputs.has_code == 'true' &&
-      (github.event_name != 'pull_request' || needs.changes.outputs.has_clippy == 'true')
+      needs.changes.outputs.has_clippy == 'true' &&
+      (needs.changes.outputs.has_code == 'true' ||
+       needs.changes.outputs.clippy_scope == 'full')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -428,7 +446,7 @@ jobs:
           cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
       - name: Check production-target lints
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.changes.outputs.clippy_scope == 'selected'
         env:
           CLIPPY_PACKAGES: ${{ needs.changes.outputs.clippy_packages }}
         run: |
@@ -447,9 +465,30 @@ jobs:
           # package shape. scripts/ci/ws12_workflow_contracts.py pins this.
           cargo clippy "${package_args[@]}" \
             ${{ matrix.flags }} -- -D warnings
+      - name: Check affected all-target lints
+        if: github.event_name == 'merge_group' && needs.changes.outputs.clippy_scope == 'selected'
+        env:
+          CLIPPY_PACKAGES: ${{ needs.changes.outputs.clippy_packages }}
+        run: |
+          package_args=()
+          while IFS= read -r package; do
+            package_args+=(-p "${package}")
+          done < <(jq -r '.[]' <<< "${CLIPPY_PACKAGES}")
+          cargo clippy "${package_args[@]}" --all-targets \
+            ${{ matrix.flags }} -- -D warnings
+      - name: Check affected production-target lints (no dev-dependency features)
+        if: github.event_name == 'merge_group' && needs.changes.outputs.clippy_scope == 'selected' && matrix.name == 'default'
+        env:
+          CLIPPY_PACKAGES: ${{ needs.changes.outputs.clippy_packages }}
+        run: |
+          package_args=()
+          while IFS= read -r package; do
+            package_args+=(-p "${package}")
+          done < <(jq -r '.[]' <<< "${CLIPPY_PACKAGES}")
+          cargo clippy "${package_args[@]}" -- -D warnings
       - name: Check all-target lints
-        if: github.event_name != 'pull_request'
-        run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
+        if: needs.changes.outputs.clippy_scope == 'full'
+        run: cargo clippy --all --all-targets ${{ matrix.flags }} -- -D warnings
       # #7119. The PR lane above lints only the *changed* packages, so a crate
       # that is merely a dependency of that set compiles with whatever features
       # the set happens to enable. `--lib --bins` builds no dev-dependencies, and
@@ -466,7 +505,7 @@ jobs:
       # `test-support` on every selected package and masks the exact class this
       # step exists to catch.
       - name: Check production-target lints (workspace, no dev-dependency features)
-        if: github.event_name != 'pull_request' && matrix.name == 'default'
+        if: needs.changes.outputs.clippy_scope == 'full' && matrix.name == 'default'
         run: cargo clippy --all --lib --bins -- -D warnings
 
   clippy-windows:
@@ -630,7 +669,8 @@ jobs:
             exit 1
           fi
 
-          if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
+          if [[ "${{ needs.changes.outputs.has_code }}" == "false" &&
+                "${{ needs.changes.outputs.clippy_scope }}" != "full" ]]; then
             if [[ "${{ needs.changes.outputs.has_reborn_cli }}" == "true" && "${{ needs.reborn-cli-smoke.result }}" != "success" ]]; then
               echo "Reborn CLI smoke failed: ${{ needs.reborn-cli-smoke.result }}"
               exit 1
@@ -657,8 +697,7 @@ jobs:
           done
 
           clippy_may_skip=false
-          if [[ "${{ github.event_name }}" == "pull_request" && \
-                "${{ needs.changes.outputs.has_clippy }}" != "true" ]]; then
+          if [[ "${{ needs.changes.outputs.has_clippy }}" != "true" ]]; then
             clippy_may_skip=true
           fi
           if ! job_result_ok \
@@ -678,7 +717,7 @@ jobs:
             fi
           done
       - name: Assert the full clippy matrix ran (merge queue + push)
-        if: needs.changes.outputs.has_code == 'true' && github.event_name != 'pull_request'
+        if: needs.changes.outputs.clippy_scope == 'full' && github.event_name != 'pull_request'
         env:
           MATRIX_JSON: ${{ needs.changes.outputs.clippy_matrix }}
         run: |
