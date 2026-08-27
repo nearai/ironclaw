@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Select focused Reborn test lanes for pull requests.
+"""Select focused Reborn test lanes for pull requests and merge groups.
 
-Pull requests run direct evidence for changed packages and test surfaces.
-Merge-queue, main, and manual runs remain exhaustive.
+Diff events run direct evidence for changed packages and test surfaces.
+Global or unattributable merge-group changes widen to exhaustive coverage;
+main and manual runs remain exhaustive.
 """
 
 from __future__ import annotations
@@ -70,7 +71,10 @@ def _sandbox_docker_prefixes() -> tuple[str, ...]:
 
 
 MAX_PR_CRATE_BUCKETS = 3
-FULL_EVENTS = {"merge_group", "push", "workflow_call", "workflow_dispatch", "schedule"}
+DIFF_EVENTS = {"pull_request", "merge_group"}
+FULL_EVENTS = {"push", "workflow_call", "workflow_dispatch", "schedule"}
+ALL_ROOT_PARTITIONS = (0, 1, 2, 3)
+ALL_INTEGRATION_LANES = (0, 1, 2, 3, "groups")
 # Doc-fact contract tests (#7378) read `docs/` pages from inside owning
 # crates, so a published-page edit can fail a cargo test. Route those edits
 # to exactly the doc-fact test binaries (no reverse-dependency widening —
@@ -850,13 +854,43 @@ def _full_plan(
         "changed_packages": [],
         "affected_packages": canonical_packages,
         "crate_buckets": _bucket_packages(canonical_packages),
-        "root_partitions": [0, 1, 2, 3],
-        "integration_lanes": [0, 1, 2, 3, "groups"],
+        "root_partitions": list(ALL_ROOT_PARTITIONS),
+        "integration_lanes": list(ALL_INTEGRATION_LANES),
         "run_group_tests": True,
         "run_qa_replay": True,
         "run_sandbox_docker": True,
         "coverage_mode": "full",
     }
+
+
+def _merge_group_global_risk(paths: set[str]) -> str | None:
+    """Return the first path whose queue impact cannot be narrowed safely."""
+    for path in sorted(paths):
+        if (
+            path in {"Cargo.lock", ".config/nextest.toml"}
+            or path in PR_STATIC_CONTROL_PATHS
+            or path in PR_STATIC_CONTROL_FRAGMENTS
+            or path.startswith(PR_STATIC_CONTROL_PREFIXES)
+            or path.startswith(SHARED_REBORN_ACTION_PREFIXES)
+        ):
+            return path
+    return None
+
+
+def _unclassified_path_plan(
+    *,
+    event: str,
+    reason: str,
+    canonical_packages: list[str],
+) -> dict[str, Any]:
+    """Fail PR feedback loudly; widen an otherwise valid queue diff."""
+    if event == "merge_group":
+        return _full_plan(
+            f"merge-group scope could not classify {reason}; running the "
+            "exhaustive plan",
+            canonical_packages,
+        )
+    raise ValueError(reason)
 
 
 def build_plan(
@@ -867,20 +901,45 @@ def build_plan(
     canonical_packages: list[str],
     lockfile_manifest_owned: bool = False,
 ) -> dict[str, Any]:
-    """Build a deterministic test plan, rejecting unknown PR inputs."""
+    """Build a deterministic test plan, rejecting or widening unknown inputs."""
     if event in FULL_EVENTS:
         return _full_plan(f"{event} requires exhaustive coverage", canonical_packages)
-    if event != "pull_request":
+    if event not in DIFF_EVENTS:
         return _full_plan(f"unknown event {event!r}", canonical_packages)
 
     paths = {path.strip().replace("\\", "/") for path in changed_paths if path.strip()}
     if not paths:
         raise ValueError(
-            "empty pull-request diff cannot be classified; refusing to launch "
-            "an unbounded PR matrix"
+            f"empty {event.replace('_', '-')} diff cannot be classified; "
+            "refusing to launch "
+            "an unbounded test matrix"
         )
 
+    if event == "merge_group":
+        global_risk = _merge_group_global_risk(paths)
+        if global_risk is not None:
+            return _full_plan(
+                f"merge-group global or topology input changed: {global_risk}; "
+                "running the exhaustive plan",
+                canonical_packages,
+            )
+
     package_directories, reverse = _workspace_packages(metadata)
+    if event == "merge_group":
+        changed_manifest = next(
+            (
+                f"{directory}/Cargo.toml"
+                for directory in sorted(package_directories)
+                if f"{directory}/Cargo.toml" in paths
+            ),
+            None,
+        )
+        if changed_manifest is not None:
+            return _full_plan(
+                "merge-group workspace topology input changed: "
+                f"{changed_manifest}; running the exhaustive plan",
+                canonical_packages,
+            )
     production_packages: set[str] = set()
     direct_test_packages: set[str] = set()
     exact_test_targets: dict[str, set[tuple[str, str]]] = defaultdict(set)
@@ -1047,22 +1106,36 @@ def build_plan(
             path.startswith("tests/support/reborn_parity_qa/")
             or path == "tests/support_unit_tests.rs"
         ):
-            root_partitions.add(0)
-            reasons.append(
-                "shared root-test support changed; PR runs a representative partition"
-            )
+            if event == "merge_group":
+                root_partitions.update(ALL_ROOT_PARTITIONS)
+                reasons.append(
+                    "shared root-test support changed; merge group runs every root partition"
+                )
+            else:
+                root_partitions.add(0)
+                reasons.append(
+                    "shared root-test support changed; PR runs a representative partition"
+                )
             continue
         if path.startswith("tests/support/") and path not in INTEGRATION_SUPPORT_OWNERS:
             # Direct shared root-test support (tests/support/mod.rs and the
             # modules it declares). The integration group targets also compile
             # this tree via `#[path = "../../support/mod.rs"]`, so schedule a
             # representative lane of each tier.
-            root_partitions.add(0)
-            integration_lanes.add(0)
-            reasons.append(
-                "shared root-test support changed; PR runs a representative "
-                "partition and integration lane"
-            )
+            if event == "merge_group":
+                root_partitions.update(ALL_ROOT_PARTITIONS)
+                integration_lanes.update(ALL_INTEGRATION_LANES)
+                reasons.append(
+                    "shared root-test support changed; merge group runs every "
+                    "root and integration consumer lane"
+                )
+            else:
+                root_partitions.add(0)
+                integration_lanes.add(0)
+                reasons.append(
+                    "shared root-test support changed; PR runs a representative "
+                    "partition and integration lane"
+                )
             continue
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
@@ -1088,6 +1161,23 @@ def build_plan(
         if snapshot_owner is not None:
             integration_lanes.add(integration_inventory[snapshot_owner])
             reasons.append(f"integration test snapshot changed: {path}")
+            continue
+        if path.startswith("tests/integration/support/"):
+            if event == "merge_group":
+                # Root parity/QA binaries and every flat/group integration
+                # target compile this support tree, so the queue must run all
+                # of those consumers together.
+                root_partitions.update(ALL_ROOT_PARTITIONS)
+                integration_lanes.update(ALL_INTEGRATION_LANES)
+                reasons.append(
+                    "shared integration support changed; merge group runs every "
+                    "root and integration consumer lane"
+                )
+            else:
+                integration_lanes.add(0)
+                reasons.append(
+                    "shared integration support changed; PR runs a representative lane"
+                )
             continue
         if path.startswith("tests/integration/"):
             integration_lanes.add(0)
@@ -1116,7 +1206,11 @@ def build_plan(
             reasons.append(f"integration fixture changed: {path}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
-            raise ValueError(f"unmapped Reborn test path: {path}")
+            return _unclassified_path_plan(
+                event=event,
+                reason=f"unmapped Reborn test path: {path}",
+                canonical_packages=canonical_packages,
+            )
         if path.startswith("tests/e2e/"):
             # E2E scenarios and support live in the dedicated
             # `reborn-e2e.yml` workflow, which runs its own changed-path
@@ -1245,7 +1339,11 @@ def build_plan(
                 reasons.append(f"production package changed: {package}")
             continue
         if path.startswith(("tests/reborn_", "tests/e2e/reborn_", "scripts/ci/reborn-")):
-            raise ValueError(f"unmapped Reborn test path: {path}")
+            return _unclassified_path_plan(
+                event=event,
+                reason=f"unmapped Reborn test path: {path}",
+                canonical_packages=canonical_packages,
+            )
         if path.startswith("tests/e2e/"):
             # The browser/E2E suite has its own workflow (`reborn-e2e.yml`,
             # `paths: tests/e2e/**`) with its own scope detection, so this
@@ -1255,8 +1353,16 @@ def build_plan(
             reasons.append(f"dedicated Reborn E2E workflow owns: {path}")
             continue
         if path.startswith(("scripts/", "tests/", ".github/actions/")):
-            raise ValueError(f"unmapped test or CI path: {path}")
-        raise ValueError(f"unclassified pull-request path: {path}")
+            return _unclassified_path_plan(
+                event=event,
+                reason=f"unmapped test or CI path: {path}",
+                canonical_packages=canonical_packages,
+            )
+        return _unclassified_path_plan(
+            event=event,
+            reason=f"unclassified pull-request path: {path}",
+            canonical_packages=canonical_packages,
+        )
 
     if nextest_config_changed:
         return _full_plan(
@@ -1296,7 +1402,9 @@ def build_plan(
             for package in sorted(bucket_packages)
             for kind, name in sorted(exact_test_targets[package])
         ]
-    if len(buckets) > MAX_PR_CRATE_BUCKETS:
+    # PR feedback is latency-bounded; merge-group coverage stays exhaustive
+    # and preserves every canonical bucket boundary.
+    if event == "pull_request" and len(buckets) > MAX_PR_CRATE_BUCKETS:
         original_bucket_count = len(buckets)
         buckets = _bound_pr_buckets(buckets)
         reasons.append(
@@ -1320,7 +1428,7 @@ def build_plan(
         "integration_lanes": sorted(
             integration_lanes, key=lambda value: (isinstance(value, str), str(value))
         ),
-        "run_group_tests": False,
+        "run_group_tests": event == "merge_group" and "groups" in integration_lanes,
         "run_qa_replay": run_qa_replay,
         "run_sandbox_docker": run_sandbox_docker,
         "coverage_mode": "none",
@@ -1333,7 +1441,7 @@ def main() -> int:
     parser.add_argument(
         "--changed-files",
         type=Path,
-        help="newline-delimited changed paths; required for pull_request",
+        help="newline-delimited changed paths; required for diff events",
     )
     parser.add_argument(
         "--canonical-packages",

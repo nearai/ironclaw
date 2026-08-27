@@ -6,17 +6,19 @@ a check belongs to exactly one tier on purpose.
 | Tier | Event | Job |
 |---|---|---|
 | PR feedback | `pull_request` | Fast, scoped signal for the author. May run slim matrices and path-scoped subsets. |
-| **Production gate** | `merge_group` (merge queue) | The authority on what reaches `main`. Runs deterministic checks in the **same shape as push** on the merged state. |
-| Post-merge confirm | `push` to `main` | Confirms the queue's verdict, warms shared caches, feeds Codecov/canaries. Should never be the first place a deterministic failure appears. |
+| **Production gate** | `merge_group` (merge queue) | The authority on what reaches `main`. Runs affected deterministic checks for the combined candidate and widens to exhaustive deterministic checks for global, topology, or unclassified changes. |
+| Post-merge confirm | `push` to `main` | Runs exhaustive coverage, warms shared caches, and feeds Codecov/canaries. A main-only deterministic failure means the affected-area classifier missed an impact and must be widened. |
 | Deep / scheduled | `schedule` (nightly) | Exhaustive suites too slow for the queue: legacy v1 matrix, full browser E2E, stress scans. |
 
 ## The invariant
 
-**No deterministic failure may be main-only.** If a check runs deterministically
-on `push` to main, the merge queue must run it in the same shape first
-(`merge_group` does not support `paths:` filters — use a `changes` scope job
-instead). External/live checks (canaries, deploys, releases, benchmark
-thresholds) are exempt: they stay out of the queue by design.
+**No attributable deterministic failure may be main-only.** The merge queue
+classifies the combined `base_sha...head_sha` diff, runs the union of affected
+packages and lanes, and widens to the exhaustive push shape whenever a changed
+path is global, changes workspace topology, or cannot be classified. This
+fail-loud fallback makes new repository surfaces safe by default. External/live
+checks (canaries, deploys, releases, benchmark thresholds) are exempt: they
+stay out of the queue by design.
 
 The canonical local composition of the deterministic Reborn gates is
 `scripts/ci/run-hermetic-deterministic-suite.sh all`. CI invokes the same
@@ -31,9 +33,10 @@ changes. Root `Cargo.toml` and `Cargo.lock` changes are broader workspace risk:
 they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
-`reborn-tests.yml` follows the same PR-versus-queue contract. Pull requests use
-`reborn_pr_test_plan.py` to run affected crate buckets and exact changed root
-and integration suites without LLVM instrumentation. Recorded QA
+`reborn-tests.yml` uses one affected-area planner for pull requests and merge
+groups. Pull requests classify their own three-dot diff; merge groups classify
+the combined candidate diff so interacting PRs contribute one union of
+affected crate buckets and exact changed root and integration suites. Recorded QA
 replay remains a baseline on every pull request because it detects ordering
 and cross-surface regressions that cannot be inferred from changed paths. The
 full transitive reverse workspace dependency closure is included in PR crate
@@ -43,30 +46,29 @@ package's production behavior. A changed top-level Cargo test, example, or
 bench target runs directly; nested support changes retain all owning-package
 targets. Foundational-crate changes that span more than
 three canonical buckets coalesce every changed and dependent package into at
-most three PR jobs instead of omitting consumer tests. The merge queue and
-pushes to `main` still run every crate bucket, root partition, group suite,
-integration lane, recorded replay, and coverage gate. Shared root or
-integration support changes run one
-representative PR partition or lane, with the exhaustive fan-out required in
-merge queue. CI workflow, CI script, coverage-policy, toolchain, and workspace
-topology changes use their owning static/compile gates on the PR and receive
-the exhaustive Reborn matrix in merge queue. Unknown paths and empty diffs
-fail quickly at planning instead of silently launching or skipping an
-unbounded matrix. A planner execution or schema failure also fails the
-required check loudly.
+most three PR jobs instead of omitting consumer tests. Merge groups retain the
+planner's reverse-dependency closure without the PR fan-out caps. Shared root
+or integration support changes select their owning lanes. CI workflow, CI
+script, coverage-policy, toolchain, workspace topology, and other global inputs
+widen the merge group to every crate bucket, root partition, group suite,
+integration lane, and recorded replay. Unclassified merge-group paths also
+widen to exhaustive deterministic checks; unclassified pull-request paths and
+empty diffs fail planning loudly. Push, schedule, and manual runs remain
+exhaustive. A planner execution or schema failure fails the required check.
 `Cargo.lock` is scoped only when a structured base/head comparison proves that
 the lockfile changed solely in dependency lists for workspace manifests changed
 by the same PR. Package additions/removals, versions, checksums, unrelated
 workspace edges, and unreadable base state receive their full dependency
-breadth in merge queue; changed workspace manifests still select their
-production dependency closure on the PR. The stress tool
+breadth; workspace manifests and lockfiles are exhaustive merge-group inputs.
+Changed workspace manifests still select their production dependency closure
+on the PR. The stress tool
 is owned by `ironclaw-stress.yml`, and changed-line coverage exemptions are
 schema-checked in Code Style instead of launching unrelated integration lanes.
-The queue therefore preserves exhaustive deterministic evidence while
-ordinary PRs avoid consuming 20-plus runners for unrelated lanes. Pull-request
-parallelism is capped at three crate buckets, one root partition, and one
-integration lane; merge queue and main retain full matrix parallelism so this
-feedback optimization does not serialize the production gate.
+The queue therefore preserves evidence for every classified impact without
+launching unrelated lanes. Diff-based crate work is packed into at most three
+buckets without dropping packages. Pull requests additionally cap root and
+integration work at one lane; merge groups run every selected root and
+integration lane in parallel, while main retains exhaustive fan-out.
 Full-coverage crate buckets run one multi-package `cargo llvm-cov` invocation
 per bucket, preserving every package test and the bucket LCOV artifact while
 sharing dependency compilation across packages in the same job.
@@ -77,9 +79,11 @@ code events. Pull-request Clippy covers production libraries and binaries for
 directly changed workspace packages with all features. Test-only and CI-only
 PRs do not compile an unchanged workspace solely for linting. Root
 `Cargo.toml` and `Cargo.lock` changes lint every workspace package because
-their dependency and feature impact is workspace-wide. Merge queue and main
-lint the full workspace, add test and example targets, and run the
-default-feature matrix. Code Style's CLI Rust smoke and Reborn E2E's
+their dependency and feature impact is workspace-wide. Merge groups lint
+affected packages and their test/example targets in both all-features and
+default-feature configurations. Global, topology, and unclassified inputs
+widen that scope to the full workspace. Main always runs the full workspace.
+Code Style's CLI Rust smoke and Reborn E2E's
 four Rust groups run on merge queue and main, where they validate the
 exhaustive merged state, but do not repeat those contracts on PR runners. The release-binary
 smoke harness self-test remains in Code Style's fast deterministic job on every
@@ -96,9 +100,9 @@ without restoring the two runner allocations removed by pairing.
 The fast Responses API and black-box contracts share the browser worker in
 separate hermetic pytest processes, capping the E2E fan-out at four workers.
 
-History: the slim-vs-full clippy matrix violated this — the queue linted only
-`--all-features` while push linted a broader matrix, so feature-gated dead code
-could pass the queue and turn main red post-merge.
+History: the slim-vs-full clippy matrix showed why feature configurations and
+affected packages are separate dimensions. The queue keeps both required
+feature configurations even when its package set is scoped.
 
 ## Required checks and where they're enforced
 
