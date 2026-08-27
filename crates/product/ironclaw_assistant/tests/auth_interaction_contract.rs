@@ -955,13 +955,40 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
     );
     let (service, flow_manager, coordinator) =
         service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    let inbox = notification_inbox();
+    inbox
+        .publish(PublishNotificationRequest {
+            id: auth_notification_id(run_id, &gate_ref),
+            recipient: NotificationRecipient {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: actor.user_id.clone(),
+            },
+            kind: NotificationKind::AuthenticationRequired,
+            severity: NotificationSeverity::Warning,
+            source: NotificationSource {
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: Some(run_id),
+                lifecycle_ref: Some(
+                    LifecycleRef::new(gate_ref.as_str()).expect("auth lifecycle reference"),
+                ),
+            },
+            action: NotificationAction::OpenThread {
+                thread_id: scope.thread_id.clone(),
+            },
+            initial_state: NotificationInitialState::Open,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .expect("seed denied auth notification");
+    let service =
+        service.with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
 
     let response = service
         .resolve(ResolveAuthInteractionRequest {
-            scope,
-            actor,
+            scope: scope.clone(),
+            actor: actor.clone(),
             run_id_hint: Some(run_id),
-            gate_ref,
+            gate_ref: gate_ref.clone(),
             decision: AuthInteractionDecision::Deny,
             idempotency_key: IdempotencyKey::new("auth-action-deny").unwrap(),
         })
@@ -987,6 +1014,20 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
         Some(GateResumeDisposition::Denied)
     ));
     assert!(coordinator.cancellations().is_empty());
+    let notifications = inbox
+        .list(ListNotificationsRequest {
+            recipient: NotificationRecipient {
+                tenant_id: scope.tenant_id,
+                user_id: actor.user_id,
+            },
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list denied auth notification");
+    assert_eq!(notifications.notifications.len(), 1);
+    assert!(notifications.notifications[0].resolved_at.is_some());
 }
 
 #[tokio::test]

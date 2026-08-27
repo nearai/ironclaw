@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthProductError, RebornAuthContinuationDispatcher,
 };
+use ironclaw_notifications::NotificationInboxStorePort;
 use ironclaw_processes::{ProcessGateQuery, ProcessGateQuerySource, ProcessSuspensionKind};
 use ironclaw_turns::{
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor, TurnCoordinator,
@@ -46,6 +47,7 @@ pub struct BlockedAuthResumeFanout {
     inner: Arc<dyn RebornAuthContinuationDispatcher>,
     gate_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    notification_inbox: Option<Arc<dyn NotificationInboxStorePort>>,
 }
 
 impl BlockedAuthResumeFanout {
@@ -58,7 +60,16 @@ impl BlockedAuthResumeFanout {
             inner,
             gate_source,
             turn_coordinator,
+            notification_inbox: None,
         }
+    }
+
+    pub fn with_notification_inbox(
+        mut self,
+        notification_inbox: Arc<dyn NotificationInboxStorePort>,
+    ) -> Self {
+        self.notification_inbox = Some(notification_inbox);
+        self
     }
 
     /// Sweep the caller's other provider-blocked runs. An incomplete sweep —
@@ -130,10 +141,10 @@ impl BlockedAuthResumeFanout {
                 continue;
             };
             let request = ResumeTurnRequest {
-                scope,
+                scope: scope.clone(),
                 actor,
                 run_id,
-                gate_resolution_ref: gate_ref,
+                gate_resolution_ref: gate_ref.clone(),
                 idempotency_key,
                 // No credential_ref: the resumed run re-runs its capability
                 // (extension_activate), which re-checks requirement
@@ -143,7 +154,27 @@ impl BlockedAuthResumeFanout {
                 resume_disposition: None,
             };
             match self.turn_coordinator.resume_turn(request).await {
-                Ok(_) => resumed += 1,
+                Ok(_) => {
+                    resumed += 1;
+                    if let Some(inbox) = self.notification_inbox.as_ref()
+                        && let Err(error) = crate::auth_continuation::resolve_auth_notification(
+                            inbox.as_ref(),
+                            &scope,
+                            user_id,
+                            run_id,
+                            &gate_ref,
+                        )
+                        .await
+                    {
+                        tracing::debug!(
+                            %run_id,
+                            flow_id = %event.flow_id,
+                            %error,
+                            "blocked-auth fan-out resumed a run but its Inbox notification remains retryable"
+                        );
+                        incomplete = true;
+                    }
+                }
                 Err(error) => {
                     // Keep sweeping so one failing run does not starve the
                     // rest, but report the sweep incomplete: the continuation

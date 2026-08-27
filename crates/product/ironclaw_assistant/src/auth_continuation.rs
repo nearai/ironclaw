@@ -266,34 +266,44 @@ impl ProductAuthTurnGateResumeDispatcher {
         let Some(inbox) = self.notification_inbox.as_ref() else {
             return Ok(());
         };
-        let notification_id = crate::run_delivery::run_notification_inbox_id(
-            run_id,
-            NotificationKind::AuthenticationRequired,
-            Some(gate_ref.as_str()),
-        )
-        .map_err(|error| ProductSurfaceFailure::Transient {
-            reason: format!("build auth Inbox notification id failed: {error}"),
-        })?;
-        let owner_user_id = scope
-            .explicit_owner_user_id()
-            .cloned()
-            .unwrap_or_else(|| fallback_user_id.clone());
-        match inbox
-            .resolve(NotificationMutationRequest {
-                recipient: NotificationRecipient {
-                    tenant_id: scope.tenant_id.clone(),
-                    user_id: owner_user_id,
-                },
-                notification_id,
-                occurred_at: chrono::Utc::now(),
-            })
-            .await
-        {
-            Ok(_) | Err(NotificationInboxError::NotificationNotFound) => Ok(()),
-            Err(error) => Err(ProductSurfaceFailure::Transient {
-                reason: format!("resolve auth Inbox notification failed: {error}"),
-            }),
-        }
+        resolve_auth_notification(inbox.as_ref(), scope, fallback_user_id, run_id, gate_ref).await
+    }
+}
+
+pub(crate) async fn resolve_auth_notification(
+    inbox: &dyn NotificationInboxStorePort,
+    scope: &TurnScope,
+    fallback_user_id: &ironclaw_host_api::ids::UserId,
+    run_id: TurnRunId,
+    gate_ref: &TurnGateRef,
+) -> Result<(), ProductSurfaceFailure> {
+    let notification_id = crate::run_delivery::run_notification_inbox_id(
+        run_id,
+        NotificationKind::AuthenticationRequired,
+        Some(gate_ref.as_str()),
+    )
+    .map_err(|error| ProductSurfaceFailure::Transient {
+        reason: format!("build auth Inbox notification id failed: {error}"),
+    })?;
+    let owner_user_id = scope
+        .explicit_owner_user_id()
+        .cloned()
+        .unwrap_or_else(|| fallback_user_id.clone());
+    match inbox
+        .resolve(NotificationMutationRequest {
+            recipient: NotificationRecipient {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: owner_user_id,
+            },
+            notification_id,
+            occurred_at: chrono::Utc::now(),
+        })
+        .await
+    {
+        Ok(_) | Err(NotificationInboxError::NotificationNotFound) => Ok(()),
+        Err(error) => Err(ProductSurfaceFailure::Transient {
+            reason: format!("resolve auth Inbox notification failed: {error}"),
+        }),
     }
 }
 

@@ -619,6 +619,7 @@ pub(crate) fn auth_continuation_dispatcher(
     >,
     notification_inbox: Option<super::ComposedNotificationInbox>,
 ) -> Arc<dyn RebornAuthContinuationDispatcher> {
+    let fanout_notification_inbox = notification_inbox.as_ref().map(Arc::clone);
     let dispatcher = ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator));
     let dispatcher = match notification_inbox {
         Some(inbox) => dispatcher.with_notification_inbox(inbox),
@@ -630,11 +631,18 @@ pub(crate) fn auth_continuation_dispatcher(
         // provider-blocked runs (pair/authorize once, all waiting chats
         // continue). Production-shaped builders pass None until their
         // turn-state snapshot source is wired.
-        Some(gate_source) => Arc::new(ironclaw_assistant::BlockedAuthResumeFanout::new(
-            single_run,
-            gate_source,
-            turn_coordinator,
-        )),
+        Some(gate_source) => {
+            let fanout = ironclaw_assistant::BlockedAuthResumeFanout::new(
+                single_run,
+                gate_source,
+                turn_coordinator,
+            );
+            let fanout = match fanout_notification_inbox {
+                Some(inbox) => fanout.with_notification_inbox(inbox),
+                None => fanout,
+            };
+            Arc::new(fanout)
+        }
         None => single_run,
     }
 }

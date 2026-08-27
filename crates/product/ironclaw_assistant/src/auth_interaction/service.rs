@@ -213,10 +213,22 @@ impl DefaultAuthInteractionService {
             }
         };
         validate_completion_ref(&gate, completion)?;
+        self.resume_auth_gate_and_resolve(request, run_id, None)
+            .await
+    }
+
+    async fn resume_auth_gate_and_resolve(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        run_id: TurnRunId,
+        resume_disposition: Option<GateResumeDisposition>,
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         let scope = request.scope.clone();
         let actor = request.actor.clone();
         let gate_ref = request.gate_ref.clone();
-        let response = self.resume_auth_gate(request, run_id, None).await?;
+        let response = self
+            .resume_auth_gate(request, run_id, resume_disposition)
+            .await?;
         self.resolve_auth_notification(&scope, &actor, run_id, &gate_ref)
             .await;
         Ok(response)
@@ -322,7 +334,7 @@ impl DefaultAuthInteractionService {
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         self.cancel_auth_flow_if_active(&gate).await?;
-        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
+        self.resume_auth_gate_and_resolve(request, run_id, Some(GateResumeDisposition::Denied))
             .await
     }
 
@@ -337,7 +349,7 @@ impl DefaultAuthInteractionService {
         // check, so this is idempotent regardless of current run state.  A
         // fresh key on a finished run still errors via the precondition
         // (correctly StaleAuth).
-        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
+        self.resume_auth_gate_and_resolve(request, run_id, Some(GateResumeDisposition::Denied))
             .await
     }
 
@@ -352,7 +364,7 @@ impl DefaultAuthInteractionService {
                 return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
             }
         }
-        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
+        self.resume_auth_gate_and_resolve(request, run_id, Some(GateResumeDisposition::Denied))
             .await
     }
 }

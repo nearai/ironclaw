@@ -8,10 +8,10 @@ use ironclaw_host_api::{
     turn::{TurnExecutionOutcome, TurnOriginKind, TurnRunId},
 };
 use ironclaw_notifications::{
-    LifecycleRef, NotificationAction, NotificationId, NotificationInboxError,
-    NotificationInboxStorePort, NotificationInitialState, NotificationKind,
-    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
-    PublishNotificationRequest,
+    LifecycleRef, ListNotificationsRequest, NOTIFICATION_PAGE_LIMIT_MAX, NotificationAction,
+    NotificationId, NotificationInboxError, NotificationInboxStorePort, NotificationInitialState,
+    NotificationKind, NotificationMutationRequest, NotificationRecipient, NotificationSeverity,
+    NotificationSource, PublishNotificationRequest,
 };
 use ironclaw_processes::{
     GetProcessSnapshotRequest, JournaledProcessSnapshot, ProcessJournalCommit,
@@ -222,6 +222,64 @@ impl RunOutcomeProcessCommitObserver {
             Err(error) => Err(format!("resolve auth notification failed: {error}")),
         }
     }
+
+    async fn resolve_run_authentication_required(
+        &self,
+        snapshot: &JournaledProcessSnapshot,
+        run_id: TurnRunId,
+        occurred_at: Timestamp,
+    ) -> Result<(), String> {
+        // A Resumed process snapshot no longer carries the suspension's gate
+        // reference. Reconcile by the notification's stable run identity;
+        // the recipient Inbox is bounded, and paging preserves older or
+        // archived records that may have survived a transient write outage.
+        let Some(owner_user_id) = snapshot.owner_user_id.clone() else {
+            return Ok(());
+        };
+        let recipient = NotificationRecipient {
+            tenant_id: snapshot.scope.tenant_id.clone(),
+            user_id: owner_user_id,
+        };
+        let mut cursor = None;
+        loop {
+            let page = self
+                .inbox
+                .list(ListNotificationsRequest {
+                    recipient: recipient.clone(),
+                    limit: NOTIFICATION_PAGE_LIMIT_MAX,
+                    cursor: cursor.clone(),
+                    include_archived: true,
+                })
+                .await
+                .map_err(|error| {
+                    format!("list auth notifications for resumed run failed: {error}")
+                })?;
+            for notification in page.notifications {
+                if notification.kind == NotificationKind::AuthenticationRequired
+                    && notification.source.turn_run_id == Some(run_id)
+                    && notification.resolved_at.is_none()
+                {
+                    self.inbox
+                        .resolve(NotificationMutationRequest {
+                            recipient: recipient.clone(),
+                            notification_id: notification.id,
+                            occurred_at,
+                        })
+                        .await
+                        .map_err(|error| {
+                            format!("resolve auth notification for resumed run failed: {error}")
+                        })?;
+                }
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(());
+            };
+            if cursor.as_ref() == Some(&next_cursor) {
+                return Err("auth notification pagination cursor did not advance".to_string());
+            }
+            cursor = Some(next_cursor);
+        }
+    }
 }
 
 impl RunOutcomeProcessCommitObserver {
@@ -280,6 +338,10 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
         };
         let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        if commit.kind == ProcessJournalKind::Resumed {
+            self.resolve_run_authentication_required(&commit.state, run_id, occurred_at)
+                .await?;
+        }
         if commit.kind == ProcessJournalKind::Suspended
             && commit.state.status == ProcessLifecycleStatus::Suspended
         {
@@ -602,6 +664,28 @@ mod tests {
         ))
     }
 
+    fn inbox_failing_second_write() -> Arc<NotificationInboxStore<FaultInjecting<InMemoryBackend>>>
+    {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/run-outcome-resolve-fault-notifications")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .nth(2)
+                    .backend("notification backend temporarily unavailable"),
+            ),
+        );
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)),
+            ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
+    }
+
     fn process_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/processes").expect("process mount alias"),
@@ -852,6 +936,62 @@ mod tests {
             .expect("replay reconciles against the recovered process state");
 
         assert!(records(inbox.as_ref()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resumed_commit_retries_auth_resolution_after_an_inbox_outage() {
+        let inbox = inbox_failing_second_write();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:resume-after-inbox-outage").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        observer
+            .observe_process_commit(suspended.clone())
+            .await
+            .expect("publish auth notification");
+
+        let mut resumed = suspended;
+        resumed.kind = ProcessJournalKind::Resumed;
+        resumed.state.status = ProcessLifecycleStatus::Queued;
+        resumed.state.suspension = None;
+        observer
+            .observe_process_commit(resumed.clone())
+            .await
+            .expect_err("the first durable resolution attempt fails");
+        observer
+            .observe_process_commit(resumed)
+            .await
+            .expect("durable observer replay resolves the notification");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list reconciled auth notification");
+        assert_eq!(page.notifications.len(), 1);
+        assert!(page.notifications[0].resolved_at.is_some());
     }
 
     /// A timed-out fire publishes an actionable block and the delivery watcher
