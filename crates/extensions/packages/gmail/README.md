@@ -11,4 +11,17 @@ native gsuite executor.
 - **Contents:** `manifest.toml`, `prompts/`, `schemas/`; embedded by `ironclaw_extension_support::packages::gmail`
 - **Tests:** executor — `cargo test -p ironclaw_extension_support`; manifest projection — `cargo test -p ironclaw_extension_registry`
 
+`gmail.get_message` returns producer-owned semantic JSON: selected message
+headers, a decoded text or Markdown body, and bounded attachment metadata.
+Provider MIME/base64 envelopes and unselected routing/authentication headers do
+not enter the durable tool result. Encrypted messages are reported explicitly
+without exposing ciphertext as readable content.
+
+For Gmail `format=full`, the API has already applied MIME transfer encoding;
+the producer decodes only Gmail's `body.data` base64url wrapper. This remains a
+Gmail-local transformation because the generic durable-result path must not
+guess provider semantics. Promote a shared conversion only when a second
+producer has the same semantic contract; unsupported MIME bodies remain
+explicitly unavailable rather than triggering a generic fallback.
+
 Family model and the package rules: `crates/extensions/AGENTS.md`.

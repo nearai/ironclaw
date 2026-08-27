@@ -1,0 +1,20 @@
+{
+  "id": "msg-html",
+  "threadId": "thr-html",
+  "labelIds": ["INBOX"],
+  "payload": {
+    "mimeType": "text/html; charset=utf-8",
+    "headers": [
+      { "name": "From", "value": "Ada Lovelace <ada@example.com>" },
+      { "name": "To", "value": "team@example.com" },
+      { "name": "Subject", "value": "Launch notes" },
+      { "name": "Date", "value": "Wed, 26 Aug 2026 10:30:00 +0000" },
+      { "name": "ARC-Seal", "value": "arc-should-not-leak" },
+      { "name": "DKIM-Signature", "value": "dkim-should-not-leak" }
+    ],
+    "body": {
+      "size": 306,
+      "data": "PGgxPkxhdW5jaCBub3RlczwvaDE-PHA-UmVhZGFibGUgPHN0cm9uZz5kZWNvZGVkPC9zdHJvbmc-IG1lc3NhZ2UuPC9wPjx1bD48bGk-Rmlyc3QgaXRlbTwvbGk-PGxpPjxhIGhyZWY9Imh0dHBzOi8vZXhhbXBsZS5jb20iPkRldGFpbHM8L2E-PC9saT48L3VsPjxwcmU-PGNvZGU-Y2FyZ28gdGVzdDwvY29kZT48L3ByZT48c2NyaXB0PnNlY3JldFNjcmlwdCgpPC9zY3JpcHQ-PHN0eWxlPi5zZWNyZXRTdHlsZXt9PC9zdHlsZT48IS0tIHNlY3JldENvbW1lbnQgLS0-PGltZyBzcmM9ImRhdGE6aW1hZ2UvcG5nO2Jhc2U2NCxBQUFBIiBhbHQ9InRyYWNrZXIiPg"
+    }
+  }
+}

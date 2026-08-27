@@ -45,6 +45,7 @@ use crate::latency::{
 };
 
 mod calendar_list_events;
+mod gmail_message;
 
 pub const CALENDAR_LIST_CALENDARS_CAPABILITY_ID: &str = "google-calendar.list_calendars";
 pub const CALENDAR_LIST_EVENTS_CAPABILITY_ID: &str = "google-calendar.list_events";
@@ -491,7 +492,7 @@ impl GsuiteExecutor {
             }
         };
         let shape_output_started_at = gsuite_latency_started_at();
-        let output = match response_output(&response) {
+        let output = match response_output(capability.operation, &response) {
             Ok(output) => output,
             Err(error) => {
                 trace_gsuite_latency_error(
@@ -811,9 +812,15 @@ async fn execute_runtime_http(
 }
 
 fn response_output(
+    operation: GsuiteCapabilityOperation,
     response: &ironclaw_host_api::http::RuntimeHttpEgressResponse,
 ) -> Result<Value, GsuiteDispatchError> {
-    let body = response_body_json(response)?;
+    let mut body = response_body_json(response)?;
+    if (200..300).contains(&response.status)
+        && operation == GsuiteCapabilityOperation::GmailGetMessage
+    {
+        body = gmail_message::normalize(body)?;
+    }
     Ok(json!({
         "status": response.status,
         "body": body,
