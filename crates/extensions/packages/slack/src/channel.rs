@@ -70,7 +70,15 @@ impl ChannelIngress for SlackChannelAdapter {
                 content_type: None,
                 body: Vec::new(),
             })),
-            SlackInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
+            // One line per drop. The router answers an ignored event with a
+            // bare 200 to satisfy Slack's retry machinery, so without this a
+            // human message discarded by mistake leaves no trace anywhere —
+            // which is exactly how `thread_broadcast` stayed invisible until
+            // someone compared response latencies.
+            SlackInboundEvent::Ignore { reason } => {
+                tracing::debug!(?reason, "slack inbound event produced no message");
+                Ok(InboundOutcome::Ignore)
+            }
             SlackInboundEvent::Message(parsed) => {
                 let ParsedSlackInboundMessage {
                     mut message,
@@ -749,6 +757,72 @@ mod tests {
         assert_eq!(message.actor.id(), "U123");
         assert_eq!(message.conversation.conversation_id(), "D123");
         assert!(message.reply_context.is_none());
+    }
+
+    /// The incident's root symptom was not the drop — it was that the drop
+    /// left no trace. The router turns an ignore into a bare 200, so without
+    /// this log line a human message discarded by mistake is invisible in
+    /// every system we own. Deleting the `debug!` makes this fail.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn every_ignored_event_records_why_it_was_dropped() {
+        for (body, expected_reason) in [
+            (
+                br#"{
+                "type": "event_callback",
+                "event_id": "Ev-bot",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message", "channel": "D1", "channel_type": "im",
+                    "user": "U1", "bot_id": "B1", "text": "echo",
+                    "ts": "1710000000.000300"
+                }
+            }"#
+                .as_slice(),
+                "BotAuthored",
+            ),
+            (
+                br#"{
+                "type": "event_callback",
+                "event_id": "Ev-subtype",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message", "channel": "D1", "channel_type": "im",
+                    "user": "U1", "subtype": "channel_join",
+                    "text": "joined", "ts": "1710000000.000301"
+                }
+            }"#
+                .as_slice(),
+                "NonUserMessageSubtype",
+            ),
+            (
+                br#"{
+                "type": "event_callback",
+                "event_id": "Ev-ambient",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message", "channel": "C1", "user": "U1",
+                    "text": "chatter", "ts": "1710000000.000302"
+                }
+            }"#
+                .as_slice(),
+                "AmbientChannelMessage",
+            ),
+        ] {
+            let outcome = inbound(body).await.expect("payload parses");
+            assert!(
+                matches!(outcome, InboundOutcome::Ignore),
+                "expected Ignore for {expected_reason}"
+            );
+            assert!(
+                logs_contain("slack inbound event produced no message"),
+                "the drop for {expected_reason} produced no log line"
+            );
+            assert!(
+                logs_contain(expected_reason),
+                "the drop log did not carry reason {expected_reason}"
+            );
+        }
     }
 
     #[tokio::test]
