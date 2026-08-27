@@ -7,10 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.0-rc.1] - 2026-08-26
+## [1.4.0] - 2026-08-27
 
-First release candidate for 1.4.0, covering the 81 commits since
-`ironclaw-v1.3.0`.
+Stable promotion of `1.4.0-rc.1`, covering the 81 commits since
+`ironclaw-v1.3.0` and the complete release-candidate scope below.
 
 ### Added
 
