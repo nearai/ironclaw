@@ -696,6 +696,63 @@ async fn gmail_get_message_bounds_decoded_body_before_model_exposure() {
 }
 
 #[tokio::test]
+async fn gmail_get_message_bounds_selected_headers_and_attachment_fields() {
+    let oversized_header = "é".repeat(5_000);
+    let oversized_filename = "é".repeat(2_500);
+    let oversized_mime_type = format!("application/{}", "x".repeat(5_000));
+    let oversized_attachment_id = "é".repeat(2_500);
+    let (message, _) = GsuiteShapeCase::new(
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({ "message_id": "msg-large-fields" }),
+        &[GOOGLE_GMAIL_READONLY_SCOPE],
+        vec![RecordingEgress::json(json!({
+            "id": "msg-large-fields",
+            "threadId": "thr-large-fields",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "headers": [{ "name": "Subject", "value": oversized_header }],
+                "body": {},
+                "parts": [{
+                    "mimeType": oversized_mime_type,
+                    "filename": oversized_filename,
+                    "body": {
+                        "attachmentId": oversized_attachment_id,
+                        "size": 1
+                    }
+                }]
+            }
+        }))],
+    )
+    .dispatch()
+    .await;
+
+    let subject = message["body"]["headers"]["subject"]
+        .as_str()
+        .expect("selected Subject remains a string");
+    assert_eq!(subject.len(), 4 * 1024);
+    assert_eq!(subject.chars().count(), 2 * 1024);
+
+    let attachment = &message["body"]["attachments"][0];
+    let filename = attachment["filename"]
+        .as_str()
+        .expect("attachment filename remains a string");
+    assert_eq!(filename.len(), 512);
+    assert_eq!(filename.chars().count(), 256);
+    assert_eq!(
+        attachment["mime_type"]
+            .as_str()
+            .expect("attachment MIME type remains a string")
+            .len(),
+        512
+    );
+    let attachment_id = attachment["attachment_id"]
+        .as_str()
+        .expect("attachment id remains a string");
+    assert_eq!(attachment_id.len(), 512);
+    assert_eq!(attachment_id.chars().count(), 256);
+}
+
+#[tokio::test]
 async fn gmail_get_message_bounds_html_before_markdown_conversion() {
     let html = format!("<p>{}</p>", "x".repeat(600 * 1024));
     let (message, _) = GsuiteShapeCase::new(
