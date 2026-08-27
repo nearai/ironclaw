@@ -49,20 +49,14 @@ pub(super) fn first_look_result_preview(
                 continue;
             }
             Err(error) => {
-                tracing::debug!(
-                    error = %error,
-                    "large JSON first-look rendering unavailable; retaining legacy byte continuation"
-                );
+                tracing::debug!(error = %error, "large JSON first-look rendering unavailable");
                 break;
             }
         };
         let text = match ironclaw_threads::model_result_preview_from_json_page(&page) {
             Ok(redacted) => redacted.into_inner(),
             Err(error) => {
-                tracing::debug!(
-                    error = %error,
-                    "large JSON first-look redaction unavailable; retaining legacy byte continuation"
-                );
+                tracing::debug!(error = %error, "large JSON first-look redaction unavailable");
                 break;
             }
         };
@@ -105,29 +99,23 @@ fn structured_preview_fits_observation(
     let Ok(result_ref) = LoopResultRef::new(result_ref.to_string()) else {
         return false;
     };
-    let empty_preview = FirstLookResultPreview {
-        text: String::new(),
-        next_offset: None,
-        structured_json_view: true,
-    };
     let observation = result_reference_observation(
         &result_ref,
         byte_len as u64,
-        Some(empty_preview),
+        Some(FirstLookResultPreview {
+            text: preview.to_string(),
+            next_offset: None,
+            structured_json_view: true,
+        }),
         item_count,
     );
-    let Some(empty_size) = serde_json::to_vec(&observation)
-        .ok()
-        .map(|value| value.len())
-    else {
-        return false;
-    };
-    let Some(encoded_preview_size) = serde_json::to_vec(preview).ok().map(|value| value.len())
-    else {
-        return false;
-    };
-    empty_size.saturating_add(encoded_preview_size.saturating_sub(2))
-        <= RESULT_OBSERVATION_MAX_BYTES
+    matches!(
+        observation.detail,
+        ToolObservationDetail::ResultReference {
+            structured_json_view: true,
+            ..
+        }
+    )
 }
 
 fn floor_char_boundary(value: &str, index: usize) -> usize {
