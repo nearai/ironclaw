@@ -221,6 +221,7 @@ jobs:
           scripts/ci/test-check-wasm-artifact-freshness.sh
           scripts/ci/test-package-feature-flags.sh
           scripts/ci/test-quality-gate-runner.sh
+          scripts/ci/test-ironclaw-integration-batch-runner.sh
           scripts/ci/test-install-ci-apt-packages.sh
           python3 scripts/ci/test_changed_workspace_packages.py
           scripts/ci/test-reborn-crate-test-buckets.sh

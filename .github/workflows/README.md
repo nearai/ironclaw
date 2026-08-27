@@ -67,8 +67,9 @@ schema-checked in Code Style instead of launching unrelated integration lanes.
 The queue therefore preserves evidence for every classified impact without
 launching unrelated lanes. Diff-based crate work is packed into at most three
 buckets without dropping packages. Pull requests additionally cap root and
-integration work at one lane; merge groups run every selected root and
-integration lane in parallel, while main retains exhaustive fan-out.
+integration work at one lane. Merge groups run every selected root lane in
+parallel and batch selected integration lanes into one compile-and-run job;
+main retains exhaustive per-lane fan-out for instrumented coverage.
 Full-coverage crate buckets run one multi-package `cargo llvm-cov` invocation
 per bucket, preserving every package test and the bucket LCOV artifact while
 sharing dependency compilation across packages in the same job.

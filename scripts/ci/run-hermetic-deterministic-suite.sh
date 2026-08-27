@@ -90,6 +90,7 @@ run_integration_tier() {
   prepare_postgres_test_image
   while IFS= read -r test_name; do
     [[ "${test_name}" == --test ]] && continue
+    [[ "${test_name}" == reborn_group_* ]] && continue
     run cargo test -p ironclaw_integration_tests \
       --test "${test_name}" -- --nocapture
   done < <("${repo_root}/scripts/ci/reborn-coverage-int-tier-tests.sh")

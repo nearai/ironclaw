@@ -856,7 +856,6 @@ def _full_plan(
         "crate_buckets": _bucket_packages(canonical_packages),
         "root_partitions": list(ALL_ROOT_PARTITIONS),
         "integration_lanes": list(ALL_INTEGRATION_LANES),
-        "run_group_tests": True,
         "run_qa_replay": True,
         "run_sandbox_docker": True,
         "coverage_mode": "full",
@@ -1428,7 +1427,6 @@ def build_plan(
         "integration_lanes": sorted(
             integration_lanes, key=lambda value: (isinstance(value, str), str(value))
         ),
-        "run_group_tests": event == "merge_group" and "groups" in integration_lanes,
         "run_qa_replay": run_qa_replay,
         "run_sandbox_docker": run_sandbox_docker,
         "coverage_mode": "none",
