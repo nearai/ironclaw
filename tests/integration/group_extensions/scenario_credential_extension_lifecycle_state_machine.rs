@@ -170,8 +170,38 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     restorer
         .assert_tool_result_contains("\"phase\":\"active\"")
         .await?;
+
+    // The install result's large payload is exposed through the generic
+    // durable-result continuation rather than copied wholesale into the
+    // automatic first look.
+    let install_result_ref = restorer.latest_tool_result_ref().await?;
+    restorer.push_script([
+        RebornScriptedReply::tool_call(
+            "builtin.result_read",
+            json!({
+                "result_ref": install_result_ref,
+                "offset": 0,
+                "max_bytes": ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
+                "json_pointer": "/payload/installed",
+            }),
+        ),
+        RebornScriptedReply::text("restore result inspected"),
+    ]);
     restorer
-        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .submit_turn("inspect whether the stored reinstall result succeeded")
+        .await?;
+    restorer.assert_tool_invoked("builtin.result_read").await?;
+    restorer
+        .assert_tool_result_contains(r#""json_pointer":"/payload/installed""#)
+        .await?;
+    restorer
+        .assert_tool_result_contains(r#""content":true"#)
+        .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"json_pointer\":\"/payload/installed\""#)
+        .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"content\":true"#)
         .await?;
     restorer
         .assert_model_message_content_contains(r#"\"phase\":\"active\""#)

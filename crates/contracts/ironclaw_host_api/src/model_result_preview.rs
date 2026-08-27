@@ -22,16 +22,106 @@
 //! The durable full output stays host-owned behind the result reference; this is
 //! the bounded, credential-safe *preview* the model sees inline.
 
-use serde::{Deserialize, Serialize};
-
 use crate::error::HostApiError;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Maximum size of a model-visible result preview, in bytes. Mirrors
 /// `ironclaw_threads::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (24 KiB) — the
 /// largest raw first-look chunk a `result_read` returns — so the inline preview
 /// and a follow-up read share one cap.
 pub const MODEL_RESULT_PREVIEW_MAX_BYTES: usize = 24 * 1024;
+pub const MODEL_RESULT_JSON_PAGE_VIEW: &str = "ironclaw.json_page.v1";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ModelResultJsonPageView {
+    #[serde(rename = "ironclaw.json_page.v1")]
+    V1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelResultJsonNodeType {
+    Null,
+    Boolean,
+    Number,
+    String,
+    Array,
+    Object,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelResultJsonOffsetUnit {
+    Bytes,
+    Items,
+    Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ModelResultJsonOmittedDescriptor {
+    Object(ModelResultJsonOmittedObject),
+    Array(ModelResultJsonOmittedArray),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelResultJsonOmittedObject {
+    pub key: String,
+    pub json_pointer: String,
+    pub node_type: ModelResultJsonNodeType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelResultJsonOmittedArray {
+    pub index: u64,
+    pub json_pointer: String,
+    pub node_type: ModelResultJsonNodeType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelResultJsonNextRequest {
+    pub result_ref: String,
+    pub json_pointer: String,
+    pub offset: u64,
+    pub max_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+/// Closed host controls around provider-owned JSON selected by threads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelResultJsonPage {
+    pub view: ModelResultJsonPageView,
+    pub result_ref: String,
+    pub json_pointer: String,
+    pub node_type: ModelResultJsonNodeType,
+    pub offset: u64,
+    pub offset_unit: ModelResultJsonOffsetUnit,
+    pub content: Value,
+    pub omitted: Vec<ModelResultJsonOmittedDescriptor>,
+    pub total_bytes: u64,
+    pub next_offset: Option<u64>,
+    pub next: Option<ModelResultJsonNextRequest>,
+}
+
+impl ModelResultJsonPage {
+    pub fn from_json_str(value: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(value)
+    }
+
+    pub fn to_value(&self) -> Result<Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+}
 /// A bounded, credential-redacted, model-visible preview of a tool result's
 /// content. Tolerates delimiters/newlines (it is the tool's own output); refuses
 /// only genuine credential material and NUL/disallowed control characters.
@@ -66,11 +156,31 @@ impl ModelResultPreview {
                     value = serde_json::to_string(&structured)
                         .unwrap_or_else(|_| "[redacted]".to_string());
                 }
-                let redacted = crate::credential_redaction::redact_credential_text(&value);
+                let redacted = redact_model_result_text(&value)?;
                 validate_model_result_preview(&redacted)?;
                 Ok(Self(redacted))
             }
         }
+    }
+
+    /// Construct a preview from a threads-owned JSON page after provider
+    /// content has passed the canonical redactor. Opaque references and JSON
+    /// pointers remain exact host controls.
+    pub fn from_redacted_json_page(page: ModelResultJsonPage) -> Result<Self, HostApiError> {
+        let mut checked_content = page.content.clone();
+        redact_structured_credential_values(&mut checked_content, 0);
+        if checked_content != page.content {
+            return Err(HostApiError::invalid_safe_summary(
+                "JSON result page content must be credential-redacted",
+            ));
+        }
+        let encoded = serde_json::to_string(&page).map_err(|error| {
+            HostApiError::invalid_safe_summary(format!(
+                "JSON result page could not serialize: {error}"
+            ))
+        })?;
+        validate_json_page_wire(&encoded)?;
+        Ok(Self(encoded))
     }
 
     pub fn as_str(&self) -> &str {
@@ -82,6 +192,46 @@ impl ModelResultPreview {
     }
 }
 
+fn text_contains_redaction_target(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    crate::credential_redaction::contains_credential_label(&lower)
+        || crate::credential_redaction::contains_secret_like_token(&lower)
+        || contains_private_key_marker(&lower)
+}
+
+/// Whether a provider-owned JSON field name is credential-labeled and its
+/// selected value must not cross the model-visible boundary.
+///
+/// Kept beside the canonical structured redactor so durable JSON paging cannot
+/// drift to a second credential-label vocabulary.
+pub fn json_field_name_requires_redaction(field_name: &str) -> bool {
+    text_contains_redaction_target(field_name)
+}
+
+fn contains_private_key_marker(lower: &str) -> bool {
+    lower.contains("private key") || lower.contains("private_key") || lower.contains("private-key")
+}
+
+fn contains_pem_private_key(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("-----begin ")
+        && lower.contains("private key-----")
+        && lower.contains("-----end ")
+}
+
+fn redact_model_result_text(value: &str) -> Result<String, HostApiError> {
+    if contains_pem_private_key(value)
+        || crate::credential_redaction::contains_unredacted_credential_value(
+            &value.to_ascii_lowercase(),
+        )
+    {
+        return Ok("[redacted]".to_string());
+    }
+    let redacted = crate::credential_redaction::redact_credential_text(value);
+    validate_model_result_preview(&redacted)?;
+    Ok(redacted)
+}
+
 fn redact_structured_credential_values(value: &mut serde_json::Value, depth: usize) -> bool {
     if depth >= 16 {
         *value = serde_json::Value::String("[redacted]".to_string());
@@ -90,9 +240,7 @@ fn redact_structured_credential_values(value: &mut serde_json::Value, depth: usi
     match value {
         serde_json::Value::Object(fields) => {
             fields.iter_mut().fold(false, |changed, (key, value)| {
-                if crate::credential_redaction::contains_credential_marker(
-                    &key.to_ascii_lowercase(),
-                ) {
+                if json_field_name_requires_redaction(key) {
                     *value = serde_json::Value::String("[redacted]".to_string());
                     true
                 } else {
@@ -136,9 +284,10 @@ fn redact_embedded_structured_text(text: &mut String, depth: usize) -> bool {
 }
 
 fn redact_unparsed_credential_text(text: &mut String) -> bool {
-    if !crate::credential_redaction::contains_unredacted_credential_value(
-        &text.to_ascii_lowercase(),
-    ) {
+    let lower = text.to_ascii_lowercase();
+    if !crate::credential_redaction::contains_unredacted_credential_value(&lower)
+        && !contains_pem_private_key(text)
+    {
         return false;
     }
     *text = "[redacted]".to_string();
@@ -152,7 +301,19 @@ impl TryFrom<String> for ModelResultPreview {
     /// persisted/relayed preview is re-checked against the current redaction rule
     /// on deserialize, never trusted transparently.
     fn try_from(value: String) -> Result<Self, HostApiError> {
-        Self::new(value)
+        match ModelResultJsonPage::from_json_str(&value) {
+            Ok(page) => {
+                let preview = Self::from_redacted_json_page(page)?;
+                if preview.as_str() == value {
+                    Ok(preview)
+                } else {
+                    Err(HostApiError::invalid_safe_summary(
+                        "JSON result page must use its canonical wire form",
+                    ))
+                }
+            }
+            Err(_) => Self::new(value),
+        }
     }
 }
 
@@ -203,6 +364,30 @@ fn validate_model_result_preview(value: &str) -> Result<(), HostApiError> {
     if crate::credential_redaction::contains_secret_like_token(&lower) {
         return Err(HostApiError::invalid_safe_summary(
             "model result preview must not contain API-key-like tokens",
+        ));
+    }
+    if contains_pem_private_key(value)
+        || crate::credential_redaction::contains_unredacted_credential_value(&lower)
+    {
+        return Err(HostApiError::invalid_safe_summary(
+            "model result preview must not contain private key material",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_json_page_wire(value: &str) -> Result<(), HostApiError> {
+    if value.is_empty() || value.len() > MODEL_RESULT_PREVIEW_MAX_BYTES {
+        return Err(HostApiError::invalid_safe_summary(format!(
+            "model result preview must be between 1 and {MODEL_RESULT_PREVIEW_MAX_BYTES} bytes"
+        )));
+    }
+    if value
+        .chars()
+        .any(|c| c == '\0' || (c.is_control() && !matches!(c, '\n' | '\r' | '\t')))
+    {
+        return Err(HostApiError::invalid_safe_summary(
+            "model result preview must not contain NUL/disallowed control characters",
         ));
     }
     Ok(())

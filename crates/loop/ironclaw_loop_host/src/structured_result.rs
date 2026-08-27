@@ -142,6 +142,7 @@ impl SyntheticCapabilityHandler for StructuredResultHandler {
                 result_ref: write.result_ref.as_str().to_string(),
                 byte_len: write.byte_len,
                 preview: None,
+                structured_json_view: false,
                 total_bytes: Some(write.byte_len),
                 next_offset: None,
                 item_count: None,

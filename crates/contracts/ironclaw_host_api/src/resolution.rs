@@ -470,6 +470,10 @@ pub struct OutcomeRefs {
 /// suppressed by model-visible safety validation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResultPreviewMeta {
+    /// True only when the host constructed the preview as a typed JSON page.
+    /// Provider output that merely resembles the page wire shape remains false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub structured_json_view: bool,
     /// The result ref the preview is OF. A `result_read` reading ANOTHER result
     /// presents that original's ref (so the model continues reading the original,
     /// not the read's own chunk output); for a normal completed result it equals
@@ -507,12 +511,17 @@ impl ResultPreviewMeta {
     /// True when no continuation metadata is present (the preview is complete or
     /// absent) — the `skip_serializing_if` predicate keeping the wire clean.
     pub fn is_empty(&self) -> bool {
-        self.referenced_result_ref.is_none()
+        !self.structured_json_view
+            && self.referenced_result_ref.is_none()
             && self.total_bytes.is_none()
             && self.next_offset.is_none()
             && self.item_count.is_none()
             && self.summary.is_none()
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A dispatched capability's result — tool success OR recoverable failure (§3).

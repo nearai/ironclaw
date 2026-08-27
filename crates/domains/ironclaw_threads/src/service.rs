@@ -17,7 +17,7 @@ use crate::{
     RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, StructuredFinalizationRecord, SummaryArtifact, ThreadGoal, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
-    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultRecordRead, UpdateAssistantDraftRequest,
     UpdateThreadGoalRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
@@ -260,7 +260,7 @@ pub trait SessionThreadService: Send + Sync {
     async fn read_tool_result_record(
         &self,
         _request: ReadToolResultRecordRequest,
-    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+    ) -> Result<Option<ToolResultRecordRead>, SessionThreadError> {
         Err(SessionThreadError::Backend(
             "tool result records are not implemented by this SessionThreadService backend"
                 .to_string(),
@@ -672,7 +672,7 @@ where
     async fn read_tool_result_record(
         &self,
         request: ReadToolResultRecordRequest,
-    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+    ) -> Result<Option<ToolResultRecordRead>, SessionThreadError> {
         self.as_ref().read_tool_result_record(request).await
     }
 

@@ -580,7 +580,7 @@ impl RebornIntegrationHarnessBuilder {
     ///
     /// Implies [`with_builtin_http_tools`](Self::with_builtin_http_tools).
     pub fn with_live_shell(mut self) -> Self {
-        self.capability = RebornCapabilityBackend::BuiltinHttpTools;
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsDurableIo;
         self.shell_mode = ShellMode::Live;
         self
     }

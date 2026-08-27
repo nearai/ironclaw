@@ -212,6 +212,9 @@ pub struct ChatMessage {
     /// exact encrypted/redacted/summary replay rather than plain text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_details: Option<ReasoningDetails>,
+    /// Host-only provenance for structured tool-result page controls.
+    #[serde(skip)]
+    pub tool_result_structured_json_view: bool,
 }
 
 /// Opening delimiter of the host-reminder frame.
@@ -267,6 +270,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
         }
     }
 
@@ -281,6 +285,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
         }
     }
 
@@ -306,6 +311,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
         }
     }
 
@@ -322,6 +328,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
         }
     }
 
@@ -336,6 +343,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
         }
     }
 
@@ -357,6 +365,7 @@ impl ChatMessage {
             },
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
         }
     }
 
@@ -407,6 +416,7 @@ impl ChatMessage {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
         }
     }
 }

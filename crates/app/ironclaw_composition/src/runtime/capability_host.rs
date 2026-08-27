@@ -38,15 +38,12 @@ use ironclaw_product_contracts::{
 
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityInputRef,
-    LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
-    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
-    ModelVisibleToolObservation, ObservationTrust, ProviderToolCall, ToolObservationDetail,
-    ToolObservationStatus, resolution,
+    LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, resolution,
 };
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
-    TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadMessageId, ThreadScope,
+    ThreadMessageId, ThreadScope,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{ExternalToolCatalog, LoopResultRef};
@@ -64,6 +61,7 @@ use ironclaw_assistant::projection::{
 mod notification_channels_set;
 mod outbound_delivery;
 mod refreshing_capability_port;
+mod result_preview;
 #[cfg(test)]
 mod shell_tests;
 #[cfg(test)]
@@ -85,6 +83,9 @@ pub(crate) use ironclaw_loop_host::SKILL_ACTIVATE_CAPABILITY_ID;
 use refreshing_capability_port::{
     RefreshingCapabilityPortConfig, create_refreshing_capability_port,
 };
+#[cfg(test)]
+use result_preview::RESULT_PREVIEW_MAX_BYTES;
+use result_preview::{first_look_result_preview, result_reference_observation};
 
 #[cfg(feature = "test-support")]
 pub(super) use ironclaw_loop_host::wrap_result_read_capability_for_test;
@@ -382,12 +383,6 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
 const CAPABILITY_IO_MAX_STAGED_REFS: usize = 1024;
 const CAPABILITY_IO_MAX_STAGED_BYTES: usize = 4 * 1024 * 1024;
 const DURABLE_TOOL_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// First-look preview bound on the initial result-reference observation.
-/// Matches `result_read`'s max chunk size so the preview is exactly the
-/// first chunk `result_read` would itself return at `offset: 0` — a model
-/// that pages past `next_offset` sees no gap or overlap.
-const RESULT_PREVIEW_MAX_BYTES: usize = TOOL_RESULT_RECORD_READ_MAX_BYTES;
-
 struct StagedCapabilityIo {
     inputs: StdMutex<StagedValueStore>,
     results: StdMutex<StagedValueStore>,
@@ -910,7 +905,7 @@ impl LoopCapabilityResultWriter for StagedCapabilityIo {
         // Snapshot the first-look preview from the same bytes the durable
         // record stores, before `output_content` is moved into persistence,
         // so its offsets line up exactly with what `result_read` returns.
-        let preview = first_look_result_preview(&output_content);
+        let preview = first_look_result_preview(&output_content, &result_ref, item_count);
         let diagnostic_result = self
             .tool_diagnostics
             .prepare_result(&output_content, TOOL_RESULT_DIAGNOSTIC_CAPTURE_MAX_BYTES);
@@ -1066,116 +1061,6 @@ fn serialized_result_output(output: &serde_json::Value) -> Result<Vec<u8>, Agent
         ));
     }
     Ok(content)
-}
-
-/// A bounded, UTF-8-safe first-look slice of a serialized result payload,
-/// truncated at `RESULT_PREVIEW_MAX_BYTES`.
-struct FirstLookResultPreview {
-    text: String,
-    /// `None` when `text` already covers the entire payload.
-    next_offset: Option<u64>,
-}
-
-/// Builds the inline first-look preview from the same serialized bytes the
-/// durable record stores, so a truncated preview's `next_offset` matches
-/// exactly what `result_read` would return continuing from that offset.
-fn first_look_result_preview(serialized: &[u8]) -> Option<FirstLookResultPreview> {
-    let Ok(full_text) = std::str::from_utf8(serialized) else {
-        return None;
-    };
-    if full_text.len() <= RESULT_PREVIEW_MAX_BYTES {
-        return Some(FirstLookResultPreview {
-            text: full_text.to_string(),
-            next_offset: None,
-        });
-    }
-    let end = floor_char_boundary(full_text, RESULT_PREVIEW_MAX_BYTES);
-    Some(FirstLookResultPreview {
-        text: full_text[..end].to_string(),
-        next_offset: Some(end as u64),
-    })
-}
-
-fn floor_char_boundary(value: &str, index: usize) -> usize {
-    if index >= value.len() {
-        return value.len();
-    }
-    let mut index = index;
-    while index > 0 && !value.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
-/// Truncated-preview summary text; names the full array's element count when
-/// known so the model doesn't misread a truncated array preview as the whole
-/// result (issue: byte-slice lands mid-JSON-array).
-fn truncated_preview_summary(next_offset: u64, item_count: Option<u64>) -> String {
-    let base = format!(
-        "Tool completed; preview truncated, use result_read with the result \
-         reference and offset {next_offset} for more output."
-    );
-    match item_count {
-        Some(count) => format!("{base} Full result is a JSON array of {count} items."),
-        None => base,
-    }
-}
-
-fn result_reference_observation(
-    result_ref: &LoopResultRef,
-    byte_len: u64,
-    preview: Option<FirstLookResultPreview>,
-    item_count: Option<u64>,
-) -> ModelVisibleToolObservation {
-    let (summary, preview_text, total_bytes, next_offset, item_count) = match preview {
-        Some(FirstLookResultPreview {
-            text,
-            next_offset: Some(next_offset),
-        }) => (
-            truncated_preview_summary(next_offset, item_count),
-            Some(text),
-            Some(byte_len),
-            Some(next_offset),
-            item_count,
-        ),
-        Some(FirstLookResultPreview {
-            text,
-            next_offset: None,
-        }) => (
-            "Tool completed; preview contains the full result.".to_string(),
-            Some(text),
-            Some(byte_len),
-            None,
-            None,
-        ),
-        None => (
-            "Tool completed; use result_read with the result reference for more output."
-                .to_string(),
-            None,
-            None,
-            None,
-            None,
-        ),
-    };
-    ModelVisibleToolObservation {
-        schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-        status: ToolObservationStatus::Success,
-        summary,
-        detail: ToolObservationDetail::ResultReference {
-            result_ref: result_ref.as_str().to_string(),
-            byte_len,
-            preview: preview_text,
-            total_bytes,
-            next_offset,
-            item_count,
-        },
-        artifacts: vec![ModelVisibleArtifact {
-            artifact_ref: result_ref.as_str().to_string(),
-            summary: "Stored tool result".to_string(),
-        }],
-        recovery: None,
-        trust: ObservationTrust::UntrustedToolOutput,
-    }
 }
 
 fn durable_result_store_error(error: ironclaw_threads::SessionThreadError) -> AgentLoopHostError {

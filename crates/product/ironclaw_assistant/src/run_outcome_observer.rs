@@ -293,14 +293,7 @@ fn outcome_notification_id(
     run_id: TurnRunId,
     kind: NotificationKind,
 ) -> Result<NotificationId, String> {
-    let kind = match kind {
-        NotificationKind::RunCompleted => "completed",
-        NotificationKind::RunFailed => "failed",
-        NotificationKind::DeliveryFailed => "delivery-failed",
-        NotificationKind::ApprovalRequired => "approval",
-        NotificationKind::AuthenticationRequired => "authentication",
-        NotificationKind::RunBlocked => "blocked",
-    };
+    let kind = kind.stable_key();
     NotificationId::new(format!("run:{run_id}:{kind}"))
         .map_err(|error| format!("build run outcome notification id failed: {error}"))
 }
