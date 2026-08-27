@@ -2101,8 +2101,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         plan = self.plan(
             "pull_request",
             [
-                "tests/integration/group_extensions/"
-                "scenario_install_then_visible_cross_thread.rs"
+                "tests/integration/group_extensions/scenario_install_then_visible_cross_thread.rs"
             ],
         )
         self.assertEqual(plan["mode"], "selected")
