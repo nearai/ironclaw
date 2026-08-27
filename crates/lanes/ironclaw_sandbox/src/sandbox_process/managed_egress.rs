@@ -1883,6 +1883,29 @@ async fn write_proxy_credential_material(
     Ok(())
 }
 
+/// Apply POSIX permission bits to a freshly created material file.
+///
+/// Windows has no POSIX permission model, so the non-unix build is a no-op.
+/// It still *takes* `mode`, which is the point: a `#[cfg(unix)]` block around
+/// the call site left the parameter unused on Windows and `-D warnings`
+/// rejected the build. Consuming it on every platform keeps one signature and
+/// needs no lint suppression.
+#[cfg(unix)]
+fn apply_material_mode(file: &std::fs::File, mode: u32) -> Result<(), RuntimeProcessError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox managed-egress material permissions failed: {error}"
+            ))
+        })
+}
+
+#[cfg(not(unix))]
+fn apply_material_mode(_file: &std::fs::File, _mode: u32) -> Result<(), RuntimeProcessError> {
+    Ok(())
+}
+
 async fn write_atomic_material_file_with_mode<C>(
     path: PathBuf,
     contents: C,
@@ -1904,18 +1927,7 @@ where
                 "sandbox managed-egress temporary material file create failed: {error}"
             ))
         })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            temporary
-                .as_file()
-                .set_permissions(std::fs::Permissions::from_mode(mode))
-                .map_err(|error| {
-                    RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox managed-egress material permissions failed: {error}"
-                    ))
-                })?;
-        }
+        apply_material_mode(temporary.as_file(), mode)?;
         temporary.write_all(contents.as_ref()).map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox managed-egress material file write failed: {error}"
@@ -2047,6 +2059,52 @@ mod tests {
     use ironclaw_host_api::action::{NetworkScheme, NetworkTargetPattern};
 
     use super::*;
+
+    /// The managed-egress writer hands the credential material's permission
+    /// bits to `apply_material_mode` on every platform. Before this existed
+    /// the call site was a `#[cfg(unix)]` block, which left `mode` unused on
+    /// Windows and made `-D warnings` fail the whole build there.
+    ///
+    /// Asserting the mode actually lands (rather than that the call merely
+    /// returns `Ok`) is the point: material files carry proxy credentials, so
+    /// a writer that silently stopped restricting them would be a real leak,
+    /// not a style regression.
+    #[cfg(unix)]
+    #[test]
+    fn apply_material_mode_restricts_the_file_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("material");
+        let file = std::fs::File::create(&path).expect("create material file");
+
+        apply_material_mode(&file, 0o600).expect("apply mode");
+
+        let mode = std::fs::metadata(&path)
+            .expect("material metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "credential material must be owner-only; got {:o}",
+            mode & 0o777
+        );
+    }
+
+    /// Windows has no POSIX permission model, so the non-unix build is a
+    /// deliberate no-op -- but it must still accept `mode`, because consuming
+    /// the parameter on every platform is what removes the need for a lint
+    /// suppression at the call site.
+    #[cfg(not(unix))]
+    #[test]
+    fn apply_material_mode_is_a_noop_off_unix() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("material");
+        let file = std::fs::File::create(&path).expect("create material file");
+
+        apply_material_mode(&file, 0o600).expect("apply mode must succeed off unix");
+    }
 
     fn policy() -> NetworkPolicy {
         NetworkPolicy {
