@@ -224,7 +224,7 @@ async fn cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_histor
             oldest.sequence,
             middle.sequence.checked_sub(1).expect("ordered messages"),
             OLDER_SUMMARY,
-            ironclaw_threads::SummaryModelContextPolicy::ReplaceRangeWhenSelected,
+            None,
         )
         .await
         .expect("older summary persists");
@@ -233,7 +233,7 @@ async fn cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_histor
             oldest.sequence,
             retained.sequence.checked_sub(1).expect("ordered messages"),
             CUMULATIVE_SUMMARY,
-            ironclaw_threads::SummaryModelContextPolicy::CumulativeBarrier,
+            Some(ironclaw_threads::SummaryContextMode::CumulativeBarrier),
         )
         .await
         .expect("cumulative summary persists");

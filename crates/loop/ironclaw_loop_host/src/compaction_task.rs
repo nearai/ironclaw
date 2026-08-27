@@ -11,8 +11,8 @@ use ironclaw_loop_contracts::{
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
     CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
-    SummaryArtifact, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadMessageRangeRequest, ThreadScope,
+    SummaryArtifact, SummaryContextMode, SummaryKind, SummaryModelContextPolicy,
+    ThreadHistoryRequest, ThreadMessageRangeRequest, ThreadScope,
 };
 use thiserror::Error;
 
@@ -89,6 +89,7 @@ where
     prompt_id: SystemPromptId,
     system_prompt: String,
     max_input_bytes: usize,
+    max_summary_bytes: usize,
     max_input_tokens: u64,
 }
 
@@ -119,8 +120,16 @@ struct ValidatedCompactionRange {
     messages: Vec<ValidatedCompactionMessage>,
 }
 
+struct PriorSummaryContext {
+    start_sequence: Option<u64>,
+    compacted_through: u64,
+    summary_artifact_id: Option<ironclaw_threads::SummaryArtifactId>,
+    messages: Vec<ValidatedCompactionMessage>,
+}
+
 enum CompactionRangeDecision {
     Ready(ValidatedCompactionRange),
+    AlreadyCompacted(LoopCompactionResponse),
     Deferred { safe_summary: LoopSafeSummary },
 }
 
@@ -249,6 +258,7 @@ where
             prompt_id,
             system_prompt: system_prompt.into(),
             max_input_bytes: 256 * 1024,
+            max_summary_bytes: 128 * 1024,
             max_input_tokens: 64 * 1024,
         }
     }
@@ -259,6 +269,9 @@ where
     ) -> Result<LoopCompactionOutcome, CompactionError> {
         let range = match self.validate_range(&request).await? {
             CompactionRangeDecision::Ready(range) => range,
+            CompactionRangeDecision::AlreadyCompacted(response) => {
+                return Ok(LoopCompactionOutcome::Compacted(response));
+            }
             CompactionRangeDecision::Deferred { safe_summary } => {
                 return Ok(LoopCompactionOutcome::Deferred { safe_summary });
             }
@@ -290,7 +303,6 @@ where
         ) {
             return Err(CompactionError::UnsupportedMode);
         }
-        let start_exclusive = request.last_compacted_through_seq.unwrap_or(0);
         if self.threads.supports_resolve_scope() {
             match self.threads.resolve_scope(request.thread_id.clone()).await {
                 Ok(scope) if scope == request.expected_scope => {}
@@ -305,6 +317,34 @@ where
                     });
                 }
             }
+        }
+        let prior_context = self
+            .load_prior_summary_context(request, request.last_compacted_through_seq)
+            .await?;
+        let start_exclusive = request
+            .last_compacted_through_seq
+            .unwrap_or(0)
+            .max(prior_context.compacted_through);
+        if request.drop_through_seq <= start_exclusive {
+            if request.drop_through_seq == prior_context.compacted_through
+                && let Some(summary_artifact_id) = prior_context.summary_artifact_id
+            {
+                return Ok(CompactionRangeDecision::AlreadyCompacted(
+                    LoopCompactionResponse {
+                        summary_artifact_id: LoopSummaryArtifactId::new(
+                            summary_artifact_id.to_string(),
+                        )
+                        .map_err(|_| {
+                            CompactionError::PersistenceFailed {
+                                safe_summary: safe("summary artifact id is invalid"),
+                            }
+                        })?,
+                        compression_ratio_ppm: 0,
+                        redacted_leak_count: 0,
+                    },
+                ));
+            }
+            return Err(CompactionError::InvalidCutPoint);
         }
         let range = self
             .threads
@@ -391,9 +431,8 @@ where
             Some(message) => message.sequence,
             None => return Err(CompactionError::InvalidCutPoint),
         };
-        let (cumulative_start_sequence, mut prior_summaries) = self
-            .load_prior_summary_context(request, start_exclusive)
-            .await?;
+        let cumulative_start_sequence = prior_context.start_sequence;
+        let mut prior_summaries = prior_context.messages;
         prior_summaries.append(&mut validated_messages);
 
         Ok(CompactionRangeDecision::Ready(ValidatedCompactionRange {
@@ -409,11 +448,8 @@ where
     async fn load_prior_summary_context(
         &self,
         request: &CompactionTaskRequest,
-        compacted_through: u64,
-    ) -> Result<(Option<u64>, Vec<ValidatedCompactionMessage>), CompactionError> {
-        if compacted_through == 0 {
-            return Ok((None, Vec::new()));
-        }
+        compacted_through: Option<u64>,
+    ) -> Result<PriorSummaryContext, CompactionError> {
         let history = self
             .threads
             .list_thread_history(ThreadHistoryRequest {
@@ -421,28 +457,50 @@ where
                 thread_id: request.thread_id.clone(),
             })
             .await
-            .map_err(|_| CompactionError::PersistenceFailed {
-                safe_summary: safe("previous compaction summaries unavailable"),
+            .map_err(|error| {
+                tracing::debug!(%error, "previous compaction summaries unavailable");
+                CompactionError::PersistenceFailed {
+                    safe_summary: safe("previous compaction summaries unavailable"),
+                }
             })?;
         let selected =
             select_prior_compaction_summaries(history.summary_artifacts, compacted_through);
-        let start_sequence = selected.iter().map(|summary| summary.start_sequence).min();
-        if selected.is_empty() {
+        if selected.is_empty() && compacted_through.is_some() {
             return Err(CompactionError::PersistenceFailed {
                 safe_summary: safe("previous compaction checkpoint missing"),
             });
         }
-        Ok((
+        let latest_summary = selected
+            .iter()
+            .max_by_key(|summary| (summary.end_sequence, summary.summary_id));
+        let start_sequence = selected.iter().map(|summary| summary.start_sequence).min();
+        let durable_compacted_through = latest_summary
+            .map(|summary| summary.end_sequence)
+            .unwrap_or(0);
+        let summary_artifact_id = latest_summary.map(|summary| summary.summary_id);
+        let messages = selected
+            .into_iter()
+            .map(|summary| ValidatedCompactionMessage {
+                sequence: summary.end_sequence,
+                kind: MessageKind::Summary,
+                body: summary.content,
+            })
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            let sanitized = self.sanitizer().sanitize_messages(&messages)?;
+            if sanitized.content.len() > self.max_summary_bytes {
+                return Err(CompactionError::InputTooLarge {
+                    cap: self.max_summary_bytes,
+                    observed_bytes: sanitized.content.len(),
+                });
+            }
+        }
+        Ok(PriorSummaryContext {
             start_sequence,
-            selected
-                .into_iter()
-                .map(|summary| ValidatedCompactionMessage {
-                    sequence: summary.end_sequence,
-                    kind: MessageKind::Summary,
-                    body: summary.content,
-                })
-                .collect(),
-        ))
+            compacted_through: durable_compacted_through,
+            summary_artifact_id,
+            messages,
+        })
     }
 
     fn build_input(
@@ -461,6 +519,14 @@ where
             self.injection_scanner.as_ref(),
             self.leak_detector.as_ref(),
             self.max_input_bytes,
+        )
+    }
+
+    fn summary_sanitizer(&self) -> CompactionSanitizer<'_> {
+        CompactionSanitizer::new(
+            self.injection_scanner.as_ref(),
+            self.leak_detector.as_ref(),
+            self.max_summary_bytes,
         )
     }
 
@@ -494,7 +560,9 @@ where
         response: &SystemInferenceResponse,
         input_bytes: usize,
     ) -> Result<SanitizedSummary, CompactionError> {
-        let sanitized = self.sanitizer().sanitize_summary(&response.output_text)?;
+        let sanitized = self
+            .summary_sanitizer()
+            .sanitize_summary(&response.output_text)?;
         let compression_ratio_ppm = compression_ratio_ppm(input_bytes, sanitized.content.len());
         Ok(SanitizedSummary {
             content: sanitized.content,
@@ -517,7 +585,8 @@ where
                 end_sequence: range.end_sequence,
                 summary_kind: SummaryKind::Compaction,
                 content: MessageContent::text(summary.content),
-                model_context_policy: Some(SummaryModelContextPolicy::CumulativeBarrier),
+                model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+                context_mode: Some(SummaryContextMode::CumulativeBarrier),
             })
             .await
             .map_err(|error| {
@@ -539,27 +608,20 @@ where
 
 fn select_prior_compaction_summaries(
     summaries: Vec<SummaryArtifact>,
-    compacted_through: u64,
+    compacted_through: Option<u64>,
 ) -> Vec<SummaryArtifact> {
     let mut eligible = summaries
         .into_iter()
         .filter(|summary| {
             summary.summary_kind == SummaryKind::Compaction
-                && summary.end_sequence <= compacted_through
-                && matches!(
-                    summary.model_context_policy,
-                    Some(
-                        SummaryModelContextPolicy::ReplaceRangeWhenSelected
-                            | SummaryModelContextPolicy::CumulativeBarrier
-                    )
-                )
+                && compacted_through.is_none_or(|through| summary.end_sequence <= through)
+                && summary.model_context_policy
+                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
         })
         .collect::<Vec<_>>();
     if let Some(newest_barrier) = eligible
         .iter()
-        .filter(|summary| {
-            summary.model_context_policy == Some(SummaryModelContextPolicy::CumulativeBarrier)
-        })
+        .filter(|summary| summary.context_mode == Some(SummaryContextMode::CumulativeBarrier))
         .max_by(|left, right| {
             left.end_sequence
                 .cmp(&right.end_sequence)
@@ -569,8 +631,7 @@ fn select_prior_compaction_summaries(
     {
         eligible.retain(|summary| {
             summary.summary_id == newest_barrier.summary_id
-                || (summary.model_context_policy
-                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+                || (summary.context_mode.is_none()
                     && summary.start_sequence > newest_barrier.end_sequence)
         });
     }
@@ -809,7 +870,7 @@ mod tests {
     fn summary(
         start_sequence: u64,
         end_sequence: u64,
-        policy: SummaryModelContextPolicy,
+        context_mode: Option<SummaryContextMode>,
         content: &str,
     ) -> SummaryArtifact {
         SummaryArtifact {
@@ -819,7 +880,8 @@ mod tests {
             end_sequence,
             summary_kind: SummaryKind::Compaction,
             content: content.to_string(),
-            model_context_policy: Some(policy),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode,
         }
     }
 
@@ -862,30 +924,20 @@ mod tests {
 
     #[test]
     fn prior_summary_selection_keeps_mixed_version_deltas_after_the_newest_barrier() {
-        let old_incremental = summary(
-            1,
-            3,
-            SummaryModelContextPolicy::ReplaceRangeWhenSelected,
-            "old incremental",
-        );
+        let old_incremental = summary(1, 3, None, "old incremental");
         let old_barrier = summary(
             1,
             5,
-            SummaryModelContextPolicy::CumulativeBarrier,
+            Some(SummaryContextMode::CumulativeBarrier),
             "old barrier",
         );
         let newest_barrier = summary(
             1,
             8,
-            SummaryModelContextPolicy::CumulativeBarrier,
+            Some(SummaryContextMode::CumulativeBarrier),
             "newest barrier",
         );
-        let rolling_deploy_delta = summary(
-            9,
-            11,
-            SummaryModelContextPolicy::ReplaceRangeWhenSelected,
-            "rolling deploy delta",
-        );
+        let rolling_deploy_delta = summary(9, 11, None, "rolling deploy delta");
 
         let selected = select_prior_compaction_summaries(
             vec![
@@ -894,7 +946,7 @@ mod tests {
                 old_incremental,
                 newest_barrier.clone(),
             ],
-            11,
+            Some(11),
         );
 
         assert_eq!(

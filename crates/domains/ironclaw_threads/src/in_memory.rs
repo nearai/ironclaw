@@ -1605,6 +1605,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             summary_kind: request.summary_kind,
             content,
             model_context_policy: request.model_context_policy,
+            context_mode: request.context_mode,
         };
         thread.summary_artifacts.push(artifact.clone());
         Ok(artifact)

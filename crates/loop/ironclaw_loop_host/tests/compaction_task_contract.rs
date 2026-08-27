@@ -26,7 +26,7 @@ use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest,
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, EnsureThreadRequest, InMemorySessionThreadService,
-    MessageContent, RedactMessageRequest, SessionThreadService, SummaryKind,
+    MessageContent, RedactMessageRequest, SessionThreadService, SummaryContextMode, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
     ToolResultSafeSummary,
 };
@@ -1302,10 +1302,31 @@ async fn incremental_compaction_folds_the_previous_checkpoint_into_a_cumulative_
     assert_eq!(newest.end_sequence, 3);
     assert_eq!(
         newest.model_context_policy,
-        Some(SummaryModelContextPolicy::CumulativeBarrier)
+        Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+    );
+    assert_eq!(
+        newest.context_mode,
+        Some(SummaryContextMode::CumulativeBarrier)
     );
     assert!(newest.content.contains("result:alpha"));
     assert!(newest.content.contains("bytes 10-20"));
+
+    fixture.append_user("fresh run delta").await;
+    let fresh_run_inference = Arc::new(CapturingInference::new("third cumulative checkpoint"));
+    let fresh_run_port = fixture.port_with_inference(
+        fresh_run_inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+    fresh_run_port
+        .compact_loop_context(fixture.request(4))
+        .await
+        .expect("a fresh run should resume from the durable barrier");
+    let fresh_run_input = fresh_run_inference.last_input();
+    assert!(fresh_run_input.contains("cumulative checkpoint preserving result:alpha bytes 10-20"));
+    assert!(fresh_run_input.contains("fresh run delta"));
+    assert!(!fresh_run_input.contains("already summarized raw transcript"));
 }
 
 #[tokio::test]
@@ -1450,6 +1471,33 @@ async fn compaction_task_rejects_oversized_input_before_inference() {
 }
 
 #[tokio::test]
+async fn compaction_task_reserves_half_the_input_budget_for_future_deltas() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("summarize me").await;
+    let port = fixture.port(
+        "x".repeat(128 * 1024),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+    );
+
+    let error = port
+        .compact_loop_context(fixture.request(1))
+        .await
+        .expect_err("a checkpoint must leave room for the next transcript delta");
+
+    assert!(matches!(error, LoopCompactionError::InputTooLarge));
+    let history = fixture
+        .threads
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.summary_artifacts.is_empty());
+}
+
+#[tokio::test]
 async fn compaction_task_rejects_xml_expanded_output_before_persistence() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("summarize me").await;
@@ -1583,7 +1631,11 @@ async fn compaction_task_persists_escaped_summary_with_anti_injection_prefix() {
     );
     assert_eq!(
         summary.model_context_policy,
-        Some(SummaryModelContextPolicy::CumulativeBarrier)
+        Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+    );
+    assert_eq!(
+        summary.context_mode,
+        Some(SummaryContextMode::CumulativeBarrier)
     );
 }
 
@@ -1623,13 +1675,13 @@ async fn production_compaction_scanner_allows_dotted_package_names_and_persists_
 }
 
 #[tokio::test]
-async fn compaction_task_maps_summary_persistence_failure_after_inference() {
+async fn stale_compaction_request_reuses_the_durable_barrier_without_inference() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("visible").await;
-    fixture
+    let existing = fixture
         .create_cumulative_barrier(1, 1, "existing summary")
         .await;
-    let inference = Arc::new(CapturingInference::new("summary"));
+    let inference = Arc::new(CapturingInference::new("different retry summary"));
     let port = fixture.port_with_inference(
         inference.clone(),
         Arc::new(CleanInjectionScanner),
@@ -1637,49 +1689,19 @@ async fn compaction_task_maps_summary_persistence_failure_after_inference() {
         fixture.scope.clone(),
     );
 
-    let error = port
+    let outcome = port
         .compact_loop_context(fixture.request(1))
         .await
-        .expect_err("overlapping summary persistence failure should be mapped");
+        .expect("the durable barrier should satisfy a stale compaction request");
 
-    assert!(matches!(
-        error,
-        LoopCompactionError::PersistenceFailed { .. }
-    ));
-    assert!(inference.last_input().contains("visible"));
-}
-
-#[tokio::test]
-async fn compaction_task_reuses_exact_persisted_summary_on_retry() {
-    let fixture = CompactionFixture::new().await;
-    fixture.append_user("visible").await;
-    let expected_summary = format!("{EXPECTED_ANTI_INJECTION_PREFIX}<summary>summary</summary>");
-    let existing = fixture
-        .create_cumulative_barrier(1, 1, &expected_summary)
-        .await;
-    let inference = Arc::new(CapturingInference::new("summary"));
-    let port = fixture.port_with_inference(
-        inference.clone(),
-        Arc::new(CleanInjectionScanner),
-        Arc::new(CleanLeakScanner),
-        fixture.scope.clone(),
+    let LoopCompactionOutcome::Compacted(response) = outcome else {
+        panic!("expected compacted outcome");
+    };
+    assert_eq!(
+        response.summary_artifact_id.as_str(),
+        existing.summary_id.to_string()
     );
-
-    port.compact_loop_context(fixture.request(1))
-        .await
-        .expect("exact persisted compaction summary should be reused");
-
-    let history = fixture
-        .threads
-        .list_thread_history(ThreadHistoryRequest {
-            scope: fixture.scope.clone(),
-            thread_id: fixture.thread_id.clone(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(history.summary_artifacts.len(), 1);
-    assert_eq!(history.summary_artifacts[0].summary_id, existing.summary_id);
-    assert!(inference.last_input().contains("visible"));
+    assert!(inference.last_input().is_empty());
 }
 
 #[tokio::test]
@@ -2119,7 +2141,8 @@ impl CompactionFixture {
                 end_sequence,
                 summary_kind: SummaryKind::Compaction,
                 content: MessageContent::text(content),
-                model_context_policy: Some(SummaryModelContextPolicy::CumulativeBarrier),
+                model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+                context_mode: Some(SummaryContextMode::CumulativeBarrier),
             })
             .await
             .unwrap()

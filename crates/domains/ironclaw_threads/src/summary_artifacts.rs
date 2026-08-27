@@ -1,6 +1,6 @@
 use crate::{
-    CreateSummaryArtifactRequest, SessionThreadError, SummaryArtifact, SummaryKind,
-    SummaryModelContextPolicy,
+    CreateSummaryArtifactRequest, SessionThreadError, SummaryArtifact, SummaryContextMode,
+    SummaryKind, SummaryModelContextPolicy,
 };
 
 pub(crate) fn sorted_context_summaries(
@@ -28,8 +28,7 @@ pub(crate) fn newest_context_barrier(
     summaries
         .iter()
         .filter(|summary| {
-            summary.model_context_policy == Some(SummaryModelContextPolicy::CumulativeBarrier)
-                && eligible(summary)
+            summary.context_mode == Some(SummaryContextMode::CumulativeBarrier) && eligible(summary)
         })
         .max_by(|left, right| {
             left.end_sequence
@@ -48,6 +47,8 @@ pub(crate) fn is_exact_compaction_summary_replay(
         && summary.start_sequence == request.start_sequence
         && summary.end_sequence == request.end_sequence
         && summary.content == content
+        && summary.model_context_policy == request.model_context_policy
+        && summary.context_mode == request.context_mode
 }
 
 /// Disjoint replacement summaries reject non-idempotent overlaps. Cumulative
@@ -63,9 +64,17 @@ pub(crate) fn find_overlapping_summary<'a>(
         return Ok(None);
     };
 
-    if policy == SummaryModelContextPolicy::CumulativeBarrier {
+    if request.context_mode == Some(SummaryContextMode::CumulativeBarrier) {
+        if policy != SummaryModelContextPolicy::ReplaceRangeWhenSelected
+            || request.start_sequence != 1
+        {
+            return Err(SessionThreadError::InvalidSummaryRange {
+                start_sequence: request.start_sequence,
+                end_sequence: request.end_sequence,
+            });
+        }
         let mut barriers = summaries.iter().filter(|summary| {
-            summary.model_context_policy == Some(SummaryModelContextPolicy::CumulativeBarrier)
+            summary.context_mode == Some(SummaryContextMode::CumulativeBarrier)
                 && request.summary_kind == SummaryKind::Compaction
                 && summary.summary_kind == request.summary_kind
         });
@@ -148,6 +157,7 @@ mod tests {
             summary_kind: SummaryKind::Compaction,
             content: crate::MessageContent::text("summary content"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         }
     }
 
@@ -160,6 +170,7 @@ mod tests {
             summary_kind: SummaryKind::Compaction,
             content: "summary content".to_string(),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         }
     }
 
@@ -172,12 +183,13 @@ mod tests {
             summary_kind: SummaryKind::Compaction,
             content: content.to_string(),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         }
     }
 
     fn barrier_with(start_sequence: u64, end_sequence: u64, content: &str) -> SummaryArtifact {
         SummaryArtifact {
-            model_context_policy: Some(SummaryModelContextPolicy::CumulativeBarrier),
+            context_mode: Some(SummaryContextMode::CumulativeBarrier),
             ..summary_with(start_sequence, end_sequence, content)
         }
     }
@@ -339,8 +351,7 @@ mod tests {
         superseding.start_sequence = 1;
         superseding.end_sequence = 8;
         superseding.content = crate::MessageContent::text("cumulative checkpoint");
-        superseding.model_context_policy = Some(SummaryModelContextPolicy::CumulativeBarrier);
-
+        superseding.context_mode = Some(SummaryContextMode::CumulativeBarrier);
         assert!(
             find_overlapping_summary(&summaries, &superseding, "cumulative checkpoint")
                 .expect("superseding barriers may overlap")

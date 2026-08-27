@@ -3846,6 +3846,7 @@ where
             summary_kind: request.summary_kind,
             content,
             model_context_policy: request.model_context_policy,
+            context_mode: request.context_mode,
         };
         let path = summary_record_path(&request.scope, &request.thread_id, artifact.summary_id)?;
         let entry = Self::summary_entry(&artifact)?;
