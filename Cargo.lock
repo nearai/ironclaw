@@ -4514,6 +4514,7 @@ dependencies = [
  "jsonschema 0.49.9",
  "libc",
  "libsql",
+ "parking_lot",
  "rust_decimal",
  "secrecy",
  "serde",
@@ -5088,8 +5089,10 @@ dependencies = [
  "libc",
  "rcgen",
  "rust_decimal_macros",
+ "secrecy",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.11.0",
  "tar",
  "tempfile",
@@ -5100,6 +5103,7 @@ dependencies = [
  "url",
  "uuid",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
@@ -8482,6 +8486,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap 2.14.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9767,6 +9784,12 @@ dependencies = [
  "crypto-common 0.2.2",
  "ctutils",
 ]
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "unsafe-libyaml-norway"
@@ -11087,6 +11110,7 @@ version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

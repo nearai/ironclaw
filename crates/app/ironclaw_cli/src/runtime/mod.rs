@@ -941,8 +941,7 @@ fn build_standalone_local_runtime_services_input(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
-    let workspace_root = std::env::current_dir()
-        .with_context(|| format!("failed to resolve current directory for {profile} workspace"))?;
+    let workspace_root = local_runtime_workspace_root(profile)?;
     let mut services_input = local_runtime_build_input_with_options(
         composition_profile(profile),
         owner_id,
@@ -970,8 +969,7 @@ fn build_hosted_single_tenant_services_input(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    let workspace_root = std::env::current_dir()
-        .context("failed to resolve current directory for hosted single-tenant workspace")?;
+    let workspace_root = local_runtime_workspace_root(profile)?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(
@@ -1334,6 +1332,24 @@ fn confirmed_host_home_root(options: RuntimeInputOptions) -> anyhow::Result<Path
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .context("HOME or USERPROFILE must be set")
+}
+
+fn optional_path_env(name: &str) -> anyhow::Result<Option<PathBuf>> {
+    match std::env::var_os(name) {
+        None => Ok(None),
+        Some(value) if value.is_empty() => anyhow::bail!("{name} must not be empty when set"),
+        Some(value) => Ok(Some(PathBuf::from(value))),
+    }
+}
+
+fn local_runtime_workspace_root(profile: RebornProfile) -> anyhow::Result<PathBuf> {
+    optional_path_env("IRONCLAW_REBORN_WORKSPACE_ROOT")?
+        .map(Ok)
+        .unwrap_or_else(|| {
+            std::env::current_dir().with_context(|| {
+                format!("failed to resolve current directory for {profile} workspace")
+            })
+        })
 }
 
 pub(crate) fn local_runtime_storage_root(
@@ -1735,8 +1751,9 @@ mod tests {
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
         RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, initialize_local_runtime_storage_root,
-        no_assistant_text_message, protect_reborn_log_filter, resolve_google_oauth_config,
-        resolve_google_oauth_config_state, resolve_google_oauth_config_state_merged,
+        local_runtime_workspace_root, no_assistant_text_message, protect_reborn_log_filter,
+        resolve_google_oauth_config, resolve_google_oauth_config_state,
+        resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
         with_binary_host_extension_bindings_from_bundles,
     };
@@ -2936,6 +2953,53 @@ regex_activation_enabled = false
             error
                 .to_string()
                 .contains("failed to initialize Reborn runtime state")
+        );
+    }
+
+    #[test]
+    fn local_runtime_workspace_root_uses_explicit_env_override() {
+        // A reviewer noted IRONCLAW_REBORN_WORKSPACE_ROOT feeds two production
+        // builders with no test anywhere; this pins the override path.
+        let _lock = lock_runtime_env();
+        let explicit = std::path::PathBuf::from("/tmp/example-reborn-workspace-root");
+        let _workspace_root = EnvGuard::set(
+            "IRONCLAW_REBORN_WORKSPACE_ROOT",
+            explicit.to_str().expect("test path must be valid utf8"),
+        );
+
+        let root = local_runtime_workspace_root(ironclaw_config::RebornProfile::Standalone)
+            .expect("explicit workspace root must resolve");
+
+        assert_eq!(root, explicit);
+    }
+
+    #[test]
+    fn local_runtime_workspace_root_falls_back_to_current_dir_when_unset() {
+        let _lock = lock_runtime_env();
+        let _workspace_root = EnvGuard::clear("IRONCLAW_REBORN_WORKSPACE_ROOT");
+
+        let root = local_runtime_workspace_root(ironclaw_config::RebornProfile::Standalone)
+            .expect("unset workspace root must fall back to the current directory");
+
+        assert_eq!(
+            root,
+            std::env::current_dir().expect("current dir must be resolvable in test")
+        );
+    }
+
+    #[test]
+    fn local_runtime_workspace_root_rejects_explicitly_empty_value() {
+        let _lock = lock_runtime_env();
+        let _workspace_root = EnvGuard::set("IRONCLAW_REBORN_WORKSPACE_ROOT", "");
+
+        let error = local_runtime_workspace_root(ironclaw_config::RebornProfile::Standalone)
+            .expect_err(
+                "an explicitly empty workspace root must fail loudly, not silently fall back",
+            );
+
+        assert!(
+            error.to_string().contains("IRONCLAW_REBORN_WORKSPACE_ROOT"),
+            "unexpected error: {error}"
         );
     }
 

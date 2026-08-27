@@ -1375,6 +1375,7 @@ mod tests {
             authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
+            runtime_credentials: Vec::new(),
             services: InvocationServices {
                 filesystem: Arc::new(DiskFilesystem::new()),
                 runtime_http_egress: None,

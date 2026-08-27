@@ -270,10 +270,10 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
          archive workflows — GitHub as a code host, not the github extension",
     ),
     (
-        "crates/ironclaw_sandbox/src/sandbox_process/network_allowlist.rs",
+        "crates/lanes/ironclaw_sandbox/src/sandbox_process/network_allowlist.rs",
         "api.github.com",
-        "default sandboxed-shell egress allowlist includes GitHub's content API host for \
-         `gh`/archive-download workflows — GitHub as a code host, not the github extension",
+        "default sandboxed-shell egress allowlist includes the GitHub API host for ordinary \
+         `gh` CLI workflows — GitHub as a code host, not the github extension",
     ),
     (
         "crates/ironclaw_host_runtime/src/first_party_tools/skill_management.rs",
@@ -1695,6 +1695,16 @@ const ALLOWLIST: &[(&str, &str)] = &[
 // named doc-comment examples on the retired `DispatchError::Wasm` variant;
 // deleting the variant deleted the examples, so the now-stale allowlist
 // entries were deleted too.
+// 117 -> 115 (generic staged process credentials): provider selection, the
+// `GH_TOKEN` placeholder, and the exact `api.github.com` audience remain in the
+// explicit shell adapter. The staging port and service composition consume
+// authorized binding descriptors without naming GitHub, retiring their three
+// pilot carve-outs while adding the adapter's audience pair.
+// 115 -> 110 (2026-08-23, #7825 stages 1-2): direct process credential
+// mediation now selects manifest-declared placeholder/executable bindings and
+// exact header targets. The authorization fold, shell adapter, and direct-argv
+// parser no longer name GitHub or its API audience, retiring all five #7732
+// pilot carve-outs.
 const WS0_EXTENSION_SPECIFICITY_ALLOWLIST_BASELINE: usize = 110;
 
 /// §11.2.8 vendor-scope shrink, armed at the WS0 baseline.
@@ -2155,20 +2165,20 @@ fn term_collision_carve_outs_stay_documented_and_narrow() {
         BTreeSet::from([
             "google",
             "github",
+            "api.github.com",
             "slack",
             "gmail",
             "google_calendar",
             "google-calendar",
             "notion",
             "telegram",
-            "api.github.com",
             "private.near.ai",
             "accounts.google.com",
             "oauth2.googleapis.com",
             "www.googleapis.com",
         ]),
         "path-scoped carve-outs are reserved for the four documented collision domains \
-         (LLM providers, SSO login, GitHub-as-skill-source, vendor-safety detection — \
+         (LLM providers, SSO login, GitHub-as-skill/code-host, vendor-safety detection — \
          credential-format scanners plus the trace payload-redaction classifier); \
          new terms here are a gate regression"
     );

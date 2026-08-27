@@ -25,7 +25,7 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    capability::CapabilityGrant,
+    capability::{CapabilityDescriptor, CapabilityGrant},
     decision::RuntimeCredentialAuthRequirement,
     ids::{CapabilityId, SecretHandle},
     resource::ResourceScope,
@@ -77,7 +77,7 @@ pub trait HostPolicyFacts: Send + Sync {
     /// [`CredentialPresence::Indeterminate`], never a false `Missing`.
     async fn credential_presence(
         &self,
-        capability_id: &CapabilityId,
+        descriptor: &CapabilityDescriptor,
         scope: &ResourceScope,
     ) -> CredentialPresence;
 

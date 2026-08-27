@@ -314,6 +314,13 @@ pub struct CapabilityActivityProjection {
     pub updated_at: Timestamp,
 }
 
+/// Bounded capability-activity facts for one exact parent run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityActivityProjectionWindow {
+    pub activities: Vec<CapabilityActivityProjection>,
+    pub truncated: bool,
+}
+
 impl CapabilityActivityProjection {
     pub fn activity_order_cursor(&self) -> EventCursor {
         if self.first_cursor == EventCursor::origin() {
@@ -660,6 +667,36 @@ impl ReplayEventProjectionService {
             runtime_log,
             runtime_checkpoints: RuntimeProjectionCheckpointCache::default(),
         }
+    }
+
+    /// Replay metadata-only capability activity for one exact run.
+    ///
+    /// This is intentionally narrower than `snapshot`: detail consumers do
+    /// not need to fetch or expose neighboring runs in the same owner scope.
+    pub async fn capability_activities_for_run(
+        &self,
+        scope: ProjectionScope,
+        run_id: InvocationId,
+        limit: usize,
+    ) -> Result<CapabilityActivityProjectionWindow, ProjectionError> {
+        if limit == 0 {
+            return Err(ProjectionError::InvalidRequest {
+                reason: "limit must be greater than zero",
+            });
+        }
+        if limit > MAX_PROJECTION_PAGE_LIMIT {
+            return Err(ProjectionError::InvalidRequest {
+                reason: "limit exceeds MAX_PROJECTION_PAGE_LIMIT",
+            });
+        }
+        let mut folded = self.fold_runtime_to_head(&scope, usize::MAX).await?;
+        folded.retain_capability_activities_for_run(run_id);
+        let truncated = folded.capability_activity_count() > limit;
+        let (_, activities) = folded.with_output_limit(limit).into_parts();
+        Ok(CapabilityActivityProjectionWindow {
+            activities,
+            truncated,
+        })
     }
 
     async fn read_runtime(

@@ -261,7 +261,7 @@ async fn host_runtime_services_compact_github_search_preserves_pagination_and_eg
             .find(|(name, _)| name == "authorization"),
         Some(&(
             "authorization".to_string(),
-            "Bearer ghp_fake_fixture_token".to_string(),
+            "token ghp_fake_fixture_token".to_string(),
         ))
     );
 }
@@ -445,7 +445,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
     );
     for request in &requests {
         assert_eq!(request.policy, policy);
-        assert_google_bearer_header(request, "ghp_fake_fixture_token");
+        assert_github_token_header(request, "ghp_fake_fixture_token");
     }
     let create_body: serde_json::Value =
         serde_json::from_slice(&requests[1].body).expect("create branch JSON body");
@@ -2769,6 +2769,19 @@ fn google_first_party_trust_policy(package_id: &str) -> HostTrustPolicy {
         ),
     ]))])
     .unwrap()
+}
+
+fn assert_github_token_header(request: &NetworkHttpRequest, expected_token: &str) {
+    assert_eq!(
+        request
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            format!("token {expected_token}"),
+        ))
+    );
 }
 
 fn assert_google_bearer_header(request: &NetworkHttpRequest, expected_token: &str) {

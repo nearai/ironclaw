@@ -435,7 +435,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
                 credential.target,
                 RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
-                    prefix: Some("Bearer ".to_string()),
+                    prefix: Some("token ".to_string()),
                 }
             );
             assert!(credential.required);

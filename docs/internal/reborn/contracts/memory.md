@@ -179,8 +179,8 @@ Rules:
 - model-facing reads return a content hash; a rewrite may supply that hash as
   its expected prior state;
 - scheduled loop runs must supply that expectation for full-document
-  replacements; append and patch operations retain their operation-specific
-  atomicity;
+  replacements; a scheduled run creates a new document through atomic append
+  mode, while patch operations retain their operation-specific atomicity;
 - the native provider enforces expected-content hashes atomically and returns a
   model-visible `conflict` when the document changed, without overwriting it;
 - a native backend that cannot compare-and-write atomically fails closed rather

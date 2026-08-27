@@ -30,6 +30,7 @@ use ironclaw_host_runtime::{MEMORY_READ_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_I
 use ironclaw_memory::content_bytes_sha256;
 use serde_json::json;
 
+use super::reborn_support::builder::RebornIntegrationHarness;
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
 use super::support::trace_llm::TraceLlm;
@@ -182,11 +183,24 @@ pub async fn run() -> HarnessResult<()> {
     run_conflict_case().await
 }
 
-async fn run_conflict_case() -> HarnessResult<()> {
-    const STALE_SNAPSHOT: &str = "the user prefers the original itinerary";
-    const CONCURRENT_DOCUMENT: &str = "the user now prefers the updated itinerary";
-    const STALE_CURATION: &str = "the user prefers the original itinerary (curated)";
+const STALE_SNAPSHOT: &str = "the user prefers the original itinerary";
+const CONCURRENT_DOCUMENT: &str = "the user now prefers the updated itinerary";
+const STALE_CURATION: &str = "the user prefers the original itinerary (curated)";
 
+struct CurationConflictCase {
+    group: RebornIntegrationGroup,
+    conversation: RebornIntegrationHarness,
+    curation_llm: Arc<TraceLlm>,
+    current_hash: String,
+}
+
+async fn run_conflict_case() -> HarnessResult<()> {
+    let case = build_conflict_case().await?;
+    case.submit_turns().await?;
+    case.assert_results().await
+}
+
+async fn build_conflict_case() -> HarnessResult<CurationConflictCase> {
     let group = RebornIntegrationGroup::builder()
         .with_memory_curation_interval(
             NonZeroU32::new(CURATION_INTERVAL).ok_or("the curation interval must be non-zero")?,
@@ -223,7 +237,6 @@ async fn run_conflict_case() -> HarnessResult<()> {
         group.canonical_actor_user().as_str()
     );
     let stale_hash = content_bytes_sha256(STALE_SNAPSHOT.as_bytes());
-    let current_hash = content_bytes_sha256(CONCURRENT_DOCUMENT.as_bytes());
     let curation_llm = group
         .register_scope_script_prefix_for_test(
             curation_thread_prefix,
@@ -255,50 +268,64 @@ async fn run_conflict_case() -> HarnessResult<()> {
         )
         .await?;
 
-    conversation
-        .submit_turn("Remember my original itinerary.")
-        .await?;
-    conversation
-        .submit_turn("I changed my itinerary preference.")
-        .await?;
-    wait_for_pass_to_finish(&curation_llm).await?;
+    Ok(CurationConflictCase {
+        group,
+        conversation,
+        curation_llm,
+        current_hash: content_bytes_sha256(CONCURRENT_DOCUMENT.as_bytes()),
+    })
+}
 
-    let captured = curation_llm.captured_requests();
-    assert_eq!(
-        captured.len(),
-        4,
-        "a conflict must complete the pass without a second write attempt"
-    );
-    let read_output = conversation
-        .tool_result_output(MEMORY_READ_CAPABILITY_ID)
-        .await?;
-    assert_eq!(
-        read_output["content_hash"].as_str(),
-        Some(current_hash.as_str()),
-        "the curation read must observe the newer concurrent document"
-    );
-    let write_output = conversation
-        .tool_result_output(MEMORY_WRITE_CAPABILITY_ID)
-        .await?;
-    assert_eq!(
-        write_output["status"], "conflict",
-        "the stale conditional write must return a model-visible conflict"
-    );
-    conversation
-        .assert_capability_result_count(MEMORY_WRITE_CAPABILITY_ID, 3)
-        .await?;
+impl CurationConflictCase {
+    async fn submit_turns(&self) -> HarnessResult<()> {
+        self.conversation
+            .submit_turn("Remember my original itinerary.")
+            .await?;
+        self.conversation
+            .submit_turn("I changed my itinerary preference.")
+            .await?;
+        wait_for_pass_to_finish(&self.curation_llm).await
+    }
 
-    let reader = group
-        .thread("conv-curation-conflict-reader")
-        .script([RebornScriptedReply::text("answered")])
-        .build()
-        .await?;
-    reader.submit_turn("Help with an unrelated note.").await?;
-    reader
-        .assert_model_request_contains(CONCURRENT_DOCUMENT)
-        .await?;
-    reader.assert_model_request_excludes(STALE_CURATION).await?;
-    Ok(())
+    async fn assert_results(&self) -> HarnessResult<()> {
+        assert_eq!(
+            self.curation_llm.captured_requests().len(),
+            4,
+            "a conflict must complete the pass without a second write attempt"
+        );
+        let read_output = self
+            .conversation
+            .tool_result_output(MEMORY_READ_CAPABILITY_ID)
+            .await?;
+        assert_eq!(
+            read_output["content_hash"].as_str(),
+            Some(self.current_hash.as_str()),
+            "the curation read must observe the newer concurrent document"
+        );
+        let write_output = self
+            .conversation
+            .tool_result_output(MEMORY_WRITE_CAPABILITY_ID)
+            .await?;
+        assert_eq!(
+            write_output["status"], "conflict",
+            "the stale conditional write must return a model-visible conflict"
+        );
+        self.conversation
+            .assert_capability_result_count(MEMORY_WRITE_CAPABILITY_ID, 3)
+            .await?;
+
+        let reader = self
+            .group
+            .thread("conv-curation-conflict-reader")
+            .script([RebornScriptedReply::text("answered")])
+            .build()
+            .await?;
+        reader.submit_turn("Help with an unrelated note.").await?;
+        reader
+            .assert_model_request_contains(CONCURRENT_DOCUMENT)
+            .await?;
+        reader.assert_model_request_excludes(STALE_CURATION).await
+    }
 }
 
 /// Poll until the pass has consumed its whole script. Polling the model rather

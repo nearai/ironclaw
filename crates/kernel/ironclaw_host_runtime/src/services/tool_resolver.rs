@@ -230,24 +230,57 @@ where
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let CapabilityDispatchRequest {
+            authorized_descriptor,
+            capability_id,
+            scope,
+            authenticated_actor_user_id,
+            run_id,
+            origin,
+            estimate,
+            mounts,
+            resource_reservation,
+            input,
+        } = request;
+        let descriptor = authorized_descriptor
+            .as_ref()
+            .unwrap_or(self.descriptor.as_ref());
+        if descriptor.id != capability_id {
+            return Err(DispatchError::UnknownCapability {
+                capability: capability_id,
+            });
+        }
+        if descriptor.provider != self.descriptor.provider {
+            return Err(DispatchError::UnknownProvider {
+                capability: capability_id,
+                provider: descriptor.provider.clone(),
+            });
+        }
+        if descriptor.runtime != self.descriptor.runtime {
+            return Err(DispatchError::RuntimeMismatch {
+                capability: capability_id,
+                descriptor_runtime: descriptor.runtime,
+                package_runtime: self.descriptor.runtime,
+            });
+        }
         self.executor
             .dispatch_json(
                 self.lane,
                 RuntimeLaneRequest {
                     package: &self.package,
-                    descriptor: &self.descriptor,
+                    descriptor,
                     filesystem: self.filesystem.as_ref(),
                     governor: self.governor.as_ref(),
                     runtime_policy: &self.runtime_policy,
-                    capability_id: &request.capability_id,
-                    scope: request.scope,
-                    authenticated_actor_user_id: request.authenticated_actor_user_id,
-                    run_id: request.run_id,
-                    origin: Some(request.origin),
-                    estimate: request.estimate,
-                    mounts: request.mounts,
-                    resource_reservation: request.resource_reservation,
-                    input: request.input,
+                    capability_id: &capability_id,
+                    scope,
+                    authenticated_actor_user_id,
+                    run_id,
+                    origin: Some(origin),
+                    estimate,
+                    mounts,
+                    resource_reservation,
+                    input,
                 },
             )
             .await

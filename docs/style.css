@@ -2,3 +2,14 @@ code {
     max-height: 300px;
     overflow: scroll;
 }
+
+/* Move the navbar tabs from the theme's right side to the content edge
+   (fixed 256px sidebar + 16px gutter = 272px). */
+@media (min-width: 1024px) {
+    #navbar .nav-tabs {
+        position: fixed;
+        left: 272px;
+        top: 0;
+        height: 3.5rem;
+    }
+}

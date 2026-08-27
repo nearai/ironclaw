@@ -29,7 +29,7 @@ use ironclaw_capabilities::{
 };
 use ironclaw_extension_registry::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::capability::PROCESS_SANDBOX_CAPABILITY_ID;
+use ironclaw_host_api::capability::{CapabilityDescriptor, PROCESS_SANDBOX_CAPABILITY_ID};
 use ironclaw_host_api::{
     approval::sha256_digest_token,
     decision::{DenyReason, RuntimeCredentialAuthRequirement},
@@ -1053,7 +1053,7 @@ impl DefaultHostRuntime {
 impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
     async fn credential_presence(
         &self,
-        capability_id: &CapabilityId,
+        descriptor: &CapabilityDescriptor,
         scope: &ResourceScope,
     ) -> ironclaw_capabilities::CredentialPresence {
         use ironclaw_capabilities::CredentialPresence;
@@ -1061,12 +1061,6 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
         // No store wired ⇒ pre-flight disabled (as before): treat as satisfied so
         // the kernel proceeds and the dispatch-time obligation check enforces.
         let Some(secret_store) = self.credential_preflight_store.as_ref() else {
-            return CredentialPresence::Satisfied;
-        };
-        // The kernel already validated the descriptor exists; if this fresh
-        // snapshot cannot see it there is nothing to pre-flight — satisfied.
-        let registry = self.registry.snapshot();
-        let Some(descriptor) = registry.get_capability(capability_id) else {
             return CredentialPresence::Satisfied;
         };
         let (required_secrets, requirements) = capability_credential_requirements(descriptor);
@@ -1085,7 +1079,7 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
                 }
                 Ok(None) => {
                     tracing::debug!(
-                        capability_id = %capability_id,
+                        capability_id = %descriptor.id,
                         secret_handle = handle.as_str(),
                         "credential pre-flight (kernel): required secret absent; surfacing AuthRequired before approval gate"
                     );
@@ -1100,7 +1094,7 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
                     // kernel maps `Indeterminate` to "skip the pre-flight"; the
                     // dispatch-time obligation check is the enforcing backstop.
                     tracing::debug!(
-                        capability_id = %capability_id,
+                        capability_id = %descriptor.id,
                         secret_handle = handle.as_str(),
                         error = %error,
                         "credential pre-flight (kernel): secret store metadata query failed; treating as indeterminate (dispatch-time check enforces)"

@@ -1,16 +1,18 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
     time::Duration,
 };
 
-use super::{registry, user_key::RebornSandboxUserKey, worker_spec};
+use super::{
+    ca::SandboxCertificateAuthority, registry, user_key::RebornSandboxUserKey, worker_spec,
+};
 use bollard::{
     Docker,
     container::{
         Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions,
-        LogsOptions, RemoveContainerOptions, StartContainerOptions,
+        LogsOptions, RemoveContainerOptions, RestartContainerOptions, StartContainerOptions,
     },
     image::CreateImageOptions,
     models::{HealthConfig, HealthStatusEnum, HostConfig, HostConfigLogConfig},
@@ -24,9 +26,12 @@ use ironclaw_common::env_helpers::env_or_override;
 use ironclaw_host_api::{
     action::NetworkPolicy,
     ids::{InvocationId, TenantId, UserId},
-    process::RuntimeProcessError,
+    process::{RuntimeProcessError, SandboxCommandCredential},
 };
+use secrecy::ExposeSecret;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 pub(super) const PROXY_LABEL_PREFIX: &str = "ironclaw.proxy";
 pub(super) const NETWORK_LABEL_PREFIX: &str = "ironclaw.network";
 pub(super) const DEFAULT_PROXY_IMAGE: &str =
@@ -35,6 +40,10 @@ pub(super) const PROXY_IMAGE_ENV: &str = "IRONCLAW_REBORN_SANDBOX_PROXY_IMAGE";
 const PROXY_CONFIG_PATH: &str = "/run/ironclaw-proxy/proxy.yaml";
 const PROXY_MATERIAL_ROOT: &str = "/run/ironclaw-proxy";
 const PROXY_INVOCATION_ID_PATH: &str = "/run/ironclaw-proxy/invocation-id";
+const PROXY_CREDENTIAL_BUNDLE_PATH: &str = "/run/ironclaw-proxy/credentials.json";
+const PROXY_CA_CERT_PATH: &str = "/run/ironclaw-proxy/ca.crt";
+const PROXY_CA_KEY_PATH: &str = "/run/ironclaw-proxy/ca.key";
+pub(super) const USER_PROXY_CA_PATH: &str = "/run/ironclaw/egress-ca.crt";
 const SHARED_UPSTREAM_NETWORK_NAME: &str = "ironclaw-reborn-sandbox-upstream";
 const SHARED_UPSTREAM_LABEL_ROLE: &str = "ironclaw.network.role";
 const SHARED_UPSTREAM_ROLE: &str = "shared-proxy-upstream-v1";
@@ -77,6 +86,7 @@ pub(super) struct ManagedEgressConfig {
     proxy_image: String,
     policy: NetworkPolicy,
     material_root: PathBuf,
+    ca: Arc<SandboxCertificateAuthority>,
 }
 
 impl ManagedEgressConfig {
@@ -97,10 +107,12 @@ impl ManagedEgressConfig {
         }
         reject_wildcard_targets(&policy)?;
         let proxy_image = configured_proxy_image()?;
+        let ca = Arc::new(SandboxCertificateAuthority::generate()?);
         Ok(Self {
             proxy_image,
             policy,
             material_root,
+            ca,
         })
     }
 }
@@ -170,6 +182,7 @@ pub(super) struct ManagedEgressRuntime {
     proxy_image: String,
     policy: NetworkPolicy,
     posture: String,
+    ca: Arc<SandboxCertificateAuthority>,
     material_root: PathBuf,
     upstream_gate: tokio::sync::Mutex<()>,
 }
@@ -190,7 +203,22 @@ pub(super) struct ManagedEgressBundle {
     pub(super) proxy_ip: String,
     proxy_host: String,
     pub(super) posture: String,
+    pub(super) ca_cert_path: PathBuf,
     invocation_id_path: PathBuf,
+}
+
+#[cfg(test)]
+impl ManagedEgressBundle {
+    pub(super) fn test_bundle(material_root: &std::path::Path) -> Self {
+        Self {
+            network_name: "test-network".to_string(),
+            proxy_ip: "172.28.10.2".to_string(),
+            proxy_host: "test-proxy".to_string(),
+            posture: "test-posture".to_string(),
+            ca_cert_path: material_root.join("ca.crt"),
+            invocation_id_path: material_root.join("invocation-id"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +226,23 @@ enum ManagedNetworkStatus {
     Missing,
     Compatible,
     Incompatible,
+}
+
+#[cfg(test)]
+impl ManagedEgressRuntime {
+    pub(super) fn test_runtime(
+        policy: NetworkPolicy,
+        material_root: PathBuf,
+    ) -> Result<Arc<Self>, RuntimeProcessError> {
+        Ok(Arc::new(Self {
+            proxy_image: "sha256:test-proxy".to_string(),
+            policy,
+            posture: "test-posture".to_string(),
+            ca: Arc::new(SandboxCertificateAuthority::generate()?),
+            material_root,
+            upstream_gate: tokio::sync::Mutex::new(()),
+        }))
+    }
 }
 
 impl ManagedEgressRuntime {
@@ -208,12 +253,17 @@ impl ManagedEgressRuntime {
         let proxy_image = resolve_proxy_image(docker, &config.proxy_image).await?;
         let material_root = config.material_root;
         create_material_directory(&material_root, 0o711).await?;
-        let posture = proxy_posture(&proxy_image, &config.policy, &material_root)?;
+        let posture = proxy_posture(
+            &proxy_image,
+            &config.policy,
+            config.ca.root_certificate_pem().as_bytes(),
+        )?;
         Ok(Arc::new(Self {
             proxy_image,
             policy: config.policy,
             posture,
             material_root,
+            ca: config.ca,
             upstream_gate: tokio::sync::Mutex::new(()),
         }))
     }
@@ -256,6 +306,21 @@ impl ManagedEgressRuntime {
         let upstream_network_name = SHARED_UPSTREAM_NETWORK_NAME;
         let proxy_material_root = self.material_root.join(&proxy_name);
         create_material_directory(&proxy_material_root, 0o711).await?;
+        let ca_cert_path = proxy_material_root.join("ca.crt");
+        let ca_key_path = proxy_material_root.join("ca.key");
+        write_atomic_material_file_if_changed(
+            &ca_cert_path,
+            self.ca.root_certificate_pem().as_bytes(),
+            0o644,
+        )
+        .await?;
+        let ca_key = self.ca.proxy_private_key_pem();
+        write_atomic_material_file_if_changed(
+            &ca_key_path,
+            ca_key.expose_secret().as_bytes(),
+            0o600,
+        )
+        .await?;
         let invocation_id_path = proxy_material_root.join("invocation-id");
         if !tokio::fs::try_exists(&invocation_id_path)
             .await
@@ -398,6 +463,7 @@ impl ManagedEgressRuntime {
             proxy_host: proxy_name,
             posture: self.posture.clone(),
             invocation_id_path,
+            ca_cert_path,
         })
     }
 
@@ -415,6 +481,137 @@ impl ManagedEgressRuntime {
         // Attribution metadata must remain readable across that boundary.
         let invocation_id = invocation_id.to_string();
         write_atomic_material_file(&bundle.invocation_id_path, invocation_id.as_bytes()).await
+    }
+    pub(super) async fn configure_credentials(
+        &self,
+        docker: &Docker,
+        bundle: &ManagedEgressBundle,
+        credentials: &[SandboxCommandCredential],
+    ) -> Result<(), RuntimeProcessError> {
+        self.configure_credentials_with_restart(bundle, credentials, || {
+            restart_proxy_container(docker, &bundle.proxy_host)
+        })
+        .await
+    }
+
+    async fn configure_credentials_with_restart<F, Fut>(
+        &self,
+        bundle: &ManagedEgressBundle,
+        credentials: &[SandboxCommandCredential],
+        restart: F,
+    ) -> Result<(), RuntimeProcessError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), RuntimeProcessError>>,
+    {
+        let material_root = bundle.ca_cert_path.parent().ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox proxy credential material path has no parent".to_string(),
+            )
+        })?;
+        let configured = async {
+            remove_credential_material(material_root).await?;
+            let mut credential_bundle = BTreeMap::new();
+            let mut placeholder_values = HashSet::with_capacity(credentials.len());
+            let mut rendered = Vec::with_capacity(credentials.len());
+            for credential in credentials {
+                if !self.policy.allowed_targets.iter().any(|target| {
+                    target
+                        .host_pattern
+                        .eq_ignore_ascii_case(&credential.approved_host)
+                }) {
+                    return Err(RuntimeProcessError::ExecutionFailed(
+                        "sandbox credential host is outside the approved network policy"
+                            .to_string(),
+                    ));
+                }
+                let header_prefix = credential.header_prefix.as_deref().unwrap_or_default();
+                let placeholder_value = format!("{header_prefix}{}", credential.placeholder);
+                if credential.placeholder.trim().is_empty()
+                    || credential.header_name.trim().is_empty()
+                    || placeholder_value.trim().is_empty()
+                    || credential.placeholder == credential.expose_secret()
+                {
+                    return Err(RuntimeProcessError::ExecutionFailed(
+                        "sandbox credential replacement rule is invalid".to_string(),
+                    ));
+                }
+                if !placeholder_values.insert(placeholder_value.clone()) {
+                    return Err(RuntimeProcessError::ExecutionFailed(
+                        "sandbox credential bundle contains a duplicate placeholder".to_string(),
+                    ));
+                }
+                let bundle_key = credential.credential_key.as_str().to_string();
+                let authorized_value =
+                    Zeroizing::new(format!("{header_prefix}{}", credential.expose_secret()));
+                if credential_bundle
+                    .insert(bundle_key.clone(), authorized_value)
+                    .is_some()
+                {
+                    return Err(RuntimeProcessError::ExecutionFailed(
+                        "sandbox credential bundle contains a duplicate handle".to_string(),
+                    ));
+                }
+                rendered.push(ProxyCredentialRule {
+                    bundle_key,
+                    approved_host: credential.approved_host.clone(),
+                    target_header: credential.header_name.clone(),
+                    placeholder_value,
+                });
+            }
+            let config =
+                render_proxy_config_inner(&self.policy, &bundle.proxy_ip, true, &rendered)?;
+            let bundle_json =
+                Zeroizing::new(serde_json::to_vec(&credential_bundle).map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox proxy credential bundle rendering failed: {error}"
+                    ))
+                })?);
+            write_proxy_credential_material(material_root, &bundle_json, config.as_bytes()).await?;
+            restart().await
+        }
+        .await;
+        if let Err(configure_error) = configured {
+            return match remove_credential_material(material_root).await {
+                Ok(()) => Err(configure_error),
+                Err(cleanup_error) => Err(RuntimeProcessError::ExecutionFailed(format!(
+                    "{configure_error}; sandbox proxy credential rollback failed: {cleanup_error}"
+                ))),
+            };
+        }
+        Ok(())
+    }
+
+    pub(super) async fn clear_credentials(
+        &self,
+        docker: &Docker,
+        bundle: &ManagedEgressBundle,
+    ) -> Result<(), RuntimeProcessError> {
+        let material_root = bundle.ca_cert_path.parent().ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox proxy credential material path has no parent".to_string(),
+            )
+        })?;
+        // Delete the bundle before asking Docker to reload. A failed or hung
+        // restart must not extend the lifetime of credential material on disk.
+        // If deletion itself fails, still reload the uncredentialed config so
+        // the proxy stops referencing the stranded file.
+        let cleanup_result = remove_credential_material(material_root).await;
+        let clear_result = async {
+            let config = render_proxy_config_with_ca(&self.policy, &bundle.proxy_ip)?;
+            write_bind_mounted_proxy_config(&material_root.join("proxy.yaml"), config.as_bytes())
+                .await?;
+            restart_proxy_container(docker, &bundle.proxy_host).await
+        }
+        .await;
+        match (clear_result, cleanup_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(clear_error), Ok(())) => Err(clear_error),
+            (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+            (Err(clear_error), Err(cleanup_error)) => Err(RuntimeProcessError::ExecutionFailed(
+                format!("{clear_error}; sandbox proxy credential cleanup failed: {cleanup_error}"),
+            )),
+        }
     }
 
     async fn create_proxy(
@@ -454,7 +651,7 @@ impl ManagedEgressRuntime {
                 test: Some(vec![
                     "CMD-SHELL".to_string(),
                     format!(
-                        "address=$(sed -n 's/^  tunnel_listen: \"\\([^\"]*\\)\"/\\1/p' {PROXY_CONFIG_PATH}); host=${{address%:*}}; port=${{address##*:}}; nc -z \"$host\" \"$port\""
+                        "address=$(sed -n 's/^  tunnel_listen: //p' {PROXY_CONFIG_PATH} | tr -d '\"'); host=${{address%:*}}; port=${{address##*:}}; nc -z \"$host\" \"$port\""
                     ),
                 ]),
                 interval: Some(100_000_000),
@@ -466,7 +663,15 @@ impl ManagedEgressRuntime {
                 network_mode: Some(network_name.to_string()),
                 auto_remove: Some(false),
                 cap_drop: Some(vec!["ALL".to_string()]),
-                cap_add: Some(vec!["NET_BIND_SERVICE".to_string()]),
+                // The proxy runs as container root after dropping every
+                // capability. Keep only low-port binding plus read/search
+                // override so it can read 0600 host-owned CA/token files
+                // across Docker's host-UID boundary; the only host bind is
+                // its own read-only per-user material directory.
+                cap_add: Some(vec![
+                    "NET_BIND_SERVICE".to_string(),
+                    "DAC_READ_SEARCH".to_string(),
+                ]),
                 security_opt: Some(vec!["no-new-privileges:true".to_string()]),
                 readonly_rootfs: Some(true),
                 pids_limit: Some(128),
@@ -542,7 +747,7 @@ impl ManagedEgressRuntime {
                 return Err(error);
             }
         };
-        let proxy_config = render_proxy_config(&self.policy, &proxy_ip)?;
+        let proxy_config = render_proxy_config_with_ca(&self.policy, &proxy_ip)?;
         if let Err(error) =
             write_atomic_material_file(&proxy_config_path, proxy_config.as_bytes()).await
         {
@@ -558,6 +763,13 @@ impl ManagedEgressRuntime {
         }
         Ok(proxy_ip)
     }
+    pub(super) fn user_ca_bind(
+        &self,
+        bundle: &ManagedEgressBundle,
+    ) -> Result<String, RuntimeProcessError> {
+        docker_readonly_bind(&bundle.ca_cert_path, USER_PROXY_CA_PATH)
+    }
+
     pub(super) fn user_environment(
         &self,
         bundle: &ManagedEgressBundle,
@@ -577,6 +789,10 @@ impl ManagedEgressRuntime {
             ("https_proxy", proxy_url.as_str()),
             ("HTTP_PROXY", proxy_url.as_str()),
             ("HTTPS_PROXY", proxy_url.as_str()),
+            ("SSL_CERT_FILE", USER_PROXY_CA_PATH),
+            ("NODE_EXTRA_CA_CERTS", USER_PROXY_CA_PATH),
+            ("REQUESTS_CA_BUNDLE", USER_PROXY_CA_PATH),
+            ("CURL_CA_BUNDLE", USER_PROXY_CA_PATH),
             ("NO_PROXY", ""),
             ("no_proxy", ""),
         ]
@@ -776,12 +992,19 @@ impl ManagedEgressRuntime {
         remove_material_directory(&self.material_root.join(proxy_name)).await
     }
 
+    /// Stops the idle proxy without invalidating the persistent worker's CA
+    /// file bind mount. Docker Desktop pins file binds to the source inode, so
+    /// the CA material must outlive every suspension of the user container.
     pub(super) async fn suspend_bundle(
         &self,
         docker: &Docker,
         key: &RebornSandboxUserKey,
     ) -> Result<(), RuntimeProcessError> {
-        self.remove_proxy(docker, key).await
+        let proxy_name = key.proxy_name();
+        self.preserve_proxy_audit(docker, &proxy_name, &proxy_name)
+            .await?;
+        remove_proxy_if_present(docker, &proxy_name).await?;
+        remove_credential_material(&self.material_root.join(proxy_name)).await
     }
 
     pub(super) async fn rollback_provisioned_bundle(
@@ -790,7 +1013,7 @@ impl ManagedEgressRuntime {
         key: &RebornSandboxUserKey,
         user_container_name: &str,
     ) -> Result<(), RuntimeProcessError> {
-        self.suspend_bundle(docker, key).await?;
+        self.remove_proxy(docker, key).await?;
         if !container_attached_to_network(docker, user_container_name, &key.network_name()).await? {
             remove_network_if_present(docker, &key.network_name()).await?;
         }
@@ -803,7 +1026,7 @@ impl ManagedEgressRuntime {
         key: &RebornSandboxUserKey,
         user_container_name: &str,
     ) -> Result<(), RuntimeProcessError> {
-        self.suspend_bundle(docker, key).await?;
+        self.remove_proxy(docker, key).await?;
         disconnect_container_if_attached(docker, &key.network_name(), user_container_name).await?;
         remove_network_if_present(docker, &key.network_name()).await
     }
@@ -1003,6 +1226,54 @@ fn proxy_is_ready(inspected: &bollard::models::ContainerInspectResponse) -> bool
         )
 }
 
+async fn restart_proxy_container(docker: &Docker, name: &str) -> Result<(), RuntimeProcessError> {
+    docker
+        .restart_container(name, Some(RestartContainerOptions { t: 10 }))
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy credential reload failed: {error}"
+            ))
+        })?;
+    if let Err(error) = wait_proxy_ready(docker, name).await {
+        let detail = proxy_failure_detail(docker, name).await;
+        return Err(RuntimeProcessError::ExecutionFailed(format!(
+            "{error}{detail}"
+        )));
+    }
+    Ok(())
+}
+
+async fn remove_credential_material(
+    material_root: &std::path::Path,
+) -> Result<(), RuntimeProcessError> {
+    let mut entries = tokio::fs::read_dir(material_root).await.map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox proxy credential material scan failed: {error}"
+        ))
+    })?;
+    while let Some(entry) = entries.next_entry().await.map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox proxy credential material scan failed: {error}"
+        ))
+    })? {
+        let filename = entry.file_name();
+        if filename.to_str().is_some_and(|name| {
+            name == "credentials.json"
+                || (name.starts_with("credential-") && name.ends_with(".secret"))
+        }) {
+            tokio::fs::remove_file(entry.path())
+                .await
+                .map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox proxy credential material cleanup failed: {error}"
+                    ))
+                })?;
+        }
+    }
+    Ok(())
+}
+
 async fn start_proxy_container(docker: &Docker, name: &str) -> Result<(), RuntimeProcessError> {
     docker
         .start_container(name, None::<StartContainerOptions<String>>)
@@ -1168,7 +1439,7 @@ fn reject_wildcard_targets(policy: &NetworkPolicy) -> Result<(), RuntimeProcessE
 pub(super) fn proxy_posture(
     proxy_image: &str,
     policy: &NetworkPolicy,
-    material_root: &std::path::Path,
+    ca_certificate: &[u8],
 ) -> Result<String, RuntimeProcessError> {
     let policy_json = serde_json::to_vec(policy).map_err(|error| {
         RuntimeProcessError::ExecutionFailed(format!(
@@ -1176,18 +1447,160 @@ pub(super) fn proxy_posture(
         ))
     })?;
     let mut hasher = Sha256::new();
-    hasher.update(b"ironclaw-managed-egress-v3\0");
+    hasher.update(b"ironclaw-managed-egress-v5\0");
     hasher.update(proxy_image.as_bytes());
     hasher.update([0]);
-    hasher.update(material_root.as_os_str().as_encoded_bytes());
+    hasher.update(ca_certificate);
     hasher.update([0]);
     hasher.update(policy_json);
     Ok(hex::encode(hasher.finalize()))
 }
 
+#[derive(Debug, Serialize)]
+struct ProxyConfig {
+    dns: ProxyDnsConfig,
+    proxy: ProxyListenerConfig,
+    tls: ProxyTlsConfig,
+    transforms: Vec<ProxyTransform>,
+    log: ProxyLogConfig,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyDnsConfig {
+    listen: String,
+    proxy_ip: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyListenerConfig {
+    http_listen: String,
+    https_listen: String,
+    tunnel_listen: String,
+    upstream_deny_cidrs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ProxyTlsConfig {
+    SniOnly { mode: String },
+    Mitm { ca_cert: String, ca_key: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "name", content = "config", rename_all = "snake_case")]
+enum ProxyTransform {
+    Allowlist(ProxyAllowlistTransform),
+    HeaderAllowlist(ProxyHeaderAllowlistTransform),
+    Secrets(ProxySecretsTransform),
+    Annotate(ProxyAnnotateTransform),
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyAllowlistTransform {
+    domains: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyHeaderAllowlistTransform {
+    headers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxySecretsTransform {
+    secrets: Vec<ProxySecret>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum ProxySecret {
+    Inject {
+        source: ProxySecretSource,
+        rules: Vec<ProxyRule>,
+        inject: ProxyInjectOperation,
+    },
+    Replace {
+        source: ProxySecretSource,
+        replace: ProxyReplaceOperation,
+        rules: Vec<ProxyRule>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ProxySecretSource {
+    File {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        json_key: Option<String>,
+        ttl: String,
+        failure_ttl: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyRule {
+    host: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    methods: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyInjectOperation {
+    header: String,
+    require: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyReplaceOperation {
+    proxy_value: String,
+    match_headers: Vec<String>,
+    require: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyAnnotateTransform {
+    annotations: Vec<ProxyAnnotation>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyAnnotation {
+    rules: Vec<ProxyRule>,
+    headers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProxyLogConfig {
+    level: String,
+}
+
+struct ProxyCredentialRule {
+    bundle_key: String,
+    approved_host: String,
+    target_header: String,
+    placeholder_value: String,
+}
+
 pub(super) fn render_proxy_config(
     policy: &NetworkPolicy,
     proxy_ip: &str,
+) -> Result<String, RuntimeProcessError> {
+    render_proxy_config_inner(policy, proxy_ip, false, &[])
+}
+
+fn render_proxy_config_with_ca(
+    policy: &NetworkPolicy,
+    proxy_ip: &str,
+) -> Result<String, RuntimeProcessError> {
+    render_proxy_config_inner(policy, proxy_ip, true, &[])
+}
+
+fn render_proxy_config_inner(
+    policy: &NetworkPolicy,
+    proxy_ip: &str,
+    intercept_tls: bool,
+    credentials: &[ProxyCredentialRule],
 ) -> Result<String, RuntimeProcessError> {
     if policy.allowed_targets.is_empty() || !policy.deny_private_ip_ranges {
         return Err(RuntimeProcessError::ExecutionFailed(
@@ -1211,37 +1624,119 @@ pub(super) fn render_proxy_config(
         ));
     }
     reject_wildcard_targets(policy)?;
-    let dns_listen =
-        serde_json::to_string(&format!("{proxy_ip}:53")).map_err(proxy_config_error)?;
-    let http_listen =
-        serde_json::to_string(&format!("{proxy_ip}:80")).map_err(proxy_config_error)?;
-    let https_listen =
-        serde_json::to_string(&format!("{proxy_ip}:443")).map_err(proxy_config_error)?;
-    let tunnel_listen =
-        serde_json::to_string(&format!("{proxy_ip}:3128")).map_err(proxy_config_error)?;
-    let mut config = format!(
-        "dns:\n  listen: {dns_listen}\n  proxy_ip: {}\nproxy:\n  http_listen: {http_listen}\n  https_listen: {https_listen}\n  tunnel_listen: {tunnel_listen}\n  upstream_deny_cidrs:\n",
-        serde_json::to_string(proxy_ip).map_err(proxy_config_error)?,
-    );
-    for cidr in DENIED_UPSTREAM_CIDRS {
-        config.push_str("    - ");
-        config.push_str(cidr);
-        config.push('\n');
+
+    let mut headers = [
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "User-Agent",
+        "Range",
+        "If-None-Match",
+        "If-Modified-Since",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    let mut normalized_headers = headers
+        .iter()
+        .map(|header| header.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for credential in credentials {
+        if normalized_headers.insert(credential.target_header.to_ascii_lowercase()) {
+            headers.push(credential.target_header.clone());
+        }
     }
-    config.push_str("tls:\n  mode: \"sni-only\"\ntransforms:\n  - name: secrets\n    config:\n      secrets:\n        - source:\n            type: file\n            path: \"");
-    config.push_str(PROXY_INVOCATION_ID_PATH);
-    config.push_str("\"\n            ttl: \"-1ns\"\n            failure_ttl: \"1ms\"\n          rules:\n            - host: \"*\"\n          inject:\n            header: \"X-Ironclaw-Invocation-Id\"\n            require: true\n  - name: annotate\n    config:\n      annotations:\n        - rules:\n            - host: \"*\"\n          headers: [\"X-Ironclaw-Invocation-Id\"]\n  - name: header_allowlist\n    config:\n      headers: [\"Authorization\", \"Content-Type\", \"Accept\", \"User-Agent\", \"Range\", \"If-None-Match\", \"If-Modified-Since\"]\n  - name: allowlist\n    config:\n      domains:\n");
-    for target in &policy.allowed_targets {
-        let quoted = serde_json::to_string(&target.host_pattern).map_err(proxy_config_error)?;
-        config.push_str("        - ");
-        config.push_str(&quoted);
-        config.push('\n');
+
+    let wildcard_rule = || ProxyRule {
+        host: "*".to_string(),
+        methods: Vec::new(),
+        paths: Vec::new(),
+    };
+    let mut secrets = Vec::with_capacity(credentials.len() + 1);
+    secrets.push(ProxySecret::Inject {
+        source: ProxySecretSource::File {
+            path: PROXY_INVOCATION_ID_PATH.to_string(),
+            json_key: None,
+            ttl: "-1ns".to_string(),
+            failure_ttl: "1ms".to_string(),
+        },
+        rules: vec![wildcard_rule()],
+        inject: ProxyInjectOperation {
+            header: "X-Ironclaw-Invocation-Id".to_string(),
+            require: true,
+        },
+    });
+    let methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    for credential in credentials {
+        secrets.push(ProxySecret::Replace {
+            source: ProxySecretSource::File {
+                path: PROXY_CREDENTIAL_BUNDLE_PATH.to_string(),
+                json_key: Some(credential.bundle_key.clone()),
+                ttl: "-1ns".to_string(),
+                failure_ttl: "1ms".to_string(),
+            },
+            replace: ProxyReplaceOperation {
+                proxy_value: credential.placeholder_value.clone(),
+                match_headers: vec![credential.target_header.clone()],
+                require: true,
+            },
+            rules: vec![ProxyRule {
+                host: credential.approved_host.clone(),
+                methods: methods.into_iter().map(str::to_string).collect(),
+                paths: vec!["/*".to_string()],
+            }],
+        });
     }
-    config.push_str("log:\n  level: info\n");
-    Ok(config)
+
+    let config = ProxyConfig {
+        dns: ProxyDnsConfig {
+            listen: format!("{proxy_ip}:53"),
+            proxy_ip: proxy_ip.to_string(),
+        },
+        proxy: ProxyListenerConfig {
+            http_listen: format!("{proxy_ip}:80"),
+            https_listen: format!("{proxy_ip}:443"),
+            tunnel_listen: format!("{proxy_ip}:3128"),
+            upstream_deny_cidrs: DENIED_UPSTREAM_CIDRS
+                .iter()
+                .map(|cidr| (*cidr).to_string())
+                .collect(),
+        },
+        tls: if intercept_tls {
+            ProxyTlsConfig::Mitm {
+                ca_cert: PROXY_CA_CERT_PATH.to_string(),
+                ca_key: PROXY_CA_KEY_PATH.to_string(),
+            }
+        } else {
+            ProxyTlsConfig::SniOnly {
+                mode: "sni-only".to_string(),
+            }
+        },
+        transforms: vec![
+            ProxyTransform::Allowlist(ProxyAllowlistTransform {
+                domains: policy
+                    .allowed_targets
+                    .iter()
+                    .map(|target| target.host_pattern.clone())
+                    .collect(),
+            }),
+            ProxyTransform::HeaderAllowlist(ProxyHeaderAllowlistTransform { headers }),
+            ProxyTransform::Secrets(ProxySecretsTransform { secrets }),
+            ProxyTransform::Annotate(ProxyAnnotateTransform {
+                annotations: vec![ProxyAnnotation {
+                    rules: vec![wildcard_rule()],
+                    headers: vec!["X-Ironclaw-Invocation-Id".to_string()],
+                }],
+            }),
+        ],
+        log: ProxyLogConfig {
+            level: "info".to_string(),
+        },
+    };
+    serde_yaml::to_string(&config).map_err(proxy_config_error)
 }
 
-fn proxy_config_error(error: serde_json::Error) -> RuntimeProcessError {
+fn proxy_config_error(error: serde_yaml::Error) -> RuntimeProcessError {
     RuntimeProcessError::ExecutionFailed(format!("sandbox proxy config rendering failed: {error}"))
 }
 
@@ -1273,8 +1768,152 @@ async fn write_atomic_material_file(
     path: &std::path::Path,
     contents: &[u8],
 ) -> Result<(), RuntimeProcessError> {
-    let path = path.to_path_buf();
-    let contents = contents.to_vec();
+    write_atomic_material_file_with_mode(path.to_path_buf(), contents.to_vec(), 0o644).await
+}
+
+async fn write_atomic_private_material_file(
+    path: &std::path::Path,
+    contents: &[u8],
+) -> Result<(), RuntimeProcessError> {
+    write_atomic_material_file_with_mode(
+        path.to_path_buf(),
+        Zeroizing::new(contents.to_vec()),
+        0o600,
+    )
+    .await
+}
+
+/// Keeps an existing file bind mount valid when the material has not changed.
+///
+/// Docker Desktop pins file bind mounts to the source inode. Replacing an
+/// unchanged CA file makes that mount disappear from a running user container.
+/// A changed CA still uses the atomic writer; its posture change recreates the
+/// dependent containers before they execute another command.
+async fn write_atomic_material_file_if_changed(
+    path: &std::path::Path,
+    contents: &[u8],
+    mode: u32,
+) -> Result<(), RuntimeProcessError> {
+    match tokio::fs::read(path).await {
+        Ok(existing) => {
+            let existing = Zeroizing::new(existing);
+            if existing.as_slice() == contents {
+                #[cfg(unix)]
+                tokio::fs::set_permissions(path, {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::Permissions::from_mode(mode)
+                })
+                .await
+                .map_err(|error| {
+                    RuntimeProcessError::ExecutionFailed(format!(
+                        "sandbox managed-egress material permissions failed: {error}"
+                    ))
+                })?;
+                #[cfg(not(unix))]
+                let _ = mode;
+                return Ok(());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox managed-egress material read failed: {error}"
+            )));
+        }
+    }
+    write_atomic_material_file_with_mode(
+        path.to_path_buf(),
+        Zeroizing::new(contents.to_vec()),
+        mode,
+    )
+    .await
+}
+
+/// Rewrites the existing proxy config without replacing its inode.
+///
+/// Docker Desktop can retain a stale directory-bind dentry across an atomic
+/// rename. The proxy reads this file only at startup, and the lifecycle gate
+/// serializes updates with restarts, so an in-place write followed by `sync_all`
+/// gives the container one stable mounted file to reopen.
+async fn write_bind_mounted_proxy_config(
+    path: &std::path::Path,
+    contents: &[u8],
+) -> Result<(), RuntimeProcessError> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy config open failed: {error}"
+            ))
+        })?;
+    tokio::io::AsyncWriteExt::write_all(&mut file, contents)
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox proxy config write failed: {error}"
+            ))
+        })?;
+    file.sync_all().await.map_err(|error| {
+        RuntimeProcessError::ExecutionFailed(format!("sandbox proxy config sync failed: {error}"))
+    })
+}
+
+async fn write_proxy_credential_material(
+    material_root: &std::path::Path,
+    bundle_json: &[u8],
+    proxy_config: &[u8],
+) -> Result<(), RuntimeProcessError> {
+    let result = async {
+        write_atomic_private_material_file(&material_root.join("credentials.json"), bundle_json)
+            .await?;
+        write_bind_mounted_proxy_config(&material_root.join("proxy.yaml"), proxy_config).await
+    }
+    .await;
+    if let Err(write_error) = result {
+        return match remove_credential_material(material_root).await {
+            Ok(()) => Err(write_error),
+            Err(cleanup_error) => Err(RuntimeProcessError::ExecutionFailed(format!(
+                "{write_error}; sandbox proxy credential material rollback failed: {cleanup_error}"
+            ))),
+        };
+    }
+    Ok(())
+}
+
+/// Apply POSIX permission bits to a freshly created material file.
+///
+/// Windows has no POSIX permission model, so the non-unix build is a no-op.
+/// It still *takes* `mode`, which is the point: a `#[cfg(unix)]` block around
+/// the call site left the parameter unused on Windows and `-D warnings`
+/// rejected the build. Consuming it on every platform keeps one signature and
+/// needs no lint suppression.
+#[cfg(unix)]
+fn apply_material_mode(file: &std::fs::File, mode: u32) -> Result<(), RuntimeProcessError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox managed-egress material permissions failed: {error}"
+            ))
+        })
+}
+
+#[cfg(not(unix))]
+fn apply_material_mode(_file: &std::fs::File, _mode: u32) -> Result<(), RuntimeProcessError> {
+    Ok(())
+}
+
+async fn write_atomic_material_file_with_mode<C>(
+    path: PathBuf,
+    contents: C,
+    mode: u32,
+) -> Result<(), RuntimeProcessError>
+where
+    C: AsRef<[u8]> + Send + 'static,
+{
     tokio::task::spawn_blocking(move || {
         use std::io::Write as _;
 
@@ -1288,19 +1927,8 @@ async fn write_atomic_material_file(
                 "sandbox managed-egress temporary material file create failed: {error}"
             ))
         })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            temporary
-                .as_file()
-                .set_permissions(std::fs::Permissions::from_mode(0o644))
-                .map_err(|error| {
-                    RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox managed-egress material permissions failed: {error}"
-                    ))
-                })?;
-        }
-        temporary.write_all(&contents).map_err(|error| {
+        apply_material_mode(temporary.as_file(), mode)?;
+        temporary.write_all(contents.as_ref()).map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
                 "sandbox managed-egress material file write failed: {error}"
             ))
@@ -1432,6 +2060,52 @@ mod tests {
 
     use super::*;
 
+    /// The managed-egress writer hands the credential material's permission
+    /// bits to `apply_material_mode` on every platform. Before this existed
+    /// the call site was a `#[cfg(unix)]` block, which left `mode` unused on
+    /// Windows and made `-D warnings` fail the whole build there.
+    ///
+    /// Asserting the mode actually lands (rather than that the call merely
+    /// returns `Ok`) is the point: material files carry proxy credentials, so
+    /// a writer that silently stopped restricting them would be a real leak,
+    /// not a style regression.
+    #[cfg(unix)]
+    #[test]
+    fn apply_material_mode_restricts_the_file_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("material");
+        let file = std::fs::File::create(&path).expect("create material file");
+
+        apply_material_mode(&file, 0o600).expect("apply mode");
+
+        let mode = std::fs::metadata(&path)
+            .expect("material metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "credential material must be owner-only; got {:o}",
+            mode & 0o777
+        );
+    }
+
+    /// Windows has no POSIX permission model, so the non-unix build is a
+    /// deliberate no-op -- but it must still accept `mode`, because consuming
+    /// the parameter on every platform is what removes the need for a lint
+    /// suppression at the call site.
+    #[cfg(not(unix))]
+    #[test]
+    fn apply_material_mode_is_a_noop_off_unix() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("material");
+        let file = std::fs::File::create(&path).expect("create material file");
+
+        apply_material_mode(&file, 0o600).expect("apply mode must succeed off unix");
+    }
+
     fn policy() -> NetworkPolicy {
         NetworkPolicy {
             allowed_targets: vec![
@@ -1451,17 +2125,66 @@ mod tests {
         }
     }
 
+    fn test_runtime(material_root: PathBuf) -> ManagedEgressRuntime {
+        ManagedEgressRuntime {
+            proxy_image: "sha256:test-proxy".to_string(),
+            policy: policy(),
+            posture: "test-posture".to_string(),
+            ca: Arc::new(SandboxCertificateAuthority::generate().unwrap()),
+            material_root,
+            upstream_gate: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    fn test_bundle(material_root: &std::path::Path) -> ManagedEgressBundle {
+        ManagedEgressBundle {
+            network_name: "test-network".to_string(),
+            proxy_ip: "172.28.10.2".to_string(),
+            proxy_host: "test-proxy".to_string(),
+            posture: "test-posture".to_string(),
+            ca_cert_path: material_root.join("ca.crt"),
+            invocation_id_path: material_root.join("invocation-id"),
+        }
+    }
+
+    fn test_credential(
+        placeholder: &str,
+        header_name: &str,
+        secret: &str,
+    ) -> SandboxCommandCredential {
+        SandboxCommandCredential::new(
+            ironclaw_host_api::ids::SecretHandle::new("atlas_runtime_token").unwrap(),
+            "ATLAS_TOKEN".to_string(),
+            placeholder.to_string(),
+            "github.com".to_string(),
+            header_name.to_string(),
+            Some("Bearer ".to_string()),
+            secret.to_string(),
+        )
+    }
+
     #[test]
-    fn renders_default_deny_allowlist_without_management_api() {
+    fn renders_parseable_default_deny_allowlist_without_management_api() {
         let rendered = render_proxy_config(&policy(), "172.28.10.2").unwrap();
-        assert!(rendered.contains("proxy_ip: \"172.28.10.2\""));
-        assert!(rendered.contains("listen: \"172.28.10.2:53\""));
-        assert!(rendered.contains("http_listen: \"172.28.10.2:80\""));
-        assert!(rendered.contains("https_listen: \"172.28.10.2:443\""));
-        assert!(rendered.contains("tunnel_listen: \"172.28.10.2:3128\""));
-        assert!(rendered.contains("- \"github.com\""));
-        assert!(rendered.contains("- \"objects.githubusercontent.com\""));
-        assert!(rendered.contains("upstream_deny_cidrs:"));
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
+
+        assert_eq!(parsed["dns"]["proxy_ip"].as_str(), Some("172.28.10.2"));
+        assert_eq!(parsed["dns"]["listen"].as_str(), Some("172.28.10.2:53"));
+        assert_eq!(
+            parsed["proxy"]["http_listen"].as_str(),
+            Some("172.28.10.2:80")
+        );
+        assert_eq!(
+            parsed["proxy"]["https_listen"].as_str(),
+            Some("172.28.10.2:443")
+        );
+        assert_eq!(
+            parsed["proxy"]["tunnel_listen"].as_str(),
+            Some("172.28.10.2:3128")
+        );
+        let denied = parsed["proxy"]["upstream_deny_cidrs"]
+            .as_sequence()
+            .unwrap();
         for cidr in [
             "10.0.0.0/8",
             "127.0.0.0/8",
@@ -1473,18 +2196,122 @@ mod tests {
             "2001:db8::/32",
             "fc00::/7",
         ] {
-            assert!(rendered.contains(cidr), "missing denied CIDR {cidr}");
+            assert!(
+                denied.iter().any(|value| value.as_str() == Some(cidr)),
+                "missing denied CIDR {cidr}"
+            );
         }
-        assert!(!rendered.contains("management:"));
-        assert!(rendered.contains(PROXY_INVOCATION_ID_PATH));
-        assert!(rendered.contains("X-Ironclaw-Invocation-Id"));
-        assert!(
-            rendered.contains("ttl: \"-1ns\""),
-            "attribution source must bypass the proxy cache on every request"
-        );
-        assert!(rendered.contains("name: header_allowlist"));
+        assert!(parsed.get("management").is_none());
+        assert_eq!(parsed["tls"]["mode"].as_str(), Some("sni-only"));
     }
 
+    #[test]
+    fn credential_renderer_preserves_transform_order_and_bundle_source() {
+        let credentials = [ProxyCredentialRule {
+            bundle_key: "atlas_runtime_token".to_string(),
+            approved_host: "github.com".to_string(),
+            target_header: "Authorization".to_string(),
+            placeholder_value: "Bearer icsbx_test_placeholder".to_string(),
+        }];
+
+        let rendered =
+            render_proxy_config_inner(&policy(), "172.28.10.2", true, &credentials).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
+        let transforms = parsed["transforms"].as_sequence().unwrap();
+        let names = transforms
+            .iter()
+            .map(|transform| transform["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["allowlist", "header_allowlist", "secrets", "annotate"]
+        );
+
+        let header_allowlist = transforms[1]["config"]["headers"].as_sequence().unwrap();
+        assert_eq!(
+            header_allowlist
+                .iter()
+                .filter(|header| header.as_str() == Some("Authorization"))
+                .count(),
+            1,
+            "a credential header already in the base allowlist must not be duplicated"
+        );
+        let secrets = transforms[2]["config"]["secrets"].as_sequence().unwrap();
+        assert_eq!(
+            secrets[0]["source"]["path"].as_str(),
+            Some(PROXY_INVOCATION_ID_PATH)
+        );
+        assert_eq!(
+            secrets[0]["inject"]["header"].as_str(),
+            Some("X-Ironclaw-Invocation-Id")
+        );
+        assert_eq!(
+            secrets[1]["source"]["path"].as_str(),
+            Some(PROXY_CREDENTIAL_BUNDLE_PATH)
+        );
+        assert_eq!(
+            secrets[1]["source"]["json_key"].as_str(),
+            Some("atlas_runtime_token")
+        );
+        assert_eq!(
+            secrets[1]["replace"]["proxy_value"].as_str(),
+            Some("Bearer icsbx_test_placeholder")
+        );
+        assert_eq!(secrets[1]["rules"][0]["host"].as_str(), Some("github.com"));
+        assert_eq!(parsed["tls"]["ca_cert"].as_str(), Some(PROXY_CA_CERT_PATH));
+        assert_eq!(parsed["tls"]["ca_key"].as_str(), Some(PROXY_CA_KEY_PATH));
+    }
+
+    #[test]
+    fn typed_renderer_round_trips_yaml_sensitive_values_exactly() {
+        let host = "api.atlas.test\"quoted\nline";
+        let header = "X-Atlas-\"\n\u{1}";
+        let placeholder = "Bearer placeholder\"\n\u{2}";
+        let policy = NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: None,
+                host_pattern: host.to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        };
+        let credentials = [ProxyCredentialRule {
+            bundle_key: "atlas\"key\n".to_string(),
+            approved_host: host.to_string(),
+            target_header: header.to_string(),
+            placeholder_value: placeholder.to_string(),
+        }];
+
+        let rendered =
+            render_proxy_config_inner(&policy, "172.28.10.2", true, &credentials).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
+        let transforms = parsed["transforms"].as_sequence().unwrap();
+        let secrets = transforms[2]["config"]["secrets"].as_sequence().unwrap();
+
+        assert_eq!(transforms[0]["config"]["domains"][0].as_str(), Some(host));
+        assert_eq!(
+            transforms[1]["config"]["headers"]
+                .as_sequence()
+                .unwrap()
+                .last()
+                .and_then(serde_yaml::Value::as_str),
+            Some(header)
+        );
+        assert_eq!(
+            secrets[1]["source"]["json_key"].as_str(),
+            Some("atlas\"key\n")
+        );
+        assert_eq!(secrets[1]["rules"][0]["host"].as_str(), Some(host));
+        assert_eq!(
+            secrets[1]["replace"]["proxy_value"].as_str(),
+            Some(placeholder)
+        );
+        assert_eq!(
+            secrets[1]["replace"]["match_headers"][0].as_str(),
+            Some(header)
+        );
+    }
     #[test]
     fn proxy_image_override_requires_a_full_sha256_digest() {
         let _guard = lock_env();
@@ -1545,17 +2372,11 @@ mod tests {
     }
 
     #[test]
-    fn posture_binds_image_policy_and_material_root() {
+    fn posture_binds_image_policy_and_deployment_identity() {
         let image = "sha256:proxy-image";
-        let base = proxy_posture(image, &policy(), std::path::Path::new("/a")).unwrap();
-        assert_eq!(
-            base,
-            proxy_posture(image, &policy(), std::path::Path::new("/a")).unwrap()
-        );
-        assert_ne!(
-            base,
-            proxy_posture(image, &policy(), std::path::Path::new("/b")).unwrap()
-        );
+        let base = proxy_posture(image, &policy(), b"ca-a").unwrap();
+        assert_eq!(base, proxy_posture(image, &policy(), b"ca-a").unwrap());
+        assert_ne!(base, proxy_posture(image, &policy(), b"ca-b").unwrap());
     }
 
     #[tokio::test]
@@ -1579,6 +2400,239 @@ mod tests {
                 .permissions()
                 .mode();
             assert_eq!(mode & 0o777, 0o644);
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_mounted_proxy_config_rewrite_preserves_the_mounted_inode() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("proxy.yaml");
+        write_atomic_material_file(&config, b"first").await.unwrap();
+
+        #[cfg(unix)]
+        let original_inode = tokio::fs::metadata(&config).await.unwrap().ino();
+
+        write_bind_mounted_proxy_config(&config, b"second")
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read(&config).await.unwrap(), b"second");
+        #[cfg(unix)]
+        assert_eq!(
+            tokio::fs::metadata(&config).await.unwrap().ino(),
+            original_inode,
+            "Docker Desktop bind mounts track the original config inode"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_ca_material_preserves_the_file_bind_inode() {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let certificate = directory.path().join("ca.crt");
+        write_atomic_material_file_if_changed(&certificate, b"same-root", 0o644)
+            .await
+            .unwrap();
+
+        #[cfg(unix)]
+        let original_inode = tokio::fs::metadata(&certificate).await.unwrap().ino();
+
+        #[cfg(unix)]
+        tokio::fs::set_permissions(&certificate, {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::Permissions::from_mode(0o666)
+        })
+        .await
+        .unwrap();
+
+        write_atomic_material_file_if_changed(&certificate, b"same-root", 0o644)
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read(&certificate).await.unwrap(), b"same-root");
+        #[cfg(unix)]
+        assert_eq!(
+            tokio::fs::metadata(&certificate).await.unwrap().ino(),
+            original_inode,
+            "an unchanged CA must remain visible through an existing file bind mount"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                tokio::fs::metadata(&certificate)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o644,
+                "unchanged material must have its required mode repaired"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_cleanup_removes_bundle_and_legacy_material() {
+        let directory = tempfile::tempdir().unwrap();
+        let bundle = directory.path().join("credentials.json");
+        let legacy = directory.path().join("credential-0.secret");
+        let marker = directory.path().join("invocation-id");
+        let certificate = directory.path().join("ca.crt");
+        let private_key = directory.path().join("ca.key");
+        write_atomic_private_material_file(&bundle, br#"{"atlas":"secret"}"#)
+            .await
+            .unwrap();
+        write_atomic_private_material_file(&legacy, b"legacy")
+            .await
+            .unwrap();
+        write_atomic_material_file(&marker, b"keep").await.unwrap();
+        write_atomic_material_file(&certificate, b"certificate")
+            .await
+            .unwrap();
+        write_atomic_private_material_file(&private_key, b"private-key")
+            .await
+            .unwrap();
+
+        remove_credential_material(directory.path()).await.unwrap();
+
+        assert!(!bundle.exists());
+        assert!(!legacy.exists());
+        assert!(marker.exists());
+        assert_eq!(tokio::fs::read(&certificate).await.unwrap(), b"certificate");
+        assert_eq!(tokio::fs::read(&private_key).await.unwrap(), b"private-key");
+    }
+
+    #[tokio::test]
+    async fn failed_credential_write_removes_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir(directory.path().join("proxy.yaml"))
+            .await
+            .unwrap();
+
+        let result = write_proxy_credential_material(
+            directory.path(),
+            br#"{"atlas_runtime_token":"Bearer secret"}"#,
+            b"proxy config",
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!directory.path().join("credentials.json").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_proxy_restart_removes_configured_credential_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(directory.path().to_path_buf());
+        let bundle = test_bundle(directory.path());
+        let credential = test_credential("icsbx_test_placeholder", "Authorization", "secret");
+        write_atomic_material_file(&directory.path().join("proxy.yaml"), b"base")
+            .await
+            .unwrap();
+
+        let result = runtime
+            .configure_credentials_with_restart(&bundle, &[credential], || async {
+                Err(RuntimeProcessError::ExecutionFailed(
+                    "test proxy restart failure".to_string(),
+                ))
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(!directory.path().join("credentials.json").exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_credential_replacement_rules_fail_before_material_is_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(directory.path().to_path_buf());
+        let bundle = test_bundle(directory.path());
+        let invalid = [
+            test_credential("", "Authorization", "secret"),
+            test_credential("   ", "Authorization", "secret"),
+            test_credential("same-value", "Authorization", "same-value"),
+            test_credential("icsbx_test_placeholder", "", "secret"),
+        ];
+
+        for credential in invalid {
+            let result = runtime
+                .configure_credentials_with_restart(&bundle, &[credential], || async { Ok(()) })
+                .await;
+            assert!(result.is_err());
+            assert!(!directory.path().join("credentials.json").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_credential_placeholders_fail_before_material_is_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(directory.path().to_path_buf());
+        let bundle = test_bundle(directory.path());
+        let credentials = [
+            test_credential("icsbx_duplicate", "Authorization", "first-secret"),
+            test_credential("icsbx_duplicate", "X-Api-Key", "second-secret"),
+        ];
+
+        let result = runtime
+            .configure_credentials_with_restart(&bundle, &credentials, || async { Ok(()) })
+            .await;
+
+        assert!(result.is_err());
+        assert!(!directory.path().join("credentials.json").exists());
+    }
+
+    #[tokio::test]
+    async fn configured_secret_exists_only_in_the_private_bundle() {
+        const RAW_SECRET_SENTINEL: &str = "raw-secret-sentinel-for-test";
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(directory.path().to_path_buf());
+        let bundle = test_bundle(directory.path());
+        let credential = test_credential(
+            "icsbx_test_placeholder",
+            "Authorization",
+            RAW_SECRET_SENTINEL,
+        );
+        write_atomic_material_file(&directory.path().join("proxy.yaml"), b"base")
+            .await
+            .unwrap();
+
+        runtime
+            .configure_credentials_with_restart(
+                &bundle,
+                std::slice::from_ref(&credential),
+                || async { Ok(()) },
+            )
+            .await
+            .unwrap();
+
+        let proxy_config = tokio::fs::read_to_string(directory.path().join("proxy.yaml"))
+            .await
+            .unwrap();
+        let credential_bundle =
+            tokio::fs::read_to_string(directory.path().join("credentials.json"))
+                .await
+                .unwrap();
+        assert!(!proxy_config.contains(RAW_SECRET_SENTINEL));
+        assert!(!format!("{runtime:?}").contains(RAW_SECRET_SENTINEL));
+        assert!(!format!("{credential:?}").contains(RAW_SECRET_SENTINEL));
+        assert!(credential_bundle.contains(RAW_SECRET_SENTINEL));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode = tokio::fs::metadata(directory.path().join("credentials.json"))
+                .await
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
         }
     }
 

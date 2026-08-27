@@ -28,6 +28,9 @@ pub struct RefreshingCapabilityPortTestParts {
     /// Host runtime the assembled port dispatches builtin capabilities
     /// through (harness passes a recording double).
     pub runtime: std::sync::Arc<dyn ironclaw_host_runtime::HostRuntime>,
+    /// Projects the same backend-specific builtin policy production resolved
+    /// before constructing the per-run port.
+    pub process_backend: ironclaw_host_api::runtime_policy::ProcessBackendKind,
     pub run_context: ironclaw_loop_contracts::LoopRunContext,
     /// The already-resolved neutral host-API surface policy production's
     /// runner passes into the real factory for this run.
@@ -73,6 +76,10 @@ pub struct RefreshingCapabilityPortTestParts {
     /// capabilities are only visible when the harness actually installs and
     /// activates them AND passes the resulting handle here.
     pub extension_management: Option<ExtensionManagementTestHandle>,
+    /// Optional static surface for focused factory tests. When present it
+    /// replaces `extension_management`; production never uses this seam.
+    pub extension_surface_override:
+        Option<ironclaw_extension_host::capability_surface::ExtensionCapabilitySurface>,
     pub trajectory_observer: Option<std::sync::Arc<dyn crate::RebornTrajectoryObserver>>,
     pub outbound_preferences_service:
         Option<std::sync::Arc<dyn ironclaw_assistant::OutboundPreferencesProductService>>,

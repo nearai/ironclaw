@@ -18,14 +18,14 @@ PR_SET_CHILD_SUBREAPER = 36
 
 def usage() -> "NoReturn":
     print(
-        "usage: ironclaw-exec <timeout-seconds> <outcome-nonce> <command>",
+        "usage: ironclaw-exec <timeout-seconds> <outcome-nonce> <executable> [arg ...]",
         file=sys.stderr,
     )
     raise SystemExit(64)
 
 
-def parse_args() -> tuple[int, str, str]:
-    if len(sys.argv) != 4:
+def parse_args() -> tuple[int, str, list[str]]:
+    if len(sys.argv) < 4:
         usage()
     try:
         timeout = int(sys.argv[1], 10)
@@ -36,7 +36,7 @@ def parse_args() -> tuple[int, str, str]:
     nonce = sys.argv[2]
     if not nonce or any(char not in "0123456789abcdef-" for char in nonce):
         usage()
-    return timeout, nonce, sys.argv[3]
+    return timeout, nonce, sys.argv[3:]
 
 
 def make_subreaper() -> None:
@@ -138,19 +138,36 @@ def cleanup_processes(root_pid: int | None) -> None:
         time.sleep(0.01)
 
 
+def emit_outcome(nonce: str, outcome: str) -> None:
+    print(f"\n__IRONCLAW_EXEC_OUTCOME_{nonce}={outcome}")
+
+
 def main() -> int:
-    timeout, nonce, command = parse_args()
+    timeout, nonce, argv = parse_args()
     try:
         make_subreaper()
     except OSError as error:
         print(f"ironclaw-exec: cannot become subreaper: {error}", file=sys.stderr)
         return 70
 
-    process = subprocess.Popen(
-        ["sh", "-c", command],
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError as error:
+        print(f"ironclaw-exec: executable not found: {error}", file=sys.stderr)
+        emit_outcome(nonce, "exit:127")
+        return 0
+    except PermissionError as error:
+        print(f"ironclaw-exec: executable is not runnable: {error}", file=sys.stderr)
+        emit_outcome(nonce, "exit:126")
+        return 0
+    except OSError as error:
+        print(f"ironclaw-exec: executable could not start: {error}", file=sys.stderr)
+        emit_outcome(nonce, "exit:126")
+        return 0
     timed_out = False
     reaped = False
     try:
@@ -174,7 +191,7 @@ def main() -> int:
     else:
         exit_code = 128 + -status if status < 0 else status & 0xFF
         outcome = f"exit:{min(exit_code, 255)}"
-    print(f"\n__IRONCLAW_EXEC_OUTCOME_{nonce}={outcome}")
+    emit_outcome(nonce, outcome)
     return 0
 
 

@@ -128,6 +128,9 @@ pub fn provider_diagnostic_model_cause(diagnostic: &ProviderDiagnostic) -> Optio
 /// consumed by the dispatcher.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilityDispatchRequest {
+    /// Exact descriptor evaluated by authorization. `None` is accepted only for
+    /// a process continuation persisted before descriptor freezing.
+    pub authorized_descriptor: Option<crate::capability::CapabilityDescriptor>,
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
     pub authenticated_actor_user_id: Option<UserId>,

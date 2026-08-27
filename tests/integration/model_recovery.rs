@@ -184,6 +184,84 @@ async fn long_tool_run_keeps_the_original_task_after_raw_history_exceeds_window_
 }
 
 #[tokio::test]
+async fn compaction_summary_chain_preserves_earlier_compacted_history() {
+    const OLDEST_TURN: &str = "oldest transcript marker before compaction";
+    const MIDDLE_TURN: &str = "middle transcript marker before the newest summary";
+    const RETAINED_TAIL: &str = "retained transcript tail after the newest summary";
+    const OLDER_SUMMARY: &str = "older summary preserving earlier compacted history";
+    const NEWEST_SUMMARY: &str = "newest incremental compaction summary";
+
+    let harness = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::text("oldest reply"),
+            RebornScriptedReply::text("middle reply"),
+            RebornScriptedReply::text("tail reply"),
+            RebornScriptedReply::text("barrier verified"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    harness.submit_turn(OLDEST_TURN).await.expect("oldest turn");
+    harness.submit_turn(MIDDLE_TURN).await.expect("middle turn");
+    harness.submit_turn(RETAINED_TAIL).await.expect("tail turn");
+
+    let oldest = harness
+        .user_message_record(OLDEST_TURN)
+        .await
+        .expect("oldest message");
+    let middle = harness
+        .user_message_record(MIDDLE_TURN)
+        .await
+        .expect("middle message");
+    let retained = harness
+        .user_message_record(RETAINED_TAIL)
+        .await
+        .expect("retained message");
+    harness
+        .create_compaction_summary_for_test(
+            oldest.sequence,
+            middle.sequence.checked_sub(1).expect("ordered messages"),
+            OLDER_SUMMARY,
+        )
+        .await
+        .expect("older summary persists");
+    harness
+        .create_compaction_summary_for_test(
+            middle.sequence,
+            retained.sequence.checked_sub(1).expect("ordered messages"),
+            NEWEST_SUMMARY,
+        )
+        .await
+        .expect("newest summary persists");
+
+    harness
+        .submit_turn("build the prompt after the newest summary")
+        .await
+        .expect("post-summary turn");
+    harness
+        .assert_last_model_message_content_contains(NEWEST_SUMMARY)
+        .await
+        .expect("newest summary reaches the prompt");
+    harness
+        .assert_last_model_message_content_contains(RETAINED_TAIL)
+        .await
+        .expect("tail after the barrier remains visible");
+    harness
+        .assert_last_model_message_content_contains(OLDER_SUMMARY)
+        .await
+        .expect("earlier compacted history remains represented");
+    harness
+        .assert_last_model_message_content_not_contains(OLDEST_TURN)
+        .await
+        .expect("raw history covered by a summary stays out of the prompt");
+    harness
+        .assert_conversation_history_contains(OLDEST_TURN)
+        .await
+        .expect("summary projection does not delete durable history");
+}
+
+#[tokio::test]
 async fn context_overflow_recovers_with_model_visible_observation() {
     // Seed one oversized user message so forced compaction exercises the real
     // compactor instead of taking its safe "nothing eligible" skip path.

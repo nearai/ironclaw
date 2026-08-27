@@ -11,6 +11,7 @@ use ironclaw_event_log::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extension_registry::SharedExtensionRegistry;
 use ironclaw_host_api::{
     authorized::Authorized,
+    capability::CapabilityDescriptor,
     ids::{ActivityId, CorrelationId, ProductKind},
     invocation::{Actor, Invocation, InvocationOrigin},
 };
@@ -104,7 +105,28 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
     }
 }
 
+struct DescriptorAssertingLane {
+    expected: CapabilityDescriptor,
+}
+
+#[async_trait]
+impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for DescriptorAssertingLane {
+    async fn dispatch_json(
+        &self,
+        request: RuntimeLaneRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        assert_eq!(
+            request.descriptor, &self.expected,
+            "runtime lane must receive the descriptor frozen by authorization"
+        );
+        Err(DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Wasm,
+        })
+    }
+}
+
 fn authorized(request: CapabilityDispatchRequest) -> Authorized {
+    let authorized_descriptor = request.authorized_descriptor;
     let lane = RuntimeLane::from_runtime_kind(RuntimeKind::Wasm)
         .expect("test runtime must map to an execution lane");
     let invocation = Invocation {
@@ -127,6 +149,7 @@ fn authorized(request: CapabilityDispatchRequest) -> Authorized {
     };
     Authorized::seal_for_test_with_mounts(
         invocation,
+        authorized_descriptor,
         lane,
         request.mounts,
         request.resource_reservation,
@@ -136,6 +159,7 @@ fn authorized(request: CapabilityDispatchRequest) -> Authorized {
 
 fn wasm_capability_request(input: Value) -> Authorized {
     authorized(CapabilityDispatchRequest {
+        authorized_descriptor: None,
         run_id: None,
         origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
         capability_id: CapabilityId::new("test-wasm.run").unwrap(),
@@ -211,6 +235,54 @@ async fn resolver_prebinds_and_dispatches_through_the_registered_lane() {
 }
 
 #[tokio::test]
+async fn dispatch_uses_the_descriptor_frozen_by_authorization() {
+    let registry = shared_registry_with(WASM_MANIFEST, "test-wasm");
+    let capability_id = CapabilityId::new("test-wasm.run").unwrap();
+    let mut authorized_descriptor = registry
+        .snapshot()
+        .get_capability(&capability_id)
+        .unwrap()
+        .clone();
+    authorized_descriptor.description =
+        "invocation-enriched descriptor that is absent from the registry".to_string();
+    let expected = authorized_descriptor.clone();
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let mut lanes: std::collections::HashMap<
+        RuntimeKind,
+        Arc<dyn RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor>>,
+    > = std::collections::HashMap::new();
+    lanes.insert(
+        RuntimeKind::Wasm,
+        Arc::new(DescriptorAssertingLane { expected }),
+    );
+    let resolver: Arc<dyn ToolResolver> =
+        Arc::new(resolver_with_lanes(registry, Arc::clone(&governor), lanes));
+    let dispatcher = RuntimeDispatcher::from_arcs(resolver, governor);
+
+    let error = dispatcher
+        .dispatch_json(authorized(CapabilityDispatchRequest {
+            authorized_descriptor: Some(authorized_descriptor),
+            run_id: None,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            capability_id,
+            scope: sample_scope(),
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        }))
+        .await
+        .expect_err("asserting lane returns its sentinel error");
+    assert!(matches!(
+        error,
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Wasm
+        }
+    ));
+}
+
+#[tokio::test]
 async fn unconfigured_lane_fails_missing_backend_and_releases_prepared_reservation() {
     let registry = shared_registry_with(WASM_MANIFEST, "test-wasm");
     let governor = Arc::new(InMemoryResourceGovernor::new());
@@ -234,6 +306,7 @@ async fn unconfigured_lane_fails_missing_backend_and_releases_prepared_reservati
 
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: CapabilityId::new("test-wasm.run").unwrap(),
@@ -354,6 +427,7 @@ async fn resolved_binding_survives_registry_swap_mid_flight() {
     let adapter: Arc<dyn BoundCapabilityAdapter> = binding.adapter;
     let result = adapter
         .dispatch_json(CapabilityDispatchRequest {
+            authorized_descriptor: None,
             run_id: None,
             origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
             capability_id: echo_id,

@@ -1188,6 +1188,17 @@ struct V2InstallationRecord {
     schema_version: String,
     installation_id: ExtensionInstallationId,
     extension_id: ExtensionId,
+    /// Written by 1.2.x builds, which added the field under this same
+    /// `extension_state.v2` schema string. This release has no persisted
+    /// activation concept -- `ExtensionActivationState` is a compatibility
+    /// shim that always reports `Enabled` -- so the value is never read here.
+    /// It is nonetheless carried forward rather than discarded like the
+    /// diagnostic `health` field: `health` is regenerable, whereas this
+    /// records operator intent that a rollback to 1.2 would otherwise
+    /// silently reset to enabled. Absent on rows this release writes fresh,
+    /// which 1.2 reads as its own `enabled` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_state: Option<String>,
     manifest: WireManifestRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     incarnation_id: Option<InstallationIncarnationId>,
@@ -2206,6 +2217,9 @@ impl ExtensionInstallationStore {
                         schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
                         installation_id: installation.installation_id().clone(),
                         extension_id: installation.extension_id().clone(),
+                        activation_state: current
+                            .as_ref()
+                            .and_then(|record| record.activation_state.clone()),
                         manifest: wire,
                         incarnation_id: installation.incarnation_id().cloned(),
                         legacy_tenant_owner: installation.owner().is_tenant(),
@@ -3451,6 +3465,9 @@ impl ExtensionInstallationStorePort for ExtensionInstallationStore {
                         schema_version: EXTENSION_STATE_V2_SCHEMA.to_string(),
                         installation_id,
                         extension_id,
+                        activation_state: current
+                            .as_ref()
+                            .and_then(|record| record.activation_state.clone()),
                         manifest: wire,
                         incarnation_id: current
                             .as_ref()

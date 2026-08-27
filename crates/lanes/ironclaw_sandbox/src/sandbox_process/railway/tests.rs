@@ -726,19 +726,21 @@ async fn ephemeral_worker_uses_managed_proxy_and_hardened_private_network() {
 #[test]
 fn railway_proxy_config_is_fail_closed_and_has_no_management_listener() {
     let config = config();
-    assert!(config.proxy_config_template.contains("name: allowlist"));
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(&config.proxy_config_template).expect("proxy config parses");
+    assert_eq!(parsed["transforms"][0]["name"].as_str(), Some("allowlist"));
     assert!(
-        config
-            .proxy_config_template
-            .contains("upstream_deny_cidrs:")
+        parsed["proxy"]["upstream_deny_cidrs"]
+            .as_sequence()
+            .is_some_and(|cidrs| !cidrs.is_empty())
     );
-    assert!(config.proxy_config_template.contains("mode: \"sni-only\""));
+    assert_eq!(parsed["tls"]["mode"].as_str(), Some("sni-only"));
     assert!(
         config
             .proxy_config_template
             .contains("X-Ironclaw-Invocation-Id")
     );
-    assert!(!config.proxy_config_template.contains("management:"));
+    assert!(parsed.get("management").is_none());
 }
 
 #[tokio::test]

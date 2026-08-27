@@ -913,9 +913,19 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // the type that already owns it, matching the sibling
         // `deny_capability_ids`/`narrow_to_capability_ids` builders. The
         // behavior that reads them lives in `ironclaw_turn_runner`, so there is
-        // no lower crate to move this to. Count read from this test's own
-        // failure message, never counted by eye.
-        ("ironclaw_host_api", 20_632),
+        // no lower crate to move this to.
+        // 20_632 -> 21_098 (2026-08-26, #7810 merged with main plus final
+        // review fixes): the provider-neutral credentialed-process boundary
+        // adds authorized binding DTOs, invocation bundle keys, the exact
+        // capability descriptor carried through sealed authorization and
+        // durable process continuation, a release-build witness mismatch
+        // error, and the shared sandbox credential-environment validator.
+        // These are neutral contract and authorization-evidence declarations.
+        // Credential selection, staging, execution, bundle I/O, and proxy
+        // substitution remain in their owning kernel, host-runtime, and
+        // sandbox crates. Count re-captured from this test; the stored ceiling
+        // excludes the standing 150-line working tolerance.
+        ("ironclaw_host_api", 20_948),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

@@ -24,11 +24,14 @@ visibility = "model"
 input_schema_ref = "schemas/github/get_repo.input.v1.json"
 prompt_doc_ref = "prompts/github/get_repo.md"
 
+# GitHub CLI sends `Authorization: token <GH_TOKEN>` for API requests:
+# https://github.com/cli/cli/blob/trunk/api/http_client.go
 [[tools.credentials]]
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -44,7 +47,8 @@ prompt_doc_ref = "prompts/github/create_repo.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -60,7 +64,8 @@ prompt_doc_ref = "prompts/github/list_issues.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -76,7 +81,8 @@ prompt_doc_ref = "prompts/github/create_issue.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -92,7 +98,8 @@ prompt_doc_ref = "prompts/github/update_issue.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -108,7 +115,8 @@ prompt_doc_ref = "prompts/github/add_issue_labels.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -124,7 +132,8 @@ prompt_doc_ref = "prompts/github/remove_issue_label.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -140,7 +149,8 @@ prompt_doc_ref = "prompts/github/add_issue_assignees.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -156,7 +166,8 @@ prompt_doc_ref = "prompts/github/remove_issue_assignees.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -172,7 +183,8 @@ prompt_doc_ref = "prompts/github/get_issue.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -188,7 +200,8 @@ prompt_doc_ref = "prompts/github/list_issue_comments.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -204,7 +217,8 @@ prompt_doc_ref = "prompts/github/create_issue_comment.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -220,7 +234,8 @@ prompt_doc_ref = "prompts/github/comment_issue.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -236,7 +251,8 @@ prompt_doc_ref = "prompts/github/list_pull_requests.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -252,7 +268,8 @@ prompt_doc_ref = "prompts/github/create_pull_request.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -268,7 +285,8 @@ prompt_doc_ref = "prompts/github/update_pull_request.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -284,7 +302,8 @@ prompt_doc_ref = "prompts/github/get_pull_request.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -300,7 +319,8 @@ prompt_doc_ref = "prompts/github/get_pull_request_files.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -316,7 +336,8 @@ prompt_doc_ref = "prompts/github/create_pr_review.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -332,7 +353,8 @@ prompt_doc_ref = "prompts/github/list_pull_request_comments.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -348,7 +370,8 @@ prompt_doc_ref = "prompts/github/reply_pull_request_comment.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -364,7 +387,8 @@ prompt_doc_ref = "prompts/github/get_pull_request_reviews.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -380,7 +404,8 @@ prompt_doc_ref = "prompts/github/list_pull_request_review_threads.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -396,7 +421,8 @@ prompt_doc_ref = "prompts/github/resolve_review_thread.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -412,7 +438,8 @@ prompt_doc_ref = "prompts/github/unresolve_review_thread.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -428,7 +455,8 @@ prompt_doc_ref = "prompts/github/get_combined_status.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -444,7 +472,8 @@ prompt_doc_ref = "prompts/github/merge_pull_request.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -460,7 +489,8 @@ prompt_doc_ref = "prompts/github/get_authenticated_user.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -476,7 +506,8 @@ prompt_doc_ref = "prompts/github/list_repos.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -492,7 +523,8 @@ prompt_doc_ref = "prompts/github/search_repositories.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -508,7 +540,8 @@ prompt_doc_ref = "prompts/github/search_code.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -524,7 +557,8 @@ prompt_doc_ref = "prompts/github/search_issues.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -540,7 +574,8 @@ prompt_doc_ref = "prompts/github/search_issues_pull_requests.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -556,7 +591,8 @@ prompt_doc_ref = "prompts/github/list_branches.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -572,7 +608,8 @@ prompt_doc_ref = "prompts/github/create_branch.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -588,7 +625,8 @@ prompt_doc_ref = "prompts/github/get_file_content.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -604,7 +642,8 @@ prompt_doc_ref = "prompts/github/create_or_update_file.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -620,7 +659,8 @@ prompt_doc_ref = "prompts/github/delete_file.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -636,7 +676,8 @@ prompt_doc_ref = "prompts/github/list_releases.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -652,7 +693,8 @@ prompt_doc_ref = "prompts/github/create_release.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -668,7 +710,8 @@ prompt_doc_ref = "prompts/github/trigger_workflow.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -684,7 +727,8 @@ prompt_doc_ref = "prompts/github/get_workflow_runs.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -700,7 +744,8 @@ prompt_doc_ref = "prompts/github/get_workflow_run_jobs.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -725,7 +770,8 @@ network_targets = [
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -741,7 +787,8 @@ prompt_doc_ref = "prompts/github/get_workflow_run_artifacts.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -757,7 +804,8 @@ prompt_doc_ref = "prompts/github/rerun_failed_workflow_run_jobs.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -773,7 +821,8 @@ prompt_doc_ref = "prompts/github/rerun_workflow_job.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -789,7 +838,8 @@ prompt_doc_ref = "prompts/github/fork_repo.md"
 handle = "github_runtime_token"
 vendor = "github"
 audience = { scheme = "https", host = "api.github.com" }
-injection = { type = "header", name = "authorization", prefix = "Bearer " }
+injection = { type = "header", name = "authorization", prefix = "token " }
+placeholder_env = "GH_TOKEN"
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }

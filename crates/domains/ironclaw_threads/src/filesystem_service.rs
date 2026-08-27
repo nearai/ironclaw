@@ -66,7 +66,7 @@ use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::stored_message::serialize_stored_thread_message;
-use crate::summary_artifacts::find_overlapping_summary;
+use crate::summary_artifacts::{find_overlapping_summary, sorted_context_summaries};
 use crate::title::derive_title_from_message;
 use crate::tool_result_records::{
     tool_result_record_chunk, validate_tool_result_record_content,
@@ -4489,14 +4489,10 @@ fn context_messages_with_summary_replacements(
     messages: &[ThreadMessageRecord],
     summaries: &[SummaryArtifact],
 ) -> Vec<ContextMessage> {
-    let replacement_summaries = summaries
-        .iter()
-        .filter(|summary| {
-            summary.model_context_policy
-                == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-                && !summary_covers_hidden_content(messages, summary)
-        })
-        .collect::<Vec<_>>();
+    let replacement_summaries = sorted_context_summaries(summaries, |summary| {
+        summary.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+            && !summary_covers_hidden_content(messages, summary)
+    });
     let mut skip_through = 0u64;
     let mut emitted_summaries: std::collections::HashSet<_> = std::collections::HashSet::new();
     let mut context = Vec::new();

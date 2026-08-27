@@ -632,6 +632,56 @@ async fn replay_projection_folds_dispatch_lifecycle_into_capability_activity() {
 }
 
 #[tokio::test]
+async fn exact_run_capability_activity_read_excludes_neighboring_runs() {
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let service = ReplayEventProjectionService::new(Arc::clone(&log));
+    let mut owner_scope = scope_for_thread(ThreadId::new("thread-exact-run-facts").unwrap());
+    let selected_run = InvocationId::new();
+    let neighboring_run = InvocationId::new();
+
+    let mut selected_event = RuntimeEvent::capability_activity_succeeded(
+        owner_scope.clone(),
+        CapabilityId::new("gmail.search").unwrap(),
+        provider_id(),
+        RuntimeKind::Script,
+        42,
+    );
+    selected_event.parent_invocation_id = Some(selected_run);
+    log.append(selected_event).await.unwrap();
+
+    owner_scope.invocation_id = InvocationId::new();
+    let mut neighboring_event = RuntimeEvent::capability_activity_failed(
+        owner_scope.clone(),
+        CapabilityId::new("slack.send").unwrap(),
+        Some(provider_id()),
+        Some(RuntimeKind::Script),
+        "provider_error",
+    );
+    neighboring_event.parent_invocation_id = Some(neighboring_run);
+    log.append(neighboring_event).await.unwrap();
+
+    let mut projection_resource_scope = owner_scope;
+    projection_resource_scope.thread_id = None;
+    let window = service
+        .capability_activities_for_run(
+            ProjectionScope::from_resource_scope(&projection_resource_scope),
+            selected_run,
+            16,
+        )
+        .await
+        .unwrap();
+
+    assert!(!window.truncated);
+    assert_eq!(window.activities.len(), 1);
+    assert_eq!(window.activities[0].run_id, Some(selected_run));
+    assert_eq!(window.activities[0].capability_id.as_str(), "gmail.search");
+    assert_eq!(
+        window.activities[0].status,
+        CapabilityActivityStatus::Completed
+    );
+}
+
+#[tokio::test]
 async fn replay_projection_folds_process_completed_into_completed_capability_activity() {
     let log = Arc::new(InMemoryDurableEventLog::new());
     let service = ReplayEventProjectionService::new(Arc::clone(&log));

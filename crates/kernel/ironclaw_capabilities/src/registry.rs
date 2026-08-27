@@ -400,6 +400,7 @@ mod tests {
 
     fn sample_dispatch_request(capability_id: &str) -> CapabilityDispatchRequest {
         CapabilityDispatchRequest {
+            authorized_descriptor: None,
             capability_id: CapabilityId::new(capability_id).expect("capability id"),
             scope: ResourceScope {
                 tenant_id: TenantId::new("tenant-a").expect("tenant id"),

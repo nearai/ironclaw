@@ -190,7 +190,7 @@ where
             });
         }
 
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+        let Some(base_descriptor) = self.registry.get_capability(&request.capability_id) else {
             fail_invocation_if_configured(
                 Some(invocation_state),
                 &scope,
@@ -202,6 +202,32 @@ where
                 capability: request.capability_id,
             });
         };
+        let descriptor = match self
+            .enrich_invocation_descriptor(base_descriptor, &request.capability_id, &request.input)
+            .await
+        {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                fail_invocation_if_configured(
+                    Some(invocation_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.enforce_runtime_policy(&descriptor) {
+            fail_invocation_if_configured(
+                Some(invocation_state),
+                &scope,
+                invocation_id,
+                "RuntimePolicyDenied",
+            )
+            .await;
+            return Err(error);
+        }
 
         let Some(lease) = matching_approval_lease(
             capability_leases,
@@ -247,7 +273,7 @@ where
             .authorizer
             .authorize_spawn_with_trust(
                 &authorized_context,
-                descriptor,
+                &descriptor,
                 &request.estimate,
                 &trust_decision,
             )
@@ -360,10 +386,10 @@ where
             &request.capability_id,
             &request.estimate,
             &request.input,
-            descriptor,
+            &descriptor,
             &obligation_outcome,
             claimed_lease.grant.constraints.expires_at,
-        );
+        )?;
         let authorized_continuation = match process_authorized_continuation(
             result,
             &request.capability_id,

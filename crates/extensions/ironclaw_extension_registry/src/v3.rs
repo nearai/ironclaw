@@ -201,6 +201,8 @@ struct RawToolCredentialV3 {
     scopes: Vec<String>,
     audience: RawAudienceV3,
     injection: RuntimeCredentialTarget,
+    #[serde(default)]
+    placeholder_env: Option<String>,
     #[serde(default = "default_credential_required")]
     required: bool,
 }
@@ -451,16 +453,19 @@ pub(crate) fn parse_v3(
             .iter()
             .map(|credential| {
                 credential_from_v3(
-                    &credential.handle,
-                    &credential.vendor,
-                    &credential.scopes,
-                    RawAudienceV3 {
-                        scheme: NetworkScheme::Https,
-                        host: mcp.server.host(),
-                        port: None,
+                    CredentialProjection {
+                        handle: &credential.handle,
+                        vendor: &credential.vendor,
+                        scopes: &credential.scopes,
+                        audience: RawAudienceV3 {
+                            scheme: NetworkScheme::Https,
+                            host: mcp.server.host(),
+                            port: None,
+                        },
+                        injection: credential.injection.clone(),
+                        placeholder_env: None,
+                        required: true,
                     },
-                    credential.injection.clone(),
-                    true,
                     &recipes,
                     &mut referenced_vendors,
                 )
@@ -650,12 +655,15 @@ pub(crate) fn parse_v3(
                     .into_iter()
                     .map(|credential| {
                         credential_from_v3(
-                            &credential.handle,
-                            &credential.vendor,
-                            &credential.scopes,
-                            credential.audience,
-                            credential.injection,
-                            credential.required,
+                            CredentialProjection {
+                                handle: &credential.handle,
+                                vendor: &credential.vendor,
+                                scopes: &credential.scopes,
+                                audience: credential.audience,
+                                injection: credential.injection,
+                                placeholder_env: credential.placeholder_env,
+                                required: credential.required,
+                            },
                             &recipes,
                             &mut referenced_vendors,
                         )
@@ -968,17 +976,30 @@ fn account_setup_for_recipe(recipe: &VendorAuthRecipe) -> RuntimeCredentialAccou
     }
 }
 
-#[allow(clippy::too_many_arguments)] // arch-exempt: too_many_args, private normalization helper pending a CredentialContext bundle if it grows, extension-runtime P2
-fn credential_from_v3(
-    handle: &str,
-    vendor: &str,
-    scopes: &[String],
+struct CredentialProjection<'a> {
+    handle: &'a str,
+    vendor: &'a str,
+    scopes: &'a [String],
     audience: RawAudienceV3,
     injection: RuntimeCredentialTarget,
+    placeholder_env: Option<String>,
     required: bool,
+}
+
+fn credential_from_v3(
+    credential: CredentialProjection<'_>,
     recipes: &BTreeMap<VendorId, VendorAuthRecipe>,
     referenced_vendors: &mut BTreeMap<VendorId, ()>,
 ) -> Result<RawRuntimeCredentialV2, ManifestV3Error> {
+    let CredentialProjection {
+        handle,
+        vendor,
+        scopes,
+        audience,
+        injection,
+        placeholder_env,
+        required,
+    } = credential;
     if audience.host.contains('*') {
         return Err(ManifestV3Error::WildcardAudienceHost {
             host: audience.host,
@@ -1005,6 +1026,7 @@ fn credential_from_v3(
             port: audience.port,
         },
         target: injection,
+        placeholder_env,
         required,
     })
 }

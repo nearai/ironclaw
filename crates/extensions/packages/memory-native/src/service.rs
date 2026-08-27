@@ -854,7 +854,13 @@ fn build_native_backend(
     Arc::new(backend)
 }
 
-fn resolve_target_path(target: &str, timezone: Option<&str>) -> Result<String, MemoryServiceError> {
+/// Resolve a model-facing native-memory target alias to its canonical relative
+/// document path. The host handler uses the same resolver for pre-dispatch
+/// outcomes so conflict and success responses cannot disagree on `path`.
+pub fn resolve_target_path(
+    target: &str,
+    timezone: Option<&str>,
+) -> Result<String, MemoryServiceError> {
     match target {
         "memory" => Ok(MEMORY_PATH.to_string()),
         "heartbeat" => Ok(HEARTBEAT_PATH.to_string()),
