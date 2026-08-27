@@ -218,6 +218,7 @@ where
             request: McpClientRequest {
                 provider: request.extension.clone(),
                 capability_id: request.capability_id.clone(),
+                tool_name: request.tool_name.map(str::to_string),
                 scope: request.scope.clone(),
                 transport: transport.clone(),
                 command: command.clone(),

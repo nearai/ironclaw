@@ -485,6 +485,21 @@ where
         &self,
         request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let tool_names = request.package.hosted_mcp_tool_names();
+        let tool_name = match tool_names.get(request.capability_id) {
+            Some(tool_name) => Some(tool_name.as_str()),
+            None if tool_names.is_empty() => None,
+            None => {
+                return Err(dispatch_error_for_runtime(
+                    RuntimeKind::Mcp,
+                    RuntimeDispatchErrorKind::Manifest,
+                    Some(
+                        "hosted MCP capability is missing its persisted wire-name binding"
+                            .to_string(),
+                    ),
+                ));
+            }
+        };
         // The lane holds no budget authority: it is handed the narrow
         // reserve/reconcile/release port, not the governor (#7067).
         let budget = GovernorRuntimeBudget::new(request.governor);
@@ -497,6 +512,7 @@ where
                     capabilities: &request.package.capabilities,
                     runtime: &request.package.manifest.runtime,
                     capability_id: request.capability_id,
+                    tool_name,
                     scope: request.scope,
                     estimate: request.estimate,
                     resource_reservation: request.resource_reservation,

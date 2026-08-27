@@ -772,6 +772,7 @@ pub(crate) fn parse_v3(
                 })
                 .unwrap_or_default(),
             dynamic_input_schemas: std::collections::BTreeMap::new(),
+            tool_names: std::collections::BTreeMap::new(),
             registration_auth:
                 ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::NoAuth,
         }),

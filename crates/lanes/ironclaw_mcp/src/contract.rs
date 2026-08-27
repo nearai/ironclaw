@@ -83,6 +83,9 @@ pub struct McpExecutionRequest<'a> {
     pub capabilities: &'a [CapabilityDescriptor],
     pub runtime: &'a ExtensionRuntime,
     pub capability_id: &'a CapabilityId,
+    /// Exact MCP wire identity for a discovered alias. `None` retains the
+    /// historical static-tool mapping from the capability id suffix.
+    pub tool_name: Option<&'a str>,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
     pub resource_reservation: Option<ResourceReservation>,
@@ -94,6 +97,7 @@ pub struct McpExecutionRequest<'a> {
 pub struct McpClientRequest {
     pub provider: ExtensionId,
     pub capability_id: CapabilityId,
+    pub tool_name: Option<String>,
     pub scope: ResourceScope,
     pub transport: String,
     pub command: Option<String>,

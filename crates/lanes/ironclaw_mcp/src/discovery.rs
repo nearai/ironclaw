@@ -9,9 +9,10 @@
 //! so the two enforcement points cannot drift apart.
 
 use ironclaw_extension_contracts::hosted_mcp::{
-    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations,
+    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_valid_mcp_tool_name,
 };
 use serde_json::Value;
+use std::collections::HashSet;
 
 use crate::diagnostics::{McpInvalidToolListCause, invalid_tool_list};
 
@@ -96,6 +97,7 @@ pub(crate) fn parse_tools_list_result(
         // caller treats as "no tools discovered yet".
         return Err(invalid_tool_list(cause));
     }
+    validate_mcp_tool_aliases(&published)?;
     Ok(published)
 }
 
@@ -152,13 +154,10 @@ fn classify_discovered_tool(
     ) {
         return Err(McpInvalidToolListCause::UnsafeInputSchema);
     }
-    // Discovered tool names become Reborn capability suffixes, so discovery
-    // skips unsupported names instead of normalizing them into potentially
-    // colliding capability IDs.
     let Some(name) = tool
         .get("name")
         .and_then(Value::as_str)
-        .filter(|name| is_supported_mcp_tool_name(name, max_name_bytes))
+        .filter(|name| name.len() <= max_name_bytes && is_valid_mcp_tool_name(name))
     else {
         return Ok(DiscoveredToolClassification::SkippedShapeViolation(
             McpInvalidToolListCause::InvalidToolName,
@@ -177,6 +176,12 @@ fn classify_discovered_tool(
         Ok(annotations) => annotations,
         Err(cause) => return Ok(DiscoveredToolClassification::SkippedShapeViolation(cause)),
     };
+    let capability_name = name.to_ascii_lowercase();
+    if !is_supported_mcp_tool_name(&capability_name, max_name_bytes) {
+        return Ok(DiscoveredToolClassification::SkippedShapeViolation(
+            McpInvalidToolListCause::InvalidToolName,
+        ));
+    }
     Ok(DiscoveredToolClassification::Published(
         HostedMcpDiscoveredTool {
             name: name.to_string(),
@@ -185,6 +190,19 @@ fn classify_discovered_tool(
             annotations,
         },
     ))
+}
+
+pub(crate) fn validate_mcp_tool_aliases(tools: &[HostedMcpDiscoveredTool]) -> Result<(), String> {
+    let mut aliases = HashSet::with_capacity(tools.len());
+    if tools
+        .iter()
+        .any(|tool| !aliases.insert(tool.capability_name()))
+    {
+        return Err(invalid_tool_list(
+            McpInvalidToolListCause::ToolNameCollision,
+        ));
+    }
+    Ok(())
 }
 
 fn is_supported_mcp_input_schema(
@@ -470,8 +488,7 @@ mod tests {
     #[tracing_test::traced_test]
     fn parse_tools_list_result_skips_shape_invalid_tools_and_publishes_bounded_remainder() {
         // A real MCP server can advertise a mostly-valid catalog alongside a
-        // few shape-nonconforming entries (an uppercase tool name, a
-        // control-char description). Those individual tools are dropped and
+        // shape-nonconforming entry (a control-char description). That tool is dropped and
         // recorded, but the remaining valid tools must still publish so one
         // malformed entry cannot brick the whole integration on first install.
         let mut tools = (0..24)
@@ -483,11 +500,12 @@ mod tests {
         let published = parse_tools_list_result(&json!({ "tools": tools }), 128)
             .expect("a bounded catalog must survive a few shape-nonconforming tools");
 
-        assert_eq!(published.len(), 22);
-        assert!(
-            published.iter().all(|tool| tool.name != "UppercaseName"),
-            "the uppercase-named tool must not be published"
-        );
+        assert_eq!(published.len(), 23);
+        let uppercase = published
+            .iter()
+            .find(|tool| tool.name == "UppercaseName")
+            .expect("spec-valid uppercase tool must publish");
+        assert_eq!(uppercase.capability_name(), "uppercasename");
         assert!(
             published.iter().any(|tool| tool.name == "tool-0"),
             "valid tools before the skipped entries must still publish"
@@ -497,7 +515,6 @@ mod tests {
             "valid tools after the skipped entries must still publish"
         );
         assert!(logs_contain("skipping shape-nonconforming hosted MCP tool"));
-        assert!(logs_contain("invalid_tool_name"));
         assert!(logs_contain("invalid_description"));
     }
 
@@ -525,8 +542,8 @@ mod tests {
         // so discovery still fails non-retryably with a stable subcause rather
         // than activating on an empty catalog.
         let tools = vec![
-            valid_tool("Uppercase-A", json!({"type": "object"})),
-            valid_tool("Uppercase-B", json!({"type": "object"})),
+            valid_tool("invalid name a", json!({"type": "object"})),
+            valid_tool("invalid name b", json!({"type": "object"})),
         ]
         .into_iter()
         .map(|mut tool| {
@@ -540,6 +557,19 @@ mod tests {
             .expect_err("a catalog with no shape-valid tools must not activate");
 
         assert_eq!(error, "mcp_invalid_tool_list: invalid_tool_name");
+    }
+
+    #[test]
+    fn parse_tools_list_result_rejects_case_folded_alias_collision() {
+        let tools = vec![
+            valid_tool("authHealth", json!({"type": "object"})),
+            valid_tool("authhealth", json!({"type": "object"})),
+        ];
+
+        let error = parse_tools_list_result(&json!({ "tools": tools }), 128)
+            .expect_err("case-folded aliases must remain one-to-one");
+
+        assert_eq!(error, "mcp_invalid_tool_list: tool_name_collision");
     }
 
     #[test]

@@ -138,6 +138,9 @@ pub struct ResolvedMcpDeclaration {
     /// through their materialized package root.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub dynamic_input_schemas: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Local capability id to exact case-sensitive MCP `tools/call` name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tool_names: std::collections::BTreeMap<String, String>,
     /// Immutable registration-time authentication selection for a remote
     /// user-registered MCP definition. Bundled/static providers use NoAuth
     /// here because their concrete auth recipe remains the authority.

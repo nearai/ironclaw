@@ -7,6 +7,7 @@ use ironclaw_host_api::{
     ids::CapabilityId,
     runtime::RuntimeKind,
 };
+use std::collections::BTreeMap;
 
 use crate::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage, ManifestSource,
@@ -56,7 +57,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
         })
         .collect();
 
-    match package.manifest.source {
+    let discovered_package = match package.manifest.source {
         ManifestSource::HostBundled => {
             ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
                 manifest,
@@ -76,7 +77,14 @@ pub fn package_with_discovered_hosted_mcp_tools(
         _ => Err(invalid_hosted_mcp_manifest(
             "hosted MCP discovery requires bundled or user-registered provenance".to_string(),
         )),
-    }
+    }?;
+    let tool_names = discovered_package
+        .capabilities
+        .iter()
+        .zip(tools)
+        .map(|(capability, tool)| (capability.id.clone(), tool.name.clone()))
+        .collect::<BTreeMap<_, _>>();
+    discovered_package.with_hosted_mcp_tool_names(tool_names)
 }
 
 fn hosted_http_mcp_url(package: &ExtensionPackage) -> Option<&str> {
@@ -166,14 +174,15 @@ fn discovered_capability_manifest(
     template: &HostedMcpCapabilityTemplate,
     tool: &HostedMcpDiscoveredTool,
 ) -> Result<CapabilityManifest, ExtensionError> {
-    let capability_id =
-        CapabilityId::new(format!("{}.{}", package.id.as_str(), tool.name)).map_err(|error| {
-            invalid_hosted_mcp_manifest(format!(
-                "discovered MCP tool {} from {} cannot be published as a Reborn capability: {error}",
-                tool.name, package.id
-            ))
-        })?;
-    let schema_path = tool.name.replace('.', "/");
+    let capability_name = tool.capability_name();
+    let capability_id = CapabilityId::new(format!("{}.{}", package.id.as_str(), capability_name))
+        .map_err(|error| {
+        invalid_hosted_mcp_manifest(format!(
+            "discovered MCP tool {} from {} cannot be published as a Reborn capability: {error}",
+            tool.name, package.id
+        ))
+    })?;
+    let schema_path = capability_name.replace('.', "/");
     let input_schema_ref = CapabilityProfileSchemaRef::new(format!(
         "schemas/{}/dynamic/{schema_path}.input.v1.json",
         package.id.as_str()

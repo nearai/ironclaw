@@ -258,6 +258,7 @@ fn mcp_request_from_manifest(
         capabilities: &package.capabilities,
         runtime: &package.manifest.runtime,
         capability_id,
+        tool_name: None,
         scope: sample_scope(),
         estimate: ResourceEstimate::default()
             .set_concurrency_slots(1)

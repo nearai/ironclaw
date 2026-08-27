@@ -230,10 +230,27 @@ pub struct RegisterHostedMcpRequest {
 /// `serde_json::Value`, and its own annotations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedMcpDiscoveredTool {
+    /// Exact, case-sensitive tool identity advertised by the MCP server.
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
     pub annotations: HostedMcpDiscoveredToolAnnotations,
+}
+
+impl HostedMcpDiscoveredTool {
+    /// Lowercase suffix used for the local authority-bearing capability id.
+    pub fn capability_name(&self) -> String {
+        self.name.to_ascii_lowercase()
+    }
+}
+
+/// Whether an advertised MCP tool name satisfies the bounded protocol grammar.
+pub fn is_valid_mcp_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 /// Advisory MCP tool behavior hints returned by `tools/list`.

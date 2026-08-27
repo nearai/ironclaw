@@ -201,11 +201,16 @@ Transport-specific policy is a host adapter responsibility:
 The protocol client parses the server result into bounded `McpDiscoveredTool`
 records:
 
-- tool names are capped at 128 bytes and must be directly publishable as
-  Reborn capability suffixes
-  (lowercase ASCII name segments separated by dots); unsupported names are
-  rejected rather than normalized so discovery cannot create ambiguous or
-  colliding capability IDs
+- tool names use MCP's case-sensitive ASCII grammar and are capped at 128
+  bytes; discovery preserves that exact wire name while deriving a lowercase
+  Reborn capability suffix for local lookup
+- a tool is rejected when its lowercase alias is not a valid capability
+  suffix, and the complete catalog is rejected atomically when two exact MCP
+  names derive the same lowercase alias (for example, `authHealth` and
+  `authhealth`)
+- exact wire-name bindings are persisted with discovered schemas and restored
+  on restart; records written before those bindings existed retain the legacy
+  suffix-derived dispatch behavior
 - descriptions are capped at 2,048 bytes and control-character-free
   except for normal formatting whitespace (`\n`, `\r`, `\t`)
 - `inputSchema` must be an object-shaped JSON schema

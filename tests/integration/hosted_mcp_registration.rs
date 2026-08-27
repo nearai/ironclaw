@@ -987,6 +987,171 @@ async fn no_auth_registration_story_replays_streamable_http_mrc_trace_through_re
 }
 
 #[tokio::test]
+async fn camelcase_tool_alias_preserves_wire_name_across_restart() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::NoAuth,
+        vec![HostedMcpTool::read_only("authHealth", json!("healthy"))],
+    )
+    .await;
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-camelcase-tool",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-camelcase-tool");
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect("camelCase MCP registers before catalog discovery");
+    let installed = install_fixture(&services, scope.clone()).await;
+    assert_eq!(
+        installed.phase,
+        ironclaw_extension_contracts::state::InstallationState::Active,
+        "a spec-valid camelCase MCP tool must activate"
+    );
+
+    let capability_id = CapabilityId::new("mcp-fixture.authhealth").expect("lowercase alias");
+    let active = services
+        .extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active capability projection");
+    assert!(
+        active
+            .iter()
+            .any(|capability| capability.id == capability_id),
+        "camelCase wire name must publish the deterministic lowercase alias; actual ids: {:?}",
+        active
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect::<Vec<_>>()
+    );
+    let outcome = invoke_with_standalone_approval(
+        &services,
+        capability_id.as_str(),
+        runtime_context(scope.clone(), capability_id.as_str()),
+        json!({}),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
+    ));
+    assert!(server.requests().iter().any(|request| {
+        request.rpc_method.as_deref() == Some("tools/call")
+            && request.rpc_tool_name.as_deref() == Some("authHealth")
+    }));
+
+    let restored = rebuild_lifecycle_test_services_with_auth_provider(
+        &services,
+        "hosted-mcp-camelcase-tool",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+        Arc::new(ironclaw_auth::UnavailableAuthProviderClient),
+    )
+    .await;
+    let restored_active = restored
+        .extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("restored active capability projection");
+    assert!(
+        restored_active
+            .iter()
+            .any(|capability| capability.id == capability_id),
+        "restart must retain the same lowercase alias: {restored_active:#?}"
+    );
+    let restored_outcome = invoke_with_standalone_approval(
+        &restored,
+        capability_id.as_str(),
+        runtime_context(scope, capability_id.as_str()),
+        json!({}),
+    )
+    .await;
+    assert!(matches!(
+        restored_outcome,
+        ironclaw_host_runtime::RuntimeCapabilityOutcome::Completed(_)
+    ));
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|request| {
+                request.rpc_method.as_deref() == Some("tools/call")
+                    && request.rpc_tool_name.as_deref() == Some("authHealth")
+            })
+            .count(),
+        2,
+        "both pre- and post-restart invocation must preserve the exact upstream wire name"
+    );
+}
+
+#[tokio::test]
+async fn camelcase_tool_alias_collision_rejects_catalog_atomically() {
+    let server = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::NoAuth,
+        vec![
+            HostedMcpTool::read_only("authHealth", json!("camelCase")),
+            HostedMcpTool::read_only("authhealth", json!("lowercase")),
+        ],
+    )
+    .await;
+    let services = build_lifecycle_test_services(
+        "hosted-mcp-camelcase-collision",
+        Some(Arc::new(HostedMcpRegistrationNetworkEgress::for_server(
+            &server,
+        ))),
+        false,
+    )
+    .await;
+    let scope = webui_gate_resource_scope_for_owner("hosted-mcp-camelcase-collision");
+    services
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope.clone()),
+            LifecycleProductAction::ExtensionRegisterHostedMcp {
+                request: automatic_request(),
+            },
+        )
+        .await
+        .expect("registration probes auth without discovering the colliding catalog");
+    let installed = install_fixture(&services, scope).await;
+    assert_eq!(
+        installed.phase,
+        ironclaw_extension_contracts::state::InstallationState::Installed,
+        "a colliding catalog must leave the extension installed but inactive"
+    );
+
+    let active = services
+        .extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active capability projection after collision");
+    assert!(
+        active.is_empty(),
+        "aliases that collide after ASCII lowercasing must reject the whole generation: {active:#?}"
+    );
+    assert!(
+        !server
+            .requests()
+            .iter()
+            .any(|request| request.rpc_method.as_deref() == Some("tools/call")),
+        "a rejected catalog must publish no callable tool"
+    );
+}
+
+#[tokio::test]
 async fn automatic_no_auth_empty_catalog_registers_before_catalog_discovery() {
     let server = HostedMcpRegistrationServer::start(HostedMcpAuthPolicy::NoAuth, Vec::new()).await;
     let services = build_lifecycle_test_services(

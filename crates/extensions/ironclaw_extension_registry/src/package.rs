@@ -3,9 +3,10 @@ use ironclaw_host_api::{
     capability::CapabilityDescriptor,
     ids::{ExtensionId, PackageId},
     path::VirtualPath,
+    runtime::RuntimeKind,
     trust::{PackageIdentity, PackageSource, TrustPolicyInput},
 };
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::{
     CapabilityDeclV2, CapabilityManifest, ExtensionError, ExtensionManifest, ExtensionRuntime,
@@ -21,6 +22,7 @@ pub struct ExtensionPackage {
     pub capabilities: Vec<CapabilityDescriptor>,
     pub manifest_digest: Option<String>,
     pub descriptor_schema_mode: CapabilityDescriptorSchemaMode,
+    hosted_mcp_tool_names: BTreeMap<ironclaw_host_api::ids::CapabilityId, String>,
 }
 
 /// How package capability descriptor schemas are derived from the manifest.
@@ -88,6 +90,7 @@ impl ExtensionPackage {
             capabilities,
             manifest_digest,
             descriptor_schema_mode: CapabilityDescriptorSchemaMode::InlineDynamic,
+            hosted_mcp_tool_names: BTreeMap::new(),
         })
     }
 
@@ -105,6 +108,7 @@ impl ExtensionPackage {
             capabilities,
             manifest_digest,
             descriptor_schema_mode: CapabilityDescriptorSchemaMode::ManifestRefs,
+            hosted_mcp_tool_names: BTreeMap::new(),
         })
     }
 
@@ -136,7 +140,50 @@ impl ExtensionPackage {
             capabilities,
             manifest_digest,
             descriptor_schema_mode: CapabilityDescriptorSchemaMode::InlineDynamic,
+            hosted_mcp_tool_names: BTreeMap::new(),
         })
+    }
+
+    pub fn with_hosted_mcp_tool_names(
+        mut self,
+        tool_names: BTreeMap<ironclaw_host_api::ids::CapabilityId, String>,
+    ) -> Result<Self, ExtensionError> {
+        self.hosted_mcp_tool_names = tool_names;
+        self.validate_consistency()?;
+        Ok(self)
+    }
+
+    fn validate_hosted_mcp_tool_names(&self) -> Result<(), ExtensionError> {
+        if self.hosted_mcp_tool_names.is_empty() {
+            return Ok(());
+        }
+        let prefix = format!("{}.", self.id.as_str());
+        if self.hosted_mcp_tool_names.len() != self.capabilities.len()
+            || self.capabilities.iter().any(|descriptor| {
+                !self.hosted_mcp_tool_names.contains_key(&descriptor.id)
+                    || descriptor.runtime != RuntimeKind::Mcp
+            })
+            || self
+                .hosted_mcp_tool_names
+                .iter()
+                .any(|(capability_id, wire_name)| {
+                    let Some(suffix) = capability_id.as_str().strip_prefix(&prefix) else {
+                        return true;
+                    };
+                    !ironclaw_extension_contracts::hosted_mcp::is_valid_mcp_tool_name(wire_name)
+                        || wire_name.to_ascii_lowercase() != suffix
+                })
+        {
+            return Err(ExtensionError::InvalidManifest {
+                reason: "hosted MCP tool-name bindings do not match discovered capabilities"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn hosted_mcp_tool_names(&self) -> &BTreeMap<ironclaw_host_api::ids::CapabilityId, String> {
+        &self.hosted_mcp_tool_names
     }
 
     pub fn manifest_digest(&self) -> Option<String> {
@@ -219,6 +266,7 @@ impl ExtensionPackage {
                     .to_string(),
             });
         }
+        self.validate_hosted_mcp_tool_names()?;
         Ok(())
     }
 
@@ -547,6 +595,42 @@ input_schema_ref = "schemas/remote-tools/invoke.input.v1.json"
             .validate_consistency()
             .expect_err("fabrication cannot survive packaging");
         assert!(matches!(error, ExtensionError::InvalidManifest { .. }));
+    }
+
+    #[test]
+    fn package_consistency_rejects_stale_hosted_mcp_tool_name_bindings() {
+        let manifest = ExtensionManifest::parse(
+            DIRECT_REMOTE_VIRTUAL_MANIFEST,
+            ManifestSource::UserRegistered,
+            &HostPortCatalog::empty(),
+            &contracts(),
+        )
+        .expect("manifest");
+        let mut capabilities =
+            capability_descriptors_from_manifest(&manifest).expect("capability descriptors");
+        capabilities[0].parameters_schema = serde_json::json!({"type": "object"});
+        let capability_id = capabilities[0].id.clone();
+        let mut package = ExtensionPackage::from_virtual_manifest(manifest, None, capabilities)
+            .expect("virtual package")
+            .with_hosted_mcp_tool_names(BTreeMap::from([(capability_id, "invoke".to_string())]))
+            .expect("complete binding is consistent");
+
+        let mut added_manifest = package.manifest.capabilities[0].clone();
+        added_manifest.id = ironclaw_host_api::ids::CapabilityId::new("remote-tools.second")
+            .expect("second capability id");
+        let mut added_descriptor = package.capabilities[0].clone();
+        added_descriptor.id = added_manifest.id.clone();
+        package.manifest.capabilities.push(added_manifest);
+        package.capabilities.push(added_descriptor);
+
+        let error = package
+            .validate_consistency()
+            .expect_err("stale non-empty bindings must fail package admission");
+        assert!(matches!(
+            error,
+            ExtensionError::InvalidManifest { reason }
+                if reason.contains("tool-name bindings do not match")
+        ));
     }
 
     #[test]

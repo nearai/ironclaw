@@ -308,6 +308,7 @@ mod tests {
             effects: Vec::new(),
             credential_handles: Vec::new(),
             dynamic_input_schemas: Default::default(),
+            tool_names: Default::default(),
             registration_auth:
                 ironclaw_extension_contracts::hosted_mcp::HostedMcpAuthSelection::OAuth {
                     client_profile_id: None,

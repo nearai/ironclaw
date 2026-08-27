@@ -92,6 +92,7 @@ fn hosted_mcp_client_and_request(
         McpClientRequest {
             provider: package.id.clone(),
             capability_id: planning_capability_id,
+            tool_name: None,
             scope,
             transport,
             command,

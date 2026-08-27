@@ -34,7 +34,7 @@ use crate::diagnostics::{
 };
 use crate::discovery::{
     MAX_DISCOVERED_MCP_TOOLS, MAX_MCP_TOOLS_CATALOG_BYTES, MAX_MCP_TOOLS_LIST_PAGES,
-    parse_tools_list_page,
+    parse_tools_list_page, validate_mcp_tool_aliases,
 };
 use crate::egress::{
     McpHostHttp, McpHostHttpEgressPlan, McpHostHttpEgressPlanRequest, McpHostHttpEgressPlanner,
@@ -448,7 +448,10 @@ where
         let _session_cleanup =
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
 
-        let tool_name = mcp_tool_name(&request.provider, &request.capability_id);
+        let tool_name = request
+            .tool_name
+            .clone()
+            .unwrap_or_else(|| mcp_tool_name(&request.provider, &request.capability_id));
         let tool_call_params = serde_json::json!({
             "name": tool_name,
             "arguments": request.input.clone(),
@@ -614,6 +617,7 @@ where
                 None => break,
             }
         }
+        validate_mcp_tool_aliases(&discovered).map_err(McpClientError::invalid_tool_catalog)?;
         Ok(McpToolDiscoveryOutput {
             tools: discovered,
             usage,

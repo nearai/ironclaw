@@ -37,6 +37,7 @@ pub struct RecordedHostedMcpRequest {
     pub authorization_present: bool,
     pub authorization_matches: bool,
     pub rpc_method: Option<String>,
+    pub rpc_tool_name: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -427,6 +428,10 @@ async fn mcp(
                 .get("method")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            rpc_tool_name: request
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         });
     let gate = state
         .mcp_probe_gate
@@ -539,6 +544,7 @@ fn record_metadata_request(state: &StateData, path: &str) {
             authorization_present: false,
             authorization_matches: false,
             rpc_method: None,
+            rpc_tool_name: None,
         });
 }
 

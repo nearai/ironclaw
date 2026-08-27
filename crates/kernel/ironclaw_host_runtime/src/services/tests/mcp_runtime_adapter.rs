@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
@@ -125,6 +125,59 @@ async fn mcp_adapter_sanitizes_executor_failure_paths() {
     }
 }
 
+#[tokio::test]
+async fn mcp_adapter_rejects_partial_tool_name_bindings_before_executor() {
+    let mut package = test_package(MCP_MANIFEST, "test");
+    let bound_capability = package.capabilities[0].id.clone();
+    package = package
+        .with_hosted_mcp_tool_names(BTreeMap::from([(
+            bound_capability,
+            "capability".to_string(),
+        )]))
+        .expect("complete one-tool binding is valid");
+
+    let mut unbound_descriptor = package.capabilities[0].clone();
+    unbound_descriptor.id = CapabilityId::new("test.unbound").expect("unbound capability id");
+    package.capabilities.push(unbound_descriptor.clone());
+
+    let adapter = McpRuntimeAdapter::from_executor(Arc::new(UnexpectedMcpExecutor));
+    let filesystem = DiskFilesystem::new();
+    let governor = InMemoryResourceGovernor::new();
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::DirectLogged,
+        SecretMode::ScrubbedEnv,
+    );
+
+    let result = adapter
+        .dispatch_json(RuntimeLaneRequest {
+            run_id: None,
+            origin: None,
+            package: &package,
+            descriptor: &unbound_descriptor,
+            filesystem: &filesystem,
+            governor: &governor,
+            runtime_policy: &policy,
+            capability_id: &unbound_descriptor.id,
+            scope: sample_scope(),
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(DispatchError::Rejected {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest),
+            ..
+        })
+    ));
+}
+
 const MCP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "test"
 name = "Test MCP"
@@ -159,6 +212,19 @@ struct AuthRequiredMcpExecutor {
 
 struct FailingMcpExecutor {
     reason: String,
+}
+
+struct UnexpectedMcpExecutor;
+
+#[async_trait]
+impl McpExecutor for UnexpectedMcpExecutor {
+    async fn execute_extension_json(
+        &self,
+        _budget: &dyn RuntimeResourceBudget,
+        _request: McpExecutionRequest<'_>,
+    ) -> Result<McpExecutionResult, McpError> {
+        panic!("partial hosted-MCP bindings must fail before executor dispatch")
+    }
 }
 
 #[async_trait]
