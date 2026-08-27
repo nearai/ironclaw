@@ -224,8 +224,8 @@ pub enum RunDeliveryError {
     },
     #[error("run {run_id} did not finish before the delivery timeout")]
     RunWaitTimedOut { run_id: TurnRunId },
-    /// Timeout after at least one blocked-state notification (approval/auth
-    /// prompt) was already delivered. The user is not in silence, so no
+    /// Timeout after a blocked state was already surfaced through a channel
+    /// prompt or the durable WebUI Inbox. The user is not in silence, so no
     /// additional feedback message is needed.
     #[error("run {run_id} did not reach a terminal state after delivering a blocked notification")]
     RunWaitTimedOutAfterNotification { run_id: TurnRunId },
@@ -233,8 +233,8 @@ pub enum RunDeliveryError {
     InvalidProjectionRef { reason: String },
 }
 
-/// The last blocked state a watcher already notified about; a run returning
-/// to the same (status, gate) pair is not re-announced.
+/// The last blocked state a watcher already handled; a run returning to the
+/// same (status, gate) pair is not reprocessed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockedActionableMarker {
     pub(crate) status: TurnStatus,
@@ -248,7 +248,6 @@ pub(crate) fn blocked_status_notification_kind(status: TurnStatus) -> Option<Not
     match status {
         TurnStatus::BlockedApproval => Some(NotificationKind::ApprovalRequired),
         TurnStatus::BlockedAuth => Some(NotificationKind::AuthenticationRequired),
-        TurnStatus::BlockedResource => Some(NotificationKind::RunBlocked),
         _ => None,
     }
 }
@@ -287,7 +286,7 @@ pub(crate) async fn wait_for_actionable_state(
     scope: &TurnScope,
     run_id: TurnRunId,
     settings: &RunDeliverySettings,
-    delivered_blocked_marker: Option<&BlockedActionableMarker>,
+    observed_blocked_marker: Option<&BlockedActionableMarker>,
 ) -> Result<TurnRunState, RunDeliveryError> {
     let start = tokio::time::Instant::now();
     let mut poll_interval = settings.poll_interval;
@@ -302,7 +301,7 @@ pub(crate) async fn wait_for_actionable_state(
             return Ok(state);
         }
         if let Some(marker) = blocked_actionable_marker(&state)
-            && Some(&marker) != delivered_blocked_marker
+            && Some(&marker) != observed_blocked_marker
         {
             return Ok(state);
         }

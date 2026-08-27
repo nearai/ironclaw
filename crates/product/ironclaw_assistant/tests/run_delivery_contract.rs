@@ -1945,7 +1945,7 @@ async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completi
 }
 
 #[tokio::test]
-async fn observer_publishes_resource_block_only_to_inbox_and_resolves_after_recovery() {
+async fn observer_keeps_resource_block_off_channels_and_continues_after_recovery() {
     const GATE: &str = "gate:resource-budget-00000000000000000000000001";
     let harness = build_harness(
         vec![
@@ -1977,9 +1977,10 @@ async fn observer_publishes_resource_block_only_to_inbox_and_resolves_after_reco
         "resource policy metadata must not reach the channel: {texts:?}"
     );
     let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
-    assert_eq!(inbox.notifications.len(), 1);
-    assert_eq!(inbox.notifications[0].kind, NotificationKind::RunBlocked);
-    assert!(inbox.notifications[0].resolved_at.is_some());
+    assert!(
+        inbox.notifications.is_empty(),
+        "the process-journal observer, not this bounded delivery watcher, owns resource-block notifications"
+    );
 }
 
 #[tokio::test]
@@ -4103,7 +4104,7 @@ async fn triggered_empty_notification_set_delivers_nothing() {
 }
 
 #[tokio::test]
-async fn triggered_resource_block_publishes_one_inbox_record_and_resolves_after_recovery() {
+async fn triggered_resource_block_stays_external_silent_and_continues_after_recovery() {
     const GATE: &str = "gate:resource-budget-00000000000000000000000001";
     let harness = build_triggered_harness(
         vec![
@@ -4128,30 +4129,46 @@ async fn triggered_resource_block_publishes_one_inbox_record_and_resolves_after_
         TriggeredRunDeliveryOutcomeKind::Skipped
     );
     assert!(harness.adapter.texts().is_empty());
-    wait_for_inbox_resolution(
-        harness.notification_inbox.as_ref(),
-        NotificationKind::RunBlocked,
-        GATE,
-    )
-    .await;
     let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
-    assert_eq!(
-        inbox.notifications.len(),
-        1,
-        "one record for one active gate"
+    assert!(
+        inbox.notifications.is_empty(),
+        "the authoritative process-journal observer owns the durable resource-block lifecycle"
     );
-    assert_eq!(inbox.notifications[0].kind, NotificationKind::RunBlocked);
+}
+
+#[tokio::test]
+async fn triggered_persistent_resource_block_does_not_claim_external_delivery() {
+    const GATE: &str = "gate:resource-budget-00000000000000000000000002";
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::BlockedResource, Some(GATE))],
+        None,
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
     assert_eq!(
-        inbox.notifications[0]
-            .source
-            .lifecycle_ref
-            .as_ref()
-            .map(|reference| reference.as_str()),
-        Some(GATE)
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Skipped,
+        "an Inbox-only resource block is not external delivery evidence"
     );
     assert!(
-        inbox.notifications[0].resolved_at.is_some(),
-        "resource recovery resolves the durable block notification"
+        harness.adapter.texts().is_empty(),
+        "resource details never reach a configured channel"
+    );
+    assert!(
+        harness
+            .store
+            .list_delivery_attempts(binding_scope())
+            .await
+            .expect("delivery attempts")
+            .is_empty(),
+        "no adapter call means no durable external-delivery attempt"
     );
 }
 
@@ -4179,7 +4196,8 @@ async fn triggered_auth_prompt_is_retracted_after_an_intervening_resource_block(
 
     assert_eq!(
         wait_for_outcome(&harness.delivery_store, run_id).await,
-        TriggeredRunDeliveryOutcomeKind::Skipped
+        TriggeredRunDeliveryOutcomeKind::Delivered,
+        "the successfully delivered auth prompt remains durable external-delivery evidence"
     );
     let texts = harness.adapter.texts();
     assert_eq!(

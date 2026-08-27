@@ -28,10 +28,11 @@ shares this one implementation instead of reimplementing it.
   `IdempotencyLedger`/`ProductInboundAction`, `ProductCommandAdmissionService`.
 - `DeliveryCoordinator` + run-delivery drivers (delivery *semantics*; the
   at-most-once reservation itself is `ironclaw_outbound`'s).
-- `RunOutcomeProcessCommitObserver` — materializes selected scheduled-run
-  completion/failure facts from the authoritative process journal; completion
-  requires the exact finalized assistant reply, while delivery failure remains
-  a separate Inbox fact from the external-delivery caller.
+- `RunOutcomeProcessCommitObserver` — materializes origin-neutral top-level
+  resource-block lifecycles and selected scheduled-run completion/failure facts
+  from the authoritative process journal; completion requires the exact
+  finalized assistant reply, while delivery failure remains a separate Inbox
+  fact from the external-delivery caller.
 - `ApprovalInteractionService` / `AuthInteractionService` and their redacted
   read models.
 - The frozen command/view/capability descriptor constants (`*_COMMAND`,
@@ -81,6 +82,11 @@ shares this one implementation instead of reimplementing it.
   abandoned gates never create process-lifetime polling tasks. An external
   preference/catalog outage must not be reclassified as "no channel
   configured."
+- Resource-block notifications are instead projected from the replayable
+  process journal's resource `Suspended` transition and reconciled by later
+  `Resumed`, replacement-suspension, or terminal transitions. Delivery watchers
+  neither own that lifecycle nor treat Inbox-only publication as external
+  delivery evidence.
 - `AGENTS.md` here is **gate-pinned** (the `reborn_services` module-charter
   map) — edit only with `cargo test -p ironclaw_assistant` green.
 

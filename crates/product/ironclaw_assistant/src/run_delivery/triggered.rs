@@ -584,7 +584,8 @@ async fn notify_background_run(
         );
     }
 
-    let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
+    let mut observed_blocked_marker: Option<BlockedActionableMarker> = None;
+    let mut external_delivery_succeeded = false;
     // (extension that carried it, message) — the notification set spans
     // extensions, so retraction is per-message.
     let mut messages_to_delete_after_final: Vec<(String, DeliveredChannelMessage)> = Vec::new();
@@ -616,30 +617,31 @@ async fn notify_background_run(
             &scope,
             run_id,
             settings,
-            delivered_blocked_marker.as_ref(),
+            observed_blocked_marker.as_ref(),
         )
         .await
         {
             Ok(state) => state,
-            Err(RunDeliveryError::RunWaitTimedOut { .. }) if delivered_blocked_marker.is_some() => {
-                // Parked awaiting the user after its prompt went out — a
-                // successful, terminal-for-delivery outcome. The prompt must
-                // stay actionable, so stale-prompt cleanup deliberately does
-                // NOT run here.
+            Err(RunDeliveryError::RunWaitTimedOut { .. }) if observed_blocked_marker.is_some() => {
+                // Parked after a blocked state was surfaced. Preserve any
+                // actionable prompt, but only claim external delivery when a
+                // channel adapter actually succeeded.
                 tracing::debug!(
                     target: TRACE_TARGET,
                     %run_id,
-                    "background run parked awaiting user after notifying; settling delivery outcome"
+                    "background run parked after surfacing a blocked state; settling delivery outcome"
                 );
                 let outcome = if lookup_failed_without_targets {
                     TriggeredRunDeliveryOutcomeKind::Failed
                 } else if web_inbox_only {
                     TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                } else {
+                } else if external_delivery_succeeded {
                     TriggeredRunDeliveryOutcomeKind::Delivered
+                } else {
+                    TriggeredRunDeliveryOutcomeKind::Skipped
                 };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                if let Some(marker) = delivered_blocked_marker.clone() {
+                if let Some(marker) = observed_blocked_marker.clone() {
                     spawn_inbox_gate_observer(
                         services,
                         *settings,
@@ -806,7 +808,7 @@ async fn notify_background_run(
         };
 
         let trigger_label = prompts::triggered_label_from_prompt(&prompt);
-        if let Some(previous) = delivered_blocked_marker.as_ref()
+        if let Some(previous) = observed_blocked_marker.as_ref()
             && blocked_actionable_marker(&state).as_ref() != Some(previous)
             && let Some(kind) = super::blocked_status_notification_kind(previous.status)
         {
@@ -853,7 +855,7 @@ async fn notify_background_run(
             // the full watcher must remain alive. It owns any auth-prompt
             // cleanup already queued and must still fan a later approval/auth
             // gate out to the configured notification channels.
-            delivered_blocked_marker = Some(marker);
+            observed_blocked_marker = Some(marker);
             continue;
         }
         if targets.is_empty() {
@@ -861,7 +863,7 @@ async fn notify_background_run(
                 // The Inbox is itself a destination. Keep observing a WebUI-only
                 // gate so the stable item can be resolved when that gate is
                 // cleared or replaced, without attempting external delivery.
-                delivered_blocked_marker = Some(marker);
+                observed_blocked_marker = Some(marker);
                 continue;
             }
             let outcome = if lookup_failed_without_targets {
@@ -893,7 +895,11 @@ async fn notify_background_run(
                     &mut messages_to_delete_after_final,
                 )
                 .await;
-                let outcome = TriggeredRunDeliveryOutcomeKind::Skipped;
+                let outcome = if external_delivery_succeeded {
+                    TriggeredRunDeliveryOutcomeKind::Delivered
+                } else {
+                    TriggeredRunDeliveryOutcomeKind::Skipped
+                };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
@@ -920,6 +926,7 @@ async fn notify_background_run(
             delivered_for_gate_route,
             ..
         } = fan;
+        external_delivery_succeeded |= any_delivered;
 
         // Every conversation the prompt landed in becomes a reply route for
         // this gate, so a bare `approve` from ANY notification channel
@@ -965,7 +972,7 @@ async fn notify_background_run(
         if plan.keeps_run_parked
             && let Some(marker) = next_blocked_marker
         {
-            delivered_blocked_marker = Some(marker);
+            observed_blocked_marker = Some(marker);
             continue;
         }
 

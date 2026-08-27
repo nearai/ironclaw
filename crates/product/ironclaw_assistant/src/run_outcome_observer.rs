@@ -8,20 +8,20 @@ use ironclaw_host_api::{
     turn::{TurnExecutionOutcome, TurnOriginKind, TurnRunId},
 };
 use ironclaw_notifications::{
-    LifecycleRef, NotificationAction, NotificationId, NotificationInboxError,
-    NotificationInboxStorePort, NotificationInitialState, NotificationKind,
-    NotificationMutationRequest, NotificationRecipient, NotificationSeverity, NotificationSource,
-    PublishNotificationRequest,
+    LifecycleRef, ListNotificationsRequest, NOTIFICATION_PAGE_LIMIT_MAX, NotificationAction,
+    NotificationId, NotificationInboxError, NotificationInboxStorePort, NotificationInitialState,
+    NotificationKind, NotificationMutationRequest, NotificationRecipient, NotificationSeverity,
+    NotificationSource, PublishNotificationRequest,
 };
 use ironclaw_processes::{
     JournaledProcessSnapshot, ProcessJournalCommit, ProcessJournalCommitObserver,
-    ProcessJournalKind, ProcessKind, ProcessLifecycleStatus,
+    ProcessJournalKind, ProcessKind, ProcessLifecycleStatus, ProcessSuspensionKind,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use serde::Deserialize;
 
-/// Materializes durable background-run outcomes from the authoritative
-/// process journal. It does not observe delivery watchers or poll run state.
+/// Materializes durable user-visible run facts from the authoritative process
+/// journal. It does not observe delivery watchers or poll run state.
 pub struct RunOutcomeProcessCommitObserver {
     inbox: Arc<dyn NotificationInboxStorePort>,
     thread_service: Arc<dyn SessionThreadService>,
@@ -86,6 +86,125 @@ impl RunOutcomeProcessCommitObserver {
             .map_err(|error| format!("publish run outcome notification failed: {error}"))?;
         Ok(())
     }
+
+    async fn reconcile_resource_block(
+        &self,
+        snapshot: &JournaledProcessSnapshot,
+        run_id: TurnRunId,
+        occurred_at: Timestamp,
+    ) -> Result<(), String> {
+        let owner_user_id = snapshot
+            .owner_user_id
+            .clone()
+            .ok_or_else(|| "eligible resource-blocked run has no owner".to_string())?;
+        let recipient = NotificationRecipient {
+            tenant_id: snapshot.scope.tenant_id.clone(),
+            user_id: owner_user_id,
+        };
+        let active_lifecycle = match (snapshot.status, snapshot.suspension.as_ref()) {
+            (ProcessLifecycleStatus::Suspended, Some(suspension))
+                if suspension.kind == ProcessSuspensionKind::Resource =>
+            {
+                let gate_ref = suspension
+                    .gate_ref
+                    .as_ref()
+                    .ok_or_else(|| "resource-blocked run has no gate reference".to_string())?;
+                Some(resource_block_lifecycle_ref(gate_ref.as_str())?)
+            }
+            _ => None,
+        };
+
+        self.resolve_stale_resource_blocks(
+            &recipient,
+            run_id,
+            active_lifecycle.as_ref(),
+            occurred_at,
+        )
+        .await?;
+
+        let Some(lifecycle_ref) = active_lifecycle else {
+            return Ok(());
+        };
+        let thread_id = snapshot
+            .scope
+            .thread_id
+            .clone()
+            .ok_or_else(|| "eligible resource-blocked run has no thread id".to_string())?;
+        let notification_id = crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::RunBlocked,
+            Some(lifecycle_ref.as_str()),
+        )
+        .map_err(|error| format!("build resource-block notification id failed: {error}"))?;
+        self.inbox
+            .publish(PublishNotificationRequest {
+                id: notification_id,
+                recipient,
+                kind: NotificationKind::RunBlocked,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: thread_id.clone(),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(lifecycle_ref),
+                },
+                action: NotificationAction::OpenThread { thread_id },
+                initial_state: NotificationInitialState::Open,
+                occurred_at,
+            })
+            .await
+            .map_err(|error| format!("publish resource-block notification failed: {error}"))?;
+        Ok(())
+    }
+
+    async fn resolve_stale_resource_blocks(
+        &self,
+        recipient: &NotificationRecipient,
+        run_id: TurnRunId,
+        active_lifecycle: Option<&LifecycleRef>,
+        occurred_at: Timestamp,
+    ) -> Result<(), String> {
+        let mut cursor = None;
+        loop {
+            let page = self
+                .inbox
+                .list(ListNotificationsRequest {
+                    recipient: recipient.clone(),
+                    limit: NOTIFICATION_PAGE_LIMIT_MAX,
+                    cursor,
+                    include_archived: true,
+                })
+                .await
+                .map_err(|error| format!("list resource-block notifications failed: {error}"))?;
+            for notification in &page.notifications {
+                let Some(lifecycle_ref) = notification.source.lifecycle_ref.as_ref() else {
+                    continue;
+                };
+                if notification.kind != NotificationKind::RunBlocked
+                    || notification.source.turn_run_id != Some(run_id)
+                    || notification.resolved_at.is_some()
+                    || !is_resource_block_lifecycle_ref(lifecycle_ref)
+                    || active_lifecycle == Some(lifecycle_ref)
+                {
+                    continue;
+                }
+                self.inbox
+                    .resolve(NotificationMutationRequest {
+                        recipient: recipient.clone(),
+                        notification_id: notification.id.clone(),
+                        occurred_at,
+                    })
+                    .await
+                    .map_err(|error| {
+                        format!("resolve resource-block notification failed: {error}")
+                    })?;
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+        Ok(())
+    }
 }
 
 impl RunOutcomeProcessCommitObserver {
@@ -132,15 +251,22 @@ impl RunOutcomeProcessCommitObserver {
 #[async_trait]
 impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
     fn process_observer_id(&self) -> &'static str {
-        "run-outcome-inbox-commit-observer-v1"
+        "run-outcome-inbox-commit-observer-v2"
     }
 
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
-        let Some(metadata) = eligible_background_run(&commit.state) else {
+        let Some(metadata) = eligible_top_level_owned_run(&commit.state) else {
             return Ok(());
         };
         let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        if resource_block_reconciliation_needed(&commit) {
+            self.reconcile_resource_block(&commit.state, run_id, occurred_at)
+                .await?;
+        }
+        if !is_background_run(&metadata) {
+            return Ok(());
+        }
         if commit.state.status.is_terminal() {
             self.resolve_timed_out_block(&commit.state, run_id, occurred_at)
                 .await?;
@@ -239,7 +365,7 @@ struct OutcomeProductContext {
     execution_policy: Option<TurnExecutionPolicy>,
 }
 
-fn eligible_background_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
+fn eligible_top_level_owned_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
     if snapshot.process_kind != ProcessKind::AgentTurn
         || snapshot.parent_process_id.is_some()
         || snapshot.owner_user_id.is_none()
@@ -262,16 +388,44 @@ fn eligible_background_run(snapshot: &JournaledProcessSnapshot) -> Option<Outcom
         })
         .ok()?;
     let metadata = envelope.agent_turn;
-    if metadata.subagent_depth != 0
-        || metadata.ownerless_thread
-        || metadata
-            .product_context
-            .as_ref()
-            .is_none_or(|context| context.origin != TurnOriginKind::ScheduledTrigger)
-    {
+    if metadata.subagent_depth != 0 || metadata.ownerless_thread {
         return None;
     }
     Some(metadata)
+}
+
+fn is_background_run(metadata: &OutcomeMetadata) -> bool {
+    metadata
+        .product_context
+        .as_ref()
+        .is_some_and(|context| context.origin == TurnOriginKind::ScheduledTrigger)
+}
+
+fn resource_block_reconciliation_needed(commit: &ProcessJournalCommit) -> bool {
+    matches!(
+        (commit.state.status, commit.state.suspension.as_ref()),
+        (ProcessLifecycleStatus::Suspended, Some(suspension))
+            if suspension.kind == ProcessSuspensionKind::Resource
+    ) || matches!(
+        commit.kind,
+        ProcessJournalKind::Resumed
+            | ProcessJournalKind::RecoveryRequired
+            | ProcessJournalKind::Suspended
+            | ProcessJournalKind::Stopped
+            | ProcessJournalKind::Cancelled
+            | ProcessJournalKind::Completed
+            | ProcessJournalKind::Failed
+            | ProcessJournalKind::Killed
+    )
+}
+
+fn resource_block_lifecycle_ref(gate_ref: &str) -> Result<LifecycleRef, String> {
+    LifecycleRef::new(gate_ref)
+        .map_err(|error| format!("build resource-block lifecycle reference failed: {error}"))
+}
+
+fn is_resource_block_lifecycle_ref(lifecycle_ref: &LifecycleRef) -> bool {
+    lifecycle_ref.as_str() != crate::run_delivery::TIMEOUT_LIFECYCLE_REF
 }
 
 fn thread_scope_for_snapshot(snapshot: &JournaledProcessSnapshot) -> Option<ThreadScope> {
@@ -316,7 +470,7 @@ mod tests {
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
         resource::ResourceScope,
-        turn::TurnRunId,
+        turn::{TurnGateRef, TurnRunId},
     };
     use ironclaw_notifications::{
         LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInboxStore,
@@ -329,7 +483,8 @@ mod tests {
         ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalKind,
         ProcessJournalObserverRegistry, ProcessJournalSource, ProcessJournalStore, ProcessKind,
         ProcessLeaseRequest, ProcessLifecycleStatus, ProcessStateTransitionRequest,
-        ProcessSubmissionPort, ProcessTransitionPort, ProcessWorkerId, SubmitProcessRequest,
+        ProcessSubmissionPort, ProcessSuspension, ProcessSuspensionKind, ProcessTransitionPort,
+        ProcessWorkerId, SubmitProcessRequest,
     };
     use ironclaw_threads::{
         AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
@@ -467,6 +622,27 @@ mod tests {
         commit
     }
 
+    fn resource_block_commit(
+        run_id: TurnRunId,
+        origin: &str,
+        gate_ref: &str,
+    ) -> ProcessJournalCommit {
+        let mut commit = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            origin,
+        );
+        commit.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Resource,
+            gate_ref: Some(TurnGateRef::new(gate_ref).expect("resource gate ref")),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: Some("sensitive budget policy detail".to_string()),
+        });
+        commit
+    }
+
     async fn records(inbox: &dyn NotificationInboxStorePort) -> Vec<NotificationKind> {
         inbox
             .list(ListNotificationsRequest {
@@ -587,6 +763,85 @@ mod tests {
                 "{status:?} must retire the block a delivery timeout left open",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn webui_resource_block_reconciles_after_observer_restart_and_recovery() {
+        const GATE: &str = "gate:budget-00000000-0000-0000-0000-000000000001";
+        let inbox = inbox();
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let run_id = TurnRunId::new();
+        let blocked = resource_block_commit(run_id, "web_ui", GATE);
+
+        let first_observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+        );
+        first_observer
+            .observe_process_commit(blocked.clone())
+            .await
+            .expect("publish resource block");
+        first_observer
+            .observe_process_commit(blocked)
+            .await
+            .expect("replay resource block");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list resource block");
+        assert_eq!(page.notifications.len(), 1, "replay reuses one identity");
+        assert_eq!(page.notifications[0].kind, NotificationKind::RunBlocked);
+        assert!(page.notifications[0].resolved_at.is_none());
+        assert_eq!(
+            page.notifications[0]
+                .source
+                .lifecycle_ref
+                .as_ref()
+                .map(LifecycleRef::as_str),
+            Some(GATE),
+            "the existing gate-derived identity remains stable without exposing suspension detail"
+        );
+
+        drop(first_observer);
+        let restarted_observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            threads as Arc<dyn SessionThreadService>,
+        );
+        restarted_observer
+            .observe_process_commit(commit(
+                run_id,
+                ProcessLifecycleStatus::Queued,
+                ProcessJournalKind::Resumed,
+                "web_ui",
+            ))
+            .await
+            .expect("reconcile recovered resource block");
+
+        let recovered = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list recovered resource block");
+        assert!(
+            recovered.notifications[0].resolved_at.is_some(),
+            "durable recovery must resolve the resource block after restart"
+        );
     }
 
     #[tokio::test]

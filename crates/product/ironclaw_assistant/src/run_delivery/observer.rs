@@ -378,7 +378,8 @@ impl RunDeliveryObserver {
                 "final reply delivery failed after immediate ACK"
             );
             // Best-effort feedback so the user is not left in silence. Skip
-            // if a blocked-state notification was already delivered.
+            // if a blocked state was already surfaced through a channel or
+            // the durable WebUI Inbox.
             let feedback = match &error {
                 RunDeliveryError::RunWaitTimedOut { .. } => Some(prompts::DELIVERY_TIMEOUT_MESSAGE),
                 RunDeliveryError::RunWaitTimedOutAfterNotification { .. } => None,
@@ -503,7 +504,7 @@ impl RunDeliveryObserver {
             }
             Err(error) => return Err(error.into()),
         }
-        let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
+        let mut observed_blocked_marker: Option<BlockedActionableMarker> = None;
         let mut working_indicator = WorkingIndicator::default();
         let mut messages_to_delete_after_final: Vec<DeliveredChannelMessage> = Vec::new();
         // The current run-lifecycle reaction on the triggering message and a
@@ -516,7 +517,7 @@ impl RunDeliveryObserver {
                     &envelope,
                     &scope,
                     run_id,
-                    delivered_blocked_marker.as_ref(),
+                    observed_blocked_marker.as_ref(),
                     &mut working_indicator,
                     &mut reaction_state,
                 )
@@ -541,12 +542,12 @@ impl RunDeliveryObserver {
                         RunReaction::Failed,
                     )
                     .await;
-                    // If a blocked-state notification was already delivered,
-                    // a timeout does not leave the user in silence — convert
-                    // to the quieter variant so feedback does not double-post.
+                    // If a blocked state was already surfaced, a timeout does
+                    // not leave the user in silence — convert to the quieter
+                    // variant so feedback does not double-post.
                     return Err(
                         if matches!(err, RunDeliveryError::RunWaitTimedOut { .. })
-                            && delivered_blocked_marker.is_some()
+                            && observed_blocked_marker.is_some()
                         {
                             RunDeliveryError::RunWaitTimedOutAfterNotification { run_id }
                         } else {
@@ -576,7 +577,7 @@ impl RunDeliveryObserver {
                 .await;
             }
             let next_blocked_marker = blocked_actionable_marker(&actionable_state);
-            if let Some(previous) = delivered_blocked_marker.as_ref()
+            if let Some(previous) = observed_blocked_marker.as_ref()
                 && Some(previous) != next_blocked_marker.as_ref()
                 && let Some(kind) = super::blocked_status_notification_kind(previous.status)
             {
@@ -587,23 +588,6 @@ impl RunDeliveryObserver {
                         run_id,
                         kind,
                         previous.gate_ref.as_deref(),
-                    )
-                    .await;
-            }
-            // Resource/policy blocks are Inbox-only: they are actionable in
-            // the WebUI, but their internal reason must not be rendered onto
-            // an external channel. Persist them before the channel-plan seam
-            // and keep watching until the block clears or changes.
-            if actionable_state.status == TurnStatus::BlockedResource
-                && let Some(kind) = super::blocked_status_notification_kind(actionable_state.status)
-            {
-                self.services
-                    .publish_inbox_notification(
-                        &binding.actor_user_id,
-                        &scope,
-                        run_id,
-                        kind,
-                        actionable_state.gate_ref.as_ref().map(|gate| gate.as_str()),
                     )
                     .await;
             }
@@ -623,7 +607,7 @@ impl RunDeliveryObserver {
                     if actionable_state.status == TurnStatus::BlockedResource
                         && let Some(marker) = next_blocked_marker
                     {
-                        delivered_blocked_marker = Some(marker);
+                        observed_blocked_marker = Some(marker);
                         continue;
                     }
                     // A terminal state produced no deliverable notification.
@@ -757,7 +741,7 @@ impl RunDeliveryObserver {
             if event_kind == RunNotificationEventKind::AuthRequired {
                 messages_to_delete_after_final.extend(delivered_messages);
             }
-            delivered_blocked_marker = Some(marker);
+            observed_blocked_marker = Some(marker);
         }
     }
 
@@ -770,7 +754,7 @@ impl RunDeliveryObserver {
         envelope: &ProductInboundEnvelope,
         scope: &TurnScope,
         run_id: TurnRunId,
-        delivered_blocked_marker: Option<&BlockedActionableMarker>,
+        observed_blocked_marker: Option<&BlockedActionableMarker>,
         working_indicator: &mut WorkingIndicator,
         reaction_state: &mut SourceReactionState,
     ) -> Result<TurnRunState, RunDeliveryError> {
@@ -795,7 +779,7 @@ impl RunDeliveryObserver {
                 return Ok(state);
             }
             if let Some(marker) = blocked_actionable_marker(&state)
-                && Some(&marker) != delivered_blocked_marker
+                && Some(&marker) != observed_blocked_marker
             {
                 return Ok(state);
             }
