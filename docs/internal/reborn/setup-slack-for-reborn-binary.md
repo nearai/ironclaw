@@ -113,12 +113,11 @@ OAuth client credentials are configured after startup from Admin
 Configuration. These deployment values are never shown in a user's extension
 setup flow.
 
-> **"Admin Configuration" and the "Slack card" are the same place.** This guide
-> uses the operator-facing name; [Slack](/channels/slack) uses the UI path.
-> Concretely: web interface -> **Extensions** -> **Channels** tab -> scroll to the
-> bottom of the Built-in section -> **Configure** on the Slack card. (Extensions
-> opens on the **Registry** tab, which is *not* where channels are connected.)
-> Every "Admin Configuration" reference below means that dialog.
+> **"Admin Configuration" and the "Slack deployment configuration card" are the
+> same place.** Concretely: web interface -> **Admin** -> **Configuration** ->
+> **Slack deployment configuration**. (The **Extensions** page handles only the
+> personal half — installing the extension and connecting your own account.)
+> Every "Admin Configuration" reference below means that card.
 
 As an operator, open Admin, Configuration, then Slack deployment configuration.
 Save:

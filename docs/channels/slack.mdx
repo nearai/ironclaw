@@ -45,9 +45,22 @@ ironclaw serve
 <Step title="Enter the deployment configuration (operator, once per instance)">
 
 In the [web interface](/using/webui), open **Admin → Configuration** and fill in the
-**Slack deployment configuration** card — the bot token, signing secret, workspace
-(team) ID, app ID, and the other fields the card lists. They are written to the
-encrypted secret store.
+**Slack deployment configuration** card. Every field is required; the secrets are
+written to the encrypted secret store and never shown again.
+
+| Field | Where it comes from |
+| --- | --- |
+| Bot token | **OAuth & Permissions** → Bot User OAuth Token (`xoxb-…`) |
+| Signing secret | **Basic Information** → App Credentials |
+| Workspace (team) ID | Your workspace id (`T…`) — also the `team_id` in every Events API payload |
+| App ID | **Basic Information** → App ID (`A…`) |
+| Installation ID | A stable label you choose for this app/workspace installation, e.g. `slack-acme` |
+| Bot user ID | The bot's member id (`U…`), shown under **App Home** or returned by `auth.test` |
+| OAuth client ID | **Basic Information** → App Credentials |
+| OAuth client secret | **Basic Information** → App Credentials |
+
+The OAuth client id and secret drive the per-user ("personal") authorization described
+below; the rest configure the workspace bot.
 
 <Note>
 The agent can't do this operator step for you — registering the app credentials stays in
@@ -79,7 +92,8 @@ scope, which also needs a reinstall.
 
 <Step title="Talk to it">
 
-Invite the bot to a channel and mention it, or send it a direct message.
+Invite the bot to a channel and mention it, or send it a direct message. In a channel the
+bot only responds to messages that mention it; in a DM it responds to everything.
 
 </Step>
 
@@ -147,7 +161,7 @@ that the steps above describe.
         "command": "/ironclaw",
         "url": "https://example.com/webhooks/extensions/slack/events",
         "description": "Run IronClaw commands",
-        "usage_hint": "status | model <name> | help",
+        "usage_hint": "status | model use <name> | new | stop",
         "should_escape": false
       }
     ]
@@ -168,7 +182,10 @@ that the steps above describe.
         "im:read",
         "mpim:read",
         "users:read",
-        "chat:write"
+        "chat:write",
+        "reactions:read",
+        "reactions:write",
+        "im:write"
       ],
       "bot": [
         "channels:history",
@@ -215,7 +232,16 @@ URL with it.
 `files:read` lets the bot resolve and download inbound file shares.
 `files:write` lets it return explicitly attached workspace files through
 Slack's external upload flow. IronClaw never uses the retired `files.upload`
-method.
+method. `reactions:write` lets the bot mark the message it is working on
+(👀 while a run is in progress, ✅ or ❌ when it finishes); without it the
+reaction is skipped and the reply still arrives.
+
+The `user` scopes are the union of what the sixteen personal Slack tools need.
+`reactions:read`, `reactions:write`, and `im:write` joined that union when the
+reaction and open-DM tools landed — an account connected before then holds a
+narrower grant, and the first call to one of those tools answers with a
+reconnect prompt. Reconnecting requests the wider set and updates the same
+account in place; the earlier read-only tools keep working in the meantime.
 
 Slack validates the request URL when you save the manifest, so start IronClaw before
 creating the app.
@@ -224,9 +250,19 @@ creating the app.
 
 ## Configuration
 
-Slack has no settings in the configuration file. The app id, the bot token, the signing
-secret, and channel routing are all configured in the web interface, on the Slack card
-under **Extensions** — the tokens go straight into the encrypted secret store.
+Slack has no settings in the configuration file. The instance-wide values — bot token,
+signing secret, workspace and app ids, and the OAuth client credentials — are entered
+once under **Admin → Configuration** on the **Slack deployment configuration** card, and
+the secrets go straight into the encrypted secret store. Each person then connects their
+own Slack account from the **Extensions** page (or by asking the agent to "connect
+Slack").
+
+There is no channel allowlist or routing table. Inviting the bot into a channel is what
+enables it: Slack only delivers a channel's events to the app because the bot is a
+member, and each message runs as the person who mentioned the bot. In channels — shared
+or not — the bot answers only when explicitly mentioned: a plain thread reply without a
+mention is dropped without starting a run, though approve/deny replies and `/ironclaw`
+commands still work; in DMs it answers every message.
 
 There is no key that turns Slack on. The webhook route is always mounted, and it starts
 accepting events once the Slack extension is installed and its signing secret is
