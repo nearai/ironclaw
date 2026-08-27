@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
+import subprocess
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -273,12 +276,50 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ],
         )
 
-    def test_merge_queue_is_always_exhaustive(self) -> None:
+    def test_merge_queue_uses_the_combined_diff_and_reverse_dependency_closure(
+        self,
+    ) -> None:
         plan = self.plan("merge_group", ["crates/alpha/src/lib.rs"])
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["changed_packages"], ["alpha"])
+        self.assertEqual(plan["affected_packages"], ["alpha", "beta", "gamma"])
+        self.assertEqual(
+            plan["crate_buckets"],
+            [{"name": "selected", "packages": ["alpha", "beta", "gamma"]}],
+        )
+        self.assertEqual(plan["coverage_mode"], "none")
+
+    def test_merge_queue_global_inputs_escalate_to_the_exhaustive_plan(self) -> None:
+        for path in (
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/alpha/Cargo.toml",
+            "rust-toolchain.toml",
+            ".config/nextest.toml",
+            ".github/workflows/reborn-tests.yml",
+            ".github/actions/setup-rust/action.yml",
+            "scripts/ci/reborn_pr_test_plan.py",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("merge_group", [path])
+                self.assertEqual(plan["mode"], "full")
+                self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+                self.assertEqual(
+                    plan["integration_lanes"], [0, 1, 2, 3, "groups"]
+                )
+
+    def test_merge_queue_unclassified_path_escalates_but_pr_still_fails(self) -> None:
+        path = "Makefile"
+        plan = self.plan("merge_group", [path])
         self.assertEqual(plan["mode"], "full")
-        self.assertEqual(plan["coverage_mode"], "full")
-        self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
-        self.assertEqual(plan["integration_lanes"], [0, 1, 2, 3, "groups"])
+        self.assertIn("could not classify", plan["reasons"][0])
+
+        with self.assertRaisesRegex(ValueError, "unclassified pull-request path"):
+            self.plan("pull_request", [path])
+
+    def test_empty_merge_queue_diff_fails_fast(self) -> None:
+        with self.assertRaisesRegex(ValueError, "empty merge-group diff"):
+            self.plan("merge_group", [])
 
     def test_changed_package_includes_transitive_reverse_dependents(self) -> None:
         plan = self.plan("pull_request", ["crates/alpha/src/lib.rs"])
@@ -356,6 +397,25 @@ class RebornPrTestPlanTests(unittest.TestCase):
             canonical,
         )
         self.assertIn("without omitting packages", plan["reasons"][-1])
+
+        merge_group_plan = planner.build_plan(
+            event="merge_group",
+            changed_paths=["crates/alpha/src/lib.rs"],
+            metadata=wide,
+            canonical_packages=canonical,
+        )
+        self.assertEqual(len(merge_group_plan["crate_buckets"]), len(canonical))
+        self.assertEqual(
+            sorted(
+                package
+                for bucket in merge_group_plan["crate_buckets"]
+                for package in bucket["packages"]
+            ),
+            canonical,
+        )
+        self.assertFalse(
+            any("coalesced" in reason for reason in merge_group_plan["reasons"])
+        )
 
     def test_bounded_jobs_do_not_split_canonical_buckets(self) -> None:
         source = [
@@ -2129,6 +2189,26 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["root_partitions"], [0])
         self.assertEqual(plan["integration_lanes"], [0])
 
+    def test_merge_group_shared_root_support_runs_every_root_partition(self) -> None:
+        for path in (
+            "tests/support/reborn_parity_qa/assertions.rs",
+            "tests/support/mod.rs",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("merge_group", [path])
+                self.assertEqual(plan["root_partitions"], [0, 1, 2, 3])
+
+    def test_merge_group_shared_integration_support_runs_every_integration_lane(
+        self,
+    ) -> None:
+        for path in ("tests/integration/support/database.rs", "tests/support/mod.rs"):
+            with self.subTest(path=path):
+                plan = self.plan("merge_group", [path])
+                self.assertEqual(
+                    plan["integration_lanes"], [0, 1, 2, 3, "groups"]
+                )
+                self.assertTrue(plan["run_group_tests"])
+
 
     def test_owned_integration_support_selects_its_exact_lane(self) -> None:
         for path, owner in planner.INTEGRATION_SUPPORT_OWNERS.items():
@@ -2346,10 +2426,37 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "python3 scripts/ci/changed_workspace_packages.py",
             code_style,
         )
+        self.assertIn('--event "${{ github.event_name }}"', code_style)
+        self.assertIn("clippy_scope:", code_style)
+        self.assertIn("needs.changes.outputs.clippy_scope == 'selected'", code_style)
         self.assertIn('package_args+=(-p "${package}")', code_style)
         self.assertIn("needs.changes.outputs.has_clippy == 'true'", code_style)
         self.assertIn(
-            "cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings",
+            "needs.changes.outputs.has_clippy == 'true' &&\n"
+            "      (needs.changes.outputs.has_code == 'true' ||\n"
+            "       needs.changes.outputs.clippy_scope == 'full')",
+            code_style,
+        )
+        self.assertIn(
+            'if [[ "${{ needs.changes.outputs.has_code }}" == "false" &&\n'
+            '                "${{ needs.changes.outputs.clippy_scope }}" != "full" ]]; then',
+            code_style,
+        )
+        self.assertIn('if [[ "${clippy_scope}" == "full" ]] ||', code_style)
+        self.assertIn(
+            "if: needs.changes.outputs.clippy_scope == 'full' && "
+            "github.event_name != 'pull_request'",
+            code_style,
+        )
+        self.assertIn(
+            'cargo clippy "${package_args[@]}" --all-targets', code_style
+        )
+        self.assertIn(
+            'cargo clippy "${package_args[@]}" -- -D warnings',
+            code_style,
+        )
+        self.assertIn(
+            "cargo clippy --all --all-targets ${{ matrix.flags }} -- -D warnings",
             code_style,
         )
         self.assertIn(
@@ -2362,10 +2469,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
             workflow,
         )
 
-    def test_scope_checkouts_minimize_transfer_without_losing_pr_ancestry(
+    def test_scope_checkouts_keep_pr_ancestry_and_bound_merge_group_fetches(
         self,
     ) -> None:
-        """Scope jobs keep merge-base semantics without downloading history blobs."""
+        """PRs keep three-dot ancestry; merge groups fetch only their base."""
         reborn_tests = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
             encoding="utf-8"
         )
@@ -2373,12 +2480,32 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "\n  crate-tests:\n", 1
         )[0]
         self.assertIn(
-            "fetch-depth: "
-            "${{ github.event_name == 'pull_request' && '0' || '1' }}",
+            "fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}",
             reborn_scope,
         )
         self.assertIn("filter: blob:none", reborn_scope)
+        self.assertIn("github.event.merge_group.base_sha", reborn_scope)
+        self.assertIn(
+            'git fetch --no-tags --filter=blob:none --depth=1 origin "$BASE_SHA"',
+            reborn_scope,
+        )
+        self.assertIn(
+            'if [[ "${{ github.event_name }}" == "pull_request" || '
+            '"${{ github.event_name }}" == "merge_group" ]]; then',
+            reborn_scope,
+        )
+        self.assertIn('if [[ "${{ github.event_name }}" == "merge_group" ]]; then', reborn_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA" "$HEAD_SHA"', reborn_scope)
         self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', reborn_scope)
+        self.assertEqual(
+            reborn_scope.count('git diff --name-only "$BASE_SHA" "$HEAD_SHA"'),
+            1,
+        )
+        self.assertEqual(
+            reborn_scope.count('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"'),
+            1,
+        )
+        self.assertIn("ref: ${{ inputs.ref || github.sha }}", reborn_scope)
 
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
             encoding="utf-8"
@@ -2386,9 +2513,116 @@ class RebornPrTestPlanTests(unittest.TestCase):
         style_scope = code_style.split("\n  changes:\n", 1)[1].split(
             "\n  fast-checks:\n", 1
         )[0]
-        self.assertIn("fetch-depth: 0", style_scope)
+        self.assertIn(
+            "fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}",
+            style_scope,
+        )
         self.assertIn("filter: blob:none", style_scope)
+        self.assertIn("github.event.merge_group.base_sha", style_scope)
+        self.assertIn(
+            'git fetch --no-tags --filter=blob:none --depth=1 origin "$BASE_SHA"',
+            style_scope,
+        )
+        self.assertIn('if [[ "${{ github.event_name }}" == "merge_group" ]]; then', style_scope)
+        self.assertIn('git diff --name-only "$BASE_SHA" "$HEAD_SHA"', style_scope)
         self.assertIn('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"', style_scope)
+        self.assertEqual(
+            style_scope.count('git diff --name-only "$BASE_SHA" "$HEAD_SHA"'),
+            1,
+        )
+        self.assertEqual(
+            style_scope.count('git diff --name-only "$BASE_SHA"..."$HEAD_SHA"'),
+            1,
+        )
+
+    def test_scope_diff_branches_execute_the_event_specific_revision_range(self) -> None:
+        """Execute each workflow's branch and inspect the git arguments it uses."""
+
+        workflows = (
+            (
+                ROOT / ".github/workflows/reborn-tests.yml",
+                '            if [[ "${{ github.event_name }}" == "merge_group" ]]; then',
+                "            changed_args=(--changed-files",
+                12,
+            ),
+            (
+                ROOT / ".github/workflows/code_style.yml",
+                '          if [[ "${{ github.event_name }}" == "merge_group" ]]; then',
+                '          printf \'%s\\n\' "$CHANGED_FILES" >',
+                10,
+            ),
+        )
+        expected_ranges = {
+            "merge_group": ["base-sha", "head-sha"],
+            "pull_request": ["base-sha...head-sha"],
+        }
+
+        for workflow_path, start, end, indentation in workflows:
+            workflow = workflow_path.read_text(encoding="utf-8")
+            block_start = workflow.index(start)
+            block_end = workflow.index(end, block_start)
+            block = workflow[block_start:block_end]
+            shell = "\n".join(
+                line[indentation:] if line else ""
+                for line in block.splitlines()
+            )
+            for event, expected_range in expected_ranges.items():
+                with self.subTest(workflow=workflow_path.name, event=event):
+                    rendered = shell.replace("${{ github.event_name }}", event)
+                    with tempfile.TemporaryDirectory() as temp:
+                        temp_path = Path(temp)
+                        bin_path = temp_path / "bin"
+                        bin_path.mkdir()
+                        git_log = temp_path / "git-args.txt"
+                        git_stub = bin_path / "git"
+                        git_stub.write_text(
+                            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$GIT_LOG\"\n",
+                            encoding="utf-8",
+                        )
+                        git_stub.chmod(0o755)
+                        environment = os.environ.copy()
+                        environment.update(
+                            {
+                                "BASE_SHA": "base-sha",
+                                "HEAD_SHA": "head-sha",
+                                "GIT_LOG": str(git_log),
+                                "PATH": f"{bin_path}{os.pathsep}{environment['PATH']}",
+                                "RUNNER_TEMP": str(temp_path),
+                            }
+                        )
+                        result = subprocess.run(
+                            ["bash", "-c", rendered],
+                            cwd=ROOT,
+                            env=environment,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(
+                            result.returncode,
+                            0,
+                            result.stderr,
+                        )
+                        self.assertEqual(
+                            git_log.read_text(encoding="utf-8").splitlines(),
+                            ["diff", "--name-only", *expected_range],
+                        )
+
+    def test_windows_push_clippy_keeps_tests_and_examples_scope(self) -> None:
+        code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
+            encoding="utf-8"
+        )
+        windows_scope = code_style.split("\n  clippy-windows:\n", 1)[1].split(
+            "\n  reborn-cli-smoke:\n", 1
+        )[0]
+        self.assertIn(
+            "if: needs.changes.outputs.has_code == 'true' && github.event_name == 'push'",
+            windows_scope,
+        )
+        self.assertIn(
+            "run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings",
+            windows_scope,
+        )
+        self.assertNotIn("--all-targets", windows_scope)
 
     def test_pr_workflows_do_not_repeat_reborn_rust_contracts(self) -> None:
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
