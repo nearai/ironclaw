@@ -99,6 +99,7 @@ fn continuation_observation(
             result_ref: result_ref.as_str().to_string(),
             byte_len,
             preview: Some("first bounded chunk".to_string()),
+            structured_json_view: false,
             total_bytes: Some(byte_len * 2),
             next_offset: Some(byte_len),
             item_count: None,

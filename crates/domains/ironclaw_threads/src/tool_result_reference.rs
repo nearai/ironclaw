@@ -639,8 +639,8 @@ fn validate_model_observation_strings(
 }
 
 /// The `detail` subtree: `generic_failure.detail` carries the observation's own
-/// provenance; every other string inside `detail` — including the `preview` of
-/// a `result_reference`, which is capability OUTPUT — stays untrusted.
+/// provenance. Result JSON pages split provider content from their exact
+/// host-authored controls; every other string remains untrusted.
 fn validate_observation_detail_strings(
     value: &serde_json::Value,
     provenance: ObservationProvenance,
@@ -652,8 +652,27 @@ fn validate_observation_detail_strings(
         .get("kind")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|kind| kind == "generic_failure");
+    let is_result_reference = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind == "result_reference");
+    let has_structured_json_view = is_result_reference
+        && object
+            .get("structured_json_view")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
     for (key, child) in object {
         validate_model_observation_text(key, ObservationProvenance::Untrusted)?;
+        if has_structured_json_view
+            && key == "preview"
+            && let Some(text) = child.as_str()
+            && let Some(page) = validate_json_page_preview(text)?
+        {
+            validate_model_observation_value(&page.content, ObservationProvenance::Untrusted)?;
+            let page_value = page.to_value().map_err(|error| error.to_string())?;
+            validate_model_observation_value(&page_value, ObservationProvenance::HostAuthored)?;
+            continue;
+        }
         let field_provenance = if is_generic_failure && key == "detail" {
             provenance
         } else {
@@ -662,6 +681,18 @@ fn validate_observation_detail_strings(
         validate_model_observation_value(child, field_provenance)?;
     }
     Ok(())
+}
+
+fn validate_json_page_preview(text: &str) -> Result<Option<crate::ModelResultJsonPage>, String> {
+    let Ok(page) = crate::ModelResultJsonPage::from_json_str(text) else {
+        return Ok(None);
+    };
+    let normalized =
+        crate::model_result_preview_from_json_page(&page).map_err(|error| error.to_string())?;
+    if normalized.as_str() != text {
+        return Err("JSON result page content is not credential-redacted".to_string());
+    }
+    Ok(Some(page))
 }
 
 /// The PROVENANCE of an observation, read once from its `trust` field.
@@ -892,6 +923,7 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                     "result_ref",
                     "byte_len",
                     "preview",
+                    "structured_json_view",
                     "total_bytes",
                     "next_offset",
                     "item_count",
@@ -904,6 +936,14 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
                 MODEL_OBSERVATION_TEXT_MAX_BYTES,
             )?;
             required_u64(object, "byte_len", "model observation detail")?;
+            if let Some(value) = object.get("structured_json_view")
+                && value.as_bool().is_none()
+            {
+                return Err(
+                    "model observation detail field `structured_json_view` must be a boolean"
+                        .to_string(),
+                );
+            }
             for field in ["total_bytes", "next_offset", "item_count"] {
                 if let Some(value) = object.get(field)
                     && value.as_u64().is_none()
@@ -916,7 +956,23 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
             if let Some(preview) = optional_string(object, "preview", "model observation detail")? {
                 // A result-reference preview is capability OUTPUT — always
                 // untrusted, regardless of the enclosing observation's trust.
-                validate_model_observation_text(preview, ObservationProvenance::Untrusted)?;
+                // A validated JSON page is the one exception: its provider
+                // content was redacted before its host-authored paging controls
+                // were serialized, so re-scanning the controls as provider text
+                // would reject legitimate pointers such as `/payload/secret`.
+                let structured_json_view = object
+                    .get("structured_json_view")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if structured_json_view {
+                    if validate_json_page_preview(preview)?.is_none() {
+                        return Err(
+                            "structured JSON result preview must be a valid JSON page".to_string()
+                        );
+                    }
+                } else {
+                    validate_model_observation_text(preview, ObservationProvenance::Untrusted)?;
+                }
             }
             if object.contains_key("item_count") && !object.contains_key("next_offset") {
                 return Err("model observation item_count requires next_offset".to_string());

@@ -625,6 +625,7 @@ pub struct ReadToolResultRecordRequest {
     pub result_ref: String,
     pub offset: u64,
     pub max_bytes: usize,
+    pub selection: ToolResultRecordSelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -632,6 +633,28 @@ pub struct ToolResultRecordChunk {
     pub content: Vec<u8>,
     pub total_bytes: u64,
     pub next_offset: Option<u64>,
+}
+
+/// Selection requested while reading a durable tool-result record.
+///
+/// `Bytes` preserves the original opaque byte reader. `Json` is an additive
+/// model-facing view over records whose producers already stored JSON; the
+/// record itself remains unchanged and durable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolResultRecordSelection {
+    Bytes,
+    Json {
+        pointer: String,
+        limit: Option<usize>,
+    },
+}
+
+/// The result of one durable tool-result read. JSON pages carry a real
+/// `serde_json::Value` so callers do not have to parse a JSON string again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolResultRecordRead {
+    Bytes(ToolResultRecordChunk),
+    Json(ironclaw_host_api::model_result_preview::ModelResultJsonPage),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

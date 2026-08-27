@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import signal
 import socket
 from pathlib import Path
@@ -597,6 +598,80 @@ async def test_reborn_responses_repeated_external_tools_round_trip(
     assert "Run reborn external tool loop for Boston." in forwarded_messages
     for tool_output in outputs.values():
         assert tool_output in forwarded_messages
+
+
+async def test_reborn_responses_external_success_round_trips_through_result_read(
+    reborn_responses_client, mock_llm_server
+):
+    """A client-submitted success uses durable storage and host result_read."""
+    await _reset_mock_chat_requests(mock_llm_server)
+
+    response = await create_response(
+        reborn_responses_client,
+        input="Run reborn external tool result read for Boston.",
+        tools=[_lookup_weather_tool()],
+    )
+    calls = _function_calls(response)
+    assert len(calls) == 1, response
+    call = calls[0]
+    assert call["name"] == "lookup_weather"
+    assert json.loads(call["arguments"]) == {"city": "Boston"}
+
+    external_output = {
+        "items": [
+            {"id": 1, "marker": "external-success-result-read"},
+            *[{"id": index, "value": f"row-{index}"} for index in range(2, 120)],
+        ]
+    }
+    final = await create_response(
+        reborn_responses_client,
+        previous_response_id=response["id"],
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": call["call_id"],
+                "output": external_output,
+            }
+        ],
+    )
+
+    assert final["status"] == "completed"
+    chat_requests = await _mock_chat_requests(mock_llm_server)
+    messages = [
+        message
+        for request in chat_requests
+        for message in request.get("messages", [])
+    ]
+    result_read_calls = [
+        call
+        for message in messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls", [])
+        if call.get("function", {}).get("name") == "builtin__result_read"
+    ]
+    assert len(result_read_calls) == 1
+    result_read_arguments = json.loads(result_read_calls[0]["function"]["arguments"])
+    assert result_read_arguments["json_pointer"] == "/items"
+    external_result_output = next(
+        message["content"]
+        for message in messages
+        if message.get("role") == "tool"
+        and "lookup_weather" in message.get("content", "")
+    )
+    external_result_ref = re.search(
+        r'"result_ref"\s*:\s*"([^"\\]+)"', external_result_output
+    )
+    assert external_result_ref is not None
+    assert result_read_arguments["result_ref"] == external_result_ref.group(1)
+
+    result_read_output = next(
+        message["content"]
+        for message in messages
+        if message.get("role") == "tool"
+        and "builtin__result_read" in message.get("content", "")
+    )
+    assert '"node_type":"array"' in result_read_output
+    assert "external-success-result-read" in result_read_output
 
 
 async def test_reborn_responses_external_tool_failure_output_reaches_llm(

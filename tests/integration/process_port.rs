@@ -146,13 +146,16 @@ fn live_shell_uses_local_process_port() {
         h.assert_tool_result_contains("live-shell-probe")
             .await
             .expect("real process output surfaced in the model-visible tool result");
+        h.assert_reply_contains("done")
+            .await
+            .expect("final reply finalized");
+        h.assert_latest_result_json_round_trips("builtin.shell")
+            .await
+            .expect("shell output round-trips through durable result_read");
         assert!(
             h.assert_shell_ran_through_inert_port().await.is_err(),
             "live shell must not route through the inert RecordingProcessPort"
         );
-        h.assert_reply_contains("done")
-            .await
-            .expect("final reply finalized");
     });
 }
 

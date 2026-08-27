@@ -30,6 +30,7 @@ use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
 use super::doubles::TRANSCRIPT_FAILURE_SECRET;
+use super::reply::RebornScriptedReply;
 use crate::support::trace_llm::{first_divergence, leading_system_block};
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -119,6 +120,64 @@ impl ToolErrorClass {
 }
 
 impl RebornIntegrationHarness {
+    /// Proves the most recent successful result for `capability_id` crossed the
+    /// production durable-result seam and can be parsed back through the
+    /// runtime-neutral `result_read` JSON root view.
+    ///
+    /// Call this only after the capability turn has completed. The dependent
+    /// `result_ref` is host-minted, so the follow-up model script must be
+    /// enqueued after reading it from persisted thread history.
+    pub async fn assert_latest_result_json_round_trips(
+        &self,
+        capability_id: &str,
+    ) -> HarnessResult<()> {
+        let expected = self.tool_result_output(capability_id).await?;
+        let result_ref = self.latest_tool_result_ref().await?;
+        self.push_script([
+            RebornScriptedReply::tool_call(
+                "builtin.result_read",
+                serde_json::json!({
+                    "result_ref": result_ref,
+                    "offset": 0,
+                    "max_bytes": ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
+                    "json_pointer": "",
+                }),
+            ),
+            RebornScriptedReply::text("durable result verified"),
+        ]);
+        self.submit_turn("read the complete stored tool result as JSON")
+            .await?;
+        let envelopes = self.persisted_tool_result_envelopes().await?;
+        let latest = envelopes
+            .last()
+            .ok_or("result_read did not persist a tool-result envelope")?;
+        let preview = latest
+            .model_observation
+            .as_ref()
+            .and_then(|observation| observation["detail"]["preview"].as_str())
+            .ok_or_else(|| {
+                format!(
+                    "result_read did not persist a model-visible JSON-page preview; latest envelope: {latest:?}"
+                )
+            })?;
+        let page: serde_json::Value = serde_json::from_str(preview)
+            .map_err(|error| format!("result_read preview was not valid JSON: {error}"))?;
+        if page["result_ref"].as_str() != Some(result_ref.as_str()) {
+            return Err("result_read returned a different durable result reference".into());
+        }
+        if page["json_pointer"].as_str() != Some("") {
+            return Err("result_read did not return the requested JSON root view".into());
+        }
+        if page["content"] != expected {
+            return Err(format!(
+                "result_read JSON root differed from {capability_id} output: expected {expected}, got {}",
+                page["content"]
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Assert the complete fail-closed outcome shared by assistant and tool
     /// transcript-write failures.
     pub async fn assert_transcript_failure_terminal(

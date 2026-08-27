@@ -172,9 +172,10 @@ impl RebornCapabilityBackend {
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }
             RebornCapabilityBackend::BuiltinHttpToolsDurableIo => {
-                if !matches!(shell_mode, ShellMode::Inert) {
+                if matches!(shell_mode, ShellMode::Scripted(_)) {
                     return Err(
-                        "durable builtin-http harness does not support shell mode overrides".into(),
+                        "durable builtin-http harness does not support scripted shell results"
+                            .into(),
                     );
                 }
                 if park_capability_gate.is_some() {
@@ -182,8 +183,15 @@ impl RebornCapabilityBackend {
                          RebornCapabilityBackend::BuiltinHttpTools"
                         .into());
                 }
-                let host_runtime =
-                    core_builtin::core_builtin_tools_with_durable_capability_io().await?;
+                let host_runtime = if matches!(shell_mode, ShellMode::Live) {
+                    core_builtin::core_builtin_tools(
+                        CoreBuiltinOptions::default().with_live_shell(),
+                    )
+                    .await?
+                } else {
+                    core_builtin::core_builtin_tools_default().await?
+                };
+                let host_runtime = host_runtime.with_durable_capability_io();
                 host_runtime.install_http_responses(keyed_http_responses)?;
                 GroupCapability::HostRuntime(Arc::new(host_runtime))
             }

@@ -138,6 +138,10 @@ pub(crate) fn canonical_tool_result_payload(
         .and_then(serde_json::Value::as_str);
     preview
         .and_then(|preview| serde_json::from_str(preview).ok())
+        .filter(|value: &serde_json::Value| {
+            value.get("view").and_then(serde_json::Value::as_str)
+                != Some(ironclaw_host_api::model_result_preview::MODEL_RESULT_JSON_PAGE_VIEW)
+        })
         .map(Cow::Owned)
 }
 
@@ -262,6 +266,33 @@ mod tests {
         paged_result.content["detail"]["next_offset"] = serde_json::json!(24);
         assert!(matches!(
             resolve_trace_result_bindings(&mut paged, &[paged_result]),
+            Err(TraceBindingError::MissingPointer { .. })
+        ));
+
+        let mut structured = serde_json::json!({
+            "$trace_result": {
+                "tool_call_id": "call_upload",
+                "pointer": "/content/file/id"
+            }
+        });
+        let structured_result = ObservedToolResult {
+            tool_call_id: "call_upload".to_string(),
+            content: serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "trust": "provider",
+                "detail": {
+                    "byte_len": 24,
+                    "total_bytes": 24,
+                    "preview": serde_json::json!({
+                        "view": ironclaw_host_api::model_result_preview::MODEL_RESULT_JSON_PAGE_VIEW,
+                        "content": {"file": {"id": "derived"}}
+                    }).to_string()
+                }
+            }),
+        };
+        assert!(matches!(
+            resolve_trace_result_bindings(&mut structured, &[structured_result]),
             Err(TraceBindingError::MissingPointer { .. })
         ));
     }

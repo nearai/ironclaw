@@ -34,12 +34,56 @@ const CREDENTIAL_MARKERS: [&str; 9] = [
     "secret",
 ];
 
+const CREDENTIAL_LABELS: &[&str] = &[
+    "access token",
+    "access-token",
+    "access_token",
+    "api key",
+    "api-key",
+    "api_key",
+    "authorization",
+    "client secret",
+    "client-secret",
+    "client_secret",
+    "cookie",
+    "credential",
+    "password",
+    "passwd",
+    "private key",
+    "private-key",
+    "private_key",
+    "refresh token",
+    "refresh-token",
+    "refresh_token",
+    "secret",
+    "token",
+];
+
 /// True when `lower` (already lowercased) contains any credential marker as a
 /// standalone token rather than embedded in a larger alphanumeric word.
 pub(crate) fn contains_credential_marker(lower: &str) -> bool {
     CREDENTIAL_MARKERS
         .iter()
         .any(|marker| contains_marker_at_word_boundary(lower, marker))
+}
+
+/// True when a field name or JSON Pointer segment contains credential
+/// vocabulary at identifier boundaries. Unlike the assignment detector below,
+/// this intentionally needs no following value: the caller already knows this
+/// text names the value it is deciding whether to expose.
+pub(crate) fn contains_credential_label(lower: &str) -> bool {
+    CREDENTIAL_LABELS.iter().any(|label| {
+        lower.match_indices(label).any(|(start, _)| {
+            let end = start + label.len();
+            let before_ok = lower
+                .get(..start)
+                .is_none_or(|prefix| !prefix.ends_with(|c: char| c.is_ascii_alphanumeric()));
+            let after_ok = lower
+                .get(end..)
+                .is_none_or(|suffix| !suffix.starts_with(|c: char| c.is_ascii_alphanumeric()));
+            before_ok && after_ok
+        })
+    })
 }
 
 /// True if `marker` occurs in `haystack` (already lowercased) as a standalone
@@ -180,32 +224,7 @@ pub(crate) fn contains_secret_like_token(lower: &str) -> bool {
 /// URL userinfo. Credential vocabulary by itself remains valid diagnostic
 /// context (`password field is required`).
 pub(crate) fn contains_unredacted_credential_value(lower: &str) -> bool {
-    const LABELS: &[&str] = &[
-        "access token",
-        "access-token",
-        "access_token",
-        "api key",
-        "api-key",
-        "api_key",
-        "authorization",
-        "client secret",
-        "client-secret",
-        "client_secret",
-        "cookie",
-        "credential",
-        "password",
-        "passwd",
-        "private key",
-        "private-key",
-        "private_key",
-        "refresh token",
-        "refresh-token",
-        "refresh_token",
-        "secret",
-        "token",
-    ];
-
-    LABELS.iter().any(|label| {
+    CREDENTIAL_LABELS.iter().any(|label| {
         lower.match_indices(label).any(|(start, _)| {
             let end = start + label.len();
             let before_ok = lower

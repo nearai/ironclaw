@@ -2153,6 +2153,12 @@ impl HostRuntimeCapabilityHarness {
         self
     }
 
+    /// Use the same durable capability-result IO that production composes.
+    pub(crate) fn with_durable_capability_io(mut self) -> Self {
+        self.durable_capability_io_requested = true;
+        self
+    }
+
     /// C-MULTIUSER: opt in to per-actor capability scoping. With this set,
     /// [`create_capability_port`] resolves the execution `(tenant, user)` from
     /// each run's OWN owner/actor rather than this harness's single fixed
