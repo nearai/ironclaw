@@ -495,6 +495,7 @@ impl GsuiteExecutor {
         let output = match response_output(capability.operation, &response) {
             Ok(output) => output,
             Err(error) => {
+                let error = add_network_usage(error, network_egress_bytes);
                 trace_gsuite_latency_error(
                     "shape_output",
                     latency_fields.as_ref(),

@@ -2,6 +2,7 @@ use base64::{
     Engine as _,
     engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
 };
+use encoding_rs::{Encoding, UTF_8};
 use htmd::HtmlToMarkdown;
 use ironclaw_common::normalize_mime_type;
 use ironclaw_host_api::dispatch::RuntimeDispatchErrorKind;
@@ -190,11 +191,11 @@ fn select_body(
 ) -> Result<Option<ReadableBody>, GsuiteDispatchError> {
     visit_part(depth, budget)?;
     let mime_type = normalize_mime_type(&part.mime_type);
-    if !part.filename.is_empty() || part.body.attachment_id.is_some() {
-        return Ok(None);
-    }
     if is_encrypted_mime(&mime_type) {
         return Ok(Some(ReadableBody::Encrypted));
+    }
+    if !part.filename.is_empty() || part.body.attachment_id.is_some() {
+        return Ok(None);
     }
     if mime_type == "text/plain" || mime_type == "text/html" {
         if part.body.data.as_deref().is_none_or(str::is_empty) {
@@ -217,12 +218,15 @@ fn select_body(
         return Ok(html.or(encrypted));
     }
 
+    let mut encrypted = None;
     for child in &part.parts {
-        if let Some(body) = select_body(child, depth + 1, budget)? {
-            return Ok(Some(body));
+        match select_body(child, depth + 1, budget)? {
+            Some(body @ ReadableBody::Text { .. }) => return Ok(Some(body)),
+            Some(body @ ReadableBody::Encrypted) => encrypted = encrypted.or(Some(body)),
+            None => {}
         }
     }
-    Ok(None)
+    Ok(encrypted)
 }
 
 fn decode_text_part(
@@ -231,8 +235,7 @@ fn decode_text_part(
 ) -> Result<ReadableBody, GsuiteDispatchError> {
     let encoded = part.body.data.as_deref().ok_or_else(output_decode)?;
     let decoded = decode_base64url(encoded)?;
-    let text = String::from_utf8(decoded)
-        .map_err(|error| output_decode_with("decode message text as UTF-8", error))?;
+    let text = decode_declared_charset(part, decoded)?;
     if mime_type == "text/html" {
         let (text, input_truncated) = truncate_utf8(&text, MAX_BODY_BYTES);
         let converter = HtmlToMarkdown::builder()
@@ -281,6 +284,54 @@ fn decode_text_part(
     }
 }
 
+fn decode_declared_charset(
+    part: &MessagePart,
+    decoded: Vec<u8>,
+) -> Result<String, GsuiteDispatchError> {
+    let mut encoding = None;
+    for content_type in [
+        part.mime_type.as_str(),
+        header(&part.headers, "Content-Type").unwrap_or(""),
+    ] {
+        if content_type.is_empty() {
+            continue;
+        }
+        let parsed = match content_type.parse::<mime::Mime>() {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                tracing::debug!(%error, "ignoring malformed Gmail content type");
+                continue;
+            }
+        };
+        let Some(charset) = parsed.get_param(mime::CHARSET) else {
+            continue;
+        };
+        match Encoding::for_label(charset.as_str().as_bytes()) {
+            Some(declared) => {
+                encoding = Some(declared);
+                break;
+            }
+            None => tracing::debug!(charset = charset.as_str(), "unknown Gmail text charset"),
+        }
+    }
+    let encoding = encoding.unwrap_or(UTF_8);
+
+    if encoding == UTF_8 {
+        return String::from_utf8(decoded)
+            .map_err(|error| output_decode_with("decode message text as UTF-8", error));
+    }
+
+    encoding
+        .decode_without_bom_handling_and_without_replacement(&decoded)
+        .map(|text| text.into_owned())
+        .ok_or_else(|| {
+            output_decode_with(
+                "decode message text using declared charset",
+                format_args!("invalid {} byte sequence", encoding.name()),
+            )
+        })
+}
+
 fn decode_base64url(encoded: &str) -> Result<Vec<u8>, GsuiteDispatchError> {
     URL_SAFE_NO_PAD
         .decode(encoded)
@@ -315,7 +366,7 @@ fn validate_html_tree(root: &Rc<htmd::Node>) -> Result<(), GsuiteDispatchError> 
             || nodes_seen > MAX_HTML_NODES
             || children.len() > MAX_HTML_SIBLINGS
         {
-            tracing::warn!(
+            tracing::debug!(
                 depth,
                 nodes_seen,
                 sibling_count = children.len(),
@@ -346,11 +397,14 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
     if value.len() <= max_bytes {
         return (value.to_string(), false);
     }
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
+    let mut prefix = String::with_capacity(max_bytes);
+    for (index, character) in value.char_indices() {
+        if index.saturating_add(character.len_utf8()) > max_bytes {
+            break;
+        }
+        prefix.push(character);
     }
-    (value[..end].to_string(), true)
+    (prefix, true)
 }
 
 fn output_decode() -> GsuiteDispatchError {
@@ -358,6 +412,6 @@ fn output_decode() -> GsuiteDispatchError {
 }
 
 fn output_decode_with(context: &'static str, error: impl std::fmt::Display) -> GsuiteDispatchError {
-    tracing::warn!(context, error = %error, "Gmail response normalization failed");
+    tracing::debug!(context, error = %error, "Gmail response normalization failed");
     output_decode()
 }

@@ -522,6 +522,30 @@ async fn gmail_get_message_reports_encrypted_content_without_exposing_ciphertext
     .await;
     assert_eq!(mixed["body"]["body"]["kind"], "text");
     assert_eq!(mixed["body"]["body"]["text"], "Readable message body");
+
+    let (mixed_inline, _) = GsuiteShapeCase::new(
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({ "message_id": "msg-inline-encrypted" }),
+        &[GOOGLE_GMAIL_READONLY_SCOPE],
+        vec![RecordingEgress::json(json!({
+            "id": "msg-inline-encrypted",
+            "threadId": "thr-inline-encrypted",
+            "payload": {
+                "mimeType": "multipart/mixed",
+                "parts": [
+                    { "mimeType": "application/pkcs7-mime", "body": {} },
+                    {
+                        "mimeType": "text/plain",
+                        "body": { "data": URL_SAFE_NO_PAD.encode(b"Later readable body") }
+                    }
+                ]
+            }
+        }))],
+    )
+    .dispatch()
+    .await;
+    assert_eq!(mixed_inline["body"]["body"]["kind"], "text");
+    assert_eq!(mixed_inline["body"]["body"]["text"], "Later readable body");
 }
 
 #[tokio::test]
@@ -562,6 +586,77 @@ async fn gmail_get_message_rejects_malformed_gmail_base64url() {
     .await;
 
     assert_eq!(error.kind(), RuntimeDispatchErrorKind::OutputDecode);
+    assert_eq!(
+        error.usage().map(|usage| usage.network_egress_bytes),
+        Some(123)
+    );
+}
+
+#[tokio::test]
+async fn gmail_get_message_decodes_declared_text_charset() {
+    for (message_id, mime_type, headers, bytes, expected) in [
+        (
+            "msg-latin-1",
+            "text/plain",
+            json!([{ "name": "Content-Type", "value": "text/plain; charset=iso-8859-1" }]),
+            b"caf\xe9".as_slice(),
+            "café",
+        ),
+        (
+            "msg-unknown-charset",
+            "text/plain; charset=x-unknown",
+            json!([]),
+            "fallback ✓".as_bytes(),
+            "fallback ✓",
+        ),
+    ] {
+        let (message, _) = GsuiteShapeCase::new(
+            GMAIL_GET_MESSAGE_CAPABILITY_ID,
+            json!({ "message_id": message_id }),
+            &[GOOGLE_GMAIL_READONLY_SCOPE],
+            vec![RecordingEgress::json(json!({
+                "id": message_id,
+                "threadId": format!("thread-{message_id}"),
+                "payload": {
+                    "mimeType": mime_type,
+                    "headers": headers,
+                    "body": { "data": URL_SAFE_NO_PAD.encode(bytes) }
+                }
+            }))],
+        )
+        .dispatch()
+        .await;
+
+        assert_eq!(message["body"]["body"]["kind"], "text");
+        assert_eq!(message["body"]["body"]["text"], expected);
+    }
+}
+
+#[tokio::test]
+async fn gmail_get_message_reports_attachment_backed_encrypted_body() {
+    let (message, _) = GsuiteShapeCase::new(
+        GMAIL_GET_MESSAGE_CAPABILITY_ID,
+        json!({ "message_id": "msg-root-encrypted" }),
+        &[GOOGLE_GMAIL_READONLY_SCOPE],
+        vec![RecordingEgress::json(json!({
+            "id": "msg-root-encrypted",
+            "threadId": "thread-root-encrypted",
+            "payload": {
+                "mimeType": "application/pkcs7-mime",
+                "filename": "smime.p7m",
+                "body": { "attachmentId": "encrypted-payload", "size": 16 }
+            }
+        }))],
+    )
+    .dispatch()
+    .await;
+
+    assert_eq!(message["body"]["body"]["kind"], "encrypted");
+    assert_eq!(
+        message["body"]["body"]["reason"],
+        "encrypted content is not supported"
+    );
+    assert!(message["body"]["body"].get("text").is_none());
 }
 
 #[tokio::test]
