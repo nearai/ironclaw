@@ -2224,14 +2224,19 @@ impl SessionThreadService for ScopeMismatchThreadStub {
     }
 }
 
+enum BoundedReadOutcome {
+    Complete,
+    BackendError,
+    LimitExceeded,
+}
+
 enum ScriptedThreadBehavior {
     BackendHistory,
     History(Box<ThreadHistory>),
     ThreadArtifact {
         history: Box<ThreadHistory>,
         snapshot: Box<BoundedThreadMessageSnapshot>,
-        bounded_error: bool,
-        bounded_limit_exceeded: bool,
+        bounded_read_outcome: BoundedReadOutcome,
     },
     ListPages,
     SubmittedReplay {
@@ -2299,8 +2304,7 @@ impl ScriptedThreadService {
             behavior: ScriptedThreadBehavior::ThreadArtifact {
                 history: Box::new(history),
                 snapshot: Box::new(snapshot),
-                bounded_error: false,
-                bounded_limit_exceeded: false,
+                bounded_read_outcome: BoundedReadOutcome::Complete,
             },
             history_requests: Mutex::new(Vec::new()),
             bounded_requests: Mutex::new(Vec::new()),
@@ -2318,8 +2322,7 @@ impl ScriptedThreadService {
             behavior: ScriptedThreadBehavior::ThreadArtifact {
                 history: Box::new(history),
                 snapshot: Box::new(snapshot),
-                bounded_error: true,
-                bounded_limit_exceeded: false,
+                bounded_read_outcome: BoundedReadOutcome::BackendError,
             },
             history_requests: Mutex::new(Vec::new()),
             bounded_requests: Mutex::new(Vec::new()),
@@ -2337,8 +2340,7 @@ impl ScriptedThreadService {
             behavior: ScriptedThreadBehavior::ThreadArtifact {
                 history: Box::new(history),
                 snapshot: Box::new(snapshot),
-                bounded_error: false,
-                bounded_limit_exceeded: true,
+                bounded_read_outcome: BoundedReadOutcome::LimitExceeded,
             },
             history_requests: Mutex::new(Vec::new()),
             bounded_requests: Mutex::new(Vec::new()),
@@ -2728,22 +2730,17 @@ impl SessionThreadService for ScriptedThreadService {
         match &self.behavior {
             ScriptedThreadBehavior::ThreadArtifact {
                 snapshot,
-                bounded_error,
-                bounded_limit_exceeded,
+                bounded_read_outcome,
                 ..
-            } => {
-                if *bounded_error {
-                    Err(SessionThreadError::Backend(
-                        "bounded query unsupported".to_string(),
-                    ))
-                } else if *bounded_limit_exceeded {
-                    Ok(BoundedThreadMessages::LimitExceeded)
-                } else {
-                    Ok(BoundedThreadMessages::Complete(Box::new(
-                        snapshot.as_ref().clone(),
-                    )))
-                }
-            }
+            } => match bounded_read_outcome {
+                BoundedReadOutcome::Complete => Ok(BoundedThreadMessages::Complete(Box::new(
+                    snapshot.as_ref().clone(),
+                ))),
+                BoundedReadOutcome::BackendError => Err(SessionThreadError::Backend(
+                    "bounded query unsupported".to_string(),
+                )),
+                BoundedReadOutcome::LimitExceeded => Ok(BoundedThreadMessages::LimitExceeded),
+            },
             _ => scripted_stub_unreachable("list_thread_messages_bounded"),
         }
     }
