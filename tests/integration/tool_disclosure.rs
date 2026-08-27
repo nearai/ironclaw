@@ -98,9 +98,9 @@ async fn assert_deferred_bridge_flow(harness: &RebornIntegrationHarness) {
         .await
         .expect("bounded search result reaches the next production model request");
     harness
-        .assert_model_tool_result_content_occurrences(FLAT_GITHUB_TOOL_NAME, 1)
+        .assert_model_tool_result_content_occurrences("additionalProperties", 1)
         .await
-        .expect("describe result reaches the next production model request");
+        .expect("describe schema reaches the next production model request");
     harness
         .assert_tool_invoked("github.get_repo")
         .await
@@ -287,9 +287,9 @@ async fn discovery_batch_classifies_parallel_and_preserves_valid_siblings() {
         .await
         .expect("valid bounded search sibling reaches the next model request");
     harness
-        .assert_model_tool_result_content_occurrences(FLAT_GITHUB_TOOL_NAME, 1)
+        .assert_model_tool_result_content_occurrences("additionalProperties", 1)
         .await
-        .expect("valid describe sibling reaches the next model request");
+        .expect("valid describe schema sibling reaches the next model request");
     harness
         .assert_model_tool_result_content_occurrences("tool_describe target is unknown", 1)
         .await

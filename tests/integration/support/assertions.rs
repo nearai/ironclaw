@@ -19,7 +19,7 @@
 
 use ironclaw_config::BudgetDefaults;
 use ironclaw_event_log::{SecurityBoundary, SecurityDecision};
-use ironclaw_host_api::ids::ProcessId;
+use ironclaw_host_api::{ids::ProcessId, model_result_preview::ModelResultJsonPage};
 use ironclaw_llm::Role;
 use ironclaw_loop_contracts::{BatchPolicyKind, LoopHostMilestoneKind, LoopRecoveryClass};
 use ironclaw_processes::ProcessKind;
@@ -160,26 +160,23 @@ impl RebornIntegrationHarness {
                     "result_read did not persist a model-visible JSON-page preview; latest envelope: {latest:?}"
                 )
             })?;
-        let page: serde_json::Value = serde_json::from_str(preview)
-            .map_err(|error| format!("result_read preview was not valid JSON: {error}"))?;
-        if page["result_ref"].as_str() != Some(result_ref.as_str()) {
+        let page = ModelResultJsonPage::from_json_str(preview)
+            .map_err(|error| format!("result_read preview was not a valid JSON page: {error}"))?;
+        if page.result_ref != result_ref {
             return Err("result_read returned a different durable result reference".into());
         }
-        if page["json_pointer"].as_str() != Some("") {
+        if !page.json_pointer.is_empty() {
             return Err("result_read did not return the requested JSON root view".into());
         }
-        if page["omitted"]
-            .as_array()
-            .is_some_and(|omitted| !omitted.is_empty())
-        {
+        if !page.omitted.is_empty() {
             return Err(format!(
-                "{capability_id} output exceeds the JSON page budget; the root view is bounded: {}",
-                page["omitted"]
+                "{capability_id} output exceeds the JSON page budget; the root view omitted: {:?}",
+                page.omitted
             )
             .into());
         }
-        if page["content"] != expected {
-            if page["content"].to_string().contains("\"[redacted]\"") {
+        if page.content != expected {
+            if page.content.to_string().contains("\"[redacted]\"") {
                 return Err(format!(
                     "{capability_id} output is credential-redacted in the model-visible JSON view"
                 )
@@ -187,7 +184,7 @@ impl RebornIntegrationHarness {
             }
             return Err(format!(
                 "result_read JSON root differed from {capability_id} output: expected {expected}, got {}",
-                page["content"]
+                page.content
             )
             .into());
         }
