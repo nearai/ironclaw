@@ -10,6 +10,7 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
+    capability::RuntimeCredentialRequirement,
     decision::RuntimeCredentialAuthRequirement,
     dispatch::{
         CapabilityDisplayOutputPreview, DispatchFailureDetail, DispatchInputIssue,
@@ -46,6 +47,10 @@ pub struct FirstPartyCapabilityRequest {
     pub origin: Option<InvocationOrigin>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
+    /// Credential requirements copied from the authorized descriptor. A
+    /// handler may map these declarations to a runtime-specific placeholder,
+    /// but cannot obtain raw material from this request.
+    pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
     pub services: InvocationServices,
     pub input: Value,
 }
@@ -64,6 +69,7 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
             .field("origin", &self.origin)
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
+            .field("runtime_credentials", &self.runtime_credentials)
             .field("services", &self.services)
             .field("input", &self.input)
             .finish()
@@ -79,6 +85,7 @@ impl PartialEq for FirstPartyCapabilityRequest {
             && self.origin == other.origin
             && self.estimate == other.estimate
             && self.mounts == other.mounts
+            && self.runtime_credentials == other.runtime_credentials
             && self.input == other.input
     }
 }
@@ -102,6 +109,7 @@ impl FirstPartyCapabilityRequest {
             )),
             estimate: ResourceEstimate::default(),
             mounts: None,
+            runtime_credentials: Vec::new(),
             services: InvocationServices {
                 filesystem: Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
                 runtime_http_egress,

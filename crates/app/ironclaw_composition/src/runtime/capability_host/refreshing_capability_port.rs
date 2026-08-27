@@ -527,6 +527,7 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
 ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
     let crate::test_support::RefreshingCapabilityPortTestParts {
         runtime,
+        process_backend,
         run_context,
         surface_policy,
         fallback_user_id,
@@ -555,10 +556,13 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         capability_id_filter,
         extension_management,
         additional_capability_grants,
+        extension_surface_override,
     } = parts;
 
     let policy = Arc::new(
         crate::builtin_capability_policy::builtin_capability_policy()
+            .map_err(host_api_agent_loop_error)?
+            .for_process_backend(process_backend)
             .map_err(host_api_agent_loop_error)?,
     );
     let approval_settings: Arc<dyn ApprovalSettingsProvider> = Arc::new(
@@ -583,15 +587,12 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,
-        // Harness-port-seam P1 Change 3: same constructor production's
-        // `capability_wiring` calls (`runtime/capability_host.rs:132-133`), fed the
-        // harness's `extension_management` handle recovered from the opaque
-        // `ExtensionManagementTestHandle` (see its doc-comment); `None` when
-        // the harness never wired one, reproducing the prior always-no-op
-        // surface.
-        extension_surface_source: ExtensionCapabilitySurfaceSource::new(
-            extension_management.map(|handle| handle.extension_management()),
-        ),
+        extension_surface_source: match extension_surface_override {
+            Some(surface) => ExtensionCapabilitySurfaceSource::from_surface(surface),
+            None => ExtensionCapabilitySurfaceSource::new(
+                extension_management.map(|handle| handle.extension_management()),
+            ),
+        },
         input_resolver,
         result_writer,
         milestone_sink,

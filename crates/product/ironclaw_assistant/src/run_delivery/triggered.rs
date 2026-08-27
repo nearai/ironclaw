@@ -120,7 +120,7 @@ impl TriggeredRunDelivery for PreSubmitFailureInboxNotifier {
         publish_pre_submit_failure_inbox_notification(
             self.inbox.as_ref(),
             &request.creator_user_id,
-            &request.scope,
+            &request.scope.tenant_id,
             &request.failure_ref,
             self.publish_timeout,
         )
@@ -552,12 +552,15 @@ async fn notify_pre_submit_failure(
 async fn publish_pre_submit_failure_inbox_notification(
     inbox: &dyn NotificationInboxStorePort,
     user_id: &UserId,
-    scope: &TurnScope,
+    tenant_id: &TenantId,
     failure_ref: &ProjectionUpdateRef,
     publish_timeout: Duration,
 ) {
     let fire_key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, failure_ref.as_str().as_bytes());
-    let notification_id = match NotificationId::new(format!("trigger-fire:{fire_key}:failed")) {
+    let notification_id = match NotificationId::new(format!(
+        "trigger-fire:{fire_key}:{}",
+        NotificationKind::RunFailed.stable_key()
+    )) {
         Ok(id) => id,
         Err(error) => {
             tracing::debug!(target: TRACE_TARGET, %error, "invalid pre-submit failure Inbox id");
@@ -574,13 +577,13 @@ async fn publish_pre_submit_failure_inbox_notification(
     let publication = inbox.publish(PublishNotificationRequest {
         id: notification_id,
         recipient: NotificationRecipient {
-            tenant_id: scope.tenant_id.clone(),
+            tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
         },
         kind: NotificationKind::RunFailed,
         severity: NotificationSeverity::Error,
         source: NotificationSource {
-            thread_id: scope.thread_id.clone(),
+            thread_id: None,
             turn_run_id: None,
             lifecycle_ref: Some(lifecycle_ref),
         },

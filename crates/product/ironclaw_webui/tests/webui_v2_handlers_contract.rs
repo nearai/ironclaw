@@ -1511,7 +1511,7 @@ impl StubServices {
                         action: ProductNotificationAction::OpenThread {
                             thread_id: "thread-alpha".to_string(),
                         },
-                        thread_id: "thread-alpha".to_string(),
+                        thread_id: Some("thread-alpha".to_string()),
                         turn_run_id: Some("run-alpha".to_string()),
                         created_at: Utc::now(),
                         updated_at: Utc::now(),

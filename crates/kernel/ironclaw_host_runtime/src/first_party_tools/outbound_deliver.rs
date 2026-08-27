@@ -326,6 +326,7 @@ mod tests {
             origin: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
+            runtime_credentials: Vec::new(),
             services: InvocationServices {
                 filesystem: Arc::new(InMemoryBackend::new()),
                 runtime_http_egress: None,

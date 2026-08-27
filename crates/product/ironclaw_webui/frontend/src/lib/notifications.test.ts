@@ -123,11 +123,12 @@ test("a non-actionable notification does not link to its source thread", () => {
       id: "pre-submit-failure",
       kind: "run_failed",
       action: { kind: "none" },
-      thread_id: "route-id-without-a-materialized-thread",
+      thread_id: null,
       created_at: "2026-06-30T08:43:00Z",
       resolved_at: "2026-06-30T08:43:00Z",
     },
   ], t);
 
   assert.equal(message.href, null);
+  assert.equal(message.threadId, null);
 });

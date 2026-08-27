@@ -7,28 +7,78 @@ use ironclaw_filesystem::{
     CasApply, CasUpdateError, ContentType, Entry, FilesystemError, IndexKey, IndexValue,
     RootFilesystem, ScopedFilesystem, cas_update,
 };
-use ironclaw_host_api::{path::ScopedPath, resource::ResourceScope};
+use ironclaw_host_api::{
+    ids::ThreadId, path::ScopedPath, resource::ResourceScope, turn::TurnRunId,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ListNotificationsRequest, MarkAllNotificationsReadRequest, NOTIFICATION_INBOX_MAX_RECORDS,
-    NOTIFICATION_PAGE_LIMIT_MAX, NotificationAction, NotificationId, NotificationInboxError,
-    NotificationInboxStorePort, NotificationMutationOutcome, NotificationMutationRequest,
-    NotificationPage, NotificationRecipient, NotificationRecord, NotificationSource,
+    LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
+    NOTIFICATION_INBOX_MAX_RECORDS, NOTIFICATION_PAGE_LIMIT_MAX, NotificationAction,
+    NotificationId, NotificationInboxError, NotificationInboxStorePort, NotificationKind,
+    NotificationMutationOutcome, NotificationMutationRequest, NotificationPage,
+    NotificationRecipient, NotificationRecord, NotificationSeverity, NotificationSource,
     PublishNotificationRequest,
 };
 
 const NOTIFICATION_INBOX_PATH: &str = "/notifications/inbox.json";
 const NOTIFICATION_INBOX_SCHEMA_VERSION: u8 = 1;
+/// Required only in the legacy schema-v1 fields of a non-thread-backed record.
+/// New readers recover the absent thread from the additive compatibility
+/// metadata; rollback readers see a valid, non-route placeholder and can keep
+/// listing and mutating the snapshot. The decoder also recognizes the
+/// placeholder after a rollback writer drops unknown additive fields.
+const LEGACY_NO_THREAD_COMPAT_ID: &str = "ironclaw-notification-no-thread-v1";
 const TENANT_ID_INDEX_KEY: &str = "tenant_id";
 const NOTIFICATION_CURSOR_MAX_BYTES: usize = (20 + 1 + crate::types::NOTIFICATION_ID_MAX_BYTES) * 2;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NotificationInboxSnapshot {
     schema_version: u8,
     recipient: NotificationRecipient,
     notifications: Vec<NotificationRecord>,
+}
+
+/// On-disk schema-v1 representation. The top-level shape remains closed; each
+/// record stays open to the two additive compatibility fields because the
+/// pre-change `NotificationRecord` reader ignored unknown fields as well.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedNotificationInboxSnapshotV1 {
+    schema_version: u8,
+    recipient: NotificationRecipient,
+    notifications: Vec<PersistedNotificationRecordV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedNotificationRecordV1 {
+    id: NotificationId,
+    recipient: NotificationRecipient,
+    kind: NotificationKind,
+    severity: NotificationSeverity,
+    source: PersistedNotificationSourceV1,
+    action: NotificationAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_v2: Option<PersistedNotificationSourceV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    action_v2: Option<NotificationAction>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    read_at: Option<DateTime<Utc>>,
+    resolved_at: Option<DateTime<Utc>>,
+    archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedNotificationSourceV1 {
+    thread_id: ThreadId,
+    turn_run_id: Option<TurnRunId>,
+    lifecycle_ref: Option<LifecycleRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedNotificationSourceV2 {
+    thread_id: Option<ThreadId>,
 }
 
 pub struct NotificationInboxStore<F>
@@ -399,9 +449,28 @@ fn validate_notification_action(
     source: &NotificationSource,
     action: &NotificationAction,
 ) -> Result<(), NotificationInboxError> {
+    if source
+        .thread_id
+        .as_ref()
+        .is_some_and(|thread_id| thread_id.as_str() == LEGACY_NO_THREAD_COMPAT_ID)
+    {
+        return Err(NotificationInboxError::InvalidRequest {
+            reason: "notification source uses a reserved compatibility identity",
+        });
+    }
+    if source.thread_id.is_none() && source.turn_run_id.is_some() {
+        return Err(NotificationInboxError::InvalidRequest {
+            reason: "notification run source has no canonical thread",
+        });
+    }
     match action {
-        NotificationAction::None => Ok(()),
-        NotificationAction::OpenThread { thread_id } if thread_id != &source.thread_id => {
+        NotificationAction::None if source.thread_id.is_none() => Ok(()),
+        NotificationAction::None => Err(NotificationInboxError::InvalidRequest {
+            reason: "non-actionable notification unexpectedly has a source thread",
+        }),
+        NotificationAction::OpenThread { thread_id }
+            if source.thread_id.as_ref() != Some(thread_id) =>
+        {
             Err(NotificationInboxError::InvalidRequest {
                 reason: "notification action does not match its source thread",
             })
@@ -448,15 +517,34 @@ fn validate_snapshot(
 }
 
 fn decode_snapshot(bytes: &[u8]) -> Result<NotificationInboxSnapshot, NotificationInboxError> {
-    serde_json::from_slice(bytes).map_err(|error| NotificationInboxError::Serialization {
-        reason: error.to_string(),
+    let persisted: PersistedNotificationInboxSnapshotV1 =
+        serde_json::from_slice(bytes).map_err(|error| NotificationInboxError::Serialization {
+            reason: error.to_string(),
+        })?;
+    Ok(NotificationInboxSnapshot {
+        schema_version: persisted.schema_version,
+        recipient: persisted.recipient,
+        notifications: persisted
+            .notifications
+            .into_iter()
+            .map(notification_record_from_persisted_v1)
+            .collect(),
     })
 }
 
 fn encode_snapshot(snapshot: &NotificationInboxSnapshot) -> Result<Entry, NotificationInboxError> {
     validate_snapshot(snapshot, &snapshot.recipient)?;
+    let persisted = PersistedNotificationInboxSnapshotV1 {
+        schema_version: snapshot.schema_version,
+        recipient: snapshot.recipient.clone(),
+        notifications: snapshot
+            .notifications
+            .iter()
+            .map(notification_record_to_persisted_v1)
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     let body =
-        serde_json::to_vec(snapshot).map_err(|error| NotificationInboxError::Serialization {
+        serde_json::to_vec(&persisted).map_err(|error| NotificationInboxError::Serialization {
             reason: error.to_string(),
         })?;
     Ok(Entry::bytes(body)
@@ -465,6 +553,95 @@ fn encode_snapshot(snapshot: &NotificationInboxSnapshot) -> Result<Entry, Notifi
             tenant_id_index_key()?,
             tenant_id_index_value(&snapshot.recipient),
         ))
+}
+
+fn notification_record_to_persisted_v1(
+    record: &NotificationRecord,
+) -> Result<PersistedNotificationRecordV1, NotificationInboxError> {
+    let legacy_thread_id = match record.source.thread_id.as_ref() {
+        Some(thread_id) => thread_id.clone(),
+        None => ThreadId::new(LEGACY_NO_THREAD_COMPAT_ID).map_err(|error| {
+            NotificationInboxError::Serialization {
+                reason: format!("notification compatibility identity is invalid: {error}"),
+            }
+        })?,
+    };
+    let source_v2 = record
+        .source
+        .thread_id
+        .is_none()
+        .then_some(PersistedNotificationSourceV2 { thread_id: None });
+    let (action, action_v2) = match &record.action {
+        NotificationAction::None => (
+            NotificationAction::OpenThread {
+                thread_id: legacy_thread_id.clone(),
+            },
+            Some(NotificationAction::None),
+        ),
+        NotificationAction::OpenThread { thread_id } => (
+            NotificationAction::OpenThread {
+                thread_id: thread_id.clone(),
+            },
+            None,
+        ),
+    };
+    Ok(PersistedNotificationRecordV1 {
+        id: record.id.clone(),
+        recipient: record.recipient.clone(),
+        kind: record.kind,
+        severity: record.severity,
+        source: PersistedNotificationSourceV1 {
+            thread_id: legacy_thread_id,
+            turn_run_id: record.source.turn_run_id,
+            lifecycle_ref: record.source.lifecycle_ref.clone(),
+        },
+        action,
+        source_v2,
+        action_v2,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        read_at: record.read_at,
+        resolved_at: record.resolved_at,
+        archived_at: record.archived_at,
+    })
+}
+
+fn notification_record_from_persisted_v1(
+    record: PersistedNotificationRecordV1,
+) -> NotificationRecord {
+    let compatibility_placeholder = record.source.thread_id.as_str() == LEGACY_NO_THREAD_COMPAT_ID;
+    let source_thread_id = record.source_v2.map_or_else(
+        || {
+            if compatibility_placeholder || matches!(&record.action, NotificationAction::None) {
+                None
+            } else {
+                Some(record.source.thread_id.clone())
+            }
+        },
+        |source| source.thread_id,
+    );
+    let action = match record.action_v2 {
+        Some(action) => action,
+        None if compatibility_placeholder => NotificationAction::None,
+        None => record.action,
+    };
+    NotificationRecord {
+        id: record.id,
+        recipient: record.recipient,
+        kind: record.kind,
+        severity: record.severity,
+        source: NotificationSource {
+            thread_id: source_thread_id,
+            turn_run_id: record.source.turn_run_id,
+            lifecycle_ref: record.source.lifecycle_ref,
+        },
+        action,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        read_at: record.read_at,
+        resolved_at: record.resolved_at,
+        archived_at: record.archived_at,
+    }
 }
 
 /// Reclaim one slot from a snapshot that is at its bound, so a new event is
@@ -588,5 +765,118 @@ fn map_cas_error(error: CasUpdateError<NotificationInboxError>) -> NotificationI
 fn map_filesystem_error(error: FilesystemError) -> NotificationInboxError {
     NotificationInboxError::Backend {
         reason: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, TimeZone, Utc};
+    use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
+    use ironclaw_host_api::turn::TurnRunId;
+    use serde::{Deserialize, Serialize};
+
+    use super::*;
+
+    /// Frozen copy of the pre-non-actionable schema-v1 reader. Record fields
+    /// intentionally remain open to additive metadata, matching the shipped
+    /// `NotificationRecord` serde contract.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyNotificationInboxSnapshotV1 {
+        schema_version: u8,
+        recipient: NotificationRecipient,
+        notifications: Vec<LegacyNotificationRecordV1>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct LegacyNotificationRecordV1 {
+        id: NotificationId,
+        recipient: NotificationRecipient,
+        kind: NotificationKind,
+        severity: NotificationSeverity,
+        source: LegacyNotificationSourceV1,
+        action: LegacyNotificationActionV1,
+        created_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        read_at: Option<DateTime<Utc>>,
+        resolved_at: Option<DateTime<Utc>>,
+        archived_at: Option<DateTime<Utc>>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct LegacyNotificationSourceV1 {
+        thread_id: ThreadId,
+        turn_run_id: Option<TurnRunId>,
+        lifecycle_ref: Option<LifecycleRef>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum LegacyNotificationActionV1 {
+        OpenThread { thread_id: ThreadId },
+    }
+
+    #[test]
+    fn schema_v1_rollback_reader_can_decode_and_mutate_non_actionable_head_write() {
+        let recipient = NotificationRecipient {
+            tenant_id: TenantId::new("rollback-tenant").expect("tenant"),
+            user_id: UserId::new("rollback-user").expect("user"),
+        };
+        let occurred_at = Utc
+            .timestamp_opt(1_700_000_001, 0)
+            .single()
+            .expect("occurred at");
+        let snapshot = NotificationInboxSnapshot {
+            schema_version: NOTIFICATION_INBOX_SCHEMA_VERSION,
+            recipient: recipient.clone(),
+            notifications: vec![NotificationRecord {
+                id: NotificationId::new("pre-submit-failure").expect("notification id"),
+                recipient,
+                kind: NotificationKind::RunFailed,
+                severity: NotificationSeverity::Error,
+                source: NotificationSource {
+                    thread_id: None,
+                    turn_run_id: None,
+                    lifecycle_ref: Some(
+                        LifecycleRef::new("trigger-fire:rollback").expect("lifecycle ref"),
+                    ),
+                },
+                action: NotificationAction::None,
+                created_at: occurred_at,
+                updated_at: occurred_at,
+                read_at: None,
+                resolved_at: Some(occurred_at),
+                archived_at: None,
+            }],
+        };
+
+        let head_entry = encode_snapshot(&snapshot).expect("head writer encodes snapshot");
+        let mut legacy: LegacyNotificationInboxSnapshotV1 =
+            serde_json::from_slice(&head_entry.body).expect("base reader decodes head write");
+        assert_eq!(
+            legacy.notifications[0].source.thread_id.as_str(),
+            LEGACY_NO_THREAD_COMPAT_ID,
+            "the base reader receives a bounded compatibility identity, not a route key",
+        );
+        match &legacy.notifications[0].action {
+            LegacyNotificationActionV1::OpenThread { thread_id } => assert_eq!(
+                thread_id.as_str(),
+                LEGACY_NO_THREAD_COMPAT_ID,
+                "the frozen source/action invariant remains valid for rollback mutation",
+            ),
+        }
+        let read_at = Utc
+            .timestamp_opt(1_700_000_010, 0)
+            .single()
+            .expect("read at");
+        legacy.notifications[0].read_at = Some(read_at);
+        legacy.notifications[0].updated_at = read_at;
+
+        let legacy_mutation = serde_json::to_vec(&legacy).expect("base writer persists mutation");
+        let reopened =
+            decode_snapshot(&legacy_mutation).expect("head reader reopens base mutation");
+        assert_eq!(reopened.notifications[0].read_at, Some(read_at));
+        assert_eq!(reopened.notifications[0].action, NotificationAction::None);
+        assert!(reopened.notifications[0].source.thread_id.is_none());
     }
 }

@@ -882,6 +882,8 @@ impl RebornBinaryE2EHarness {
             thread_scope: thread_scope.clone(),
             model_gateway: Arc::new(model_gateway.clone()),
             loop_checkpoint_store,
+            // QA replay drives no lifecycle hooks; absent = the point never fires.
+            after_turn_hook_wiring: None,
             milestone_sink: runtime_milestone_sink,
             capability_factory,
             capability_surface_resolver,

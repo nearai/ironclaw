@@ -3067,7 +3067,7 @@ where
                             }
                         }
                     },
-                    thread_id: record.source.thread_id.to_string(),
+                    thread_id: record.source.thread_id.map(|id| id.to_string()),
                     turn_run_id: record.source.turn_run_id.map(|id| id.to_string()),
                     created_at: record.created_at,
                     updated_at: record.updated_at,
@@ -6034,7 +6034,7 @@ where
                             kind: NotificationKind::ApprovalRequired,
                             severity: NotificationSeverity::Warning,
                             source: NotificationSource {
-                                thread_id: approval.scope.thread_id.clone(),
+                                thread_id: Some(approval.scope.thread_id.clone()),
                                 turn_run_id: Some(approval.run_id),
                                 lifecycle_ref: Some(lifecycle_ref),
                             },

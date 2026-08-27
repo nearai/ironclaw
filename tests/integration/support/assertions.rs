@@ -745,6 +745,22 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that the final interactive model request omits `needle`.
+    ///
+    /// Earlier requests may contain the value legitimately, so this checks only
+    /// the caller-visible prompt produced after the state transition under test.
+    pub async fn assert_last_model_message_content_not_contains(
+        &self,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        let last = requests.last().ok_or("no model requests were captured")?;
+        if last.iter().any(|message| message.content.contains(needle)) {
+            return Err(format!("final model request unexpectedly contained {needle:?}").into());
+        }
+        Ok(())
+    }
+
     /// Assert that one model-visible message contains every `needle` in the
     /// supplied order. Other content may appear between needles.
     pub async fn assert_model_message_content_in_order(

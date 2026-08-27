@@ -273,7 +273,7 @@ impl RailwayPreviewSandboxConfig {
         let proxy_posture = super::managed_egress::proxy_posture(
             &proxy_image,
             &policy,
-            std::path::Path::new("/run/ironclaw-reborn-proxy"),
+            b"railway-preview-sni-only",
         )?;
         let proxy_config_template =
             super::managed_egress::render_proxy_config(&policy, RAILWAY_PROXY_IP_TOKEN)?;

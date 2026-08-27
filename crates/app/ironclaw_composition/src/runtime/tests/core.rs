@@ -1263,7 +1263,10 @@ impl HostManagedModelGateway for SandboxShellCallingGateway {
                 turn_id: Some("provider-turn-shell".to_string()),
                 id: "shell-call-1".to_string(),
                 name: shell_tool.name,
-                arguments: serde_json::json!({"command": "printf railway-sandbox-marker"}),
+                arguments: serde_json::json!({
+                    "command": "printf railway-sandbox-marker",
+                    "credential_contexts": []
+                }),
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
@@ -6063,7 +6066,7 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
                 kind: ironclaw_notifications::NotificationKind::ApprovalRequired,
                 severity: ironclaw_notifications::NotificationSeverity::Warning,
                 source: ironclaw_notifications::NotificationSource {
-                    thread_id: thread_id.clone(),
+                    thread_id: Some(thread_id.clone()),
                     turn_run_id: Some(turn_run_id),
                     lifecycle_ref: Some(
                         ironclaw_notifications::LifecycleRef::new("runtime-notification-gate")
@@ -6254,8 +6257,8 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
             .notification_inbox
             .list(ironclaw_notifications::ListNotificationsRequest {
                 recipient: ironclaw_notifications::NotificationRecipient {
-                    tenant_id: caller.tenant_id,
-                    user_id: caller.user_id,
+                    tenant_id: caller.tenant_id.clone(),
+                    user_id: caller.user_id.clone(),
                 },
                 limit: 10,
                 cursor: None,
@@ -6268,6 +6271,70 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
     assert_eq!(persisted.notifications.len(), 1);
     assert!(persisted.notifications[0].read_at.is_some());
     assert!(persisted.notifications[0].archived_at.is_some());
+
+    let fire_identity = ironclaw_triggers::TriggerFireIdentity::new(
+        caller.tenant_id.clone(),
+        ironclaw_triggers::TriggerId::new(),
+        Utc::now(),
+    );
+    let route_thread_id = fire_identity.route_thread_id().as_str().to_string();
+    let settlement = ironclaw_triggers::TriggerFailedFireSettlement {
+        fire: ironclaw_triggers::TriggerFire {
+            identity: fire_identity,
+            creator_user_id: caller.user_id.clone(),
+            agent_id: caller.agent_id.clone(),
+            project_id: None,
+            prompt: "scheduled report".to_string(),
+            execution_policy: None,
+        },
+        reason: ironclaw_triggers::TriggerPollerFailureReason::InvalidMaterialization,
+    };
+    let hook =
+        ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
+            None,
+            Some(Arc::new(
+                ironclaw_assistant::PreSubmitFailureInboxNotifier::new(Arc::clone(
+                    &reopened.notification_inbox,
+                )),
+            )),
+            reopened
+                .triggered_run_delivery_store_for_test()
+                .expect("triggered delivery store"),
+        );
+    ironclaw_extension_host::channel_triggered_delivery::PostSubmitDeliveryHook::on_trigger_failed_before_submit(
+        &hook,
+        settlement,
+    )
+    .await;
+
+    let reopened_bundle = reopened.product_surface(None).expect("product surface");
+    let failure_page = query_product_surface_page(
+        reopened_bundle.as_ref(),
+        caller,
+        RebornViewQuery {
+            view_id: NOTIFICATIONS_VIEW.id.to_string(),
+            params: serde_json::json!({ "limit": 10 }),
+            cursor: None,
+        },
+    )
+    .await
+    .expect("list settled pre-submit failure");
+    let failure = failure_page
+        .payload
+        .get("notifications")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|notifications| notifications.first())
+        .expect("pre-submit failure notification");
+    assert_eq!(failure["action"]["kind"], "none");
+    assert!(
+        failure["thread_id"].is_null(),
+        "a fire that failed before submission has no canonical thread"
+    );
+    assert!(
+        !failure.to_string().contains(&route_thread_id),
+        "the trigger route key must not escape as a canonical thread identity"
+    );
+    drop(reopened_bundle);
     tokio::time::timeout(RUNTIME_SEND_TIMEOUT, reopened.shutdown())
         .await
         .expect("reopened runtime shutdown does not time out")

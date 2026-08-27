@@ -21,7 +21,8 @@ use ironclaw_host_api::{
     scope::ExecutionContext,
 };
 use ironclaw_host_runtime::{
-    HostRuntime, SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    HostRuntime, SHELL_CAPABILITY_ID, SurfaceKind,
+    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 #[cfg(test)]
 use ironclaw_loop_host::HostManagedToolResultDiagnosticCapture;
@@ -1258,6 +1259,17 @@ fn visible_capability_request(
         inputs.memory_mounts,
         inputs.system_extensions_lifecycle_mounts,
     );
+    if let Some(shell_grant) = grants.grants.iter_mut().find(|grant| {
+        grant.capability.as_str() == SHELL_CAPABILITY_ID
+            && grant
+                .constraints
+                .allowed_effects
+                .contains(&EffectKind::UseSecret)
+    }) {
+        shell_grant.constraints.secrets = inputs
+            .extension_surface
+            .placeholder_credential_handles(&user_id);
+    }
     grants
         .grants
         .extend(inputs.extension_surface.grants(&extension_id, &user_id));

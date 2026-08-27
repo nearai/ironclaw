@@ -64,13 +64,14 @@ mod url_check;
 /// this provider targets a self-hosted mem0 OSS server, not the hosted cloud.
 pub const MEM0_MEMORY_EXTENSION_ID: &str = "mem0.local.memory";
 
-/// This package's guidance asset table (#7185): every `[memory].guidance_doc`
-/// ref its own manifest may declare, paired with the text it names. The host
-/// resolves a bound provider's declared ref against exactly this table.
-/// Empty because mem0's recall is search-first — the native provider's
-/// standing-document guidance would be wrong advice under it, so this
-/// provider deliberately ships none today.
-pub const MEMORY_GUIDANCE_ASSETS: &[(&str, &str)] = &[];
+/// This package's `[memory]` asset table (#7185): every asset ref its own
+/// manifest may declare — the `guidance_doc`, and each `scheduled_ops` pass
+/// prompt — paired with the text it names. The host resolves a bound
+/// provider's declared refs against exactly this table. Empty because this
+/// provider declares neither today: its recall is search-first, so the native
+/// provider's standing-document guidance would be wrong advice under it, and
+/// it schedules no upkeep of its own.
+pub const MEMORY_ASSETS: &[(&str, &str)] = &[];
 
 pub use config::Mem0Config;
 pub use error::Mem0Error;

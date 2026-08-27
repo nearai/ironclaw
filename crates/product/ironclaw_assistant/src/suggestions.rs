@@ -347,6 +347,8 @@ async fn submit_suggestion_generation(
         tools: Vec::new(),
         require_no_approval: true,
         output: output.clone(),
+        // Unchanged behavior: suggestions keep the profile's own ceilings.
+        limits: Default::default(),
         requested_model: None,
         idempotency_key: accept_key.to_string(),
     };

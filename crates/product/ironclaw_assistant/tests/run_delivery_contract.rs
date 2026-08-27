@@ -3147,7 +3147,10 @@ async fn pre_submit_failure_reaches_inbox_without_channel_delivery() {
     assert_eq!(records.notifications.len(), 1);
     assert_eq!(records.notifications[0].kind, NotificationKind::RunFailed);
     assert_eq!(records.notifications[0].action, NotificationAction::None);
-    assert_eq!(records.notifications[0].source.thread_id, scope.thread_id);
+    assert!(
+        records.notifications[0].source.thread_id.is_none(),
+        "a pre-submit failure has no canonical thread identity"
+    );
     assert!(records.notifications[0].resolved_at.is_some());
 }
 

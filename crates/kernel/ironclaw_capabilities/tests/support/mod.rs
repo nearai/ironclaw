@@ -86,7 +86,7 @@ pub struct PermissiveHostPolicyFacts;
 impl HostPolicyFacts for PermissiveHostPolicyFacts {
     async fn credential_presence(
         &self,
-        _capability_id: &CapabilityId,
+        _descriptor: &CapabilityDescriptor,
         _scope: &ResourceScope,
     ) -> CredentialPresence {
         CredentialPresence::Satisfied
@@ -115,7 +115,7 @@ pub struct MissingCredentialPolicyFacts;
 impl HostPolicyFacts for MissingCredentialPolicyFacts {
     async fn credential_presence(
         &self,
-        _capability_id: &CapabilityId,
+        _descriptor: &CapabilityDescriptor,
         _scope: &ResourceScope,
     ) -> CredentialPresence {
         CredentialPresence::Missing {
@@ -158,7 +158,7 @@ impl PersistentGrantPolicyFacts {
 impl HostPolicyFacts for PersistentGrantPolicyFacts {
     async fn credential_presence(
         &self,
-        _capability_id: &CapabilityId,
+        _descriptor: &CapabilityDescriptor,
         _scope: &ResourceScope,
     ) -> CredentialPresence {
         CredentialPresence::Satisfied
@@ -301,7 +301,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
         authorized: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         let deadline = authorized.deadline();
-        let (invocation, lane, mounts, resource_reservation) = authorized
+        let (invocation, descriptor, lane, mounts, resource_reservation) = authorized
             .into_parts(chrono::Utc::now())
             .map_err(|authorized| {
                 let capability = authorized.invocation().capability.clone();
@@ -319,6 +319,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
                 _ => None,
             },
             mounts,
+            descriptor,
             invocation,
             lane,
             resource_reservation,

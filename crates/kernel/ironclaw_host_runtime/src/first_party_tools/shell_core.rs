@@ -91,6 +91,8 @@ pub(super) fn parse_shell_request(
             ShellExecutionError::InvalidParameters("missing 'command' parameter".to_string())
         })?;
     let mut request = ShellExecutionRequest::new(command.to_string());
+    ironclaw_host_api::process::shell_credential_contexts(params)
+        .map_err(|error| ShellExecutionError::InvalidParameters(error.to_string()))?;
     request.workdir = parse_workdir(params)?;
     request.timeout_secs = parse_timeout(params)?;
     Ok(request)
@@ -542,6 +544,14 @@ mod tests {
             json!({"command": "echo hi", "workdir": 123}),
             json!({"command": "echo hi", "timeout": 0}),
             json!({"command": "echo hi", "timeout": "1"}),
+            json!({"command": "echo hi", "credential_contexts": "atlas"}),
+            json!({"command": "echo hi", "credential_contexts": ["atlas", "atlas"]}),
+            json!({
+                "command": "echo hi",
+                "credential_contexts": [
+                    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"
+                ]
+            }),
         ] {
             assert!(
                 matches!(

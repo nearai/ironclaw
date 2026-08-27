@@ -26,9 +26,14 @@
 //! system prompt by composition — is resolved the same way: generically,
 //! against the asset table the provider BEING BUNDLED supplies to
 //! [`memory_provider_bundle`], never by a host-side match on a specific
-//! provider's constants. See [`BundledMemoryProvider::guidance`].
+//! provider's constants. See [`BundledMemoryProvider::guidance`]. The prompt of
+//! every `[memory].scheduled_ops` pass the provider declares resolves through
+//! the same table and the same fail-closed posture
+//! ([`BundledMemoryProvider::scheduled_pass_prompts`], #7664).
 
-use ironclaw_extension_contracts::memory::MemoryDescriptor;
+use ironclaw_extension_contracts::memory::{
+    MemoryDescriptor, MemoryScheduledOpKind, MemoryScheduledTrigger,
+};
 use ironclaw_extension_registry::{
     ExtensionError, ExtensionInstallationError, ExtensionManifestRecord, ExtensionManifestV2,
     ExtensionPackage, ManifestSource, default_host_api_contract_registry,
@@ -91,15 +96,59 @@ fn resolve_guidance_doc(
     let Some(doc_ref) = descriptor.guidance_doc.as_ref() else {
         return Ok(None);
     };
+    resolve_declared_asset(doc_ref.as_str(), assets, label, "guidance_doc").map(Some)
+}
+
+/// Resolve every declared `[memory].scheduled_ops` pass prompt against the
+/// provider's OWN bundled asset table, keyed by the trigger it rides (#7664).
+///
+/// Same posture and same reason as [`resolve_guidance_doc`]: the manifest names
+/// an asset inside the provider's own package, bundled providers ride the
+/// always-on lane with nothing materialized to read back from, and the ref is
+/// resolved through the OWNING package's public asset table rather than by
+/// compiling its asset tree into this crate.
+///
+/// FAIL LOUD on a ref the table does not carry. A pass op whose prompt silently
+/// resolved to nothing would be a scheduled model run with an empty
+/// instruction: it would still be dispatched, still spend a budget, and still
+/// hold write tools over the user's memory — strictly worse than refusing to
+/// construct the provider. A declaration with no matching asset is a
+/// manifest/asset desync (a rename that touched one and not the other).
+fn resolve_scheduled_pass_prompts(
+    descriptor: &MemoryDescriptor,
+    assets: &[(&'static str, &'static str)],
+    label: &str,
+) -> Result<Vec<(MemoryScheduledTrigger, &'static str)>, String> {
+    descriptor
+        .scheduled_ops
+        .iter()
+        .map(|scheduled| match &scheduled.op {
+            MemoryScheduledOpKind::Pass(pass) => {
+                let prompt =
+                    resolve_declared_asset(pass.prompt.as_str(), assets, label, "scheduled pass")?;
+                Ok((scheduled.trigger, prompt))
+            }
+        })
+        .collect()
+}
+
+/// One declared asset ref, looked up in the provider's own table. `what` names
+/// the declaration in the failure so an operator reading it knows which key of
+/// `[memory]` desynced.
+fn resolve_declared_asset(
+    asset_ref: &str,
+    assets: &[(&'static str, &'static str)],
+    label: &str,
+    what: &str,
+) -> Result<&'static str, String> {
     assets
         .iter()
-        .find(|(candidate_ref, _)| *candidate_ref == doc_ref.as_str())
-        .map(|(_, text)| Some(*text))
+        .find(|(candidate_ref, _)| *candidate_ref == asset_ref)
+        .map(|(_, text)| *text)
         .ok_or_else(|| {
             format!(
-                "{label} memory provider manifest declares guidance_doc '{}' but its bundled \
-                 asset table has no matching entry",
-                doc_ref.as_str()
+                "{label} memory provider manifest declares {what} '{asset_ref}' but its bundled \
+                 asset table has no matching entry"
             )
         })
 }
@@ -176,6 +225,12 @@ pub struct BundledMemoryProvider {
     /// [`resolve_guidance_doc`]. `None` when the provider declares no
     /// `guidance_doc`.
     pub guidance: Option<String>,
+    /// Resolved prompt text for every scheduled pass op the provider declares,
+    /// keyed by the trigger it rides (#7664) — see
+    /// [`resolve_scheduled_pass_prompts`]. Empty when the provider schedules
+    /// nothing. The DECLARATION itself (cadence, tool selection, model-call
+    /// budget) stays on `lifecycle`; only the asset needed resolving.
+    pub scheduled_pass_prompts: Vec<(MemoryScheduledTrigger, String)>,
 }
 
 /// Build the registrable provider bundle for the bundled native memory
@@ -187,7 +242,7 @@ pub fn native_memory_provider_bundle() -> Result<BundledMemoryProvider, Extensio
         NATIVE_MEMORY_MANIFEST_TOML,
         NATIVE_MEMORY_PACKAGE_ROOT,
         "native memory",
-        ironclaw_memory_native::MEMORY_GUIDANCE_ASSETS,
+        ironclaw_memory_native::MEMORY_ASSETS,
     )
 }
 
@@ -195,19 +250,19 @@ pub fn native_memory_provider_bundle() -> Result<BundledMemoryProvider, Extensio
 /// used when the compose-time `[memory]` binding selects mem0 AND the mem0
 /// provider is actually constructible.
 ///
-/// `guidance_assets` is the mem0 provider's own asset table. This crate does
+/// `memory_assets` is the mem0 provider's own asset table. This crate does
 /// not (and, per the memory-provider naming gate, must not) depend on
 /// `ironclaw_memory_mem0` — only the provider packages and the binary may name
 /// a memory provider — so composition, which already depends on it behind the
 /// `memory-mem0` feature, passes the table in.
 pub fn mem0_memory_provider_bundle(
-    guidance_assets: &'static [(&'static str, &'static str)],
+    memory_assets: &'static [(&'static str, &'static str)],
 ) -> Result<BundledMemoryProvider, ExtensionError> {
     memory_provider_bundle(
         MEM0_MEMORY_MANIFEST_TOML,
         MEM0_MEMORY_PACKAGE_ROOT,
         "mem0",
-        guidance_assets,
+        memory_assets,
     )
 }
 
@@ -220,7 +275,7 @@ fn memory_provider_bundle(
     toml: &str,
     package_root: &str,
     label: &str,
-    guidance_assets: &'static [(&'static str, &'static str)],
+    memory_assets: &'static [(&'static str, &'static str)],
 ) -> Result<BundledMemoryProvider, ExtensionError> {
     let invalid = |error: &dyn std::fmt::Display| ExtensionError::InvalidManifest {
         reason: format!("{label} memory provider package is invalid: {error}"),
@@ -236,9 +291,14 @@ fn memory_provider_bundle(
             "{label} memory provider manifest declares no [memory] surface"
         ))
     })?;
-    let guidance = resolve_guidance_doc(&lifecycle, guidance_assets, label)
+    let guidance = resolve_guidance_doc(&lifecycle, memory_assets, label)
         .map_err(|reason| invalid(&reason))?
         .map(str::to_string);
+    let scheduled_pass_prompts = resolve_scheduled_pass_prompts(&lifecycle, memory_assets, label)
+        .map_err(|reason| invalid(&reason))?
+        .into_iter()
+        .map(|(trigger, prompt)| (trigger, prompt.to_string()))
+        .collect();
     let manifest = record
         .manifest()
         .clone()
@@ -249,6 +309,7 @@ fn memory_provider_bundle(
         package,
         lifecycle,
         guidance,
+        scheduled_pass_prompts,
     })
 }
 
@@ -280,7 +341,7 @@ mod tests {
         );
         // `bundle.guidance` is what the fix generalized (#7185): resolved at
         // bundle-construction time against the native crate's OWN asset table
-        // (`ironclaw_memory_native::MEMORY_GUIDANCE_ASSETS`), not through a
+        // (`ironclaw_memory_native::MEMORY_ASSETS`), not through a
         // host-side match on the native provider's constants.
         let guidance = bundle
             .guidance
@@ -299,7 +360,7 @@ mod tests {
     /// mem0 deliberately ships no guidance: its recall is search-first, so the
     /// native provider's standing-document advice would be wrong under it.
     /// Absent must mean "append nothing", never "fall back to native's". mem0's
-    /// own asset table is empty (`ironclaw_memory_mem0::MEMORY_GUIDANCE_ASSETS`);
+    /// own asset table is empty (`ironclaw_memory_mem0::MEMORY_ASSETS`);
     /// this crate cannot name that crate (memory-provider naming gate), so the
     /// test passes an equivalent empty table directly.
     #[test]
@@ -330,6 +391,93 @@ mod tests {
             .expect_err("an unresolved guidance_doc ref must fail loud, not resolve to None");
         assert!(
             error.contains("prompts/from-a-future-provider.md"),
+            "{error}"
+        );
+    }
+
+    /// The native provider declares its own upkeep pass (#7664), and the
+    /// declared prompt must resolve to real text at bundle construction. Both
+    /// halves again: the manifest must keep declaring the op (nothing else
+    /// schedules curation now — the hardwired interval is gone), and the ref
+    /// must still match the bundled file.
+    #[test]
+    fn native_bundle_declares_an_after_turn_pass_whose_prompt_resolves() {
+        use ironclaw_extension_contracts::memory::MemoryScheduledOpKind;
+
+        let bundle = native_memory_provider_bundle().expect("native bundle loads");
+        let scheduled = bundle
+            .lifecycle
+            .scheduled_op(MemoryScheduledTrigger::AfterTurn)
+            .expect("the native manifest must keep declaring its after-turn upkeep pass");
+        let MemoryScheduledOpKind::Pass(pass) = &scheduled.op;
+        assert_eq!(pass.prompt.as_str(), "prompts/memory_curation.md");
+        let prompt = bundle
+            .scheduled_pass_prompts
+            .iter()
+            .find(|(trigger, _)| *trigger == MemoryScheduledTrigger::AfterTurn)
+            .map(|(_, prompt)| prompt.as_str())
+            .expect("the declared pass prompt must resolve to a bundled asset");
+        assert!(
+            prompt.contains("Never invent, infer, or extrapolate"),
+            "the anti-fabrication rule is the pass's load-bearing constraint and must reach it"
+        );
+    }
+
+    /// A provider that schedules nothing resolves no prompts — absent must mean
+    /// "nothing is scheduled", never "fall back to another provider's pass".
+    #[test]
+    fn a_provider_without_scheduled_ops_resolves_no_pass_prompts() {
+        let bundle = mem0_memory_provider_bundle(&[]).expect("mem0 bundle loads");
+        assert!(bundle.lifecycle.scheduled_ops.is_empty());
+        assert!(bundle.scheduled_pass_prompts.is_empty());
+    }
+
+    /// Same fail-loud posture as the guidance desync, for the declaration that
+    /// carries strictly more authority: a pass prompt that resolved to nothing
+    /// would still be dispatched on a schedule, still spend its budget, and
+    /// still hold write tools over the user's memory — an empty instruction
+    /// running as every user. Refuse to construct the provider instead.
+    #[test]
+    fn provider_bundle_fails_loud_on_a_scheduled_pass_prompt_desync() {
+        const DESYNCED_PASS_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acme.desynced.pass"
+name = "Acme Desynced Pass"
+version = "0.1.0"
+description = "Bundled provider fixture with a pass prompt no asset backs."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "acme_desynced_pass_provider"
+
+[memory]
+lifecycle = ["read_long_term"]
+
+[[memory.scheduled_ops]]
+trigger = "after_turn"
+interval_turns = 10
+pass = { prompt = "prompts/missing-pass.md", tools = ["ironclaw.memory.read"], max_model_calls = 4 }
+
+[[tools]]
+id = "ironclaw.memory.read"
+description = "Read a memory document."
+effects = ["read_filesystem"]
+default_permission = "allow"
+visibility = "model"
+origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/memory/document-read.input.v1.json"
+output_schema_ref = "schemas/memory/document-read.output.v1.json"
+"#;
+        let error = memory_provider_bundle(
+            DESYNCED_PASS_MANIFEST,
+            "/system/extensions/acme_desynced_pass",
+            "acme",
+            &[],
+        )
+        .expect_err("a pass prompt ref with no matching bundled asset must fail loud");
+        assert!(
+            error.to_string().contains("prompts/missing-pass.md"),
             "{error}"
         );
     }

@@ -47,7 +47,7 @@ fn seed_in(tenant_id: &str, user: &str, id: &str) -> PublishNotificationRequest 
         kind: NotificationKind::ApprovalRequired,
         severity: NotificationSeverity::Warning,
         source: NotificationSource {
-            thread_id: thread_id.clone(),
+            thread_id: Some(thread_id.clone()),
             turn_run_id: None,
             lifecycle_ref: None,
         },

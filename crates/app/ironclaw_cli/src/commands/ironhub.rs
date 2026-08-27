@@ -303,39 +303,46 @@ mod tests {
 
     #[test]
     fn install_command_assembles_runtime_and_rejects_invalid_name_without_network() {
-        let _env_lock = crate::runtime::test_env::lock_runtime_env();
-        let _manifest_url = crate::runtime::test_env::EnvGuard::set(
-            "IRONHUB_MANIFEST_URL",
-            "https://hub.ironclaw.com/manifest.json",
-        );
-        let directory = tempfile::tempdir().expect("tempdir");
-        let private_url_path = directory.path().join("private-manifest-url");
-        std::fs::write(
-            &private_url_path,
-            "https://hub.ironclaw.com/private/manifest\n",
-        )
-        .expect("write private URL file");
-        let (_context_dir, context) = crate::context::RebornCliContext::test_context();
-        let command = IronHubCommand {
-            confirm_host_access: false,
-            command: IronHubSubcommand::Install(IronHubInstallCommand {
-                name: "../invalid".to_string(),
-                kind: Some(IronHubKindArg::Skill),
-                force: false,
-                acknowledge_unverified: false,
-                expected_version: None,
-                expected_artifact_digest: None,
-                private_manifest_url_file: Some(private_url_path),
-                json: true,
-            }),
-        };
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let _env_lock = crate::runtime::test_env::lock_runtime_env();
+                let _manifest_url = crate::runtime::test_env::EnvGuard::set(
+                    "IRONHUB_MANIFEST_URL",
+                    "https://hub.ironclaw.com/manifest.json",
+                );
+                let directory = tempfile::tempdir().expect("tempdir");
+                let private_url_path = directory.path().join("private-manifest-url");
+                std::fs::write(
+                    &private_url_path,
+                    "https://hub.ironclaw.com/private/manifest\n",
+                )
+                .expect("write private URL file");
+                let (_context_dir, context) = crate::context::RebornCliContext::test_context();
+                let command = IronHubCommand {
+                    confirm_host_access: false,
+                    command: IronHubSubcommand::Install(IronHubInstallCommand {
+                        name: "../invalid".to_string(),
+                        kind: Some(IronHubKindArg::Skill),
+                        force: false,
+                        acknowledge_unverified: false,
+                        expected_version: None,
+                        expected_artifact_digest: None,
+                        private_manifest_url_file: Some(private_url_path),
+                        json: true,
+                    }),
+                };
 
-        let error = command
-            .execute(context)
-            .expect_err("invalid package name must fail before network access");
-        assert!(
-            format!("{error:#}").contains("name must be 1-128 bytes"),
-            "unexpected error: {error:#}"
-        );
+                let error = command
+                    .execute(context)
+                    .expect_err("invalid package name must fail before network access");
+                assert!(
+                    format!("{error:#}").contains("name must be 1-128 bytes"),
+                    "unexpected error: {error:#}"
+                );
+            })
+            .expect("IronHub test thread should spawn")
+            .join()
+            .expect("IronHub test thread should not panic");
     }
 }

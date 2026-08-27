@@ -19,9 +19,12 @@
 //! by the upstream [`MemoryBindingPolicy`]; this factory never relaxes that —
 //! it only constructs a provider for a binding the policy already permitted.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use ironclaw_extension_contracts::memory::{MemoryDescriptor, MemoryLifecycleHook};
+use ironclaw_extension_contracts::memory::{
+    MemoryDescriptor, MemoryLifecycleHook, MemoryScheduledTrigger,
+};
 use ironclaw_extension_registry::ExtensionPackage;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_runtime::memory_binding::{MemoryBindingPolicy, MemoryProviderBinding};
@@ -234,6 +237,11 @@ pub struct ResolvedMemoryProvider {
     /// resolved from its bundle. `None` when unbound or the provider
     /// declares no `guidance_doc`.
     pub guidance: Option<String>,
+    /// Resolved prompt text for each scheduled pass op the bound provider
+    /// declares, by trigger (#7664). Empty when unbound or the provider
+    /// schedules nothing. The cadence and tool selection stay on `lifecycle`;
+    /// only the asset needed resolving, and it resolved fail-closed.
+    pub scheduled_pass_prompts: Vec<(MemoryScheduledTrigger, String)>,
 }
 
 impl ResolvedMemoryProvider {
@@ -244,6 +252,7 @@ impl ResolvedMemoryProvider {
             lifecycle: MemoryDescriptor::default(),
             tool_handler: None,
             guidance: None,
+            scheduled_pass_prompts: Vec::new(),
         }
     }
 }
@@ -288,6 +297,7 @@ pub fn resolve_memory_provider(
                 lifecycle: bundle.lifecycle,
                 tool_handler: Some(tool_handler),
                 guidance: bundle.guidance,
+                scheduled_pass_prompts: bundle.scheduled_pass_prompts,
             })
         }
         MemoryProviderBinding::Disabled => Ok(ResolvedMemoryProvider::unbound(resolver)),
@@ -300,7 +310,7 @@ pub fn resolve_memory_provider(
                 return Ok(match create_mem0_provider(deps) {
                     Some(provider) => {
                         let bundle = memory_extension::mem0_memory_provider_bundle(
-                            ironclaw_memory_mem0::MEMORY_GUIDANCE_ASSETS,
+                            ironclaw_memory_mem0::MEMORY_ASSETS,
                         )
                         .map_err(|error| {
                             crate::RebornBuildError::InvalidConfig {
@@ -320,6 +330,7 @@ pub fn resolve_memory_provider(
                             lifecycle: bundle.lifecycle,
                             tool_handler: Some(tool_handler),
                             guidance: bundle.guidance,
+                            scheduled_pass_prompts: bundle.scheduled_pass_prompts,
                         }
                     }
                     // create_mem0_provider already logged why; fail closed —
@@ -503,6 +514,57 @@ pub fn memory_lifecycle_consumers(
     }
 }
 
+/// The after-turn cadence a deployment actually runs the bound provider's
+/// declared upkeep at, or an operator-facing reason there is nothing to run.
+///
+/// The DECLARATION decides whether scheduled upkeep happens at all: a provider
+/// that declares an `after_turn` op gets one, a provider that declares none
+/// gets nothing. Config is an override of the cadence, not a switch — `Ok(None)`
+/// here means "no override, use the declared interval", `Ok(Some)` means "the
+/// operator set a different one".
+///
+/// `Err` is the one dishonest combination: an operator configured an interval
+/// while the bound provider schedules nothing. Silently ignoring it would leave
+/// a deployment believing memory is being tidied while nothing ever runs, so
+/// the build fails naming the bound provider.
+///
+/// This replaced the binding-shaped gate (only the host-bundled native
+/// provider was known to serve the standing-document REPLACEMENT a curation
+/// pass performs). The declaration now carries that: a provider only schedules
+/// the upkeep it can actually perform. A provider that declares a pass whose
+/// writes its own backend rejects is a provider lying in its own manifest.
+pub(crate) fn scheduled_after_turn_interval_override(
+    interval_turns: Option<NonZeroU32>,
+    lifecycle: &MemoryDescriptor,
+    binding: Option<&MemoryProviderBinding>,
+) -> Result<Option<NonZeroU32>, String> {
+    if lifecycle
+        .scheduled_op(MemoryScheduledTrigger::AfterTurn)
+        .is_some()
+    {
+        return Ok(interval_turns);
+    }
+    if interval_turns.is_none() {
+        return Ok(None);
+    }
+    let provider = match binding {
+        Some(MemoryProviderBinding::Native) => {
+            "the host-bundled native memory provider".to_string()
+        }
+        Some(MemoryProviderBinding::ThirdParty { extension_id }) => {
+            extension_id.as_str().to_string()
+        }
+        Some(MemoryProviderBinding::Disabled) => "memory is disabled".to_string(),
+        None => "no memory provider is assembled".to_string(),
+    };
+    Err(format!(
+        "[memory].curation_interval_turns is set, but the bound memory provider ({provider}) \
+         declares no after_turn scheduled op, so there is no upkeep to run at that interval. \
+         Bind a memory provider that declares one, or remove \
+         [memory].curation_interval_turns."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +696,98 @@ mod tests {
         assert!(full.memory_context_service.is_some());
         assert!(full.after_turn_memory_writer.is_some());
         assert!(full.user_profile_source.is_some());
+    }
+
+    fn interval(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).expect("test interval is non-zero")
+    }
+
+    /// A descriptor declaring one after-turn pass, parsed the way a manifest
+    /// carries it so the fixture cannot drift from what the parser accepts.
+    fn descriptor_declaring_an_after_turn_pass() -> MemoryDescriptor {
+        toml::from_str(
+            r#"
+lifecycle = ["read_long_term"]
+
+[[scheduled_ops]]
+trigger = "after_turn"
+interval_turns = 10
+pass = { prompt = "prompts/memory_curation.md", tools = ["ironclaw.memory.read"], max_model_calls = 10 }
+"#,
+        )
+        .expect("the declaration parses")
+    }
+
+    /// The DECLARATION decides whether upkeep runs; config only re-times it.
+    /// A provider that declares an op needs no operator opt-in, and an
+    /// operator who set an interval gets that interval instead of the
+    /// declared one.
+    #[test]
+    fn a_declared_op_runs_at_its_own_cadence_unless_config_overrides_it() {
+        let declaring = descriptor_declaring_an_after_turn_pass();
+        assert_eq!(
+            scheduled_after_turn_interval_override(
+                None,
+                &declaring,
+                Some(&MemoryProviderBinding::Native)
+            ),
+            Ok(None),
+            "no interval configured: the armed declaration stays dormant (opt-in)"
+        );
+        assert_eq!(
+            scheduled_after_turn_interval_override(
+                Some(interval(4)),
+                &declaring,
+                Some(&MemoryProviderBinding::Native)
+            ),
+            Ok(Some(interval(4))),
+            "a configured interval overrides the declared one"
+        );
+    }
+
+    /// Fail closed, loudly. An operator who configured a cadence for upkeep the
+    /// bound provider does not declare gets a startup error naming the provider
+    /// — not a quiet deployment that believes memory is being tidied while
+    /// nothing is scheduled at all.
+    #[test]
+    fn a_configured_interval_without_a_declared_op_fails_the_build() {
+        let silent = MemoryDescriptor::default();
+        let third_party = MemoryProviderBinding::ThirdParty {
+            extension_id: ExtensionId::new("some-provider").expect("valid extension id"),
+        };
+        for (label, binding) in [
+            ("third party", Some(&third_party)),
+            ("disabled", Some(&MemoryProviderBinding::Disabled)),
+            ("no memory runtime", None),
+            ("native", Some(&MemoryProviderBinding::Native)),
+        ] {
+            let error =
+                scheduled_after_turn_interval_override(Some(interval(10)), &silent, binding)
+                    .expect_err(&format!("{label} must not silently accept an interval"));
+            assert!(
+                error.contains("curation_interval_turns"),
+                "{label}: the message must name the setting to change: {error}"
+            );
+        }
+        let named =
+            scheduled_after_turn_interval_override(Some(interval(10)), &silent, Some(&third_party))
+                .expect_err("a provider declaring nothing is rejected");
+        assert!(
+            named.contains("some-provider"),
+            "the message must name the bound provider: {named}"
+        );
+        // No interval configured against a provider that declares nothing is
+        // silence, not an error: nobody asked for anything.
+        for binding in [
+            Some(&third_party),
+            Some(&MemoryProviderBinding::Disabled),
+            None,
+        ] {
+            assert_eq!(
+                scheduled_after_turn_interval_override(None, &silent, binding),
+                Ok(None)
+            );
+        }
     }
 
     /// Binding-shape regression for the resolved provider: `Disabled` and an

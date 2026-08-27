@@ -26,6 +26,7 @@ function renderRegistryTab(props, filter = "") {
   const filterUpdates = [];
   const context = {
     ExtensionCard() {},
+    Panel() {},
     RegistryCard() {},
     SearchField() {},
     React: {

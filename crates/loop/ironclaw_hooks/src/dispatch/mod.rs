@@ -42,15 +42,15 @@ use crate::kinds::mutator::HookPatch;
 use crate::kinds::observer::ObserverFact;
 use crate::ordering::{HookOrderKey, HookPhase, HookPriority};
 use crate::points::{
-    BeforeCapabilityHookContext, BeforePromptHookContext, EventTriggeredHookContext,
-    ObserverHookContext,
+    AfterTurnHookContext, BeforeCapabilityHookContext, BeforePromptHookContext,
+    EventTriggeredHookContext, ObserverHookContext,
 };
 use crate::registry::{HookBinding, HookBindingScope, HookPointSpec, HookRegistry};
 use crate::sink::EventTriggeredHook;
 use crate::sink::{
-    GateSinkState, ObserverHook, PrivilegedBeforeCapabilityHook, PrivilegedBeforePromptHook,
-    RecordingGateSink, RecordingMutatorSink, RecordingObserverSink, RestrictedBeforeCapabilityHook,
-    RestrictedBeforePromptHook,
+    GateSinkState, ObserverHook, PrivilegedAfterTurnHook, PrivilegedBeforeCapabilityHook,
+    PrivilegedBeforePromptHook, RecordingGateSink, RecordingMutatorSink, RecordingObserverSink,
+    RestrictedBeforeCapabilityHook, RestrictedBeforePromptHook,
 };
 use crate::telemetry;
 use crate::trust::HookTrustClass;
@@ -63,6 +63,15 @@ use lifecycle_owner::{LifecycleOwnerLookup, resolve_event_owner};
 
 /// Default per-hook wall-clock budget. Tunable per dispatcher.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Per-hook wall-clock budget for [`HookPointSpec::AfterTurn`] dispatch.
+///
+/// Deliberately much larger than [`DEFAULT_HOOK_TIMEOUT`]: `after_turn` runs
+/// once per terminal run rather than on the loop's hot path, and its hooks
+/// legitimately do durable work before returning. It is still bounded — a
+/// hook that outlives this budget is poisoned like any other protocol
+/// violation, so a wedged lifecycle hook cannot pin the caller.
+pub const AFTER_TURN_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default cap on eligible `before_capability` hooks evaluated during one
 /// capability-boundary dispatch.
@@ -134,6 +143,16 @@ pub(crate) enum EventTriggeredHookImpl {
     Any(Box<dyn EventTriggeredHook>),
 }
 
+/// Trait object for an `after_turn` lifecycle hook. Only one variant, because
+/// the point is privileged-only: the only installers that exist are
+/// [`HookDispatcher::install_builtin_after_turn`] and
+/// [`HookDispatcher::install_trusted_after_turn`], so there is no restricted
+/// impl to hold. Sealed to this crate for the same reason as
+/// [`BeforeCapabilityHookImpl`].
+pub(crate) enum AfterTurnHookImpl {
+    Privileged(Box<dyn PrivilegedAfterTurnHook>),
+}
+
 /// The composed outcome of dispatching `before_capability` against all active
 /// hooks at the point.
 #[derive(Debug)]
@@ -193,6 +212,20 @@ pub struct ObserverDispatchOutcome {
     pub failures: Vec<HookFailureRecord>,
 }
 
+/// Outcome of an `after_turn` dispatch.
+///
+/// `after_turn` hooks return nothing the dispatcher can compose — they act
+/// through their own collaborators — so instead of facts this carries the
+/// count of hooks actually invoked plus the per-hook failures, which is what
+/// a caller needs to assert the point fired and to audit misbehavior.
+#[derive(Debug)]
+pub struct AfterTurnDispatchOutcome {
+    /// Number of hooks that were invoked during this dispatch, whether they
+    /// returned normally or failed.
+    pub dispatched: usize,
+    pub failures: Vec<HookFailureRecord>,
+}
+
 /// The dispatcher. Holds the registry plus the actual hook implementations.
 ///
 /// The registry tracks bindings (id, version, trust class, phase) and is
@@ -204,7 +237,12 @@ pub struct HookDispatcher {
     before_prompt: HashMap<HookId, BeforePromptHookImpl>,
     observers: HashMap<HookId, ObserverHookImpl>,
     event_triggered: HashMap<HookId, EventTriggeredHookImpl>,
+    after_turn: HashMap<HookId, AfterTurnHookImpl>,
     timeout: Duration,
+    /// Per-hook budget for [`HookPointSpec::AfterTurn`], separate from
+    /// [`Self::timeout`] because lifecycle hooks run off the hot path and do
+    /// durable work. Defaults to [`AFTER_TURN_HOOK_TIMEOUT`].
+    after_turn_timeout: Duration,
     max_before_capability_hooks_per_dispatch: usize,
     milestone_sink: Option<Arc<dyn HookMilestoneSink>>,
     /// Best-effort recording sink for security-boundary decisions made by
@@ -231,7 +269,9 @@ impl HookDispatcher {
             before_prompt: HashMap::new(),
             observers: HashMap::new(),
             event_triggered: HashMap::new(),
+            after_turn: HashMap::new(),
             timeout: DEFAULT_HOOK_TIMEOUT,
+            after_turn_timeout: AFTER_TURN_HOOK_TIMEOUT,
             max_before_capability_hooks_per_dispatch:
                 DEFAULT_MAX_BEFORE_CAPABILITY_HOOKS_PER_DISPATCH,
             milestone_sink: None,
@@ -241,6 +281,11 @@ impl HookDispatcher {
 
     pub(crate) fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub(crate) fn with_after_turn_timeout(mut self, timeout: Duration) -> Self {
+        self.after_turn_timeout = timeout;
         self
     }
 
@@ -728,6 +773,16 @@ impl HookDispatcher {
                         .to_string(),
                 ));
             }
+            HookPointSpec::AfterTurn => {
+                return Err(crate::error::HookError::RegistryConstruction(
+                    "after_turn hooks register through their own install \
+                     path (`install_builtin_after_turn` / \
+                     `install_trusted_after_turn`), not `install_observer`; \
+                     that point dispatches lifecycle implementations, not \
+                     observers"
+                        .to_string(),
+                ));
+            }
         }
         let binding = HookBinding {
             hook_id,
@@ -913,6 +968,136 @@ impl HookDispatcher {
             scope,
             hook,
         )
+    }
+
+    // ── After-turn installers (tier-specific; see AGENTS.md) ──────────────
+
+    /// Install a builtin-tier privileged `after_turn` lifecycle hook.
+    ///
+    /// The point is privileged-only, and that is expressed in the INSTALLER
+    /// SET rather than in a runtime check: only this and
+    /// [`Self::install_trusted_after_turn`] exist, so an `Installed` or
+    /// `SelfAuthored` binding at `after_turn` is not a call anyone can write.
+    /// The tier matters here because an `after_turn` hook may start follow-on
+    /// work off a terminal run, which is authority neither untrusted tier
+    /// carries — mirrored in the trust matrix, where
+    /// [`HookTrustClass::permits_kind_by_default`] denies
+    /// [`crate::trust::DecisionKind::Lifecycle`] to both.
+    ///
+    /// The body is duplicated with [`Self::install_trusted_after_turn`] rather
+    /// than shared behind a `trust_class` parameter, matching the
+    /// `install_builtin_*` / `install_trusted_*` siblings: the duplication is
+    /// what makes an invalid tier unrepresentable instead of merely rejected.
+    ///
+    /// The binding is always registered at [`HookPointSpec::AfterTurn`];
+    /// there is no `point` parameter, because this installer is only for
+    /// that point.
+    pub(crate) fn install_builtin_after_turn(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        hook: Box<dyn PrivilegedAfterTurnHook>,
+    ) -> Result<(), crate::error::HookError> {
+        let binding = HookBinding {
+            hook_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Builtin,
+            phase,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::AfterTurn,
+            event_kind_filter: None,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
+            poisoned: false,
+        };
+        self.insert_binding(binding)?;
+        self.after_turn
+            .insert(hook_id, AfterTurnHookImpl::Privileged(hook));
+        Ok(())
+    }
+
+    /// Install a trusted-tier privileged `after_turn` lifecycle hook. See
+    /// [`Self::install_builtin_after_turn`] for the tier contract.
+    pub(crate) fn install_trusted_after_turn(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        hook: Box<dyn PrivilegedAfterTurnHook>,
+    ) -> Result<(), crate::error::HookError> {
+        let binding = HookBinding {
+            hook_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Trusted,
+            phase,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::AfterTurn,
+            event_kind_filter: None,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
+            poisoned: false,
+        };
+        self.insert_binding(binding)?;
+        self.after_turn
+            .insert(hook_id, AfterTurnHookImpl::Privileged(hook));
+        Ok(())
+    }
+
+    /// Dispatch `after_turn`. Hooks run in `(phase, priority, hook_id)` order,
+    /// each bounded by [`AFTER_TURN_HOOK_TIMEOUT`]. A panic or timeout
+    /// poisons that binding for the rest of the run and is recorded through
+    /// the same failure-policy and telemetry path as every other point; it
+    /// never propagates to the caller.
+    ///
+    /// The caller is responsible for the bound-actor guarantee documented on
+    /// [`AfterTurnHookContext`]: never fire this point for an unbound run.
+    pub async fn dispatch_after_turn(&self, ctx: AfterTurnHookContext) -> AfterTurnDispatchOutcome {
+        let (ordered, mut poisoned) =
+            self.ordered_bindings_with_poison_snapshot(HookPointSpec::AfterTurn);
+        let mut dispatched = 0usize;
+        let mut failures = Vec::new();
+        if ordered.is_empty() {
+            return AfterTurnDispatchOutcome {
+                dispatched,
+                failures,
+            };
+        }
+
+        for (_key, binding) in ordered {
+            if poisoned.contains(&binding.hook_id) {
+                continue;
+            }
+            let Some(hook) = self.after_turn.get(&binding.hook_id) else {
+                self.poison_with_failure(
+                    binding.hook_id,
+                    FailureCategory::Malformed,
+                    binding.trust_class,
+                    &crate::trust::DecisionKind::Lifecycle,
+                    "binding present without installed implementation",
+                    &mut failures,
+                )
+                .await;
+                poisoned.insert(binding.hook_id);
+                continue;
+            };
+            self.emit_dispatched(&binding).await;
+            dispatched += 1;
+            match self.run_after_turn_hook(hook, &binding, &ctx).await {
+                Ok(()) => {
+                    self.emit_decision(&binding, HookDecisionSummary::Pass)
+                        .await;
+                }
+                Err(failure) => {
+                    self.emit_failure(&failure).await;
+                    poisoned.insert(failure.hook_id);
+                    failures.push(failure);
+                }
+            }
+        }
+
+        AfterTurnDispatchOutcome {
+            dispatched,
+            failures,
+        }
     }
 
     /// Dispatch `before_capability`. Hooks run in `(phase, priority, hook_id)`
@@ -1745,6 +1930,36 @@ impl HookDispatcher {
         }
     }
 
+    async fn run_after_turn_hook(
+        &self,
+        hook: &AfterTurnHookImpl,
+        binding: &HookBinding,
+        ctx: &AfterTurnHookContext,
+    ) -> Result<(), HookFailureRecord> {
+        let run = async {
+            match hook {
+                AfterTurnHookImpl::Privileged(h) => AssertUnwindSafe(h.on_turn(ctx))
+                    .catch_unwind()
+                    .await
+                    .map_err(|_| ()),
+            }
+        };
+
+        match tokio::time::timeout(self.after_turn_timeout, run).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(())) => Err(self.classify_failure(
+                binding,
+                FailureCategory::Panic,
+                "after_turn hook panicked",
+            )),
+            Err(_elapsed) => Err(self.classify_failure(
+                binding,
+                FailureCategory::Timeout,
+                "after_turn hook exceeded dispatch timeout",
+            )),
+        }
+    }
+
     fn classify_failure(
         &self,
         binding: &HookBinding,
@@ -1944,6 +2159,7 @@ fn decision_kind_for(point: HookPointSpec) -> crate::trust::DecisionKind {
     match point {
         HookPointSpec::BeforeCapability => crate::trust::DecisionKind::Gate,
         HookPointSpec::BeforePrompt => crate::trust::DecisionKind::Mutator,
+        HookPointSpec::AfterTurn => crate::trust::DecisionKind::Lifecycle,
         HookPointSpec::AfterModel
         | HookPointSpec::AfterCapability
         | HookPointSpec::AfterCheckpoint
@@ -2030,6 +2246,21 @@ impl HookDispatcherBuilder {
     /// [`DEFAULT_HOOK_TIMEOUT`] when not set.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.dispatcher = self.dispatcher.with_timeout(timeout);
+        self
+    }
+
+    /// Override the per-hook wall-clock timeout for the `after_turn` point.
+    /// Defaults to [`AFTER_TURN_HOOK_TIMEOUT`] when not set — deliberately
+    /// separate from [`Self::with_timeout`], since a lifecycle hook's budget
+    /// has nothing to do with a hot-path gate's.
+    ///
+    /// A caller that shortens this must keep any OUTER bound it also applies
+    /// strictly larger than this value times the number of hooks it installs;
+    /// an outer cancel landing with the inner one takes the dispatch away
+    /// mid-classification, so an overrunning hook is neither recorded nor
+    /// poisoned.
+    pub fn with_after_turn_timeout(mut self, timeout: Duration) -> Self {
+        self.dispatcher = self.dispatcher.with_after_turn_timeout(timeout);
         self
     }
 
@@ -2290,6 +2521,34 @@ impl HookDispatcherBuilder {
         Ok(self)
     }
 
+    /// Install a builtin-tier privileged `after_turn` lifecycle hook. See
+    /// [`HookDispatcher::install_builtin_after_turn`] (private) for the trust
+    /// contract: the point is privileged-only, and there is deliberately no
+    /// installed/self-authored installer to call.
+    pub fn install_builtin_after_turn(
+        mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        hook: Box<dyn PrivilegedAfterTurnHook>,
+    ) -> Result<Self, crate::error::HookError> {
+        self.dispatcher
+            .install_builtin_after_turn(hook_id, phase, hook)?;
+        Ok(self)
+    }
+
+    /// Install a trusted-tier privileged `after_turn` lifecycle hook. See
+    /// [`Self::install_builtin_after_turn`].
+    pub fn install_trusted_after_turn(
+        mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        hook: Box<dyn PrivilegedAfterTurnHook>,
+    ) -> Result<Self, crate::error::HookError> {
+        self.dispatcher
+            .install_trusted_after_turn(hook_id, phase, hook)?;
+        Ok(self)
+    }
+
     /// Get a mutable handle to the still-private dispatcher. Used by the
     /// [`crate::registrar::HookRegistrar`] to install manifest entries
     /// against an in-flight builder without exposing the underlying
@@ -2322,9 +2581,9 @@ mod tests {
     use crate::kinds::observer::NoteCategory;
     use crate::ordering::HookPhase;
     use crate::sink::{
-        EventTriggeredHook, ObserverHook, ObserverSink, PrivilegedBeforeCapabilityHook,
-        PrivilegedGateSink, RestrictedBeforeCapabilityHook, RestrictedBeforePromptHook,
-        RestrictedGateSink, RestrictedMutatorSink,
+        EventTriggeredHook, ObserverHook, ObserverSink, PrivilegedAfterTurnHook,
+        PrivilegedBeforeCapabilityHook, PrivilegedGateSink, RestrictedBeforeCapabilityHook,
+        RestrictedBeforePromptHook, RestrictedGateSink, RestrictedMutatorSink,
     };
     use async_trait::async_trait;
 
@@ -3555,6 +3814,34 @@ mod tests {
             )
             .expect("install_installed_before_prompt signature stable");
 
+        // ── after_turn: the two privileged tier-specific installers ────────
+        // There is deliberately no installed-tier sibling here: the point may
+        // start follow-on work off a terminal run (see
+        // `after_turn_has_no_untrusted_installer`).
+        let builtin_turn = HookId::for_builtin("loader::builtin::turn", HookVersion::ONE);
+        dispatcher
+            .install_builtin_after_turn(
+                builtin_turn,
+                HookPhase::Telemetry,
+                Box::new(RecordingAfterTurnHook {
+                    label: "loader-builtin-turn",
+                    log: Arc::new(TurnLog::default()),
+                }),
+            )
+            .expect("install_builtin_after_turn signature stable");
+
+        let trusted_turn = HookId::for_builtin("loader::trusted::turn", HookVersion::ONE);
+        dispatcher
+            .install_trusted_after_turn(
+                trusted_turn,
+                HookPhase::Telemetry,
+                Box::new(RecordingAfterTurnHook {
+                    label: "loader-trusted-turn",
+                    log: Arc::new(TurnLog::default()),
+                }),
+            )
+            .expect("install_trusted_after_turn signature stable");
+
         // Verify each binding carries the trust class matching its installer.
         // The loader's responsibility is to pick the installer that matches
         // the *source* of the hook; this test confirms that, given a correct
@@ -3563,6 +3850,7 @@ mod tests {
         let by_id: std::collections::HashMap<HookId, HookTrustClass> = registry
             .active_at(HookPointSpec::BeforeCapability)
             .chain(registry.active_at(HookPointSpec::BeforePrompt))
+            .chain(registry.active_at(HookPointSpec::AfterTurn))
             .map(|b| (b.hook_id, b.trust_class))
             .collect();
         assert_eq!(by_id.get(&builtin_cap), Some(&HookTrustClass::Builtin));
@@ -3574,6 +3862,8 @@ mod tests {
             by_id.get(&installed_prompt),
             Some(&HookTrustClass::Installed)
         );
+        assert_eq!(by_id.get(&builtin_turn), Some(&HookTrustClass::Builtin));
+        assert_eq!(by_id.get(&trusted_turn), Some(&HookTrustClass::Trusted));
     }
 
     // ── C5 regression: dedupe + mid-dispatch poison re-check ────────────────
@@ -4969,5 +5259,254 @@ mod tests {
             vec![false, true],
             "is_replay must be false on live dispatch, true on replay"
         );
+    }
+
+    // ─── after_turn lifecycle point ─────────────────────────────────────
+
+    /// Records the hook ids that fired, in dispatch order.
+    #[derive(Default)]
+    struct TurnLog(Mutex<Vec<&'static str>>);
+
+    struct RecordingAfterTurnHook {
+        label: &'static str,
+        log: Arc<TurnLog>,
+    }
+
+    #[async_trait]
+    impl PrivilegedAfterTurnHook for RecordingAfterTurnHook {
+        async fn on_turn(&self, _ctx: &AfterTurnHookContext) {
+            self.log.0.lock().expect("turn log mutex").push(self.label);
+        }
+    }
+
+    struct PanickingAfterTurnHook;
+    #[async_trait]
+    impl PrivilegedAfterTurnHook for PanickingAfterTurnHook {
+        async fn on_turn(&self, _ctx: &AfterTurnHookContext) {
+            panic!("intentional panic in after_turn test hook");
+        }
+    }
+
+    struct SlowAfterTurnHook;
+    #[async_trait]
+    impl PrivilegedAfterTurnHook for SlowAfterTurnHook {
+        async fn on_turn(&self, _ctx: &AfterTurnHookContext) {
+            tokio::time::sleep(AFTER_TURN_HOOK_TIMEOUT * 2).await;
+        }
+    }
+
+    fn after_turn_ctx() -> AfterTurnHookContext {
+        AfterTurnHookContext {
+            tenant_id: tenant(),
+            run_id: ironclaw_host_api::turn::TurnRunId::new(),
+            user_id: ironclaw_host_api::ids::UserId::new("u").expect("user id ok"),
+            agent_id: None,
+            project_id: None,
+            completed: true,
+        }
+    }
+
+    /// `after_turn` is privileged-only, and after the #7770 audit that is a
+    /// property of the API SURFACE, not of a runtime check: there is no
+    /// installed- or self-authored-tier `after_turn` installer to call, on the
+    /// dispatcher or on the builder. This pin is documentation for that — a
+    /// source scan, because "a function does not exist" cannot be asserted by
+    /// calling it. Adding an installed-tier installer for this point, or
+    /// reintroducing the trust-class-parameterized one, fails here — which is
+    /// the point: the loader must not be able to register a third-party hook
+    /// at a point that may start follow-on work off a terminal run.
+    ///
+    /// The needles are assembled with `concat!` so this test's own source text
+    /// does not contain them: a scan of the file it lives in would otherwise
+    /// match itself and fail permanently.
+    #[test]
+    fn after_turn_has_no_untrusted_installer() {
+        let source = include_str!("mod.rs");
+        for forbidden in [
+            concat!("install_installed_", "after_turn"),
+            concat!("install_self_authored_", "after_turn"),
+            concat!("fn install_", "after_turn("),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "`{forbidden}` must not exist: after_turn is privileged-only, \
+                 enforced by which installers exist"
+            );
+        }
+        // The other half of the same contract, stated where a reader looks for
+        // it: the trust matrix denies the lifecycle decision kind to both
+        // untrusted tiers, so even a future generic path could not admit them.
+        for class in [HookTrustClass::Installed, HookTrustClass::SelfAuthored] {
+            assert!(
+                !class.permits_kind_by_default(crate::trust::DecisionKind::Lifecycle),
+                "{class:?} must not carry the lifecycle decision kind"
+            );
+        }
+    }
+
+    /// `after_turn` hooks have their own install path. Routing one through
+    /// `install_observer` would register a binding whose impl lands in the
+    /// observer map, so `dispatch_after_turn` would later see a binding with
+    /// no implementation and poison the slot. Reject at install time — the
+    /// same shape as the `before_capability` rejection from PR #3573.
+    #[test]
+    fn install_observer_rejects_after_turn_point() {
+        let id = HookId::for_builtin("test::observer::misuse-at", HookVersion::ONE);
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        let err = dispatcher
+            .install_builtin_observer(
+                id,
+                HookPhase::Telemetry,
+                HookPointSpec::AfterTurn,
+                Box::new(NotingObserver),
+            )
+            .expect_err("observer install at after_turn must be rejected");
+        match err {
+            crate::error::HookError::RegistryConstruction(msg) => {
+                assert!(
+                    msg.contains("after_turn") && msg.contains("install_builtin_after_turn"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("expected RegistryConstruction, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn after_turn_dispatch_runs_hooks_in_order() {
+        let log = Arc::new(TurnLog::default());
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        // Installed out of order on purpose: the dispatcher must sort by
+        // (phase, priority, hook_id), not by install order.
+        for (label, phase) in [
+            ("telemetry-phase", HookPhase::Telemetry),
+            ("policy-phase-default", HookPhase::Policy),
+            ("policy-phase-first", HookPhase::Policy),
+        ] {
+            dispatcher
+                .install_builtin_after_turn(
+                    ext_hook_id(label),
+                    phase,
+                    Box::new(RecordingAfterTurnHook {
+                        label,
+                        log: Arc::clone(&log),
+                    }),
+                )
+                .expect("install ok");
+        }
+        // Priority is applied post-install, exactly as the registrar does it.
+        dispatcher.set_binding_priority(ext_hook_id("policy-phase-first"), HookPriority::FIRST);
+
+        let outcome = dispatcher.dispatch_after_turn(after_turn_ctx()).await;
+        assert_eq!(outcome.dispatched, 3);
+        assert!(outcome.failures.is_empty());
+        assert_eq!(
+            log.0.lock().expect("turn log mutex").clone(),
+            vec![
+                "policy-phase-first",
+                "policy-phase-default",
+                "telemetry-phase"
+            ],
+            "after_turn hooks must run in (phase, priority, hook_id) order"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_turn_panic_poisons_only_the_panicking_binding() {
+        let log = Arc::new(TurnLog::default());
+        let panicking = ext_hook_id("at-panic");
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        dispatcher
+            .install_builtin_after_turn(
+                panicking,
+                HookPhase::Policy,
+                Box::new(PanickingAfterTurnHook),
+            )
+            .expect("install ok");
+        dispatcher
+            .install_trusted_after_turn(
+                ext_hook_id("at-survivor"),
+                HookPhase::Telemetry,
+                Box::new(RecordingAfterTurnHook {
+                    label: "at-survivor",
+                    log: Arc::clone(&log),
+                }),
+            )
+            .expect("install ok");
+
+        let first = dispatcher.dispatch_after_turn(after_turn_ctx()).await;
+        assert_eq!(
+            first.dispatched, 2,
+            "both hooks are invoked on the first pass"
+        );
+        assert_eq!(first.failures.len(), 1, "only the panicking hook fails");
+        assert_eq!(first.failures[0].hook_id, panicking);
+        assert_eq!(first.failures[0].category, FailureCategory::Panic);
+        assert_eq!(
+            first.failures[0].disposition,
+            FailureDisposition::FailIsolated,
+            "a lifecycle failure cannot fail closed onto an already-terminal run"
+        );
+        assert_eq!(
+            log.0.lock().expect("turn log mutex").clone(),
+            vec!["at-survivor"],
+            "the hook after the panicking one still runs"
+        );
+
+        // The poisoned slot stays skipped: a second dispatch invokes only
+        // the survivor and records no new failure.
+        let second = dispatcher.dispatch_after_turn(after_turn_ctx()).await;
+        assert_eq!(second.dispatched, 1, "poisoned hook is not re-invoked");
+        assert!(
+            second.failures.is_empty(),
+            "poisoned hook must not produce a second failure, got {:?}",
+            second.failures
+        );
+        assert_eq!(
+            log.0.lock().expect("turn log mutex").clone(),
+            vec!["at-survivor", "at-survivor"]
+        );
+    }
+
+    /// A hook that outlives [`AFTER_TURN_HOOK_TIMEOUT`] is recorded as a
+    /// timeout failure and does not hold up the rest of the dispatch. The
+    /// runtime is time-paused so the 5s budget costs no wall-clock in CI.
+    #[tokio::test(start_paused = true)]
+    async fn after_turn_timeout_is_recorded_as_a_failure() {
+        let log = Arc::new(TurnLog::default());
+        let slow = ext_hook_id("at-slow");
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        dispatcher
+            .install_builtin_after_turn(slow, HookPhase::Policy, Box::new(SlowAfterTurnHook))
+            .expect("install ok");
+        dispatcher
+            .install_builtin_after_turn(
+                ext_hook_id("at-after-slow"),
+                HookPhase::Telemetry,
+                Box::new(RecordingAfterTurnHook {
+                    label: "at-after-slow",
+                    log: Arc::clone(&log),
+                }),
+            )
+            .expect("install ok");
+
+        let outcome = dispatcher.dispatch_after_turn(after_turn_ctx()).await;
+        assert_eq!(outcome.dispatched, 2);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].hook_id, slow);
+        assert_eq!(outcome.failures[0].category, FailureCategory::Timeout);
+        assert_eq!(
+            log.0.lock().expect("turn log mutex").clone(),
+            vec!["at-after-slow"],
+            "the timeout must not swallow the rest of the dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_turn_dispatch_without_bindings_is_a_noop() {
+        let dispatcher = HookDispatcher::new(HookRegistry::new());
+        let outcome = dispatcher.dispatch_after_turn(after_turn_ctx()).await;
+        assert_eq!(outcome.dispatched, 0);
+        assert!(outcome.failures.is_empty());
     }
 }

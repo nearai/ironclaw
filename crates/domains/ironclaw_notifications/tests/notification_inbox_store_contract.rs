@@ -58,7 +58,7 @@ fn request(id: &str, timestamp: i64) -> PublishNotificationRequest {
         kind: NotificationKind::ApprovalRequired,
         severity: NotificationSeverity::Warning,
         source: NotificationSource {
-            thread_id: thread_id.clone(),
+            thread_id: Some(thread_id.clone()),
             turn_run_id: Some(TurnRunId::new()),
             lifecycle_ref: Some(LifecycleRef::new(format!("gate-{id}")).expect("lifecycle ref")),
         },

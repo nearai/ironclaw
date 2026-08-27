@@ -27,9 +27,9 @@ the point of the crate.
   credentialed-run phases stay separate.
 - Execution machinery: `RebornScopedSandboxCommandTransport` (implements the
   `ironclaw_host_api::process::SandboxCommandTransport` port — contracts
-  vocabulary this lane implements and the kernel consumes),
-  `RebornSandboxConfig`, the broker/firewall/CA/identity types
-  (`sandbox_process`).
+  vocabulary this lane implements and the kernel consumes), bounded shell
+  command dispatch, invocation cancellation, `RebornSandboxConfig`, and the
+  broker/firewall/CA/identity types (`sandbox_process`).
 - Script lane: `ScriptRuntime`, `ScriptExecutor`/`ScriptBackend`,
   `DockerScriptBackend`, `ScriptRuntimeHttpAdapter`, normalized
   request/result/error types (`script`).
@@ -52,10 +52,12 @@ posture no longer matches. A per-user creation gate converges concurrent first
 calls on one container. Active-exec accounting prevents the idle sweeper from
 stopping it until all commands finish. The sweeper stops an inactive container;
 the next command adopts and restarts it.
-For managed egress, idle suspension removes the proxy and its upstream network
-but retains the stopped worker's private network. This keeps the proxy DNS
-endpoint stable and preserves container-local state on wake. Final retention
-cleanup removes the stopped container and private network together.
+For managed egress, idle suspension removes the proxy container and every
+invocation credential file, but retains the stopped worker's private network
+and its host-side CA/key material. Keeping the CA file's inode alive preserves
+the worker's read-only Docker file bind across wake-up; a posture-version
+change recycles older workers once. Final retention cleanup removes the stopped
+container, private network, and retained proxy material together.
 
 One IronClaw process owns a local Docker workspace root at a time. The
 transport acquires a transport-local advisory owner lock on the workspace root
@@ -122,9 +124,11 @@ explicit host broker or managed-egress binding.
 
 - **Typed plans only:** no raw container flags, host paths, environment
   inheritance, or secret material through plan input (`plan`/`validation`).
-- **Credential firewall as a staging chokepoint:** an invocation consumes only
-  the credential it was already entitled to; consumers see yes/no, never
-  material. The per-tenant CA root key never touches disk and is never
+- **Credential firewall as a staging chokepoint:** the capability kernel derives
+  each invocation's credential authority from active extension declarations,
+  then stages only handle-bound material for the sandbox transport. The command
+  receives a placeholder; only the private proxy can replace it for the approved
+  host and header. The per-tenant CA root key never touches disk and is never
   serialized to a caller.
 - **Fail closed on missing containment:** a served multi-user deployment must
   never resolve to an unsandboxed host-process backend; a missing backend

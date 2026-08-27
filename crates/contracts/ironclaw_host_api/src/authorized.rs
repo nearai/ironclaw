@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Timestamp,
+    capability::CapabilityDescriptor,
     ids::{ActivityId, CapabilityId, CorrelationId, DenyRef, ProcessId},
     invocation::{Actor, Invocation, InvocationOrigin},
     lane::RuntimeLane,
@@ -74,10 +75,14 @@ pub trait CapabilityAuthorizer {
 pub struct AuthorizationGrant(());
 
 /// The dispatch-lane parts a consumed [`Authorized`] yields: the exact
-/// invocation, the descriptor-resolved lane, the fold's `Option<MountView>`, and
-/// the fold's `Option<ResourceReservation>` — all verbatim, never re-derived.
+/// invocation, the descriptor authorization evaluated, the descriptor-resolved
+/// lane, the fold's `Option<MountView>`, and the fold's
+/// `Option<ResourceReservation>` — all verbatim, never re-derived. The
+/// descriptor is absent only for a continuation persisted before descriptors
+/// became part of the witness.
 pub type AuthorizedParts = (
     Invocation,
+    Option<CapabilityDescriptor>,
     RuntimeLane,
     Option<MountView>,
     Option<ResourceReservation>,
@@ -100,6 +105,9 @@ pub type AuthorizedParts = (
 #[derive(Debug)]
 pub struct Authorized {
     invocation: Invocation,
+    /// The exact descriptor authorization evaluated. `None` is reserved for a
+    /// durable process continuation written before this field existed.
+    descriptor: Option<CapabilityDescriptor>,
     lane: RuntimeLane,
     /// The filesystem mounts the fold's `UseScopedMounts` obligation produced
     /// (`Some`), or `None` when the capability declares no mount obligation.
@@ -120,17 +128,56 @@ pub struct Authorized {
     deadline: Timestamp,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AuthorizedSealError {
+    #[error("authorized descriptor capability does not match the invocation")]
+    CapabilityMismatch {
+        invocation: CapabilityId,
+        descriptor: CapabilityId,
+    },
+}
+
 impl Authorized {
     /// Mint an `Authorized`. Callable only with an [`AuthorizationGrant`], which
     /// only a [`CapabilityAuthorizer`] can produce — i.e. only `authorize()` in
-    /// the kernel. The authorization *outputs* (`lane`, `mounts`, `reservation`,
-    /// `deadline`) are results the fold computed, not caller-supplied request
-    /// fields. `reservation` is the real reservation the fold's resource
-    /// obligation produced (`Some`), or `None` when the capability declares no
-    /// resource obligation — never a synthesized placeholder. `mounts` is
-    /// likewise the fold's `Option<MountView>` verbatim (`None` when the
-    /// capability declared no mount obligation), never a collapsed default.
+    /// the kernel. The authorization *outputs* (`descriptor`, `lane`, `mounts`,
+    /// `reservation`, `deadline`) are results the fold computed, not
+    /// caller-supplied request fields. `reservation` is the real reservation the
+    /// fold's resource obligation produced (`Some`), or `None` when the
+    /// capability declares no resource obligation — never a synthesized
+    /// placeholder. `mounts` is likewise the fold's `Option<MountView>` verbatim
+    /// (`None` when the capability declared no mount obligation), never a
+    /// collapsed default.
     pub fn seal(
+        _grant: AuthorizationGrant,
+        invocation: Invocation,
+        descriptor: CapabilityDescriptor,
+        lane: RuntimeLane,
+        mounts: Option<MountView>,
+        reservation: Option<ResourceReservation>,
+        deadline: Timestamp,
+    ) -> Result<Self, AuthorizedSealError> {
+        if descriptor.id != invocation.capability {
+            return Err(AuthorizedSealError::CapabilityMismatch {
+                invocation: invocation.capability,
+                descriptor: descriptor.id,
+            });
+        }
+        Ok(Self {
+            invocation,
+            descriptor: Some(descriptor),
+            lane,
+            mounts,
+            reservation,
+            deadline,
+        })
+    }
+
+    /// Re-mint a witness from a durable continuation written before the
+    /// authorized descriptor was persisted. New continuations always use
+    /// [`Self::seal`]; this compatibility path lets in-flight legacy processes
+    /// keep using the registry-bound descriptor they were created with.
+    pub fn seal_legacy_process_continuation(
         _grant: AuthorizationGrant,
         invocation: Invocation,
         lane: RuntimeLane,
@@ -140,6 +187,7 @@ impl Authorized {
     ) -> Self {
         Self {
             invocation,
+            descriptor: None,
             lane,
             mounts,
             reservation,
@@ -157,6 +205,7 @@ impl Authorized {
     ) -> Self {
         Self {
             invocation,
+            descriptor: None,
             lane,
             mounts: Some(mounts),
             reservation,
@@ -167,13 +216,20 @@ impl Authorized {
     #[cfg(any(test, feature = "test-support"))]
     pub fn seal_for_test_with_mounts(
         invocation: Invocation,
+        descriptor: Option<CapabilityDescriptor>,
         lane: RuntimeLane,
         mounts: Option<MountView>,
         reservation: Option<ResourceReservation>,
         deadline: Timestamp,
     ) -> Self {
+        debug_assert!(
+            descriptor
+                .as_ref()
+                .is_none_or(|descriptor| descriptor.id == invocation.capability)
+        );
         Self {
             invocation,
+            descriptor,
             lane,
             mounts,
             reservation,
@@ -184,6 +240,14 @@ impl Authorized {
     /// The exact invocation this witness authorized.
     pub fn invocation(&self) -> &Invocation {
         &self.invocation
+    }
+
+    /// The exact capability descriptor authorization evaluated.
+    ///
+    /// `None` is possible only for a durable process continuation persisted
+    /// before descriptor freezing was introduced.
+    pub fn descriptor(&self) -> Option<&CapabilityDescriptor> {
+        self.descriptor.as_ref()
     }
 
     /// The runtime lane resolved from the descriptor — where `dispatch()` routes.
@@ -230,7 +294,13 @@ impl Authorized {
             // (clippy::result_large_err).
             return Err(Box::new(self));
         }
-        Ok((self.invocation, self.lane, self.mounts, self.reservation))
+        Ok((
+            self.invocation,
+            self.descriptor,
+            self.lane,
+            self.mounts,
+            self.reservation,
+        ))
     }
 
     /// Unwind a not-dispatched witness (cancel between authorize and dispatch,
@@ -245,6 +315,77 @@ impl Authorized {
     }
 }
 
+mod process_authorized_descriptor_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+    use crate::{
+        capability::CapabilityDescriptor,
+        runtime::{RuntimeKind, TrustClass},
+    };
+
+    pub(super) fn serialize<S>(
+        descriptor: &Option<CapabilityDescriptor>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        descriptor.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<CapabilityDescriptor>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(mut value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+
+        // Manifest deserialization deliberately rejects host-assigned runtimes.
+        // A process continuation is a host-minted durable authority record, so
+        // permit those variants only at this sealed persistence boundary while
+        // retaining CapabilityDescriptor's normal validation for every field.
+        let trusted_runtime = match value.get("runtime").and_then(serde_json::Value::as_str) {
+            Some("sandbox") => Some(RuntimeKind::Sandbox),
+            Some("first_party") => Some(RuntimeKind::FirstParty),
+            Some("system") => Some(RuntimeKind::System),
+            _ => None,
+        };
+        if trusted_runtime.is_some() {
+            let runtime = value
+                .get_mut("runtime")
+                .ok_or_else(|| D::Error::custom("capability descriptor runtime is missing"))?;
+            *runtime = serde_json::Value::String("wasm".to_string());
+        }
+        let trusted_ceiling = match value
+            .get("trust_ceiling")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("first_party") => Some(TrustClass::FirstParty),
+            Some("system") => Some(TrustClass::System),
+            _ => None,
+        };
+        if trusted_ceiling.is_some() {
+            let trust_ceiling = value.get_mut("trust_ceiling").ok_or_else(|| {
+                D::Error::custom("capability descriptor trust ceiling is missing")
+            })?;
+            *trust_ceiling = serde_json::Value::String("sandbox".to_string());
+        }
+
+        let mut descriptor =
+            serde_json::from_value::<CapabilityDescriptor>(value).map_err(D::Error::custom)?;
+        if let Some(runtime) = trusted_runtime {
+            descriptor.runtime = runtime;
+        }
+        if let Some(trust_ceiling) = trusted_ceiling {
+            descriptor.trust_ceiling = trust_ceiling;
+        }
+        Ok(Some(descriptor))
+    }
+}
+
 /// Durable process-lifetime continuation of an allowed spawn decision.
 ///
 /// Unlike [`Authorized`], this record is not single-use and is not bounded by a
@@ -254,6 +395,10 @@ impl Authorized {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessAuthorizedContinuation {
     pub invocation: ProcessAuthorizedInvocation,
+    /// Exact descriptor frozen at spawn authorization. `None` means the record
+    /// predates descriptor freezing and must use the legacy registry binding.
+    #[serde(default, with = "process_authorized_descriptor_serde")]
+    pub descriptor: Option<CapabilityDescriptor>,
     pub lane: RuntimeLane,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -286,7 +431,8 @@ impl ProcessAuthorizedContinuation {
         now: Timestamp,
         process_id: ProcessId,
     ) -> Result<Self, Box<Authorized>> {
-        let (invocation, lane, mounts, resource_reservation) = authorized.into_parts(now)?;
+        let (invocation, descriptor, lane, mounts, resource_reservation) =
+            authorized.into_parts(now)?;
         let Invocation {
             activity_id,
             capability,
@@ -313,6 +459,7 @@ impl ProcessAuthorizedContinuation {
                 process_id,
                 parent_process_id,
             },
+            descriptor,
             lane,
             mounts,
             resource_reservation,

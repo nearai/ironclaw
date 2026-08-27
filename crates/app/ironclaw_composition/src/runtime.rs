@@ -3118,6 +3118,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // below — live-traffic admission, the cutover gate, substrate selection —
     // reads a field on this value instead of re-matching the profile.
     let deployment = services_input.deployment().clone();
+    // Read before `build_runtime_substrate` consumes the input (§ the runtime
+    // policy capture below, same reason).
+    let memory_curation_interval_turns = services_input.memory_curation_interval_turns();
     if let Some(reason) = deployment.traffic().live_traffic_refusal(profile) {
         return Err(RebornRuntimeError::InvalidArgument { reason });
     }
@@ -3787,6 +3790,78 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let memory_lifecycle = local_runtime
         .map(|local_runtime| local_runtime.memory_lifecycle.clone())
         .unwrap_or_default();
+    // Scheduled memory upkeep (#7276 / #7664): the bound provider's
+    // DECLARATION arms it — validated shape, resolved prompt, recommended
+    // cadence — and `[memory].curation_interval_turns` ENABLES it (owner
+    // decision, 2026-08-22: background model spend stays opt-in; a manifest
+    // must not switch on token cost for a deployment that never asked).
+    // Config set while the bound provider declares nothing is a startup
+    // error, not a degraded mode — that deployment would believe memory is
+    // being tidied while nothing runs
+    // (`scheduled_after_turn_interval_override` carries the reasoning).
+    let memory_scheduled_op_interval_override =
+        crate::memory_provider_factory::scheduled_after_turn_interval_override(
+            memory_curation_interval_turns,
+            &memory_lifecycle,
+            local_runtime
+                .map(|local_runtime| local_runtime.memory_service_resolver.resolved_binding())
+                .as_ref(),
+        )
+        .map_err(|reason| RebornRuntimeError::MalformedConfig { reason })?;
+    // Which hook, at which phase, under which trust class is decided by the
+    // crate that owns the dispatcher, so this is one call into it.
+    let memory_scheduled_op_hook_wiring = match memory_lifecycle
+        .scheduled_op(ironclaw_extension_contracts::memory::MemoryScheduledTrigger::AfterTurn)
+        .filter(|_| resolved_memory_provider.is_some())
+        // Opt-in: an armed declaration with no configured interval stays
+        // dormant. The declared `interval_turns` is the provider's
+        // RECOMMENDED cadence for the config key, not an activation.
+        .filter(|_| memory_scheduled_op_interval_override.is_some())
+    {
+        None => None,
+        Some(declared) => {
+            // The prompt was resolved fail-closed at bundle construction, so a
+            // declared op always has one here. Treat its absence as the
+            // configuration error it would be rather than scheduling a pass
+            // with an empty instruction.
+            let prompt = local_runtime
+                .and_then(|local_runtime| {
+                    local_runtime
+                        .memory_scheduled_pass_prompts
+                        .iter()
+                        .find(|(trigger, _)| *trigger == declared.trigger)
+                        .map(|(_, prompt)| prompt.clone())
+                })
+                .ok_or_else(|| RebornRuntimeError::MalformedConfig {
+                    reason: "the bound memory provider declares an after_turn scheduled op whose \
+                             prompt asset did not resolve"
+                        .to_string(),
+                })?;
+            let declared = declared.clone();
+            Some(Box::new(
+                move |deps: ironclaw_turn_runner::runtime::AfterTurnHookDeps| {
+                    let submitter = Arc::new(ironclaw_assistant::UnboundTurnService::new(
+                        deps.thread_service,
+                        deps.coordinator,
+                        deps.thread_scope.agent_id,
+                        deps.thread_scope.project_id,
+                    ));
+                    // Fail closed: the bound provider declared this work. If the
+                    // hook cannot install, swallowing it would leave a
+                    // deployment that believes memory is being tidied while
+                    // nothing ever runs — a difference nothing surfaces later.
+                    // The build carries this out as a startup error instead.
+                    ironclaw_assistant::memory_scheduled_ops::after_turn_scheduled_op_dispatcher_factory(
+                        submitter,
+                        &declared,
+                        &prompt,
+                        memory_scheduled_op_interval_override,
+                    )
+                },
+            )
+                as ironclaw_turn_runner::runtime::AfterTurnHookWiring)
+        }
+    };
     let crate::memory_provider_factory::MemoryLifecycleConsumers {
         memory_context_service: wired_memory_context_service,
         after_turn_memory_writer: wired_after_turn_memory_writer,
@@ -4054,6 +4129,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         hook_security_audit_sink: Some(Arc::new(ironclaw_event_log::TracingSecurityAuditSink)),
         turn_event_sink: Some(turn_event_sink),
         hook_dispatcher_builder_factory,
+        after_turn_hook_wiring: memory_scheduled_op_hook_wiring,
         communication_context_provider,
         // For the production composition path, use the pre-minted wiring from
         // `build_production_shaped` so the `HostRuntimeServices` notifier (used by

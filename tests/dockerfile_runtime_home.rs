@@ -204,6 +204,91 @@ fn reborn_runtime_image_includes_sql_debug_clients() {
 }
 
 #[test]
+fn reborn_runtime_image_provides_in_worker_ssh_contract() {
+    let dockerfile = read_repo_file("Dockerfile");
+    let runtime_stage = dockerfile
+        .rsplit_once(" AS runtime\n")
+        .map(|(_, stage)| stage)
+        .expect("Dockerfile must define a final runtime stage");
+    let runtime_packages = runtime_stage
+        .split_once("install -y --no-install-recommends \\\n")
+        .and_then(|(_, packages)| packages.split_once("    && rm -rf /var/lib/apt/lists/*"))
+        .map(|(packages, _)| packages)
+        .expect("runtime stage must install its package list before apt cleanup");
+
+    for package in ["gosu", "openssh-server"] {
+        assert!(
+            runtime_packages
+                .lines()
+                .any(|line| line.trim().trim_end_matches('\\').trim() == package),
+            "runtime image must install {package} for in-worker SSH"
+        );
+    }
+    assert!(
+        runtime_stage
+            .contains("COPY docker/reborn/start-sshd.sh /usr/local/bin/ironclaw-reborn-start-sshd"),
+        "runtime image must install the SSH startup script"
+    );
+    assert!(
+        runtime_stage.contains(
+            "chmod +x /usr/local/bin/ironclaw-reborn-entrypoint /usr/local/bin/ironclaw-reborn-start-sshd"
+        ),
+        "runtime image must make the SSH startup script executable"
+    );
+    assert!(
+        runtime_stage.contains(
+            "useradd --non-unique --uid 1000 --gid ironclaw --home-dir /workspace --shell /bin/bash agent"
+        ),
+        "runtime image must create the advertised agent login"
+    );
+    assert!(
+        runtime_stage.contains("passwd -d agent"),
+        "runtime image must unlock the agent account for public-key authentication"
+    );
+    assert!(
+        runtime_stage.contains("EXPOSE 3000 2222"),
+        "runtime image must publish the SSH container port"
+    );
+    assert!(
+        runtime_stage.contains("USER root"),
+        "runtime entrypoint must start as root so it can launch sshd before dropping privileges"
+    );
+
+    let entrypoint = read_repo_file("docker/reborn/entrypoint.sh");
+    assert!(
+        entrypoint.contains("ironclaw-reborn-start-sshd")
+            && entrypoint.contains("exec gosu ironclaw \"$0\" \"$@\""),
+        "entrypoint must launch SSH before re-executing as ironclaw"
+    );
+
+    let ssh_startup = read_repo_file("docker/reborn/start-sshd.sh");
+    for directive in [
+        "Port 2222",
+        "ListenAddress 0.0.0.0",
+        "AllowUsers agent",
+        "AuthenticationMethods publickey",
+        "PasswordAuthentication no",
+        "PermitRootLogin no",
+    ] {
+        assert!(
+            ssh_startup.contains(directive),
+            "SSH startup must preserve the security directive: {directive}"
+        );
+    }
+    assert!(
+        ssh_startup.contains("chmod 755 \"$ssh_dir\"")
+            && ssh_startup.contains("chmod 644 \"$authorized_keys_tmp\""),
+        "the root-owned SSH state must remain readable by the unprivileged agent key check"
+    );
+
+    let docker_workflow = read_repo_file(".github/workflows/platform-and-compat.yml");
+    assert!(
+        docker_workflow.contains("--env IRONCLAW_REBORN_WEBUI_TOKEN=ssh-ci-webui-token-"),
+        "live SSH verification must keep the application alive with a test-only WebUI token"
+    );
+}
+
+#[test]
 fn reborn_runtime_image_can_run_the_orchestrator_healthcheck() {
     // Earlier build stages install curl for downloads, so inspect only the
     // shipped runtime stage used by container healthchecks.

@@ -54,6 +54,7 @@ mod inbound_turn;
 pub mod inspector_store;
 mod ledger;
 mod lifecycle;
+pub mod memory_scheduled_ops;
 mod model_channel_delivery;
 mod notification_channel_resolution;
 mod outbound_delivery;

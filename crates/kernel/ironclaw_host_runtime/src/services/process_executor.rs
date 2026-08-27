@@ -266,6 +266,7 @@ mod tests {
     use ironclaw_host_api::dispatch_test_support::TestDispatcher;
     use ironclaw_host_api::{
         authorized::{ProcessAuthorizedContinuation, ProcessAuthorizedInvocation},
+        capability::{CapabilityDescriptor, PermissionMode},
         dispatch::{
             CapabilityDispatchResult, DispatchError, DispatchFailureKind, RuntimeDispatchErrorKind,
         },
@@ -279,6 +280,7 @@ mod tests {
         resource::{
             ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceScope, ResourceUsage,
         },
+        runtime::{RuntimeKind, TrustClass},
     };
     use ironclaw_processes::{ProcessCancellationToken, ProcessRuntimePort, ProcessStart};
     use serde_json::json;
@@ -471,6 +473,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_dispatch_executor_rejects_legacy_descriptorless_continuation() {
+        let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
+        let mut request = sample_process_request("demo.background", RuntimeKind::Script);
+        request
+            .authorized_continuation
+            .as_mut()
+            .expect("script request has a continuation")
+            .descriptor = None;
+        let executor = runtime_dispatch_executor(dispatcher.clone(), &request).await;
+
+        let error = executor.execute(request).await.unwrap_err();
+
+        assert_eq!(error.kind, "missing_process_authorization");
+        assert_eq!(dispatcher.call_count(), 0);
+    }
+
+    #[tokio::test]
     async fn runtime_dispatch_executor_preserves_authenticated_actor() {
         // safety: test dispatcher call is in-memory and does not execute an external capability.
         let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
@@ -613,6 +632,22 @@ mod tests {
                     process_id,
                     parent_process_id: None,
                 },
+                descriptor: Some(CapabilityDescriptor {
+                    id: capability_id.clone(),
+                    provider: ExtensionId::new("system").unwrap(),
+                    runtime,
+                    trust_ceiling: TrustClass::UserTrusted,
+                    description: "process executor test capability".to_string(),
+                    parameters_schema: json!({"type": "object"}),
+                    effects: Vec::new(),
+                    default_permission: PermissionMode::Allow,
+                    runtime_credentials: Vec::new(),
+                    network_targets: Vec::new(),
+                    max_egress_bytes: None,
+                    resource_profile: None,
+                    origin_gate_matrix: None,
+                    standard_op: None,
+                }),
                 lane,
                 mounts: Some(MountView::default()),
                 resource_reservation: None,

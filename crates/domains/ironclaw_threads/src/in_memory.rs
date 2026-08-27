@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::stored_message::serialize_stored_thread_message;
-use crate::summary_artifacts::find_overlapping_summary;
+use crate::summary_artifacts::{find_overlapping_summary, sorted_context_summaries};
 use crate::title::derive_thread_title;
 use crate::tool_result_records::{
     tool_result_record_chunk, validate_tool_result_record_content,
@@ -1850,15 +1850,10 @@ fn ensure_user_accepted(
 }
 
 fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<ContextMessage> {
-    let replacement_summaries = thread
-        .summary_artifacts
-        .iter()
-        .filter(|summary| {
-            summary.model_context_policy
-                == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-                && !summary_covers_hidden_content(thread, summary)
-        })
-        .collect::<Vec<_>>();
+    let replacement_summaries = sorted_context_summaries(&thread.summary_artifacts, |summary| {
+        summary.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+            && !summary_covers_hidden_content(thread, summary)
+    });
     let mut skip_through = 0;
     let mut emitted_summaries = HashSet::new();
     let mut context = Vec::new();

@@ -3,6 +3,23 @@ use crate::{
     SummaryModelContextPolicy,
 };
 
+pub(crate) fn sorted_context_summaries(
+    summaries: &[SummaryArtifact],
+    mut eligible: impl FnMut(&SummaryArtifact) -> bool,
+) -> Vec<&SummaryArtifact> {
+    let mut selected = summaries
+        .iter()
+        .filter(|summary| eligible(summary))
+        .collect::<Vec<_>>();
+    selected.sort_unstable_by(|left, right| {
+        left.start_sequence
+            .cmp(&right.start_sequence)
+            .then_with(|| left.end_sequence.cmp(&right.end_sequence))
+            .then_with(|| left.content.cmp(&right.content))
+            .then_with(|| left.summary_id.as_uuid().cmp(&right.summary_id.as_uuid()))
+    });
+    selected
+}
 pub(crate) fn is_exact_compaction_summary_replay(
     summary: &SummaryArtifact,
     request: &CreateSummaryArtifactRequest,
@@ -116,6 +133,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn context_summaries_sort_stably_by_persisted_coordinates() {
+        let older = summary_with(1, 5, "older");
+        let left = summary_with(6, 10, "same content");
+        let right = summary_with(6, 10, "same content");
+        let forward = vec![older.clone(), left.clone(), right.clone()];
+        let reverse = vec![right, left, older];
+
+        let selected_forward = sorted_context_summaries(&forward, |_| true)
+            .into_iter()
+            .map(|summary| summary.summary_id)
+            .collect::<Vec<_>>();
+        let selected_reverse = sorted_context_summaries(&reverse, |_| true)
+            .into_iter()
+            .map(|summary| summary.summary_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(selected_reverse, selected_forward);
+    }
     #[test]
     fn exact_compaction_summary_replay_matches_on_coordinates_and_content() {
         let request = request();
