@@ -1419,6 +1419,7 @@ mod tests {
                 content_parts: Vec::new(),
                 reasoning: None,
                 reasoning_details: None,
+                tool_result_structured_json_view: false,
             },
         ];
 

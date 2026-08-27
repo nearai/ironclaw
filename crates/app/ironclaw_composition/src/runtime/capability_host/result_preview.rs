@@ -2,6 +2,7 @@ use ironclaw_loop_contracts::{
     MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
     ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail, ToolObservationStatus,
 };
+use ironclaw_threads::render_json_tool_result_page as render_json_page;
 use ironclaw_turns::LoopResultRef;
 
 pub(super) const RESULT_PREVIEW_MAX_BYTES: usize = 3 * 1024;
@@ -22,7 +23,7 @@ pub(super) struct FirstLookResultPreview {
 /// Build the inline first look from the exact bytes stored durably.
 pub(super) fn first_look_result_preview(
     serialized: &[u8],
-    result_ref: &str,
+    result_ref: &LoopResultRef,
     item_count: Option<u64>,
 ) -> Option<FirstLookResultPreview> {
     let Ok(full_text) = std::str::from_utf8(serialized) else {
@@ -38,11 +39,10 @@ pub(super) fn first_look_result_preview(
     let mut lower = RESULT_JSON_VIEW_MIN_BYTES;
     let mut upper = RESULT_PREVIEW_MAX_BYTES;
     let mut best = None;
+    let result_ref_text = result_ref.as_str();
     while lower <= upper {
         let budget = lower + (upper - lower) / 2;
-        let page = match ironclaw_threads::render_json_tool_result_page(
-            result_ref, serialized, "", 0, budget, None,
-        ) {
+        let page = match render_json_page(result_ref_text, serialized, "", 0, budget, None) {
             Ok(page) => page,
             Err(ironclaw_threads::ToolResultRecordReadError::JsonViewBudgetTooSmall { .. }) => {
                 lower = budget.saturating_add(1);
@@ -91,16 +91,13 @@ pub(super) fn first_look_result_preview(
 }
 
 fn structured_preview_fits_observation(
-    result_ref: &str,
+    result_ref: &LoopResultRef,
     byte_len: usize,
     preview: &str,
     item_count: Option<u64>,
 ) -> bool {
-    let Ok(result_ref) = LoopResultRef::new(result_ref.to_string()) else {
-        return false;
-    };
     let observation = result_reference_observation(
-        &result_ref,
+        result_ref,
         byte_len as u64,
         Some(FirstLookResultPreview {
             text: preview.to_string(),

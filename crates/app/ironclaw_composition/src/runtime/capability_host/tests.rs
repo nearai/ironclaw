@@ -2052,7 +2052,8 @@ mod tests {
             "padding": "x".repeat(10_000),
         });
         let serialized = serde_json::to_vec(&output).expect("fixture serializes");
-        let preview = first_look_result_preview(&serialized, "result:redaction-growth", None)
+        let result_ref = LoopResultRef::new("result:redaction-growth").expect("valid result ref");
+        let preview = first_look_result_preview(&serialized, &result_ref, None)
             .expect("text result has a first look");
 
         assert!(
