@@ -136,7 +136,9 @@ pub use channel_workflow::{
     ChannelWorkflowDeliveryServices, ChannelWorkflowIdentity, RebornChannelWorkflowFactory,
     RebornChannelWorkflowServices, build_session_inbound_ledger, channel_conversation_services,
 };
-pub use run_outcome_observer::RunOutcomeProcessCommitObserver;
+pub use run_outcome_observer::{
+    AuthNotificationBackfillProcessCommitObserver, RunOutcomeProcessCommitObserver,
+};
 // The conversation-binding family moved to
 // `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's
 // workflow factory hands a live binding service back to a caller that sits

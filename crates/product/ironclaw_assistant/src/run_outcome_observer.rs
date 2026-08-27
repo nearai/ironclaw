@@ -100,7 +100,10 @@ impl RunOutcomeProcessCommitObserver {
     }
 
     async fn publish_authentication_required(
-        &self,
+        inbox: &dyn NotificationInboxStorePort,
+        process_journal_source: Option<
+            &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
+        >,
         snapshot: &JournaledProcessSnapshot,
         run_id: TurnRunId,
         occurred_at: Timestamp,
@@ -117,10 +120,8 @@ impl RunOutcomeProcessCommitObserver {
             // an item the user cannot complete.
             return Ok(());
         };
-        if !self.auth_gate_is_current(snapshot, gate_ref).await? {
-            return self
-                .resolve_authentication_required(snapshot, run_id, gate_ref)
-                .await;
+        if !Self::auth_gate_is_current(process_journal_source, snapshot, gate_ref).await? {
+            return Self::resolve_authentication_required(inbox, snapshot, run_id, gate_ref).await;
         }
         let thread_id = snapshot
             .scope
@@ -139,7 +140,7 @@ impl RunOutcomeProcessCommitObserver {
             Some(gate_ref.as_str()),
         )
         .map_err(|error| format!("build auth notification id failed: {error}"))?;
-        self.inbox
+        inbox
             .publish(PublishNotificationRequest {
                 id: notification_id,
                 recipient: NotificationRecipient {
@@ -162,19 +163,20 @@ impl RunOutcomeProcessCommitObserver {
         // The continuation can settle the gate between the pre-publication
         // state read and the Inbox CAS. Re-read after the write and retire the
         // just-published record if recovery won that race.
-        if !self.auth_gate_is_current(snapshot, gate_ref).await? {
-            self.resolve_authentication_required(snapshot, run_id, gate_ref)
-                .await?;
+        if !Self::auth_gate_is_current(process_journal_source, snapshot, gate_ref).await? {
+            Self::resolve_authentication_required(inbox, snapshot, run_id, gate_ref).await?;
         }
         Ok(())
     }
 
     async fn auth_gate_is_current(
-        &self,
+        process_journal_source: Option<
+            &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
+        >,
         snapshot: &JournaledProcessSnapshot,
         gate_ref: &ironclaw_host_api::turn::TurnGateRef,
     ) -> Result<bool, String> {
-        let Some(source) = self.process_journal_source.as_ref() else {
+        let Some(source) = process_journal_source else {
             return Ok(true);
         };
         let current = source
@@ -192,7 +194,7 @@ impl RunOutcomeProcessCommitObserver {
     }
 
     async fn resolve_authentication_required(
-        &self,
+        inbox: &dyn NotificationInboxStorePort,
         snapshot: &JournaledProcessSnapshot,
         run_id: TurnRunId,
         gate_ref: &ironclaw_host_api::turn::TurnGateRef,
@@ -206,8 +208,7 @@ impl RunOutcomeProcessCommitObserver {
             Some(gate_ref.as_str()),
         )
         .map_err(|error| format!("build auth notification id failed: {error}"))?;
-        match self
-            .inbox
+        match inbox
             .resolve(NotificationMutationRequest {
                 recipient: NotificationRecipient {
                     tenant_id: snapshot.scope.tenant_id.clone(),
@@ -326,10 +327,9 @@ impl RunOutcomeProcessCommitObserver {
 #[async_trait]
 impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
     fn process_observer_id(&self) -> &'static str {
-        // v2 replays already-acknowledged Suspended commits once. The current
-        // process-state check above publishes only gates that remain blocked,
-        // so an upgrade reconciles pending auth without reviving settled runs.
-        "run-outcome-inbox-commit-observer-v2"
+        // Keep the original cursor: changing this observer's identity would
+        // replay every historical terminal outcome, not just auth gates.
+        "run-outcome-inbox-commit-observer-v1"
     }
 
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
@@ -345,8 +345,14 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
         if commit.kind == ProcessJournalKind::Suspended
             && commit.state.status == ProcessLifecycleStatus::Suspended
         {
-            self.publish_authentication_required(&commit.state, run_id, occurred_at)
-                .await?;
+            Self::publish_authentication_required(
+                self.inbox.as_ref(),
+                self.process_journal_source.as_deref(),
+                &commit.state,
+                run_id,
+                occurred_at,
+            )
+            .await?;
         }
         if !is_background_run(&metadata) {
             return Ok(());
@@ -421,6 +427,53 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// One-time durable replay for auth suspensions introduced after the primary
+/// outcome observer had already advanced past them. Its separate cursor is
+/// intentionally narrow: terminal outcomes stay owned by the original v1
+/// observer and cannot consume Inbox capacity during an upgrade.
+pub struct AuthNotificationBackfillProcessCommitObserver {
+    inbox: Arc<dyn NotificationInboxStorePort>,
+    process_journal_source: Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+}
+
+impl AuthNotificationBackfillProcessCommitObserver {
+    pub fn new(
+        inbox: Arc<dyn NotificationInboxStorePort>,
+        process_journal_source: Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+    ) -> Self {
+        Self {
+            inbox,
+            process_journal_source,
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for AuthNotificationBackfillProcessCommitObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "run-auth-inbox-backfill-observer-v1"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        if commit.kind != ProcessJournalKind::Suspended
+            || commit.state.status != ProcessLifecycleStatus::Suspended
+            || eligible_user_run(&commit.state).is_none()
+        {
+            return Ok(());
+        }
+        let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
+        let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        RunOutcomeProcessCommitObserver::publish_authentication_required(
+            self.inbox.as_ref(),
+            Some(self.process_journal_source.as_ref()),
+            &commit.state,
+            run_id,
+            occurred_at,
+        )
+        .await
     }
 }
 
@@ -552,7 +605,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::RunOutcomeProcessCommitObserver;
+    use super::{AuthNotificationBackfillProcessCommitObserver, RunOutcomeProcessCommitObserver};
 
     struct CurrentProcessSource {
         snapshot: Mutex<JournaledProcessSnapshot>,
@@ -640,6 +693,23 @@ mod tests {
                 mounts,
             )),
             ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
+    }
+
+    fn inbox_with_capacity(capacity: usize) -> Arc<NotificationInboxStore<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/run-auth-backfill-capacity")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(InMemoryBackend::new()),
+                mounts,
+            )),
+            capacity,
         ))
     }
 
@@ -877,15 +947,22 @@ mod tests {
         let mut current = historical_suspension.state.clone();
         current.status = ProcessLifecycleStatus::Queued;
         current.suspension = None;
-        let observer = RunOutcomeProcessCommitObserver::new(
+        let primary = RunOutcomeProcessCommitObserver::new(
             Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
             Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
-        )
-        .with_process_journal_source(Arc::new(CurrentProcessSource::new(current)));
+        );
+        let observer = AuthNotificationBackfillProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(CurrentProcessSource::new(current)),
+        );
 
         assert_eq!(
+            primary.process_observer_id(),
+            "run-outcome-inbox-commit-observer-v1"
+        );
+        assert_eq!(
             observer.process_observer_id(),
-            "run-outcome-inbox-commit-observer-v2"
+            "run-auth-inbox-backfill-observer-v1"
         );
         observer
             .observe_process_commit(historical_suspension)
@@ -893,6 +970,49 @@ mod tests {
             .expect("historical suspension reconciliation");
 
         assert!(records(inbox.as_ref()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auth_backfill_does_not_consume_capacity_with_historical_outcomes() {
+        let inbox = inbox_with_capacity(1);
+        let auth_run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:pending-during-upgrade").expect("gate ref");
+        let mut suspended = commit(
+            auth_run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let observer = AuthNotificationBackfillProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(CurrentProcessSource::new(suspended.state.clone())),
+        );
+
+        observer
+            .observe_process_commit(commit(
+                TurnRunId::new(),
+                ProcessLifecycleStatus::Completed,
+                ProcessJournalKind::Completed,
+                "scheduled_trigger",
+            ))
+            .await
+            .expect("historical outcome is outside auth backfill scope");
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("pending auth suspension uses the remaining Inbox capacity");
+
+        assert_eq!(
+            records(inbox.as_ref()).await,
+            vec![NotificationKind::AuthenticationRequired]
+        );
     }
 
     #[tokio::test]
