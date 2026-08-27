@@ -500,6 +500,53 @@ for slash_var in IRONCLAW_REBORN_HOME IRONCLAW_REBORN_WORKSPACE_ROOT; do
   fi
 done
 
+# 9b. The root pass must repair ownership of pre-existing home CONTENTS, not
+#     just the home directory itself -- and must leave the `ssh` state
+#     directory alone. A persistent volume outlives the image, and this image
+#     ran as `ironclaw` until in-worker SSH required a root entrypoint, so a
+#     volume can carry root-written files. One unreadable file is fatal rather
+#     than degraded: the provider-registry overlay is fail-closed, so a
+#     root-owned providers.json crash-loops the container. `ssh` is excluded
+#     because start-sshd.sh refuses to start unless it owns that directory.
+own_home="${WORK}/own-repair"
+mkdir -p "$own_home/ssh" "$own_home/nested"
+printf '%s' "$LEGACY_DISABLED" > "${own_home}/config.toml"
+printf '{}' > "${own_home}/providers.json"
+printf 'x' > "${own_home}/nested/deep.db"
+printf 'k' > "${own_home}/ssh/ssh_host_ed25519_key"
+own_chown_record="${WORK}/own-chown-argv"
+
+rm -f "$own_chown_record"
+touch "$own_chown_record"
+(
+  export PATH="${WORK}/root-bin:${WORK}/bin:${PATH}"
+  export IRONCLAW_REBORN_HOME="$own_home"
+  export IRONCLAW_REBORN_DEFAULT_CONFIG=/opt/ironclaw/reborn/config.toml
+  export IRONCLAW_STUB_ARGV_PATH="${own_home}/argv"
+  export IRONCLAW_STUB_WORKSPACE_PATH="${own_home}/workspace-root"
+  export IRONCLAW_STUB_CHOWN_PATH="$own_chown_record"
+  export IRONCLAW_STUB_GOSU_PATH="${own_home}/gosu-argv"
+  export IRONCLAW_STUB_UID=0
+  unset IRONCLAW_REBORN_WORKSPACE_ROOT
+  unset RAILWAY_ENVIRONMENT RAILWAY_PROJECT_ID RAILWAY_SERVICE_ID RAILWAY_VOLUME_MOUNT_PATH
+  sh "$ENTRYPOINT" >/dev/null 2>"${own_home}/entrypoint.err"
+) || true
+
+# The chown stub records its argv rather than executing, so assert on what the
+# root pass asked for: every top-level home entry except `ssh`.
+for own_expected in config.toml providers.json nested; do
+  if ! grep -q "${own_home}/${own_expected}" "$own_chown_record"; then
+    echo "FAIL[home_contents_ownership]: root pass never chowned ${own_expected}; a root-written file would crash-loop the container" >&2
+    cat "$own_chown_record" >&2
+    failures=$((failures + 1))
+  fi
+done
+if grep -q "${own_home}/ssh" "$own_chown_record"; then
+  echo "FAIL[home_contents_ownership]: root pass chowned the ssh state directory; start-sshd.sh requires it to stay root-owned" >&2
+  cat "$own_chown_record" >&2
+  failures=$((failures + 1))
+fi
+
 # 10. The dead variable has no reader left anywhere in the tree.
 if grep -rn 'IRONCLAW_REBORN_SLACK_ENABLED' \
   --include='*.rs' --include='*.sh' --include='*.toml' \
