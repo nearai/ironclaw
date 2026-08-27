@@ -334,7 +334,8 @@ where
                         summary_artifact_id: LoopSummaryArtifactId::new(
                             summary_artifact_id.to_string(),
                         )
-                        .map_err(|_| {
+                        .map_err(|error| {
+                            tracing::debug!(%error, "summary artifact id is invalid");
                             CompactionError::PersistenceFailed {
                                 safe_summary: safe("summary artifact id is invalid"),
                             }
@@ -355,8 +356,11 @@ where
                 through_sequence: request.drop_through_seq,
             })
             .await
-            .map_err(|_| CompactionError::PersistenceFailed {
-                safe_summary: safe("thread message range unavailable"),
+            .map_err(|error| {
+                tracing::debug!(%error, "thread message range unavailable");
+                CompactionError::PersistenceFailed {
+                    safe_summary: safe("thread message range unavailable"),
+                }
             })?;
         if range.thread.scope != request.expected_scope {
             return Err(CompactionError::PersistenceFailed {
@@ -597,8 +601,11 @@ where
             })?;
         Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new(artifact.summary_id.to_string())
-                .map_err(|_| CompactionError::PersistenceFailed {
-                    safe_summary: safe("summary artifact id is invalid"),
+                .map_err(|error| {
+                    tracing::debug!(%error, "summary artifact id is invalid");
+                    CompactionError::PersistenceFailed {
+                        safe_summary: safe("summary artifact id is invalid"),
+                    }
                 })?,
             compression_ratio_ppm: summary.compression_ratio_ppm,
             redacted_leak_count: summary.redacted_leak_count,
