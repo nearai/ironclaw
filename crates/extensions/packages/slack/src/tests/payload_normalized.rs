@@ -218,6 +218,11 @@ fn a_broadcast_mention_still_reaches_the_host_as_a_bot_mention() {
 /// `app_mention` is Slack's own statement that a human named this bot, so its
 /// `subtype` is never consulted. A subtype nobody has seen before therefore
 /// cannot silence a mention — which is the failure mode the allowlist had.
+///
+/// `document_mention` is the one documented carve-out — see
+/// [`a_canvas_document_mention_is_dropped_for_synthetic_text`] below — so it
+/// is deliberately excluded from this loop rather than asserted here as
+/// still-admitted.
 #[test]
 fn an_app_mention_is_admitted_whatever_subtype_slack_stamps_on_it() {
     for subtype in [
@@ -246,6 +251,59 @@ fn an_app_mention_is_admitted_whatever_subtype_slack_stamps_on_it() {
             "app_mention with subtype {subtype} must still start a run"
         );
     }
+}
+
+/// The one documented case where `app_mention` firing does NOT mean a
+/// person addressed the bot in conversation: a canvas-body mention. Slack
+/// sets `subtype: "document_mention"` and writes `text` itself (a caption
+/// such as "was mentioned in a canvas") — the person's actual words live
+/// only in `blocks`, which this contract never reads. Fixture is the exact
+/// example payload from
+/// <https://docs.slack.dev/reference/events/message/document_mention/>, so
+/// this test is traceable to the source rather than an invented shape.
+/// Before the fix this fell through the `AppMention` exemption above and
+/// started a full agent turn on Slack-generated text.
+#[test]
+fn a_canvas_document_mention_is_dropped_for_synthetic_text() {
+    let outcome = normalize(serde_json::json!({
+        "event": {
+            "user": "UA1BCD3EF",
+            "subtype": "document_mention",
+            "document_mention": {
+                "file_id": "F123ABCDEFG",
+                "section_id": "temp:C:GQL...",
+                "mentioning_user_ids": ["UA1BCD3EF"]
+            },
+            "type": "app_mention",
+            "ts": "1716411280.657549",
+            "text": "<@U123456ABC7> was mentioned in a canvas",
+            "blocks": [{
+                "type": "section",
+                "block_id": "gcn3v",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": ">>>Hey <@U123456ABC7>",
+                    "verbatim": false
+                }
+            }],
+            "team": "T1ABC2DE3",
+            "channel": "C012ABCDEFG",
+            "event_ts": "1716411280.657549"
+        },
+        "type": "event_callback",
+        "team_id": "T1ABC2DE3",
+        "event_id": "EvDocumentMention"
+    }));
+    assert!(
+        matches!(
+            outcome,
+            SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::SyntheticMentionText
+            }
+        ),
+        "a canvas-body mention must be dropped, not started as a turn on \
+         Slack-written caption text: normalized to {outcome:?}"
+    );
 }
 
 /// The exemption covers "how does this render", never "who wrote this" — a

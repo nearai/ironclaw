@@ -855,6 +855,94 @@ mod tests {
         );
     }
 
+    /// Regression for the "Also send to channel" drop (#7925): Slack stamps
+    /// the SAME `app_mention` event with `subtype: "thread_broadcast"` when a
+    /// threaded reply is broadcast to the channel. Coverage previously lived
+    /// only on the private `normalize_slack_event` helper — this drives the
+    /// production caller, `SlackChannelAdapter::receive`, so a regression in
+    /// the `receive`-level admission guard (not just the helper) fails here.
+    #[tokio::test]
+    async fn a_broadcast_mention_reaches_receive_as_a_bot_mention_anchored_on_its_thread() {
+        let outcome = inbound(
+            br#"{
+                "type": "event_callback",
+                "event_id": "EvBroadcast",
+                "team_id": "T-A",
+                "event": {
+                    "type": "app_mention",
+                    "user": "U123",
+                    "channel": "C123",
+                    "subtype": "thread_broadcast",
+                    "text": "<@UBOT> what do you think?",
+                    "thread_ts": "1710000000.000010",
+                    "ts": "1710000000.000011"
+                }
+            }"#,
+        )
+        .await
+        .expect("broadcast mention parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages, broadcast mention must not be dropped");
+        };
+        assert_eq!(messages[0].text, "what do you think?");
+        assert_eq!(messages[0].trigger, ProductTriggerReason::BotMention);
+        assert_eq!(
+            messages[0].conversation.topic_id(),
+            Some("1710000000.000010"),
+            "a broadcast mention stays anchored to the thread it was written in, not its own ts"
+        );
+    }
+
+    /// The counterexample to the fix above: `app_mention` with
+    /// `subtype: "document_mention"` is a canvas-body mention, not a person
+    /// addressing the bot in conversation. Slack writes `text` itself (a
+    /// caption); the person's real words live only in `blocks`, a field
+    /// this contract never reads. Fixture is Slack's own documented example
+    /// payload (<https://docs.slack.dev/reference/events/message/document_mention/>).
+    /// Drives the production caller, `SlackChannelAdapter::receive`, so a
+    /// regression that re-admits this shape through the `AppMention`
+    /// exemption fails here, not just on the private normalization helper.
+    #[tokio::test]
+    async fn a_canvas_document_mention_is_ignored_by_receive() {
+        let outcome = inbound(
+            br#"{
+                "event": {
+                    "user": "UA1BCD3EF",
+                    "subtype": "document_mention",
+                    "document_mention": {
+                        "file_id": "F123ABCDEFG",
+                        "section_id": "temp:C:GQL...",
+                        "mentioning_user_ids": ["UA1BCD3EF"]
+                    },
+                    "type": "app_mention",
+                    "ts": "1716411280.657549",
+                    "text": "<@U123456ABC7> was mentioned in a canvas",
+                    "blocks": [{
+                        "type": "section",
+                        "block_id": "gcn3v",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ">>>Hey <@U123456ABC7>",
+                            "verbatim": false
+                        }
+                    }],
+                    "team": "T1ABC2DE3",
+                    "channel": "C012ABCDEFG",
+                    "event_ts": "1716411280.657549"
+                },
+                "type": "event_callback",
+                "team_id": "T1ABC2DE3",
+                "event_id": "EvDocumentMention"
+            }"#,
+        )
+        .await
+        .expect("document mention parses");
+        assert!(
+            matches!(outcome, InboundOutcome::Ignore),
+            "a canvas-body mention must not start a turn on Slack-written caption text"
+        );
+    }
+
     /// `inbound` with an explicit `can_reply_in_threads` (the helpers above
     /// pin `true`, Slack's shipped manifest value) — the seam for proving the
     /// flag drives placement rather than decorating the manifest.

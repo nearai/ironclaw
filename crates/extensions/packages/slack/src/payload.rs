@@ -22,6 +22,22 @@ const SLACK_FILE_SHARE_SUBTYPE: &str = "file_share";
 /// Slack's marker for a post authored by an integration. Authorship, not
 /// rendering — see the guard in [`normalize_user_message`].
 const SLACK_BOT_MESSAGE_SUBTYPE: &str = "bot_message";
+/// Slack's marker for a canvas-body mention: a person mentions the bot
+/// inside a canvas document, and Slack fires `app_mention` for it — but with
+/// this `subtype` set, `text` holding a Slack-written caption ("was
+/// mentioned in a canvas") rather than what the person typed, and no
+/// `bot_id`. The person's actual words live only in `blocks`, a field this
+/// contract never reads. Documented at
+/// <https://docs.slack.dev/reference/events/message/document_mention/>,
+/// whose example payload is exactly this shape; the same docs note that a
+/// mention inside a threaded *comment* still arrives as an ordinary
+/// `app_mention` with no such subtype. That makes `document_mention` the
+/// one documented case where `app_mention` is not a person addressing the
+/// bot in conversation — checked in [`normalize_user_message`] ahead of the
+/// `AppMention` exemption, the same way `SLACK_BOT_MESSAGE_SUBTYPE` is
+/// checked ahead of it, so it is rejected on every path rather than
+/// exempted by it.
+const SLACK_DOCUMENT_MENTION_SUBTYPE: &str = "document_mention";
 
 /// Message `subtype` values that carry one person's own message, rendered
 /// specially.
@@ -102,6 +118,11 @@ pub enum SlackIgnoreReason {
     AmbientChannelMessage,
     /// Authored by an integration, including this bot's own echo.
     BotAuthored,
+    /// An `app_mention` whose `subtype` is `document_mention`: a person did
+    /// author the mention, but Slack — not that person — wrote the event's
+    /// `text`, and their actual words live only in a `blocks` field this
+    /// contract does not read. See [`SLACK_DOCUMENT_MENTION_SUBTYPE`].
+    SyntheticMentionText,
     /// A `message` whose `subtype` is not in [`HUMAN_MESSAGE_SUBTYPES`].
     /// Never reached from an `app_mention`.
     NonUserMessageSubtype(String),
@@ -358,6 +379,24 @@ fn normalize_user_message(
     if event.bot_id.is_some() || event.subtype.as_deref() == Some(SLACK_BOT_MESSAGE_SUBTYPE) {
         return Ok(SlackInboundEvent::Ignore {
             reason: SlackIgnoreReason::BotAuthored,
+        });
+    }
+    // Canvas-body mention. Checked HERE, ahead of the `AppMention`
+    // exemption below, for the same reason `bot_message` is checked ahead
+    // of it: the exemption below is a statement about *rendering*
+    // ("`subtype` doesn't gate an `app_mention`"), and this is not a
+    // rendering question. `document_mention` is the one documented case
+    // where Slack firing `app_mention` does NOT mean a person addressed
+    // the bot in conversation — a person did trigger it, but Slack itself
+    // wrote `text` (a caption such as "was mentioned in a canvas"), and
+    // the person's real words are only in `blocks`, which this contract
+    // never reads. Admitting it would start a full agent turn on
+    // Slack-generated text. See [`SLACK_DOCUMENT_MENTION_SUBTYPE`] for the
+    // docs citation; a mention in a threaded *comment* carries no such
+    // subtype and is unaffected.
+    if event.subtype.as_deref() == Some(SLACK_DOCUMENT_MENTION_SUBTYPE) {
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::SyntheticMentionText,
         });
     }
     // Content shape — deliberately NOT asked of an `app_mention`.
