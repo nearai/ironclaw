@@ -153,6 +153,21 @@ impl MemoryServiceResolver {
         }
     }
 
+    /// The binding this resolver serves, before any provider is constructed.
+    ///
+    /// Exposed because some consumers must decide on the KIND of backend, not
+    /// merely on whether one resolved: a host-bundled native binding supports
+    /// write shapes (versioned replacement of a standing document) that a
+    /// remote third-party backend may reject outright. `None` policy is the
+    /// native default, matching [`Self::native`].
+    pub fn resolved_binding(&self) -> MemoryProviderBinding {
+        self.policy
+            .as_ref()
+            .map_or(MemoryProviderBinding::Native, |policy| {
+                policy.binding().clone()
+            })
+    }
+
     /// Resolve how memory binds, before provider construction. Disabled fails
     /// closed (no provider).
     fn provider_resolution(&self) -> ProviderResolution {

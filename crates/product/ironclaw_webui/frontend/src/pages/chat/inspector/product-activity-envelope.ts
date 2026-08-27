@@ -63,11 +63,11 @@ function publishCapabilityActivity(
     runId,
     kind,
     activityId,
-    summary: kind === ActivityKind.ToolStarted
-      ? "Tool invocation started"
+    summaryKey: kind === ActivityKind.ToolStarted
+      ? "inspector.activity.summary.toolStarted"
       : kind === ActivityKind.ToolCompleted
-        ? "Tool invocation completed"
-        : "Tool invocation failed",
+        ? "inspector.activity.summary.toolCompleted"
+        : "inspector.activity.summary.toolFailed",
     dedupeKey: `tool:${activityId}:${status}`,
   });
 }
@@ -81,7 +81,9 @@ function publishRunStatusActivity(threadId: unknown, runStatus: RunStatusFrame):
       threadId,
       runId,
       kind: status === "queued" ? ActivityKind.TurnStarted : ActivityKind.Progress,
-      summary: status === "queued" ? "Turn queued" : "Turn running",
+      summaryKey: status === "queued"
+        ? "inspector.activity.summary.turnQueued"
+        : "inspector.activity.summary.turnRunning",
       dedupeKey: `run:${status}`,
     });
   } else if (["completed", "succeeded"].includes(status)) {
@@ -89,22 +91,22 @@ function publishRunStatusActivity(threadId: unknown, runStatus: RunStatusFrame):
       threadId,
       runId,
       kind: ActivityKind.FinalResponseCompleted,
-      summary: "Final response completed",
+      summaryKey: "inspector.activity.summary.finalResponseCompleted",
       dedupeKey: "run:completed",
     });
   } else if (FAILED_RUN_STATUSES.has(status)) {
-    const summary = status === "cancelled"
-      ? "Run cancelled"
+    const summaryKey = status === "cancelled"
+      ? "inspector.activity.summary.runCancelled"
       : status === "timed_out"
-        ? "Run timed out"
+        ? "inspector.activity.summary.runTimedOut"
         : status === "recovery_required"
-          ? "Run requires recovery"
-          : "Run failed";
+          ? "inspector.activity.summary.runRequiresRecovery"
+          : "inspector.activity.summary.runFailed";
     publishProductInspectorActivity({
       threadId,
       runId,
       kind: ActivityKind.FinalResponseCompleted,
-      summary,
+      summaryKey,
       dedupeKey: "run:terminal-failure",
     });
   } else if (status.startsWith("blocked_") || status === "awaiting_gate") {
@@ -112,7 +114,7 @@ function publishRunStatusActivity(threadId: unknown, runStatus: RunStatusFrame):
       threadId,
       runId,
       kind: ActivityKind.GateBlocked,
-      summary: "Run blocked by a gate",
+      summaryKey: "inspector.activity.summary.runBlockedByGate",
       dedupeKey: `run:${status}`,
     });
   }
@@ -131,7 +133,7 @@ export function publishProductInspectorEnvelope(
       threadId,
       runId: frame.ack?.run_id,
       kind: ActivityKind.TurnStarted,
-      summary: "Turn accepted",
+      summaryKey: "inspector.activity.summary.turnAccepted",
       dedupeKey: "turn:accepted",
     });
     return;
@@ -141,7 +143,7 @@ export function publishProductInspectorEnvelope(
       threadId,
       runId: frame.progress?.turn_run_id || fallbackRunId,
       kind: ActivityKind.Progress,
-      summary: "Safe run progress received",
+      summaryKey: "inspector.activity.summary.progressReceived",
       dedupeKey: `progress:${type}`,
     });
     return;
@@ -157,9 +159,9 @@ export function publishProductInspectorEnvelope(
       threadId,
       runId,
       kind: ActivityKind.GateBlocked,
-      summary: type === "auth_required"
-        ? "Run blocked for authorization"
-        : "Run blocked by a gate",
+      summaryKey: type === "auth_required"
+        ? "inspector.activity.summary.runBlockedForAuthorization"
+        : "inspector.activity.summary.runBlockedByGate",
       dedupeKey: `gate:${gateRef}`,
     });
     return;
@@ -169,7 +171,7 @@ export function publishProductInspectorEnvelope(
       threadId,
       runId: frame.reply?.turn_run_id || fallbackRunId,
       kind: ActivityKind.FinalResponseCompleted,
-      summary: "Final response completed",
+      summaryKey: "inspector.activity.summary.finalResponseCompleted",
       dedupeKey: "final:reply",
     });
     return;

@@ -811,7 +811,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // ToolAdapter auth errors carry the neutral bounded provider diagnostic
         // through the extension ABI. Parsing and model-safety behavior remain
         // in runtime lanes and loop_host.
-        ("ironclaw_extension_contracts", 10_841),
+        // 10_841 -> 11_451 (2026-08-22, `[[memory.scheduled_ops]]`): the
+        // scheduled-op declaration family on the `[memory]` surface — the
+        // closed trigger vocabulary, the tagged op kind and its pass shape,
+        // two host-owned bounds (interval floor, model-call ceiling), the
+        // wire/parsed split that makes an invalid entry unrepresentable, and
+        // the inline test module this ratchet also counts. Declaration and
+        // shape validation only: the two rules needing the manifest-wide view
+        // live in `ironclaw_extension_registry::v3`, asset resolution stays
+        // host-side like `guidance_doc`'s, and nothing here schedules,
+        // dispatches, or invokes anything. Count read from this test's own
+        // failure message.
+        ("ironclaw_extension_contracts", 11_451),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
@@ -902,9 +913,19 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // the type that already owns it, matching the sibling
         // `deny_capability_ids`/`narrow_to_capability_ids` builders. The
         // behavior that reads them lives in `ironclaw_turn_runner`, so there is
-        // no lower crate to move this to. Count read from this test's own
-        // failure message, never counted by eye.
-        ("ironclaw_host_api", 20_632),
+        // no lower crate to move this to.
+        // 20_632 -> 21_098 (2026-08-26, #7810 merged with main plus final
+        // review fixes): the provider-neutral credentialed-process boundary
+        // adds authorized binding DTOs, invocation bundle keys, the exact
+        // capability descriptor carried through sealed authorization and
+        // durable process continuation, a release-build witness mismatch
+        // error, and the shared sandbox credential-environment validator.
+        // These are neutral contract and authorization-evidence declarations.
+        // Credential selection, staging, execution, bundle I/O, and proxy
+        // substitution remain in their owning kernel, host-runtime, and
+        // sandbox crates. Count re-captured from this test; the stored ceiling
+        // excludes the standing 150-line working tolerance.
+        ("ironclaw_host_api", 20_948),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

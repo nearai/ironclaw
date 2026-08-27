@@ -376,6 +376,24 @@ const ACTIVITY_LABEL_KEYS: Record<ActivityKind, string> = {
   [ActivityKind.StreamResumed]: "inspector.activity.streamResumed",
 };
 
+const AUTHORITATIVE_ACTIVITY_SUMMARY_KEYS = new Map<string, string>([
+  [`${ActivityKind.TurnStarted}\0Turn started`, "inspector.activity.turnStarted"],
+  [`${ActivityKind.PromptPrepared}\0Prompt prepared`, "inspector.activity.promptPrepared"],
+  [`${ActivityKind.ModelCallStarted}\0Model call started`, "inspector.activity.modelCallStarted"],
+  [`${ActivityKind.ModelCallCompleted}\0Model call completed`, "inspector.activity.modelCallCompleted"],
+  [`${ActivityKind.ToolStarted}\0Tool invocation started`, "inspector.activity.summary.toolStarted"],
+  [`${ActivityKind.ToolCompleted}\0Tool invocation completed`, "inspector.activity.summary.toolCompleted"],
+]);
+
+function activitySummaryKey(entry: InspectorActivityRow): string | null {
+  const summary = entry.summary?.content;
+  if (!summary) return null;
+  if (entry.key.startsWith("local:") && summary.startsWith("inspector.activity.summary.")) {
+    return summary;
+  }
+  return AUTHORITATIVE_ACTIVITY_SUMMARY_KEYS.get(`${entry.kind}\0${summary}`) ?? null;
+}
+
 function shortId(value: string | null): string | null {
   return value && value.length > 12 ? `${value.slice(0, 8)}…` : value;
 }
@@ -566,6 +584,7 @@ function ActivityEntry({
     || entry.kind === ActivityKind.ToolFailed;
   const correlation = shortId(entry.activity_id || entry.model_call_id);
   const timestamp = new Date(entry.occurred_at);
+  const summaryKey = activitySummaryKey(entry);
   return (
     <li className="rounded-xl border border-[var(--v2-panel-border)] p-3" data-activity-kind={entry.kind}>
       <div className="flex items-start justify-between gap-3">
@@ -577,7 +596,8 @@ function ActivityEntry({
           </p>
           {entry.summary?.content && (
             <p className="mt-1 break-words text-xs text-[var(--v2-text-muted)]">
-              {entry.summary.content}{entry.summary.truncated ? "…" : ""}
+              {summaryKey ? t(summaryKey) : entry.summary.content}
+              {entry.summary.truncated ? "…" : ""}
             </p>
           )}
         </div>

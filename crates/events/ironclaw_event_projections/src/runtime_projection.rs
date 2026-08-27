@@ -41,6 +41,16 @@ impl RuntimeProjectionState {
             .retain(|invocation_id, _| invocations.contains(invocation_id));
     }
 
+    pub(crate) fn retain_capability_activities_for_run(&mut self, run_id: InvocationId) {
+        self.runs.clear();
+        self.capability_activities
+            .retain(|_, activity| activity.run_id == Some(run_id));
+    }
+
+    pub(crate) fn capability_activity_count(&self) -> usize {
+        self.capability_activities.len()
+    }
+
     pub(crate) fn apply(&mut self, entry: &EventLogEntry<RuntimeEvent>) {
         apply_run_event(&mut self.runs, entry);
         apply_capability_activity_event(&mut self.capability_activities, entry);

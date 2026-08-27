@@ -22,8 +22,8 @@ use ironclaw_host_runtime::{
     TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
     TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TRIGGER_RUN_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_package,
-    native_memory_first_party_package,
+    TRIGGER_RUN_CAPABILITY_ID, TRIGGER_STATUS_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    builtin_first_party_package, native_memory_first_party_package,
 };
 use ironclaw_loop_contracts::LoopHostMilestoneKind;
 use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
@@ -75,6 +75,7 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     TRIGGER_PAUSE_CAPABILITY_ID,
     TRIGGER_RESUME_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID,
+    TRIGGER_STATUS_CAPABILITY_ID,
     // Manual trigger runs are user-direct product gestures, not tools exposed
     // to the ordinary model surface exercised below. Their positive host path
     // is covered by `builtin_trigger_run_dispatches_submitted_and_replayed_through_host_runtime`;
@@ -462,6 +463,8 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID).expect("valid capability id");
     let trigger_remove =
         CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID).expect("valid capability id");
+    let trigger_status =
+        CapabilityId::new(TRIGGER_STATUS_CAPABILITY_ID).expect("valid capability id");
     let missing_trigger_id = "01HZZZZZZZZZZZZZZZZZZZZZZZ";
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::AssertProviderToolsThenProviderToolCalls {
@@ -471,6 +474,7 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
                 trigger_remove.clone(),
                 trigger_pause.clone(),
                 trigger_resume.clone(),
+                trigger_status.clone(),
             ],
             calls: vec![RebornScriptedProviderToolCall::new(
                 trigger_create.clone(),
@@ -499,6 +503,14 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
             calls: vec![RebornScriptedProviderToolCall::new(
                 trigger_remove.clone(),
                 "call_trigger_remove_missing",
+                serde_json::json!({ "trigger_id": missing_trigger_id }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                trigger_status.clone(),
+                "call_trigger_status_missing",
                 serde_json::json!({ "trigger_id": missing_trigger_id }),
             )],
             expected_tool_results: Vec::new(),
@@ -535,10 +547,11 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
         .expect("final reply");
 
     let invocations = harness.capability_invocations();
-    assert_eq!(invocations.len(), 3);
+    assert_eq!(invocations.len(), 4);
     assert_eq!(invocations[0].capability_id, trigger_create);
     assert_eq!(invocations[1].capability_id, trigger_list);
     assert_eq!(invocations[2].capability_id, trigger_remove);
+    assert_eq!(invocations[3].capability_id, trigger_status);
 
     let results = harness.capability_results();
     assert_eq!(results.len(), 3);
@@ -562,10 +575,11 @@ async fn reborn_trace_trigger_management_first_party_tools_parity() {
     );
 
     let requests = harness.model_requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 5);
     assert_eq!(tool_result_count(&requests[1]), 1);
     assert_eq!(tool_result_count(&requests[2]), 2);
     assert_eq!(tool_result_count(&requests[3]), 3);
+    assert_eq!(tool_result_count(&requests[4]), 4);
     assert_milestone_order(
         &harness.milestones(),
         |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),

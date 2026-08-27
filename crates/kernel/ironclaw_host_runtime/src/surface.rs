@@ -13,7 +13,7 @@ use ironclaw_host_api::{
     messaging::{STANDARD_SCHEMA_REF_PREFIX, resolve_standard_schema_ref},
     resource::ResourceEstimate,
     runtime::RuntimeKind,
-    runtime_policy::EffectiveRuntimePolicy,
+    runtime_policy::{EffectiveRuntimePolicy, ProcessBackendKind},
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::{Value, json};
@@ -299,6 +299,7 @@ impl<'a> CapabilityCatalog<'a> {
                         descriptor.id, reference
                     ))
                 })?;
+            self.attach_shell_credential_context_catalog(&mut descriptor)?;
             return Ok(descriptor);
         }
 
@@ -371,6 +372,96 @@ impl<'a> CapabilityCatalog<'a> {
             resolve_package_input_schema_ref(filesystem, package, &descriptor.id, &reference)
                 .await?;
         Ok(descriptor)
+    }
+
+    fn attach_shell_credential_context_catalog(
+        &self,
+        descriptor: &mut CapabilityDescriptor,
+    ) -> Result<(), HostRuntimeError> {
+        if descriptor.id.as_str() != crate::first_party_tools::SHELL_CAPABILITY_ID
+            || self.runtime_policy.process_backend != ProcessBackendKind::UserSandbox
+        {
+            return Ok(());
+        }
+
+        let mut context_ids = self
+            .registry
+            .extensions()
+            .filter(|package| {
+                package
+                    .capabilities
+                    .iter()
+                    .flat_map(|capability| capability.runtime_credentials.iter())
+                    .any(|requirement| requirement.placeholder_env.is_some())
+            })
+            .map(|package| package.id.as_str().to_string())
+            .collect::<Vec<_>>();
+        context_ids.sort_unstable();
+
+        let active_contexts = if context_ids.is_empty() {
+            "none".to_string()
+        } else {
+            context_ids.join(", ")
+        };
+        let mut context_schema = json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "maxItems": ironclaw_host_api::process::MAX_SHELL_CREDENTIAL_CONTEXTS,
+            "uniqueItems": true,
+            "description": format!(
+                "Required explicit credential authority for this managed-sandbox shell \
+                 invocation. Select active extension IDs whose complete manifest-declared \
+                 credential requirements are needed, or use [] only when the command needs no \
+                 authenticated account access. Use extension IDs, never provider names, secret \
+                 handles, environment-variable names, or executable names. Authorization and \
+                 the managed proxy still enforce each credential's exact destination. Active \
+                 credential contexts for this runtime: {active_contexts}."
+            )
+        });
+        if context_ids.is_empty() {
+            context_schema["maxItems"] = json!(0);
+        } else {
+            context_schema["items"]["enum"] = json!(context_ids);
+        }
+
+        let properties = descriptor
+            .parameters_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                HostRuntimeError::invalid_request(
+                    "built-in shell schema is missing properties".to_string(),
+                )
+            })?;
+        let command_description = properties
+            .get("command")
+            .and_then(|command| command.get("description"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                HostRuntimeError::invalid_request(
+                    "built-in shell command schema is missing a description".to_string(),
+                )
+            })?;
+        let command_description = format!(
+            "{command_description} When authenticated account access is needed, set \
+             credential_contexts to the matching active extension IDs and execute the requested \
+             command directly. Do not probe authentication status, inspect secret environment \
+             variables, or ask the user to log in before trying the authorized context."
+        );
+        properties["command"]["description"] = Value::String(command_description);
+        properties.insert("credential_contexts".to_string(), context_schema);
+
+        let required = descriptor
+            .parameters_schema
+            .get_mut("required")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| {
+                HostRuntimeError::invalid_request(
+                    "built-in shell schema is missing required fields".to_string(),
+                )
+            })?;
+        required.push(Value::String("credential_contexts".to_string()));
+        Ok(())
     }
 }
 
@@ -864,6 +955,41 @@ visibility = "model"
 input_schema_ref = "schemas/broken.input.json"
 "#;
 
+    const SHELL_CREDENTIAL_CONTEXT_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "atlas"
+name = "Atlas"
+version = "1.0.0"
+description = "Credential context fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "atlas.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "atlas.query"
+description = "Queries Atlas"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/query.input.json"
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "atlas_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.atlas.test" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+placeholder_env = "ATLAS_TOKEN"
+required = true
+"#;
+
     fn isolation_test_contracts() -> ironclaw_extension_registry::HostApiContractRegistry {
         let mut contracts = ironclaw_extension_registry::HostApiContractRegistry::new();
         contracts
@@ -885,6 +1011,111 @@ input_schema_ref = "schemas/broken.input.json"
         .expect("manifest must parse");
         let root = VirtualPath::new("/system/extensions/isolation-test").expect("valid root");
         ExtensionPackage::from_manifest(manifest, root).expect("package must build")
+    }
+
+    fn shell_credential_context_package() -> ExtensionPackage {
+        let manifest = ExtensionManifest::parse(
+            SHELL_CREDENTIAL_CONTEXT_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+            &isolation_test_contracts(),
+        )
+        .expect("manifest must parse");
+        let root = VirtualPath::new("/system/extensions/atlas").expect("valid root");
+        ExtensionPackage::from_manifest(manifest, root).expect("package must build")
+    }
+
+    fn shell_descriptor() -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            id: CapabilityId::new(crate::first_party_tools::SHELL_CAPABILITY_ID).unwrap(),
+            provider: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).unwrap(),
+            runtime: RuntimeKind::FirstParty,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "shell".to_string(),
+            parameters_schema: json!({"$ref": "schemas/builtin/shell.input.v1.json"}),
+            effects: vec![EffectKind::ExecuteCode],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+            max_egress_bytes: None,
+            resource_profile: None,
+            origin_gate_matrix: None,
+            standard_op: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_schema_names_active_manifest_backed_credential_contexts() {
+        let mut registry = ExtensionRegistry::new();
+        registry
+            .insert(shell_credential_context_package())
+            .expect("credential context package inserts");
+        let mut runtime_policy = test_runtime_policy();
+        runtime_policy.process_backend = ProcessBackendKind::UserSandbox;
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = GrantAuthorizer;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy);
+        let descriptor = shell_descriptor();
+
+        let resolved = catalog
+            .surface_descriptor(&descriptor)
+            .await
+            .expect("shell schema resolves");
+        let contexts = &resolved.parameters_schema["properties"]["credential_contexts"];
+
+        assert_eq!(contexts["items"]["enum"], json!(["atlas"]));
+        assert!(
+            contexts["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("atlas"))
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_shell_with_no_active_contexts_accepts_only_empty_selection() {
+        let registry = ExtensionRegistry::new();
+        let mut runtime_policy = test_runtime_policy();
+        runtime_policy.process_backend = ProcessBackendKind::UserSandbox;
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = GrantAuthorizer;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy);
+
+        let resolved = catalog
+            .surface_descriptor(&shell_descriptor())
+            .await
+            .expect("managed shell schema resolves");
+        let contexts = &resolved.parameters_schema["properties"]["credential_contexts"];
+
+        assert_eq!(contexts["maxItems"], json!(0));
+        assert!(contexts["items"].get("enum").is_none());
+    }
+
+    #[tokio::test]
+    async fn local_shell_schema_omits_managed_credential_contexts() {
+        let mut registry = ExtensionRegistry::new();
+        registry
+            .insert(shell_credential_context_package())
+            .expect("credential context package inserts");
+        let runtime_policy = test_runtime_policy();
+        let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
+        let authorizer = GrantAuthorizer;
+        let catalog =
+            CapabilityCatalog::new(&registry, &authorizer, &surface_version, &runtime_policy);
+
+        let resolved = catalog
+            .surface_descriptor(&shell_descriptor())
+            .await
+            .expect("local shell schema resolves");
+
+        assert!(
+            resolved.parameters_schema["properties"]
+                .get("credential_contexts")
+                .is_none(),
+            "local shells use the host's existing CLI configuration"
+        );
+        assert_eq!(resolved.parameters_schema["required"], json!(["command"]));
     }
 
     fn allow_all_trust_decision() -> TrustDecision {

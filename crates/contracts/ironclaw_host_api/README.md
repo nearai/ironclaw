@@ -41,7 +41,10 @@ modules):
   messaging vocabulary — declarations only; validation lives in
   `ironclaw_host_runtime`).
 - Runtime and trust: `runtime` (`RuntimeKind`, `TrustClass` with serde-sealed
-  privileged variants), `runtime_policy`, `trust`, `process`.
+  privileged variants), `runtime_policy`, `trust`, and `process`. The process
+  vocabulary separates an adapter-owned placeholder binding
+  (`SandboxCommandCredentialBinding`) from transport-only secret material
+  (`SandboxCommandCredential`); neither type selects or authorizes a secret.
 - **`turn` — the complete canonical turn vocabulary.** A crate that only
   *names* turns (ids, refs, `TurnStatus`, `EventCursor`, origin adapters)
   depends on this crate, never on `ironclaw_turns`.

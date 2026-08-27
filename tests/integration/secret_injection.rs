@@ -4,8 +4,8 @@
 //! call executes the real first-party GitHub WASM capability behind a
 //! `GithubHarnessAuthorizer` that attaches an `InjectCredentialAccountOnce`
 //! obligation. The host egress pipeline resolves the synthetic access token
-//! (from the harness `StaticSecretStore`) and injects it as `Authorization:
-//! Bearer <token>` onto the outbound request before the recording *network*
+//! (from the harness `StaticSecretStore`) and injects the manifest-declared
+//! `Authorization: token <token>` header onto the outbound request before the
 //! egress captures it (the runtime egress lane is inert here —
 //! `try_with_host_http_egress` overwrites it — see
 //! `assert_network_egress_header_contains`).
@@ -50,7 +50,7 @@ async fn injects_credential_onto_github_egress() {
         .assert_network_egress_header_contains(
             "api.github.com/repos/nearai/ironclaw",
             "authorization",
-            "Bearer ghp_fake_fixture_token",
+            "token ghp_fake_fixture_token",
         )
         .await
         .expect("injected credential present on github egress request");

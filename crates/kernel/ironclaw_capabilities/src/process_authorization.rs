@@ -170,10 +170,16 @@ impl ProcessAuthorizationRemintPort for ProcessAuthorizationReminter {
         let continuation = continuation.clone();
         let ironclaw_host_api::authorized::ProcessAuthorizedContinuation {
             invocation,
+            descriptor,
             lane,
             mounts,
             resource_reservation,
         } = continuation;
+        let descriptor = descriptor.ok_or_else(|| {
+            ProcessAuthorizationRemintError::MissingProcessAuthorization {
+                capability: request.capability_id.clone(),
+            }
+        })?;
         let invocation = Invocation {
             activity_id: invocation.activity_id,
             capability: invocation.capability,
@@ -186,14 +192,19 @@ impl ProcessAuthorizationRemintPort for ProcessAuthorizationReminter {
             process_id: Some(invocation.process_id),
             parent_process_id: invocation.parent_process_id,
         };
-        Ok(Authorized::seal(
-            self.authorization_grant(),
+        let grant = self.authorization_grant();
+        Authorized::seal(
+            grant,
             invocation,
+            descriptor,
             lane,
             mounts,
             resource_reservation,
             Timestamp::MAX_UTC,
-        ))
+        )
+        .map_err(|_| ProcessAuthorizationRemintError::RecordMismatch {
+            field: "continuation.descriptor.capability",
+        })
     }
 }
 

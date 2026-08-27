@@ -1,4 +1,5 @@
 import React from "react";
+import { Panel } from "../../../design-system/primitives";
 import { useT } from "../../../lib/i18n";
 import { Icon } from "../../../design-system/icons";
 import { SearchField } from "../../../design-system/search-field";
@@ -104,7 +105,7 @@ export function RegistryTab({
 
   if (catalogEntries.length === 0) {
     return (
-      <div className="v2-panel rounded-[18px] p-6 sm:p-8">
+      <Panel className="p-6 sm:p-8">
         <div className="flex items-start justify-between gap-4">
           <h3 className="text-lg font-semibold text-white">
             {t("ext.registry.emptyTitle")}
@@ -114,7 +115,7 @@ export function RegistryTab({
         <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
           {t("ext.registry.emptyDesc")}
         </p>
-      </div>
+      </Panel>
     );
   }
 
@@ -135,7 +136,7 @@ export function RegistryTab({
         </span>
       </div>
 
-      <div className="v2-panel rounded-[18px] p-5 sm:p-6">
+      <Panel className="p-5 sm:p-6">
         {installedCount > 0 &&
         (
           <>
@@ -206,7 +207,7 @@ export function RegistryTab({
         (<p className="py-4 text-sm text-iron-300">
           {t("ext.registry.noMatch")}
         </p>)}
-      </div>
+      </Panel>
     </div>
   );
 }

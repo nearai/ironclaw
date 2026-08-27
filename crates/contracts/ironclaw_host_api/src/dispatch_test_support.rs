@@ -30,6 +30,7 @@ use crate::dispatch::{
 use crate::{
     Timestamp,
     authorized::Authorized,
+    capability::CapabilityDescriptor,
     ids::{RunId, UserId},
     invocation::{Actor, Invocation, InvocationOrigin},
     lane::RuntimeLane,
@@ -43,6 +44,7 @@ pub struct AuthorizedDispatchRecord {
     pub run_id: Option<RunId>,
     pub mounts: Option<MountView>,
     pub invocation: Invocation,
+    pub descriptor: Option<CapabilityDescriptor>,
     pub lane: RuntimeLane,
     pub resource_reservation: Option<ResourceReservation>,
     pub deadline: Timestamp,
@@ -155,7 +157,7 @@ impl CapabilityDispatcher for TestDispatcher {
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         let deadline = authorized.deadline();
         let record = match authorized.into_parts(chrono::Utc::now()) {
-            Ok((invocation, lane, mounts, resource_reservation)) => {
+            Ok((invocation, descriptor, lane, mounts, resource_reservation)) => {
                 let authenticated_actor_user_id = match &invocation.actor {
                     Actor::Sealed(user_id) => Some(user_id.clone()),
                     Actor::System => None,
@@ -173,6 +175,7 @@ impl CapabilityDispatcher for TestDispatcher {
                     authenticated_actor_user_id,
                     run_id,
                     mounts,
+                    descriptor,
                     invocation,
                     lane,
                     resource_reservation,

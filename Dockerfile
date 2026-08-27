@@ -117,6 +117,8 @@ RUN apt-get -o Acquire::Retries=3 update \
     && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
         ca-certificates \
         curl \
+        gosu \
+        openssh-server \
         postgresql-client \
         sqlite3 \
     && rm -rf /var/lib/apt/lists/*
@@ -128,20 +130,31 @@ COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.
 COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml
 COPY docker/reborn/config.production.toml /opt/ironclaw/reborn/config.production.toml
 COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
+COPY docker/reborn/start-sshd.sh /usr/local/bin/ironclaw-reborn-start-sshd
 
 ENV HOME=/home/ironclaw \
     IRONCLAW_REBORN_LOG=info \
     IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
 
+# `agent` is a deliberate uid-1000 alias of `ironclaw`, not a separate,
+# lower-privileged account. A session logged in as `agent` (e.g. over SSH)
+# holds the full runtime identity and can read/write everything the IronClaw
+# process owns.
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
+    && useradd --non-unique --uid 1000 --gid ironclaw --home-dir /workspace --shell /bin/bash agent \
+    && passwd -d agent \
     && mkdir -p /data/ironclaw-reborn /workspace \
     && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
-    && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
+    && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint /usr/local/bin/ironclaw-reborn-start-sshd
 
 WORKDIR /workspace
 
-EXPOSE 3000
+EXPOSE 3000 2222
 
-USER ironclaw
+# The container starts as root; ironclaw-reborn-entrypoint performs the ONLY
+# privilege drop (exec gosu ironclaw). Anything that bypasses the entrypoint —
+# `docker run --entrypoint`, `docker exec` without `--user`, or a platform
+# custom start command — runs as root instead.
+USER root
 
 ENTRYPOINT ["ironclaw-reborn-entrypoint"]

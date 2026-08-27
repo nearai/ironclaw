@@ -7,6 +7,7 @@ the recorded model's final wording.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -844,14 +845,15 @@ async def test_provider_operation_case_executes_with_provider_readback(
         # The full-path OAuth exchange deliberately returns this account token;
         # EMULATE_GOOGLE_BEARER is used only by the test's provider readback.
         "google": GOOGLE_PROVIDER_OPERATION_BEARER,
-        "github": EMULATE_GITHUB_BEARER,
     }.get(operation_case.provider_service)
     assert_provider_request_evidence(
         operation_case,
         proxy.state["requests"],
         expected_bearer=expected_bearer,
         expected_credential_fingerprint=(
-            reborn_provider_operation_server["slack_account_fingerprint"]
+            hashlib.sha256(f"token {EMULATE_GITHUB_BEARER}".encode()).hexdigest()[:12]
+            if operation_case.provider_service == "github"
+            else reborn_provider_operation_server["slack_account_fingerprint"]
             if operation_case.provider_service == "slack"
             else None
         ),

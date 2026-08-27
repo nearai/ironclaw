@@ -31,13 +31,13 @@ pub const DEFAULT_SANDBOX_ALLOWED_DOMAINS: &[&str] = &[
     // Go
     "proxy.golang.org",
     "sum.golang.org",
-    // GitHub (source + release archives). Content hosts are enumerated
+    // GitHub (source, API, and release archives). Content hosts are enumerated
     // exactly: the managed-egress proxy cannot represent `*.` wildcards
     // with the canonical one-label semantics, so wildcard patterns fail
     // managed-egress profile construction.
     "github.com",
-    "raw.githubusercontent.com",
     "api.github.com",
+    "raw.githubusercontent.com",
     "codeload.github.com",
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
@@ -145,6 +145,7 @@ mod tests {
             "proxy.golang.org",
             "sum.golang.org",
             "github.com",
+            "api.github.com",
             "raw.githubusercontent.com",
             "objects.githubusercontent.com",
             "release-assets.githubusercontent.com",

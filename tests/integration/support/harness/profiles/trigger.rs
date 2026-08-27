@@ -7,7 +7,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
-    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TRIGGER_STATUS_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID,
 };
 
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -21,6 +22,7 @@ pub(crate) fn trigger_management_tools_profile() -> HarnessResult<ToolsProfile> 
             CapabilityId::new(TRIGGER_PAUSE_CAPABILITY_ID)?,
             CapabilityId::new(TRIGGER_RESUME_CAPABILITY_ID)?,
             CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
+            CapabilityId::new(TRIGGER_STATUS_CAPABILITY_ID)?,
         ],
         effect_kinds: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
         options: HostRuntimeHarnessOptions::new(

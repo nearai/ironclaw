@@ -21,6 +21,10 @@ async function openPanel(container: HTMLElement) {
       .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
       ?.click();
   });
+  await waitForPanel();
+}
+
+async function waitForPanel() {
   // The dynamic import resolves over several turns of the microtask queue, so
   // settle until the panel is actually mounted rather than guessing a count.
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -38,6 +42,56 @@ afterEach(() => {
   }
   document.body.replaceChildren();
   vi.restoreAllMocks();
+});
+
+test("opening a cold notification center immediately renders a loading shell", async () => {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+
+  await act(async () => {
+    root.render(<NotificationCenter state={{ messages: [], unreadIds: new Set() }} />);
+  });
+
+  act(() => {
+    container
+      .querySelector<HTMLButtonElement>("[data-testid='notification-bell']")
+      ?.click();
+  });
+
+  const loadingShell = document.querySelector(
+    "[data-testid='notification-panel-loading']",
+  );
+  assert.ok(loadingShell, "the lazy boundary provides immediate visual feedback");
+  assert.equal(loadingShell.getAttribute("role"), "status");
+  assert.equal(loadingShell.getAttribute("aria-busy"), "true");
+  assert.match(loadingShell.textContent || "", /notifications\.loadingTitle/);
+
+  act(() => {
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+    );
+  });
+  const bell = container.querySelector<HTMLButtonElement>(
+    "[data-testid='notification-bell']",
+  );
+  assert.equal(
+    document.querySelector("[data-testid='notification-panel-loading']"),
+    null,
+    "the loading shell preserves the panel's Escape-to-close behavior",
+  );
+  assert.equal(bell?.getAttribute("aria-expanded"), "false");
+  assert.equal(document.activeElement, bell, "closing restores focus to the bell");
+
+  act(() => bell?.click());
+
+  await waitForPanel();
+  assert.equal(
+    document.querySelector("[data-testid='notification-panel-loading']"),
+    null,
+    "the real notification panel replaces the shell once its chunk resolves",
+  );
 });
 
 test("notification center renders loading and retryable error states", async () => {

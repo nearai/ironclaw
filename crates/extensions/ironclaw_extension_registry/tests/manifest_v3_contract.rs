@@ -888,7 +888,7 @@ id = "zephyrite.echo"
 description = "Echoes input"
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
-  { handle = "zephyrite_token", source = { type = "product_auth_account", provider = "zephyrite", setup = { kind = "oauth", scopes = ["echo:read"] } }, provider_scopes = ["echo:read"], audience = { scheme = "https", host_pattern = "api.zephyrite.example" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "zephyrite_token", source = { type = "product_auth_account", provider = "zephyrite", setup = { kind = "oauth", scopes = ["echo:read"] } }, provider_scopes = ["echo:read"], audience = { scheme = "https", host_pattern = "api.zephyrite.example" }, target = { type = "header", name = "authorization", prefix = "Bearer " }, placeholder_env = "ZEPHYRITE_TOKEN" },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -923,6 +923,7 @@ vendor = "zephyrite"
 scopes = ["echo:read"]
 audience = {{ scheme = "https", host = "api.zephyrite.example" }}
 injection = {{ type = "header", name = "authorization", prefix = "Bearer " }}
+placeholder_env = "ZEPHYRITE_TOKEN"
 
 [auth.zephyrite]
 method = "oauth2_code"
@@ -955,7 +956,7 @@ access_token = "/access_token"
     assert_eq!(a.required_host_ports, b.required_host_ports);
     assert_eq!(a.input_schema_ref, b.input_schema_ref);
     // Same credentials: handle, vendor, setup scopes, per-tool scopes,
-    // audience, injection.
+    // audience, injection, and direct process binding.
     assert_eq!(a.runtime_credentials, b.runtime_credentials);
 
     // Same derived surface kinds (tool + auth).

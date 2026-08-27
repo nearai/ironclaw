@@ -133,6 +133,15 @@ Reducer rules:
   capability activity must carry the same sanitized `error_kind` so refresh and
   replay paths can render refusal as a neutral declined state instead of a
   generic failure.
+- exact-run detail consumers may request a bounded capability-activity window
+  by parent run identity. The projection must retain invocation identity and
+  lifecycle metadata, exclude neighboring runs, report truncation explicitly,
+  and remain a non-authoritative informational read; it must not derive an
+  execution verdict or mutate run/trigger state. A consumer reading from the
+  production write-behind runtime-event stream must also report that the
+  observation is incomplete: durable replay proves which events arrived, but
+  the intentionally lossy producer cannot prove that none were dropped before
+  persistence.
 - generic lifecycle projections expose only redacted lifecycle facts. Internal
   resolver refs such as accepted-message refs, source/reply binding refs, and
   gate refs remain in the lifecycle event/reducer substrate; reducers that need

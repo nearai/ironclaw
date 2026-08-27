@@ -21,6 +21,23 @@ backend and provides tenant/user-rewritten mounts. Records contain metadata and
 typed references only; prompts, replies, tool payloads, secrets, and backend
 diagnostics are forbidden.
 
+## Producer safety contract
+
+Every producer must derive a stable id from the authoritative workflow event,
+use `NotificationKind::stable_key()` for the kind segment, and preserve the
+same recipient and source across retries. Kind keys are persistence vocabulary:
+changing one requires a migration because otherwise a replay would create a
+second record. Publication must remain best-effort with respect to the
+originating workflow, while failures stay observable through sanitized logs or
+the owning durable observer's retry mechanism.
+
+Actionable records use one id for one active lifecycle and resolve that record
+after verified recovery. Producers must not publish retry progress, transient
+polling states, subagent noise, prompts, tool payloads, credentials, backend
+diagnostics, or any other unbounded content. New notification kinds, source
+fields, actions, API shapes, and WebUI behavior are separate contract changes;
+producer onboarding alone must reuse the existing grammar.
+
 ## Validation
 
 ```bash

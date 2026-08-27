@@ -237,6 +237,34 @@ observed_date = "2026-08-08"
 # (~11 lines), predating that growth. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh --print`, not summed.
 #
+# Re-measured 42198 -> 42316 on 2026-08-20 for #7770 phase 1 (memory curation
+# wired through composition), in two steps.
+#
+#   +7   the `[memory].curation_interval_turns` input field/setter and the few
+#        lines that hand the runtime's thread service and coordinator to
+#        `ironclaw_assistant::memory_curation::after_turn_curation_dispatcher_factory`
+#        — the hook/phase/trust-class assembly itself stays in the crate that
+#        owns curation, per AGENTS.md.
+#   +109 the approach-audit fix that makes curation FAIL CLOSED on a memory
+#        binding whose provider cannot replace the standing document
+#        (`memory_provider_factory::curation_interval_for_binding` plus its two
+#        unit tests, and the runtime.rs call site). Composition is the only
+#        layer that may see both the operator's `[memory]` config and the
+#        resolved binding, so the decision cannot move down; roughly half the
+#        delta is the tests that pin the startup error.
+#
+# Measured with `bash scripts/ci/check-composition-budget.sh`, not summed; the
+# mirrored `COMPOSITION_ABSOLUTE_SRC_LOC` in
+# crates/app/ironclaw_architecture_tests/tests/reborn_restructure_baselines.rs
+# moves to the same figure in this commit.
+# ✎ Re-measured 42316 -> 42479 on 2026-08-21: the main merge into the #7770
+# phase-1 branch combined main's own composition growth (durable notification
+# inbox #7697, subagent background-delivery slice #7788) with this branch's
+# curation wiring. The two ceilings merged textually without a git conflict
+# while the SUM exceeded both — the gate caught exactly the case it exists
+# for. No new composition code in this commit; measured with
+# `bash scripts/ci/check-composition-budget.sh`; the mirrored
+# COMPOSITION_ABSOLUTE_SRC_LOC moves to the same figure in this commit.
 # Re-seeded 42198 -> 42371 on 2026-08-24 for #7833 (unattended-safe suggestion
 # tools). Between 08-19 and this branch's base, unrelated main-side growth had
 # already consumed all but 7 lines of the 150-line tolerance window (base
@@ -256,7 +284,15 @@ observed_date = "2026-08-08"
 # that explanation now has one home and composition points at it, which is why
 # the seed is 42371 rather than 42380. Measured with
 # `bash scripts/ci/check-composition-budget.sh --print`, not padded.
-loc_ceiling = 42371
+#
+# ✎ Re-measured on 2026-08-26 merging main (ceiling 42371, incl. #7833 and the
+# subagent background-mode slices) into the #7770 branch (ceiling 42479, the
+# curation wiring above). Same pair hazard as the 08-21 entry: the two
+# ceilings cannot be summed or max'd — the merged tree is the only truth.
+# `bash scripts/ci/check-composition-budget.sh --print` on the merged tree
+# measures 42732. No new composition code in this merge commit; the mirrored
+# COMPOSITION_ABSOLUTE_SRC_LOC moves to the same figure in this commit.
+loc_ceiling = 42732
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -267,8 +303,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42371
-loc_observed_date = "2026-08-24"
+loc_observed = 42732
+loc_observed_date = "2026-08-26"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

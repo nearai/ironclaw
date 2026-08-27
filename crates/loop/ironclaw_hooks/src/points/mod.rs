@@ -13,8 +13,10 @@ pub mod capability;
 pub mod event_triggered;
 pub mod observer;
 pub mod prompt;
+pub mod turn;
 
 pub use capability::{BeforeCapabilityHookContext, SanitizedArguments};
 pub use event_triggered::EventTriggeredHookContext;
 pub use observer::{ObservedKind, ObserverHookContext};
 pub use prompt::BeforePromptHookContext;
+pub use turn::AfterTurnHookContext;
