@@ -5,10 +5,14 @@ fn installation_id() -> AdapterInstallationId {
     AdapterInstallationId::new("install-alpha").expect("installation")
 }
 
+/// Matches the `<@UBOT>` mentions the fixtures below already use.
+const TEST_BOT_USER_ID: &str = "UBOT";
+
 fn normalize(value: serde_json::Value) -> SlackInboundEvent {
     normalize_slack_event(
         &serde_json::to_vec(&value).expect("payload"),
         &installation_id(),
+        Some(TEST_BOT_USER_ID),
     )
     .expect("normalizes")
 }
@@ -90,26 +94,40 @@ fn app_mention_strips_only_the_provider_mention_and_self_roots_a_thread() {
 
 #[test]
 fn bots_subtypes_and_ambient_channels_are_ignored() {
-    for event in [
-        serde_json::json!({
-            "type": "message", "user": "U1", "channel": "D1", "text": "loop",
-            "ts": "1.0", "bot_id": "B1"
-        }),
-        serde_json::json!({
-            "type": "message", "user": "U1", "channel": "D1", "text": "changed",
-            "ts": "1.0", "subtype": "message_changed"
-        }),
-        serde_json::json!({
-            "type": "message", "user": "U1", "channel": "C1", "text": "ambient",
-            "ts": "1.0"
-        }),
+    for (event, expected_reason) in [
+        (
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "D1", "text": "loop",
+                "ts": "1.0", "bot_id": "B1"
+            }),
+            SlackIgnoreReason::BotAuthored,
+        ),
+        (
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "D1", "text": "changed",
+                "ts": "1.0", "subtype": "message_changed"
+            }),
+            SlackIgnoreReason::NonUserMessageSubtype("message_changed".to_string()),
+        ),
+        // No mention, no thread_ts: still bystander chatter even though
+        // `mentions_bot` is now consulted for `message` events — the text
+        // here names nobody, so `TextMention` is never reached and the
+        // ambient rule holds exactly as before that check existed.
+        (
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "C1", "text": "ambient",
+                "ts": "1.0"
+            }),
+            SlackIgnoreReason::AmbientChannelMessage,
+        ),
     ] {
-        assert!(matches!(
-            normalize(serde_json::json!({
-                "type": "event_callback", "event_id": "EvIgnored", "event": event
-            })),
-            SlackInboundEvent::Ignore { .. }
-        ));
+        let outcome = normalize(serde_json::json!({
+            "type": "event_callback", "event_id": "EvIgnored", "event": event
+        }));
+        let SlackInboundEvent::Ignore { reason } = outcome else {
+            panic!("expected Ignore for {expected_reason:?}, got {outcome:?}");
+        };
+        assert_eq!(reason, expected_reason);
     }
 }
 
@@ -153,6 +171,7 @@ fn slash_command_forms_normalize_without_a_second_product_parser() {
         b"channel_id=D123&channel_name=directmessage&user_id=U123&command=%2Fironclaw&text=hello&trigger_id=trigger-1&team_id=T123",
         &headers,
         &installation_id(),
+        Some(TEST_BOT_USER_ID),
     )
     .expect("slash form");
     let SlackInboundEvent::Message(message) = event else {
@@ -165,11 +184,12 @@ fn slash_command_forms_normalize_without_a_second_product_parser() {
 #[test]
 fn oversized_payload_and_missing_event_id_fail_closed() {
     let oversized = vec![b'x'; MAX_SLACK_PAYLOAD_BYTES + 1];
-    assert!(normalize_slack_event(&oversized, &installation_id()).is_err());
+    assert!(normalize_slack_event(&oversized, &installation_id(), Some(TEST_BOT_USER_ID)).is_err());
     assert!(matches!(
         normalize_slack_event(
             br#"{"type":"event_callback","event":{"type":"message"}}"#,
-            &installation_id()
+            &installation_id(),
+            Some(TEST_BOT_USER_ID)
         ),
         Err(SlackPayloadParseError::InvalidExternalRef {
             kind: "external_event_id",
@@ -181,7 +201,7 @@ fn oversized_payload_and_missing_event_id_fail_closed() {
 proptest! {
     #[test]
     fn arbitrary_untrusted_bytes_never_panic(raw in proptest::collection::vec(any::<u8>(), 0..512)) {
-        let _ = normalize_slack_event(&raw, &installation_id());
+        let _ = normalize_slack_event(&raw, &installation_id(), Some(TEST_BOT_USER_ID));
     }
 }
 
@@ -386,14 +406,18 @@ fn a_dm_still_consults_the_subtype_list() {
 
 /// Slack's channel announcements are subtyped messages whose text can name
 /// this bot — `bot_add` does so by construction. None of them may become a
-/// mention: they carry no thread anchor, so the ambient-chatter rule holds
-/// them, and the exemption above deliberately does not reach them because
-/// they are never `app_mention` events.
+/// mention: their text naming the bot now classifies them as `TextMention`
+/// (see [`SlackMessageKind::TextMention`]), but that kind is NOT exempt from
+/// the subtype allowlist — only `AppMention` is — so the allowlist still
+/// drops them. This is the regression that sank an earlier attempt at text
+/// mention detection: without the subtype gate still applying to
+/// `TextMention`, every one of these becomes an admitted `BotMention`.
 #[test]
 fn slack_channel_announcements_are_never_admitted() {
-    for (label, event) in [
+    for (label, subtype, event) in [
         (
             "bot_add names the bot in its own text",
+            "bot_add",
             serde_json::json!({
                 "type": "message", "user": "U9", "channel": "C1",
                 "subtype": "bot_add", "ts": "1710000000.000018",
@@ -402,6 +426,7 @@ fn slack_channel_announcements_are_never_admitted() {
         ),
         (
             "a channel topic set to mention the bot",
+            "channel_topic",
             serde_json::json!({
                 "type": "message", "user": "U9", "channel": "C1",
                 "subtype": "channel_topic", "ts": "1710000000.000019",
@@ -410,6 +435,7 @@ fn slack_channel_announcements_are_never_admitted() {
         ),
         (
             "the bot's own join announcement",
+            "channel_join",
             serde_json::json!({
                 "type": "message", "user": "UBOT", "channel": "C1",
                 "subtype": "channel_join", "ts": "1710000000.000020",
@@ -422,8 +448,136 @@ fn slack_channel_announcements_are_never_admitted() {
             "event_id": "EvAnnouncement", "event": event
         }));
         assert!(
-            matches!(outcome, SlackInboundEvent::Ignore { .. }),
+            matches!(
+                &outcome,
+                SlackInboundEvent::Ignore {
+                    reason: SlackIgnoreReason::NonUserMessageSubtype(got)
+                } if got == subtype
+            ),
             "{label} normalized to {outcome:?}"
         );
     }
+}
+
+/// The point of `TextMention`: a `message` event whose TEXT names the bot
+/// becomes a `BotMention` even with no `app_mention` twin at all — Slack does
+/// not always send one, notably for a mention made inside an existing thread.
+/// Three shapes that previously either silently answered the wrong trigger or
+/// (for the top-level and `thread_broadcast` cases) were dropped outright as
+/// bystander chatter / non-human subtype.
+#[test]
+fn a_message_event_naming_the_bot_becomes_a_bot_mention_with_no_app_mention_twin() {
+    for (label, event, expected_topic) in [
+        (
+            "inside an existing thread, no subtype (Slack does not reliably \
+             fire app_mention for this case)",
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": "<@UBOT> handle this thread",
+                "thread_ts": "1710000000.000030", "ts": "1710000000.000031"
+            }),
+            Some("1710000000.000030"),
+        ),
+        (
+            "top level, no thread_ts, no subtype (previously dropped as \
+             ambient chatter)",
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": "<@UBOT> handle this at top level",
+                "ts": "1710000000.000032"
+            }),
+            Some("1710000000.000032"),
+        ),
+        (
+            "thread_broadcast subtype, the incident shape arriving only as a \
+             message",
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "C1",
+                "subtype": "thread_broadcast",
+                "text": "<@UBOT> handle this broadcast",
+                "thread_ts": "1710000000.000033", "ts": "1710000000.000034"
+            }),
+            Some("1710000000.000033"),
+        ),
+    ] {
+        let parsed = message(serde_json::json!({
+            "type": "event_callback", "team_id": "T123",
+            "event_id": "EvTextMention", "event": event
+        }));
+        assert_eq!(parsed.trigger, ProductTriggerReason::BotMention, "{label}");
+        assert_eq!(parsed.conversation.topic_id(), expected_topic, "{label}");
+    }
+}
+
+/// Slack announces one post as up to two events — `app_mention` and
+/// `message` — with distinct `event_id`s in the envelope. The dedup key is
+/// built from message identity (team, channel, ts), not the envelope
+/// `event_id`, so the twins collapse to one durable admission key whichever
+/// arrives first. Both twins must still resolve to `BotMention`, so whichever
+/// one wins the collapse still starts a run — that is the entire point of
+/// keying on the message rather than the event.
+#[test]
+fn app_mention_and_message_twins_of_one_post_collapse_to_the_same_event_id() {
+    let shared_ts = "1710000000.000040";
+    let app_mention_twin = message(serde_json::json!({
+        "type": "event_callback", "team_id": "T123",
+        "event_id": "EvTwinAppMention",
+        "event": {
+            "type": "app_mention", "user": "U1", "channel": "C1",
+            "text": "<@UBOT> ping", "ts": shared_ts
+        }
+    }));
+    let message_twin = message(serde_json::json!({
+        "type": "event_callback", "team_id": "T123",
+        "event_id": "EvTwinMessage",
+        "event": {
+            "type": "message", "user": "U1", "channel": "C1",
+            "text": "<@UBOT> ping", "ts": shared_ts
+        }
+    }));
+
+    assert_eq!(
+        app_mention_twin.event_id.as_str(),
+        message_twin.event_id.as_str(),
+        "the app_mention and message twins of one post must share one dedup key"
+    );
+    assert_eq!(app_mention_twin.trigger, ProductTriggerReason::BotMention);
+    assert_eq!(message_twin.trigger, ProductTriggerReason::BotMention);
+}
+
+/// `strip_leading_bot_mention` strips ONLY a leading token that names the
+/// configured bot. A third party's mention in front is left alone — even
+/// though their tag happens to be followed by the bot's own — because it is
+/// not the bot's mention leading the text; and a non-leading mention of the
+/// bot is never touched regardless of position.
+#[test]
+fn strip_leading_bot_mention_never_eats_a_third_partys_leading_mention() {
+    assert_eq!(
+        strip_leading_bot_mention("<@UOTHER> <@UBOT> deploy", Some(TEST_BOT_USER_ID)),
+        "<@UOTHER> <@UBOT> deploy",
+        "a third party's mention must not be dropped just because the bot is \
+         also named later in the text"
+    );
+    assert_eq!(
+        strip_leading_bot_mention("<@UBOT> deploy", Some(TEST_BOT_USER_ID)),
+        "deploy",
+        "the bot's own leading mention still strips"
+    );
+}
+
+/// A bare mention with nothing else in the text still admits a message —
+/// stripping to an empty string must not itself be treated as missing
+/// content.
+#[test]
+fn a_bare_bot_mention_still_produces_a_message() {
+    let mention = message(serde_json::json!({
+        "type": "event_callback", "team_id": "T123",
+        "event_id": "EvBareMention",
+        "event": {
+            "type": "app_mention", "user": "U1", "channel": "C1",
+            "text": "<@UBOT>", "ts": "1710000000.000041"
+        }
+    }));
+    assert_eq!(mention.text, "");
+    assert_eq!(mention.trigger, ProductTriggerReason::BotMention);
 }

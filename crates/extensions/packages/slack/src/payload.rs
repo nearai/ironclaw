@@ -38,6 +38,8 @@ const SLACK_BOT_MESSAGE_SUBTYPE: &str = "bot_message";
 /// checked ahead of it, so it is rejected on every path rather than
 /// exempted by it.
 const SLACK_DOCUMENT_MENTION_SUBTYPE: &str = "document_mention";
+/// Manifest handle for the bot's own member id (see `manifest.toml`).
+const SLACK_BOT_USER_ID_HANDLE: &str = "slack_bot_user_id";
 
 /// Message `subtype` values that carry one person's own message, rendered
 /// specially.
@@ -152,6 +154,7 @@ impl std::ops::Deref for ParsedSlackInboundMessage {
 pub fn normalize_slack_event(
     raw_payload: &[u8],
     installation_id: &AdapterInstallationId,
+    bot_user_id: Option<&str>,
 ) -> Result<SlackInboundEvent, SlackPayloadParseError> {
     if raw_payload.len() > MAX_SLACK_PAYLOAD_BYTES {
         return Err(SlackPayloadParseError::InvalidJson {
@@ -177,11 +180,7 @@ pub fn normalize_slack_event(
         serde_json::from_slice(raw_payload).map_err(|err| SlackPayloadParseError::InvalidJson {
             reason: err.to_string(),
         })?;
-    let event_id = build_event_id(
-        installation_id,
-        wrapper.event_id.as_deref(),
-        &wrapper.event_type,
-    )?;
+    require_well_formed_envelope(wrapper.event_id.as_deref(), &wrapper.event_type)?;
     if wrapper.event_type != "event_callback" {
         return Ok(SlackInboundEvent::Ignore {
             reason: SlackIgnoreReason::NotAnEventCallback,
@@ -201,6 +200,29 @@ pub fn normalize_slack_event(
                 event.channel_type.as_deref(),
             ) {
                 SlackMessageKind::Dm
+            } else if mentions_bot(event.text.as_deref().unwrap_or_default(), bot_user_id) {
+                // A person put the bot's member id in the text, so this
+                // message is addressed to it whether or not Slack also sent
+                // `app_mention` — and Slack does not always send one. It is
+                // reported unreliable for a mention made INSIDE an existing
+                // thread (notably a thread predating the bot joining the
+                // channel), and it does not fire for a mention that lives in
+                // Block Kit or a legacy attachment rather than in `text`.
+                // Depending on `app_mention` alone is what left a broadcast
+                // reply unanswered, so the text is read as its own signal.
+                //
+                // This is checked BEFORE the thread/ambient split so it also
+                // rescues a TOP-LEVEL message naming the bot, which the
+                // ambient rule would otherwise drop for want of a thread
+                // anchor.
+                //
+                // Note this is a distinct kind from `AppMention`: it decides
+                // the TRIGGER, never admission. The subtype list still gates
+                // it in `normalize_user_message`, which is what keeps Slack's
+                // own announcements out — `bot_add` reads "added an
+                // integration to this channel: <@BOT>" and names the bot by
+                // construction, and a channel topic can be set to anything.
+                SlackMessageKind::TextMention
             } else if event.thread_ts.is_some() {
                 SlackMessageKind::ThreadReply
             } else {
@@ -215,7 +237,7 @@ pub fn normalize_slack_event(
             });
         }
     };
-    normalize_user_message(event_id, team_id, event, kind)
+    normalize_user_message(installation_id, team_id, event, kind, bot_user_id)
 }
 
 /// Parse one host-verified Slack inbound request that may be EITHER the
@@ -229,11 +251,12 @@ pub(crate) fn normalize_slack_inbound(
     raw_payload: &[u8],
     headers: &[(String, String)],
     installation_id: &AdapterInstallationId,
+    bot_user_id: Option<&str>,
 ) -> Result<SlackInboundEvent, SlackPayloadParseError> {
     if is_form_urlencoded_content_type(headers) {
         return normalize_slack_slash_command(raw_payload, installation_id);
     }
-    normalize_slack_event(raw_payload, installation_id)
+    normalize_slack_event(raw_payload, installation_id, bot_user_id)
 }
 
 /// Case-insensitive Content-Type match for Slack's slash-command / ssl_check
@@ -350,23 +373,50 @@ fn build_slash_event_id(
     })
 }
 
-/// Fixed user-message routing strategies in this first slice.
-/// `AppMention`: public channel, strip leading `@mention`, thread fallback to `ts`.
+/// Fixed user-message routing strategies.
+/// `AppMention`: Slack's own `app_mention` event — public channel, strip
+/// leading `@mention`, thread fallback to `ts`.
+/// `TextMention`: a `message` event whose TEXT names the bot. Same routing as
+/// `AppMention`, but deliberately a distinct kind because it is NOT exempt
+/// from the subtype list — see [`normalize_user_message`].
 /// `Dm`: direct-message channel required, keep text verbatim, no thread fallback.
 /// `ThreadReply`: channel thread reply, strip an optional leading `@mention`,
 /// require `thread_ts`.
 #[derive(Debug, Clone, Copy)]
 enum SlackMessageKind {
     AppMention,
+    TextMention,
     Dm,
     ThreadReply,
 }
 
+/// Slack renders a mention as `<@U…>` (or `<@U…|handle>`), so a person naming
+/// the bot is detectable from the message text alone, without Slack's
+/// `app_mention` event having to arrive.
+fn mentions_bot(text: &str, bot_user_id: Option<&str>) -> bool {
+    let Some(bot) = bot_user_id.filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    text.contains(&format!("<@{bot}>")) || text.contains(&format!("<@{bot}|"))
+}
+
+/// The bot's own member id, from host-resolved, manifest-declared non-secret
+/// configuration (`slack_bot_user_id`). Absent only on an installation
+/// configured before the handle existed; mention detection then degrades to
+/// `app_mention` alone, which is the behavior that shipped before this.
+pub fn slack_bot_user_id(config: &[(String, String)]) -> Option<&str> {
+    config
+        .iter()
+        .find(|(handle, _)| handle == SLACK_BOT_USER_ID_HANDLE)
+        .map(|(_, value)| value.as_str())
+}
+
 fn normalize_user_message(
-    event_id: ExternalEventId,
+    installation_id: &AdapterInstallationId,
     team_id: Option<&str>,
     event: &SlackEvent,
     kind: SlackMessageKind,
+    bot_user_id: Option<&str>,
 ) -> Result<SlackInboundEvent, SlackPayloadParseError> {
     // Authorship. Universal, and the reason it is universal is loop
     // prevention: a mention exchange between two apps does not terminate.
@@ -447,10 +497,12 @@ fn normalize_user_message(
         });
     };
 
+    let event_id = build_message_event_id(installation_id, team_id, channel, ts)?;
+
     let raw_text = event.text.as_deref().unwrap_or_default();
     let (text, thread_ts, trigger) = match kind {
-        SlackMessageKind::AppMention => (
-            strip_leading_bot_mention(raw_text),
+        SlackMessageKind::AppMention | SlackMessageKind::TextMention => (
+            strip_leading_bot_mention(raw_text, bot_user_id),
             event.thread_ts.as_deref().or(Some(ts)),
             ProductTriggerReason::BotMention,
         ),
@@ -460,7 +512,7 @@ fn normalize_user_message(
             ProductTriggerReason::DirectChat,
         ),
         SlackMessageKind::ThreadReply => (
-            strip_leading_bot_mention(raw_text),
+            strip_leading_bot_mention(raw_text, bot_user_id),
             event.thread_ts.as_deref(),
             ProductTriggerReason::ReplyToBot,
         ),
@@ -492,29 +544,42 @@ fn normalize_user_message(
     )))
 }
 
-fn build_event_id(
-    installation_id: &AdapterInstallationId,
+/// An `event_callback` must carry `event_id`. It is no longer the dedup key
+/// (see [`build_message_event_id`]) but a callback without one is malformed,
+/// and accepting it would mean accepting an envelope Slack did not produce.
+fn require_well_formed_envelope(
     event_id: Option<&str>,
     wrapper_event_type: &str,
-) -> Result<ExternalEventId, SlackPayloadParseError> {
-    if wrapper_event_type == "event_callback" {
-        // event_callback must carry event_id to avoid dedup key collisions.
-        // Two signed events of the same type without event_id would share an
-        // identical ExternalEventId, silently dropping the second.
-        let id = event_id.ok_or_else(|| SlackPayloadParseError::InvalidExternalRef {
+) -> Result<(), SlackPayloadParseError> {
+    if wrapper_event_type == "event_callback" && event_id.is_none() {
+        return Err(SlackPayloadParseError::InvalidExternalRef {
             kind: "external_event_id",
             reason: "event_callback must carry event_id".to_string(),
-        })?;
-        ExternalEventId::new(format!("slack-{}-{id}", installation_id.as_str()))
-    } else {
-        // Non-event_callback types (team_join, url_verification, etc.) always
-        // route to noop. Use a noop-namespaced key so they never collide with
-        // real event_callback IDs.
-        ExternalEventId::new(format!(
-            "slack-{}-noop-{wrapper_event_type}",
-            installation_id.as_str()
-        ))
+        });
     }
+    Ok(())
+}
+
+/// The dedup key for one Slack MESSAGE, not one Slack EVENT.
+///
+/// Slack announces a single post as up to two events — `app_mention` and
+/// `message` — with DISTINCT `event_id`s, and both can now start a run. Keyed
+/// on `event_id` the durable admission gate cannot see they are the same
+/// message and would admit two runs, so one @mention would be answered twice.
+/// `(team, channel, ts)` is the identity Slack itself gives the message, so
+/// the twins collapse to exactly one run whichever of them arrives first.
+/// (`openclaw` and `suna` key the same collapse on the same triple.)
+fn build_message_event_id(
+    installation_id: &AdapterInstallationId,
+    team_id: Option<&str>,
+    channel: &str,
+    ts: &str,
+) -> Result<ExternalEventId, SlackPayloadParseError> {
+    ExternalEventId::new(format!(
+        "slack-{}-msg-{}-{channel}-{ts}",
+        installation_id.as_str(),
+        team_id.unwrap_or("noteam"),
+    ))
     .map_err(|err| SlackPayloadParseError::InvalidExternalRef {
         kind: "external_event_id",
         reason: err.to_string(),
@@ -581,12 +646,31 @@ fn attachment_kind_for_mime(mime_type: &str) -> ProductAttachmentKind {
     }
 }
 
-fn strip_leading_bot_mention(text: &str) -> String {
+/// Strips the leading `<@U…>` / `<@U…|handle>` token ONLY when it names the
+/// configured bot. A leading mention of anyone else stays: dropping it would
+/// silently remove a third party from the prompt while leaving the bot's own
+/// tag behind. This matters more now that [`SlackMessageKind::TextMention`]
+/// admits messages naming the bot anywhere in the text, not just in front.
+/// Non-leading mentions are never touched — the model sees them verbatim.
+///
+/// Without a configured `bot_user_id` this degrades to the pre-existing
+/// behavior of stripping whatever mention leads, the same tradeoff
+/// [`mentions_bot`] makes for detection.
+fn strip_leading_bot_mention(text: &str, bot_user_id: Option<&str>) -> String {
     let trimmed = text.trim();
     if trimmed.starts_with("<@")
         && let Some(end) = trimmed.find('>')
     {
-        return trimmed[end + 1..].trim_start().to_string();
+        // The id is the segment before an optional `|handle>` suffix.
+        let inside = &trimmed[2..end];
+        let mention_id = inside.split_once('|').map_or(inside, |(id, _)| id);
+        let names_bot = match bot_user_id.filter(|id| !id.is_empty()) {
+            Some(bot) => mention_id == bot,
+            None => true,
+        };
+        if names_bot {
+            return trimmed[end + 1..].trim_start().to_string();
+        }
     }
     trimmed.to_string()
 }

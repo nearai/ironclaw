@@ -55,8 +55,13 @@ impl ChannelIngress for SlackChannelAdapter {
                     reason: format!("invalid installation id: {error}"),
                 }
             })?;
-        match normalize_slack_inbound(request.body, request.headers, &installation_id)
-            .map_err(parse_error)?
+        match normalize_slack_inbound(
+            request.body,
+            request.headers,
+            &installation_id,
+            crate::payload::slack_bot_user_id(request.config),
+        )
+        .map_err(parse_error)?
         {
             SlackInboundEvent::UrlVerification { challenge } => {
                 Ok(InboundOutcome::Respond(ImmediateResponse {
@@ -753,7 +758,16 @@ mod tests {
         let message = &messages[0];
         assert_eq!(message.text, "hello there");
         assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
-        assert_eq!(message.event_id.as_str(), "slack-install_alpha-Ev123");
+        // Keyed on the MESSAGE (team, channel, ts), not on Slack's per-event
+        // `event_id` — the twins Slack sends for one post carry different
+        // `event_id`s and would otherwise each admit their own run. The
+        // envelope's `event_id` is still required (see
+        // `oversized_payload_and_missing_event_id_fail_closed`), it just no
+        // longer decides identity.
+        assert_eq!(
+            message.event_id.as_str(),
+            "slack-install_alpha-msg-T-A-D123-1710000000.000100"
+        );
         assert_eq!(message.actor.id(), "U123");
         assert_eq!(message.conversation.conversation_id(), "D123");
         assert!(message.reply_context.is_none());
@@ -891,6 +905,62 @@ mod tests {
             Some("1710000000.000010"),
             "a broadcast mention stays anchored to the thread it was written in, not its own ts"
         );
+    }
+
+    /// `inbound` with an explicit host-resolved config (the plain `inbound`
+    /// helper above always passes an empty config, so `mentions_bot` never
+    /// fires through it — this is the seam for driving a `message` event
+    /// that names the bot via text alone, with `slack_bot_user_id` resolved
+    /// the way the host actually resolves it).
+    async fn inbound_with_config(
+        body: &[u8],
+        config: &[(String, String)],
+    ) -> Result<InboundOutcome, ChannelError> {
+        SlackChannelAdapter
+            .receive(
+                VerifiedInbound {
+                    extension_id: "slack",
+                    installation_id: "install_alpha",
+                    config,
+                    body,
+                    headers: &[],
+                    can_reply_in_threads: true,
+                },
+                &ScriptedEgress::new(Vec::new()),
+            )
+            .await
+    }
+
+    /// The point of `TextMention` driven through the production caller: a
+    /// `message` event with NO `app_mention` twin, whose text names the bot,
+    /// still reaches `receive` as a `BotMention` rather than being dropped as
+    /// ambient chatter.
+    #[tokio::test]
+    async fn a_message_event_naming_the_bot_reaches_receive_as_a_bot_mention_with_no_app_mention_twin()
+     {
+        let config = vec![("slack_bot_user_id".to_string(), "UBOT".to_string())];
+        let outcome = inbound_with_config(
+            br#"{
+                "type": "event_callback",
+                "event_id": "EvTextMention",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message",
+                    "user": "U123",
+                    "channel": "C123",
+                    "text": "<@UBOT> can you help",
+                    "ts": "1710000000.000950"
+                }
+            }"#,
+            &config,
+        )
+        .await
+        .expect("text mention parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages, a message naming the bot must not be dropped");
+        };
+        assert_eq!(messages[0].text, "can you help");
+        assert_eq!(messages[0].trigger, ProductTriggerReason::BotMention);
     }
 
     /// The counterexample to the fix above: `app_mention` with
