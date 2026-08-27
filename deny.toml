@@ -23,13 +23,6 @@ ignore = [
     # throwaway local OIDC JWT fixtures; no production network-observable
     # private-key operation is exposed by this dependency.
     "RUSTSEC-2023-0071",
-    # arrayref 0.3.9 is yanked (0.3.5-0.3.9 were mass-yanked upstream), but every
-    # version in blake3's `^0.3.5` range is yanked and the sole unyanked release,
-    # 0.3.10, adds a dependency on `proc-macro1` - a `proc-macro2` typosquat that
-    # pulls `ureq`/`rustls`/`tar`/`flate2` and fetches over the network at build
-    # time. Staying on the pre-yank 0.3.9 content (checksum 76a2e812...) is the
-    # safe option; revisit when blake3 drops arrayref or a clean 0.3.x ships.
-    { crate = "arrayref@0.3.9", reason = "only unyanked in-range version (0.3.10) pulls a proc-macro2 typosquat with build-time network access" },
 ]
 
 [licenses]
