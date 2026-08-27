@@ -801,6 +801,48 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert exactly `expected` distinct tool results sent to the model contain
+    /// `needle`. Tool results recur in later requests as conversation history,
+    /// so count provider tool-call ids rather than flattened message instances.
+    pub async fn assert_model_tool_result_content_occurrences(
+        &self,
+        needle: &str,
+        expected: usize,
+    ) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        let tool_results: std::collections::BTreeMap<&str, &str> = requests
+            .iter()
+            .flatten()
+            .filter(|message| message.role == Role::Tool)
+            .filter_map(|message| {
+                message
+                    .tool_call_id
+                    .as_deref()
+                    .map(|tool_call_id| (tool_call_id, message.content.as_str()))
+            })
+            .collect();
+        let matching = tool_results
+            .values()
+            .filter(|content| content.contains(needle))
+            .count();
+        if matching == expected {
+            return Ok(());
+        }
+        let seen: Vec<_> = tool_results
+            .into_iter()
+            .map(|(tool_call_id, content)| {
+                let preview: String = content.chars().take(1024).collect();
+                format!("{tool_call_id}={preview}")
+            })
+            .collect();
+        Err(format!(
+            "expected {expected} distinct model-visible tool result(s) containing {needle:?}, saw {} across {} request(s): {seen:?}",
+            matching,
+            requests.len()
+        )
+        .into())
+    }
+
     /// Assert that the final interactive model request still carries `needle`.
     /// This avoids a vacuous pass from an earlier request when testing context
     /// retained across a long-running turn.
