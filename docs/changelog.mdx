@@ -11,6 +11,58 @@ always documents the **latest stable release** — docs for earlier releases
 live in their git tags, such as
 [`ironclaw-v1.0.0`](https://github.com/nearai/ironclaw/tree/ironclaw-v1.0.0/docs).
 
+<Update label="2026-08-26" description="v1.4.0">
+
+**Notifications, background subagents, and a sandbox that holds still.**
+
+- **A durable notification inbox** — runs publish authoritative outcomes and
+  actionable gates to a per-user inbox instead of vanishing into a transcript,
+  and the WebUI notification center reads from it. Approvals and auth prompts
+  you missed are still there when you come back.
+- **Background subagents** — a parent turn can spawn children that run and
+  deliver on their own, with per-child delivery, activation provenance, and a
+  derived cap on autonomous wakes. Healing sweeps recover children whose parent
+  went away.
+- **Persistent per-user sandbox containers** on the local-Docker profile —
+  a user sandbox is a durable container reached over Docker Exec rather than a
+  fresh process per call, so container-local installs and state survive between
+  commands. The Railway preview profile still runs an ephemeral worker per
+  command and keeps only its checkpointed workspace. On both, sandbox egress is
+  routed through a managed per-user proxy, and extensions can declare
+  direct-exec credential bindings that stay behind it, so secrets are never
+  handed to sandboxed code.
+- **Run-now for automations**, plus exact run capability facts, so a scheduled
+  automation can be exercised and inspected without waiting for its schedule.
+- **Suggestions you can act on** — generated over your own no-approval,
+  read-only tools, gated on extensions you have actually connected, and
+  surfaced in onboarding with refresh and connect entries.
+- **Google Docs semantic editing**, and conversation artifacts now carry run
+  timing evidence.
+- **Fewer stalls and fewer surprises** — structured finalization is bounded,
+  OpenAI-compatible reasoning-only responses survive, provider failures and auth
+  diagnostics reach the model as readable context instead of opaque errors, and
+  libSQL write-lane starvation no longer cascades through the resource governor
+  as unrelated tool failures.
+- **Telegram** separates workspace-bot pairing from personal device linking, and
+  **Slack** delivers the unlinked-user connect nudge privately with a one-click
+  link.
+
+**Upgrading from 1.3.0:** no migration steps. Installation state written by 1.2.x
+is accepted and preserved, so a deployment that skipped 1.3 upgrades directly.
+
+**Operators:** the runtime image can now start an in-worker SSH listener, and it
+is **off unless you set it**. Setting `IRONCLAW_REBORN_SSH_PUBLIC_KEY` to an
+OpenSSH *public* key enables public-key-only login as user `agent` on container
+port 2222, which must be published to be reachable. Note that `agent` shares
+uid 1000 with the `ironclaw` runtime user, so an SSH session holds the full
+runtime identity — treat the private key like shell access to the service.
+`IRONCLAW_REBORN_WORKSPACE_ROOT` is honored on both CLI boot paths; neither it
+nor `IRONCLAW_REBORN_HOME` may be set to the filesystem root. New sandbox knobs:
+`IRONCLAW_REBORN_SANDBOX_PROXY_IMAGE` and
+`IRONCLAW_SANDBOX_EXTRA_ALLOWED_DOMAINS`.
+
+</Update>
+
 <Update label="2026-08-19" description="v1.3.0">
 
 **Your model, your automations, fewer writes.**
