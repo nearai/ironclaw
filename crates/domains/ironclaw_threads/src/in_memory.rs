@@ -15,8 +15,7 @@ use crate::stored_message::serialize_stored_thread_message;
 use crate::summary_artifacts::{find_overlapping_summary, sorted_context_summaries};
 use crate::title::derive_thread_title;
 use crate::tool_result_records::{
-    tool_result_record_chunk, validate_tool_result_record_content,
-    validate_tool_result_record_read, validate_tool_result_record_ref,
+    validate_tool_result_record_content, validate_tool_result_record_ref,
 };
 use crate::{
     AcceptInboundMessageRequest, AcceptSubagentResultRequest, AcceptedInboundMessage,
@@ -34,7 +33,7 @@ use crate::{
     SessionThreadRecord, SessionThreadService, StructuredFinalizationRecord, SummaryArtifact,
     SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    ToolResultRecordRead, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
     UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
@@ -1236,15 +1235,23 @@ impl SessionThreadService for InMemorySessionThreadService {
     async fn read_tool_result_record(
         &self,
         request: ReadToolResultRecordRequest,
-    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+    ) -> Result<Option<ToolResultRecordRead>, SessionThreadError> {
         validate_tool_result_record_ref(&request.result_ref)?;
-        validate_tool_result_record_read(request.max_bytes)?;
         let state = self.state.lock().await;
         let thread = get_thread(&state, &request.scope, &request.thread_id)?;
-        Ok(thread
+        thread
             .tool_result_records
             .get(&request.result_ref)
-            .map(|content| tool_result_record_chunk(content, request.offset, request.max_bytes)))
+            .map(|content| {
+                crate::tool_result_records::read_tool_result_record(
+                    content,
+                    &request.result_ref,
+                    request.offset,
+                    request.max_bytes,
+                    &request.selection,
+                )
+            })
+            .transpose()
     }
 
     async fn update_tool_result_record(

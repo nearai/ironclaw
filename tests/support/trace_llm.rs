@@ -755,6 +755,7 @@ impl TraceLlm {
                 Some(ObservedToolResult {
                     tool_call_id,
                     content: parsed,
+                    structured_json_view: message.tool_result_structured_json_view,
                 })
             })
             .collect()

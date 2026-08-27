@@ -162,7 +162,9 @@ fn github_issue_tools_with_credential_result(
         io: Mutex::new(io),
         result_writer_io: Mutex::new(result_writer_io),
         durable_capability_io_thread_service: Mutex::new(None),
-        durable_capability_io_requested: false,
+        // Production composes `StagedCapabilityIo`; use it here so successful
+        // WASM results exercise durable storage and result_read as deployed.
+        durable_capability_io_requested: true,
         root,
         workspace_root,
         mounts,

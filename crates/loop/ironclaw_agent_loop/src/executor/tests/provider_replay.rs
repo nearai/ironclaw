@@ -438,6 +438,7 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
             result_ref: observed_ref,
             byte_len: 0,
             preview: None,
+            structured_json_view: false,
             total_bytes: None,
             next_offset: None,
             item_count: None,

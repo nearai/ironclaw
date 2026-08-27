@@ -1408,10 +1408,14 @@ mod tests {
                 result_ref: write.result_ref.as_str().to_string(),
                 offset: 0,
                 max_bytes: 128,
+                selection: ironclaw_threads::ToolResultRecordSelection::Bytes,
             })
             .await
             .expect("durable read succeeds")
             .expect("durable record exists after update");
+        let ironclaw_threads::ToolResultRecordRead::Bytes(updated_record) = updated_record else {
+            panic!("byte selection must return a byte chunk");
+        };
         assert_eq!(
             updated_record.content,
             serde_json::to_vec(&serde_json::json!({"content": "updated"})).unwrap(),
@@ -1436,6 +1440,7 @@ mod tests {
                 result_ref: write.result_ref.as_str().to_string(),
                 offset: 0,
                 max_bytes: 128,
+                selection: ironclaw_threads::ToolResultRecordSelection::Bytes,
             })
             .await
             .expect("durable read after delete succeeds");
@@ -1523,13 +1528,136 @@ mod tests {
         );
     }
 
-    /// Issue #5838: a result over the preview cap is truncated at a UTF-8 char
-    /// boundary (not mid-character), the reported `next_offset` matches the
-    /// preview's own byte length exactly, and reading a continuation chunk
-    /// from that offset through the production `result_read` capability
-    /// reproduces the full serialized result with no gap or overlap.
+    /// A large structured result keeps the complete serialized provider output
+    /// in the durable record while exposing a bounded, parseable root view to
+    /// the model. This deliberately runs through `StagedCapabilityIo` so the
+    /// assertion covers the production persistence/first-look seam rather than
+    /// only the shared renderer.
     #[tokio::test]
-    async fn standalone_result_read_continues_exactly_where_first_look_preview_truncated() {
+    async fn write_capability_result_large_json_uses_bounded_parseable_root_preview() {
+        let run_context = run_context("first-look-preview-large-json").await;
+        let fallback_user_id =
+            UserId::new("first-look-preview-large-json-owner").expect("fallback user id");
+        let thread_scope =
+            thread_scope_for_run(&run_context, &fallback_user_id).expect("run scope has an agent");
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(run_context.thread_id.clone()),
+                created_by_actor_id: "actor-a".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread exists");
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
+            Arc::new(CapabilityDisplayPreviewStore::default()),
+            thread_service.clone(),
+            fallback_user_id,
+            None,
+        );
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({"query": "large nested result"})),
+            )
+            .await
+            .expect("input stages");
+        let invocation_id = InvocationId::new();
+        let capability_id = CapabilityId::new("builtin.json").expect("capability id");
+        let items = (0..4_000)
+            .map(|index| {
+                serde_json::json!({
+                    "id": index,
+                    "label": format!("nested-item-{index}"),
+                    "payload": "x".repeat(8),
+                })
+            })
+            .collect::<Vec<_>>();
+        let output = serde_json::json!({
+            "metadata": {"marker": "large-nested-json"},
+            "payload": {"items": items},
+        });
+        let serialized = serde_json::to_vec(&output).expect("large result serializes");
+        assert!(serialized.len() > 100 * 1024, "fixture must exceed 100 KiB");
+
+        let write_result = capability_io
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
+                invocation_id,
+                capability_id: &capability_id,
+                output,
+                display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
+            })
+            .await
+            .expect("large result stages");
+
+        let mut durable_bytes = Vec::new();
+        let mut offset = 0;
+        loop {
+            let chunk = thread_service
+                .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
+                    scope: thread_scope.clone(),
+                    thread_id: run_context.thread_id.clone(),
+                    result_ref: write_result.result_ref.as_str().to_string(),
+                    offset,
+                    max_bytes: ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
+                    selection: ironclaw_threads::ToolResultRecordSelection::Bytes,
+                })
+                .await
+                .expect("durable result lookup succeeds")
+                .expect("durable result exists");
+            let ironclaw_threads::ToolResultRecordRead::Bytes(chunk) = chunk else {
+                panic!("byte selection must return a byte chunk");
+            };
+            durable_bytes.extend_from_slice(&chunk.content);
+            match chunk.next_offset {
+                Some(next_offset) => offset = next_offset,
+                None => break,
+            }
+        }
+        assert_eq!(durable_bytes, serialized, "durable bytes stay complete");
+
+        let observation = write_result
+            .model_observation
+            .as_ref()
+            .expect("large result carries a first-look observation");
+        let preview = match &observation.detail {
+            ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
+                preview: Some(preview),
+                total_bytes: Some(total_bytes),
+                ..
+            } => {
+                assert_eq!(*total_bytes, serialized.len() as u64);
+                preview
+            }
+            detail => panic!("expected a large JSON result reference, got {detail:?}"),
+        };
+        assert!(
+            preview.len()
+                <= ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES,
+            "first-look preview must stay bounded"
+        );
+        let preview_value = serde_json::from_str::<serde_json::Value>(preview)
+            .expect("large JSON first-look must be a complete JSON page");
+        assert_eq!(preview_value["total_bytes"], serialized.len() as u64);
+        assert_eq!(preview_value["json_pointer"], "");
+        assert_eq!(preview_value["node_type"], "object");
+        assert_eq!(
+            preview_value["content"]["metadata"]["marker"],
+            "large-nested-json"
+        );
+    }
+
+    /// A large JSON string gets a parseable structural first look whose nested
+    /// continuation request advances on a UTF-8 boundary. Following that
+    /// request through the production `result_read` capability reproduces the
+    /// selected string with no gap or overlap.
+    #[tokio::test]
+    async fn standalone_result_read_continues_structured_json_string_preview_exactly() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::factory::build_runtime_substrate(
             crate::deployment::local_filesystem_build_input(
@@ -1579,7 +1707,7 @@ mod tests {
         // (the raw cap) falls inside it and must round down.
         let cap = ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES;
         let content = format!("{}{}{}", "a".repeat(cap - 2), '日', "a".repeat(100));
-        let output = serde_json::Value::String(content);
+        let output = serde_json::Value::String(content.clone());
         let full_text = serde_json::to_string(&output).expect("serialize reference output");
         assert!(full_text.len() > cap, "fixture must exceed the preview cap");
 
@@ -1609,35 +1737,47 @@ mod tests {
             .model_observation
             .as_ref()
             .expect("write result carries a first-look observation");
-        let (preview, next_offset) = match &observation.detail {
+        let preview = match &observation.detail {
             ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
                 preview: Some(preview),
-                next_offset: Some(next_offset),
+                next_offset: None,
                 item_count: None,
                 ..
-            } => (preview.clone(), *next_offset),
-            detail => panic!("expected a truncated result reference preview, got {detail:?}"),
+            } => preview,
+            detail => panic!("expected a structured result reference preview, got {detail:?}"),
         };
+        let preview_page = serde_json::from_str::<serde_json::Value>(preview)
+            .expect("first look is a complete JSON page");
+        let first_content = preview_page["content"]
+            .as_str()
+            .expect("string page exposes string content");
+        let next_offset = preview_page["next_offset"]
+            .as_u64()
+            .expect("large string page has a continuation");
         assert!(
             !observation.summary.contains("Full result is"),
             "a non-array result must not claim an array item count: {}",
             observation.summary
         );
         assert!(
-            preview.is_char_boundary(preview.len()),
-            "preview must end on a UTF-8 char boundary"
+            content.is_char_boundary(next_offset as usize),
+            "JSON string continuation must land on a UTF-8 boundary"
         );
         assert!(
             next_offset < cap as u64,
             "the multi-byte char must round the boundary down below the raw cap"
         );
         assert_eq!(
-            preview.len() as u64,
+            first_content.len() as u64,
             next_offset,
-            "next_offset must match the preview's own byte length exactly"
+            "next_offset must match the selected string content length exactly"
         );
-        assert!(observation.summary.contains("result_read"));
-        assert!(observation.summary.contains(&next_offset.to_string()));
+        assert!(
+            observation.summary.contains("bounded JSON view"),
+            "unexpected first-look summary: {}",
+            observation.summary
+        );
+        assert_eq!(preview_page["next"]["offset"], next_offset);
 
         // `write_capability_result` only persists the raw record; the executor
         // finalizes the model-visible `ToolResultReference` message afterward
@@ -1705,6 +1845,7 @@ mod tests {
                         "result_ref": write_result.result_ref.as_str(),
                         "offset": next_offset,
                         "max_bytes": cap,
+                        "json_pointer": "",
                     }),
                 ),
             ))
@@ -1736,20 +1877,22 @@ mod tests {
             "the continuation must reach the end of the payload"
         );
 
-        let mut reassembled = preview;
+        let mut reassembled = first_content.to_string();
         reassembled.push_str(continuation_content);
         assert_eq!(
-            reassembled, full_text,
-            "preview + continuation must reproduce the full serialized result with no gap or overlap"
+            reassembled, content,
+            "structured pages must reproduce the selected string with no gap or overlap"
         );
     }
 
     /// Issue: a truncated preview that slices mid-JSON-array leaves the model
     /// unable to tell how many items the full result contains. When the
-    /// capability output is a top-level JSON array, the truncated-branch
-    /// observation carries `item_count` and mentions it in the summary.
+    /// capability output is a top-level JSON array, the structured page and
+    /// summary carry the count. The outer observation must not set
+    /// `item_count` because its continuation lives inside the JSON page rather
+    /// than in the outer byte `next_offset` field.
     #[tokio::test]
-    async fn write_capability_result_truncated_array_preview_reports_item_count() {
+    async fn write_capability_result_structured_array_preview_reports_item_count() {
         let run_context = run_context("first-look-preview-array").await;
         let fallback_user_id =
             UserId::new("first-look-preview-array-owner").expect("fallback user id");
@@ -1783,16 +1926,18 @@ mod tests {
         let invocation_id = InvocationId::new();
         let capability_id = CapabilityId::new("ironclaw.memory.search").expect("capability id");
 
-        // Short strings serialize well over the preview cap.
+        // Medium strings force the collection renderer to use the automatic
+        // first-look budget rather than stopping at the default item limit.
         const ITEM_COUNT: usize = 4000;
-        let items: Vec<String> = (0..ITEM_COUNT).map(|i| format!("item-{i:04}")).collect();
+        let items: Vec<String> = (0..ITEM_COUNT)
+            .map(|i| format!("item-{i:04}-{}", "x".repeat(112)))
+            .collect();
         let output = serde_json::json!(items);
         let full_text = serde_json::to_string(&output).expect("serialize reference output");
         assert!(
             full_text.len() > ironclaw_threads::TOOL_RESULT_RECORD_READ_MAX_BYTES,
             "fixture must exceed the preview cap"
         );
-
         let write_result = capability_io
             .write_capability_result(CapabilityResultWrite {
                 run_context: &run_context,
@@ -1812,20 +1957,41 @@ mod tests {
             .expect("write result carries a first-look observation");
         assert!(
             observation.summary.contains(&format!("{ITEM_COUNT} items")),
-            "truncated summary must state the array's element count: {}",
+            "structured summary must state the array's element count: {}",
+            observation.summary
+        );
+        assert!(
+            observation.summary.contains("bounded JSON view"),
+            "unexpected first-look summary: {}",
             observation.summary
         );
         match &observation.detail {
             ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
-                item_count: Some(count),
-                next_offset: Some(_),
+                item_count: None,
+                next_offset: None,
                 total_bytes: Some(total_bytes),
+                preview: Some(preview),
                 ..
             } => {
-                assert_eq!(*count, ITEM_COUNT as u64);
                 assert_eq!(*total_bytes, write_result.byte_len);
+                let page = serde_json::from_str::<serde_json::Value>(preview)
+                    .expect("array preview is a complete JSON page");
+                assert_eq!(page["total_bytes"], write_result.byte_len);
+                assert!(preview.len() <= 3 * 1024);
+                assert!(
+                    serde_json::to_vec(observation)
+                        .expect("complete observation serializes")
+                        .len()
+                        <= 4 * 1024
+                );
+                let next_offset = page["next_offset"]
+                    .as_u64()
+                    .expect("bounded array page has a continuation");
+                assert!((1..25).contains(&next_offset));
+                assert_eq!(page["next"]["json_pointer"], "");
+                assert_eq!(page["next"]["offset"], next_offset);
             }
-            detail => panic!("expected a truncated array preview with item_count, got {detail:?}"),
+            detail => panic!("expected a structured array preview with item_count, got {detail:?}"),
         }
 
         // Singleton boundary: one oversized element still counts as an array
@@ -1863,12 +2029,38 @@ mod tests {
         );
         match &singleton_observation.detail {
             ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
-                item_count: Some(count),
-                next_offset: Some(_),
+                item_count: None,
+                next_offset: None,
+                preview: Some(preview),
                 ..
-            } => assert_eq!(*count, 1),
-            detail => panic!("expected a truncated singleton-array preview, got {detail:?}"),
+            } => {
+                let page = serde_json::from_str::<serde_json::Value>(preview)
+                    .expect("singleton preview is a complete JSON page");
+                assert_eq!(page["omitted"][0]["json_pointer"], "/0");
+            }
+            detail => panic!("expected a structured singleton-array preview, got {detail:?}"),
         }
+    }
+
+    #[test]
+    fn credential_redaction_growth_never_exceeds_the_first_look_budget() {
+        let credential_fields = (0..100)
+            .map(|index| (format!("password-{index}"), serde_json::json!(0)))
+            .collect::<serde_json::Map<_, _>>();
+        let output = serde_json::json!({
+            "data": credential_fields,
+            "padding": "x".repeat(10_000),
+        });
+        let serialized = serde_json::to_vec(&output).expect("fixture serializes");
+        let result_ref = LoopResultRef::new("result:redaction-growth").expect("valid result ref");
+        let preview = first_look_result_preview(&serialized, &result_ref, None)
+            .expect("text result has a first look");
+
+        assert!(
+            preview.text.len() <= RESULT_PREVIEW_MAX_BYTES,
+            "redacted first look was {} bytes",
+            preview.text.len()
+        );
     }
 
     /// Regression (#5838): `result_read`'s own chunk output must NOT mint a
@@ -1956,9 +2148,15 @@ mod tests {
             .detail
         {
             ironclaw_loop_contracts::ToolObservationDetail::ResultReference {
-                next_offset: Some(next_offset),
+                preview: Some(preview),
+                structured_json_view: true,
                 ..
-            } => *next_offset,
+            } => {
+                ironclaw_host_api::model_result_preview::ModelResultJsonPage::from_json_str(preview)
+                    .expect("structured first look is a valid JSON page")
+                    .next_offset
+                    .expect("structured first look carries continuation")
+            }
             detail => panic!("expected a truncated result reference preview, got {detail:?}"),
         };
 
@@ -2064,6 +2262,7 @@ mod tests {
                 result_ref: inline_result_ref,
                 offset: 0,
                 max_bytes: 64,
+                selection: ironclaw_threads::ToolResultRecordSelection::Bytes,
             })
             .await
             .expect("durable lookup does not error");
@@ -2080,10 +2279,16 @@ mod tests {
                 result_ref: write_result.result_ref.as_str().to_string(),
                 offset: 0,
                 max_bytes: 64,
+                selection: ironclaw_threads::ToolResultRecordSelection::Bytes,
             })
             .await
             .expect("durable lookup does not error")
             .expect("original durable record remains intact");
+        let ironclaw_threads::ToolResultRecordRead::Bytes(original_durable_record) =
+            original_durable_record
+        else {
+            panic!("byte selection must return a byte chunk");
+        };
         assert!(!original_durable_record.content.is_empty());
     }
 
@@ -3473,6 +3678,60 @@ mod tests {
             "stored tool result cannot be returned as text"
         );
 
+        let malformed_json_ref = "result:malformed-json-tool-result".to_string();
+        thread_service
+            .put_tool_result_record(PutToolResultRecordRequest {
+                scope: thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                result_ref: malformed_json_ref.clone(),
+                content: b"{not valid JSON".to_vec(),
+            })
+            .await
+            .expect("malformed provider JSON is durably retained");
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                intrinsic_outcome: None,
+                scope: thread_scope.clone(),
+                thread_id: run_context.thread_id.clone(),
+                turn_run_id: run_context.run_id.to_string(),
+                result_ref: malformed_json_ref.clone(),
+                safe_summary: ToolResultSafeSummary::new("malformed JSON tool completed")
+                    .expect("summary"),
+                provider_call: None,
+                model_observation: None,
+            })
+            .await
+            .expect("malformed JSON reference is finalized");
+        let malformed_json_candidate = port
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                provider_tool_call_with_name(
+                    "builtin__result_read",
+                    serde_json::json!({
+                        "result_ref": malformed_json_ref,
+                        "offset": 0,
+                        "max_bytes": 128,
+                        "json_pointer": "",
+                    }),
+                ),
+            ))
+            .await
+            .expect("malformed JSON selection stages");
+        let malformed_json = port
+            .invoke_capability(invocation_for_candidate(&malformed_json_candidate))
+            .await
+            .expect("malformed JSON remains model-recoverable");
+        let Resolution::Done(malformed_json) = malformed_json else {
+            panic!("malformed JSON should be a recoverable failure, got {malformed_json:?}");
+        };
+        assert_eq!(
+            malformed_json.verdict.error_kind(),
+            Some(&FailureKind::OutputDecode)
+        );
+        assert_eq!(
+            malformed_json.summary.as_str(),
+            "stored tool result is not valid JSON"
+        );
+
         thread_service
             .redact_message(RedactMessageRequest {
                 scope: thread_scope,
@@ -3810,6 +4069,57 @@ mod tests {
                             .to_string(),
                     ),
                     schema_path: Some("properties/max_bytes".to_string()),
+                }),
+            ),
+            (
+                "non-string json_pointer",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": 8, "json_pointer": 1}),
+                "result_read json_pointer must be a string",
+                Some(CapabilityInputIssue {
+                    path: "json_pointer".to_string(),
+                    code: DispatchInputIssueCode::TypeMismatch,
+                    expected: Some("string".to_string()),
+                    received: Some("number".to_string()),
+                    schema_path: Some("properties/json_pointer".to_string()),
+                }),
+            ),
+            (
+                "overlong json_pointer",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": 8, "json_pointer": format!("/{}", "x".repeat(4096))}),
+                "result_read json_pointer is too long",
+                Some(CapabilityInputIssue {
+                    path: "json_pointer".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some("at most 4096 bytes".to_string()),
+                    received: Some("4097 bytes".to_string()),
+                    schema_path: Some("properties/json_pointer/maxLength".to_string()),
+                }),
+            ),
+            (
+                "limit outside the collection range",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": 8, "json_pointer": "", "limit": 0}),
+                "result_read limit is outside the allowed range",
+                Some(CapabilityInputIssue {
+                    path: "limit".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some(format!(
+                        "1..={}",
+                        ironclaw_threads::TOOL_RESULT_JSON_MAX_LIMIT
+                    )),
+                    received: Some("0".to_string()),
+                    schema_path: Some("properties/limit".to_string()),
+                }),
+            ),
+            (
+                "limit without a JSON pointer",
+                serde_json::json!({"result_ref": valid_ref, "offset": 0, "max_bytes": 8, "limit": 2}),
+                "result_read limit requires json_pointer",
+                Some(CapabilityInputIssue {
+                    path: "limit".to_string(),
+                    code: DispatchInputIssueCode::InvalidValue,
+                    expected: Some("omit limit for byte reads".to_string()),
+                    received: Some("2".to_string()),
+                    schema_path: Some("properties/limit".to_string()),
                 }),
             ),
         ];

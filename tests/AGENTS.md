@@ -267,6 +267,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 |---|---|
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
+| Inspect a >100 KiB nested JSON capability result through bounded first-look, node/scalar, collection, credential-redaction, invalid-selection, and exact legacy-byte views | `tool_call.rs::{result_read_large_nested_result_first_look_is_bounded_and_parseable,result_read_selects_nested_json_node_and_scalar,result_read_pages_nested_json_collection,result_read_redacts_credential_json_within_requested_budget,invalid_json_result_selections_remain_model_correctable,result_read_preserves_exact_legacy_byte_reads}` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
 | A sandbox-profile shell turn executes as an unprivileged user in one reusable per-user Docker container, preserving workspace and container-local state across shell calls and sharing that container across the user's threads | `reborn_sandbox_shell_turn.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
@@ -516,7 +517,7 @@ entries.
 ### 6.8 APIs (OpenAI-compatible, filesystem, operator)
 | The user can… | Evidence |
 |---|---|
-| Use the Responses API (non-streaming, streaming SSE, continue, retrieve, context injection, auth/validation errors) | `test_reborn_responses_api.py` (14), `test_reborn_webui_v2_legacy_responses_api.py` (14), `test_responses_api.py` (9) |
+| Use the Responses API (non-streaming, streaming SSE, continue, retrieve, context injection, auth/validation errors, and successful external output round-tripping through `result_read`) | `test_reborn_responses_api.py` (15), `test_reborn_webui_v2_legacy_responses_api.py` (14), `test_responses_api.py` (9) |
 | Use chat-completions with idempotency replay and streaming | `test_reborn_responses_api.py` |
 | Mix internal and external tools in one response and get failures back to the LLM | `test_reborn_responses_api.py` |
 | List thread files and browse filesystem mounts, with path traversal rejected | `test_reborn_webui_v2_filesystem_api.py` (3) |

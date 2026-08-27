@@ -3811,6 +3811,7 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
         }];
         let (_preamble, history) = convert_messages(&messages);
         match &history[0] {
@@ -4066,6 +4067,7 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
         };
         let messages = vec![assistant_msg, tool_result_msg];
         let (_preamble, history) = convert_messages(&messages);
@@ -4773,6 +4775,7 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
             tool_call_id: None,
             name: None,
             content_parts: vec![],
@@ -4795,6 +4798,7 @@ mod tests {
             tool_calls: None,
             reasoning: None,
             reasoning_details: None,
+            tool_result_structured_json_view: false,
             tool_call_id: None,
             name: None,
             content_parts: vec![],

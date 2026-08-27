@@ -45,8 +45,9 @@ use ironclaw_threads::{
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultIntrinsicOutcome, ToolResultReferenceEnvelope, ToolResultSafeSummary,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
+    ToolResultIntrinsicOutcome, ToolResultRecordRead, ToolResultRecordSelection,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use tokio::{
     sync::{Barrier, Mutex, OwnedMutexGuard},
@@ -429,12 +430,54 @@ async fn filesystem_tool_result_records_survive_restart_and_enforce_scope() {
             result_ref: "result:fs-tool-result".to_string(),
             offset: 0,
             max_bytes: 10,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect("reopened read succeeds")
         .expect("durable record exists");
+    let ToolResultRecordRead::Bytes(chunk) = chunk else {
+        panic!("byte selection must return a byte chunk");
+    };
     assert_eq!(chunk.content, content[..10]);
     assert_eq!(chunk.next_offset, Some(10));
+
+    let json_ref = "result:fs-json-selected".to_string();
+    let json_content = serde_json::to_vec(&serde_json::json!({
+        "a/b~c": {"marker": "filesystem-escaped-key"},
+        "items": [{"id": 0}, {"id": 1}],
+    }))
+    .expect("JSON result serializes");
+    reopened
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: json_ref.clone(),
+            content: json_content.clone(),
+        })
+        .await
+        .expect("JSON result stores");
+    let selected = reopened
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: json_ref,
+            offset: 0,
+            max_bytes: 1024,
+            selection: ToolResultRecordSelection::Json {
+                pointer: "/a~1b~0c".to_string(),
+                limit: None,
+            },
+        })
+        .await
+        .expect("JSON selection succeeds")
+        .expect("JSON result exists");
+    let ToolResultRecordRead::Json(page) = selected else {
+        panic!("JSON selection must return a structured page");
+    };
+    let page = page.to_value().expect("JSON page serializes");
+    assert_eq!(page["json_pointer"], "/a~1b~0c");
+    assert_eq!(page["content"]["marker"], "filesystem-escaped-key");
+    assert_eq!(page["total_bytes"], json_content.len());
 
     let unicode_ref = "result:fs-unicode-tool-result".to_string();
     reopened
@@ -453,10 +496,14 @@ async fn filesystem_tool_result_records_survive_restart_and_enforce_scope() {
             result_ref: unicode_ref,
             offset: 0,
             max_bytes: 4,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect("unicode durable read succeeds")
         .expect("unicode durable record exists");
+    let ToolResultRecordRead::Bytes(unicode_chunk) = unicode_chunk else {
+        panic!("byte selection must return a byte chunk");
+    };
     assert_eq!(std::str::from_utf8(&unicode_chunk.content).unwrap(), "abc");
     assert_eq!(unicode_chunk.next_offset, Some(3));
 
@@ -467,6 +514,7 @@ async fn filesystem_tool_result_records_survive_restart_and_enforce_scope() {
             result_ref: "result:fs-tool-result".to_string(),
             offset: 0,
             max_bytes: 8,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect_err("wrong scope must not expose durable result records");
@@ -541,10 +589,14 @@ async fn filesystem_concurrent_duplicate_tool_result_writes_converge() {
             result_ref,
             offset: 0,
             max_bytes: 128,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect("converged record is readable")
         .expect("converged record exists");
+    let ToolResultRecordRead::Bytes(stored) = stored else {
+        panic!("byte selection must return a byte chunk");
+    };
     assert_eq!(stored.content, content);
     assert!(stored.next_offset.is_none());
 }
@@ -607,6 +659,7 @@ async fn filesystem_redaction_retains_durable_tool_result_record() {
                 result_ref,
                 offset: 0,
                 max_bytes: 128,
+                selection: ToolResultRecordSelection::Bytes,
             })
             .await
             .expect("redaction keeps the thread readable")

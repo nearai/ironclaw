@@ -44,8 +44,9 @@ use ironclaw_loop_contracts::{
     InMemoryLoopHostMilestoneSink, InstructionMaterializationStore, InstructionSafetyContext,
     LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort,
     LoopModelProgressSink, LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest,
-    LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
+    LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId, ModelVisibleToolObservation,
+    PromptMode, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    ToolObservationDetail, sanitize_model_visible_text,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_safety::{
@@ -2411,7 +2412,11 @@ fn convert_messages(
                 }
                 validate_provider_replay_identity(&provider_call, replay_identity)?;
                 let provider_turn_id = provider_call.provider_turn_id.clone();
-                let mut provider_results = vec![(provider_call, replay.model_content)];
+                let mut provider_results = vec![(
+                    provider_call,
+                    replay.model_content,
+                    replay.structured_json_view,
+                )];
                 let mut plain_tool_results = Vec::new();
                 index += 1;
                 while index < messages.len()
@@ -2432,7 +2437,11 @@ fn convert_messages(
                     if next_provider_call.provider_turn_id != provider_turn_id {
                         break;
                     }
-                    provider_results.push((next_provider_call, next.model_content));
+                    provider_results.push((
+                        next_provider_call,
+                        next.model_content,
+                        next.structured_json_view,
+                    ));
                     index += 1;
                 }
                 converted.extend(provider_tool_roundtrip_messages(provider_results));
@@ -2535,6 +2544,7 @@ struct ToolResultReplayMessage {
     safe_summary: String,
     model_content: String,
     model_content_is_plain_fallback_safe: bool,
+    structured_json_view: bool,
 }
 
 impl ToolResultReplayMessage {
@@ -2550,16 +2560,36 @@ impl ToolResultReplayMessage {
 fn tool_result_replay_message(
     message: &HostManagedModelMessage,
 ) -> Result<ToolResultReplayMessage, HostManagedModelError> {
-    let (safe_summary, model_content, model_content_is_plain_fallback_safe) =
+    let (safe_summary, model_content, model_content_is_plain_fallback_safe, structured_json_view) =
         match message.tool_result_content.as_ref() {
             Some(HostManagedToolResultContent::Reference { envelope }) => {
                 let safe_summary = envelope.safe_summary.as_str().to_string();
                 let model_content = envelope.model_visible_content_or_safe_summary();
-                (safe_summary, model_content, true)
+                let structured_json_view = envelope
+                    .model_observation
+                    .as_ref()
+                    .map(|value| {
+                        match serde_json::from_value::<ModelVisibleToolObservation>(value.clone()) {
+                            Ok(observation) => matches!(
+                                observation.detail,
+                                ToolObservationDetail::ResultReference {
+                                    structured_json_view: true,
+                                    ..
+                                }
+                            ),
+                            Err(error) => {
+                                debug!(error = %error, "stored tool-result observation failed typed replay decoding; using safe summary");
+                                false
+                            }
+                        }
+                    })
+                    .unwrap_or(false);
+                (safe_summary, model_content, true, structured_json_view)
             }
             Some(HostManagedToolResultContent::Resolved { safe_summary }) => (
                 safe_summary.as_str().to_string(),
                 message.content.clone(),
+                false,
                 false,
             ),
             None => {
@@ -2574,35 +2604,36 @@ fn tool_result_replay_message(
         safe_summary,
         model_content,
         model_content_is_plain_fallback_safe,
+        structured_json_view,
     })
 }
 
 fn provider_tool_roundtrip_messages(
-    provider_results: Vec<(ProviderToolCallReferenceEnvelope, String)>,
+    provider_results: Vec<(ProviderToolCallReferenceEnvelope, String, bool)>,
 ) -> Vec<ChatMessage> {
     let reasoning = provider_results
         .iter()
-        .find_map(|(provider_call, _)| provider_call.response_reasoning.clone());
+        .find_map(|(provider_call, _, _)| provider_call.response_reasoning.clone());
     let assistant = ChatMessage::assistant_with_tool_calls(
         None,
         provider_results
             .iter()
-            .map(|(provider_call, _)| provider_tool_call_from_reference(provider_call))
+            .map(|(provider_call, _, _)| provider_tool_call_from_reference(provider_call))
             .collect(),
     )
     .with_reasoning(reasoning);
     std::iter::once(assistant)
-        .chain(
-            provider_results
-                .into_iter()
-                .map(|(provider_call, summary)| {
-                    ChatMessage::tool_result(
-                        provider_call.provider_call_id,
-                        provider_call.provider_tool_name.into_string(),
-                        summary,
-                    )
-                }),
-        )
+        .chain(provider_results.into_iter().map(
+            |(provider_call, summary, structured_json_view)| {
+                let mut message = ChatMessage::tool_result(
+                    provider_call.provider_call_id,
+                    provider_call.provider_tool_name.into_string(),
+                    summary,
+                );
+                message.tool_result_structured_json_view = structured_json_view;
+                message
+            },
+        ))
         .collect()
 }
 
@@ -3292,6 +3323,58 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&replay.model_content).unwrap(),
             observation
         );
+        assert!(!replay.structured_json_view);
+    }
+
+    #[test]
+    fn tool_result_replay_carries_structured_page_provenance_out_of_band() {
+        let page = serde_json::json!({
+            "view": ironclaw_host_api::model_result_preview::MODEL_RESULT_JSON_PAGE_VIEW,
+            "result_ref": "result:tool-page",
+            "json_pointer": "",
+            "node_type": "object",
+            "offset": 0,
+            "offset_unit": "items",
+            "content": {"id": 1},
+            "omitted": [],
+            "total_bytes": 8,
+            "next_offset": null,
+            "next": null,
+        });
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed with a bounded JSON view.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:tool-page",
+                "byte_len": 8,
+                "preview": page.to_string(),
+                "structured_json_view": true,
+                "total_bytes": 8,
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ironclaw_threads::ToolResultReferenceEnvelope::with_model_observation(
+            "result:tool-page",
+            ironclaw_threads::ToolResultSafeSummary::new("tool completed").expect("safe summary"),
+            observation,
+        )
+        .expect("valid structured observation envelope");
+        let message = HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: "tool completed".to_string(),
+            content_ref: ironclaw_turns::LoopMessageRef::new(
+                "msg:22222222-2222-2222-2222-222222222222",
+            )
+            .expect("valid message ref"),
+            tool_result_provider_call: None,
+            tool_result_content: Some(HostManagedToolResultContent::Reference { envelope }),
+            image_parts: Vec::new(),
+        };
+
+        let replay = tool_result_replay_message(&message).expect("replay message");
+        assert!(replay.structured_json_view);
     }
 
     fn error_tool_result_message(

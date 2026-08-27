@@ -54,9 +54,9 @@ pub use contract::{
     SessionThreadRecord, SummaryArtifact, SummaryKind, SummaryModelContextPolicy,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
-    UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
-    effective_tool_result_read_max_bytes,
+    ToolResultRecordChunk, ToolResultRecordRead, ToolResultRecordSelection,
+    UpdateAssistantDraftRequest, UpdateThreadGoalRequest, UpdateToolResultRecordRequest,
+    UpdateToolResultReferenceRequest, effective_tool_result_read_max_bytes,
 };
 pub use error::SessionThreadError;
 pub use identifiers::{SummaryArtifactId, ThreadMessageId};
@@ -72,6 +72,10 @@ pub use prepared_context::{
 pub use structured_finalization::{
     PutStructuredFinalizationRequest, ReadStructuredFinalizationRequest,
     StructuredFinalizationAccounting, StructuredFinalizationRecord, StructuredFinalizationUsage,
+};
+pub use tool_result_records::{
+    TOOL_RESULT_JSON_DEFAULT_LIMIT, TOOL_RESULT_JSON_MAX_LIMIT, ToolResultRecordReadError,
+    model_result_preview_from_json_page, render_json_tool_result_page,
 };
 // The attachment vocabulary lives in `ironclaw_common` (next to `AttachmentKind`
 // and `IncomingAttachment`); re-exposed here so transcript-contract consumers
