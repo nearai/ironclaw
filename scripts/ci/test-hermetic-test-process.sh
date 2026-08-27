@@ -355,6 +355,14 @@ then
   exit 1
 fi
 
+if ! grep -Fq \
+  'cargo test -p ironclaw_integration_tests --test "${test_name}" --ignore-rust-version -- --nocapture' \
+  "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
+then
+  echo "group test runner must ignore the older pinned nightly's rust-version floor" >&2
+  exit 1
+fi
+
 evidence_contract_step="$(
   sed -n \
     '/- name: Validate product-surface evidence contracts/,/- id: product_surface_coverage/p' \
