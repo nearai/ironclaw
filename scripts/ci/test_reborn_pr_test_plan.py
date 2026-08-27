@@ -2097,6 +2097,16 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "selected")
         self.assertEqual(plan["integration_lanes"], [lane])
 
+    def test_group_scenario_selects_the_group_lane(self) -> None:
+        plan = self.plan(
+            "pull_request",
+            [
+                "tests/integration/group_extensions/scenario_install_then_visible_cross_thread.rs"
+            ],
+        )
+        self.assertEqual(plan["mode"], "selected")
+        self.assertEqual(plan["integration_lanes"], ["groups"])
+
     def test_shared_test_support_uses_representative_pr_lanes(self) -> None:
         root_plan = self.plan(
             "pull_request", ["tests/support/reborn_parity_qa/assertions.rs"]

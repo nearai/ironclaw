@@ -2227,6 +2227,7 @@ fn result_reference_observation_from_outcome(
             result_ref,
             byte_len: outcome.refs.byte_len,
             preview: preview.map(|preview| preview.as_str().to_string()),
+            structured_json_view: meta.structured_json_view,
             // Continuation metadata for a truncated first-look preview; falls back
             // to the full inline size for a complete preview.
             total_bytes: meta.total_bytes.or(Some(outcome.refs.byte_len)),
@@ -2267,6 +2268,7 @@ fn dependent_run_result_message(
                     result_ref: result_ref.as_str().to_string(),
                     byte_len: result.byte_len,
                     preview: None,
+                    structured_json_view: false,
                     total_bytes: None,
                     next_offset: None,
                     item_count: None,

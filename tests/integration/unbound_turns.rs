@@ -537,16 +537,20 @@ async fn unbound_run_over_seeded_tool_history_completes_and_persists_the_round()
         .find(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
         .and_then(|message| message.tool_result_ref.clone())
         .ok_or("the seeded tool round must land as a ToolResultReference row")?;
-    let chunk = thread_service
+    let read = thread_service
         .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
             scope: ownerless_thread_scope()?,
             thread_id: accepted.thread_id.clone(),
             result_ref: seeded_result_ref,
             offset: 0,
             max_bytes: ironclaw_threads::effective_tool_result_read_max_bytes(),
+            selection: ironclaw_threads::ToolResultRecordSelection::Bytes,
         })
         .await?
         .ok_or("the seeded tool result record must be durable")?;
+    let ironclaw_threads::ToolResultRecordRead::Bytes(chunk) = read else {
+        return Err("a byte selection must return a byte chunk".into());
+    };
     assert!(
         String::from_utf8_lossy(&chunk.content).contains("the release is green"),
         "the record store must hold the seeded outcome bytes in full"

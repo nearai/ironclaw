@@ -3578,6 +3578,7 @@ async fn spawn_subagent_propagates_result_metadata_from_result_writer() {
             result_ref: "result:fixed-bytes".to_string(),
             byte_len: fixed_byte_len,
             preview: Some("first bounded chunk".to_string()),
+            structured_json_view: false,
             total_bytes: Some(fixed_byte_len * 2),
             next_offset: Some(fixed_byte_len),
             item_count: None,

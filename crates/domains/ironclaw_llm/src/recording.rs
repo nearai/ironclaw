@@ -625,6 +625,7 @@ fn build_prior_tool_lookup(messages: &[ChatMessage]) -> PriorToolLookup {
                 lookup.exact.push(ObservedToolResult {
                     tool_call_id: call_id.to_string(),
                     content: parsed,
+                    structured_json_view: msg.tool_result_structured_json_view,
                 });
             }
             continue;
@@ -837,7 +838,7 @@ fn parameterize_value(value: &mut serde_json::Value, lookup: &PriorToolLookup) {
         serde_json::Value::String(s) => {
             let mut exact_matches = Vec::new();
             for result in &lookup.exact {
-                let Some(payload) = canonical_tool_result_payload(&result.content) else {
+                let Some(payload) = canonical_tool_result_payload(result) else {
                     continue;
                 };
                 find_string_pointers(

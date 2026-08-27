@@ -287,6 +287,7 @@ fn model_visible_capability_success_observation(
             result_ref: result.result_ref.as_str().to_string(),
             byte_len: result.byte_len,
             preview: None,
+            structured_json_view: false,
             total_bytes: None,
             next_offset: None,
             item_count: None,

@@ -898,6 +898,11 @@ def build_plan(
     reasons: list[str] = []
     root_inventory = _root_test_partitions()
     integration_inventory = _integration_test_lanes()
+    group_integration_prefixes = {
+        f"{Path(owner).parent.as_posix()}/"
+        for owner, lane in integration_inventory.items()
+        if lane == "groups"
+    }
     sandbox_crate_prefixes = _sandbox_docker_prefixes()
     sandbox_docker_prefixes = SANDBOX_DOCKER_PREFIXES + sandbox_crate_prefixes
     sandbox_docker_exact_paths = set(SANDBOX_DOCKER_EXACT_PATHS)
@@ -1062,6 +1067,10 @@ def build_plan(
         if path in integration_inventory:
             integration_lanes.add(integration_inventory[path])
             reasons.append(f"integration test changed: {path}")
+            continue
+        if any(path.startswith(prefix) for prefix in group_integration_prefixes):
+            integration_lanes.add("groups")
+            reasons.append(f"integration group scenario changed: {path}")
             continue
         if path in INTEGRATION_SUPPORT_OWNERS:
             owner = INTEGRATION_SUPPORT_OWNERS[path]

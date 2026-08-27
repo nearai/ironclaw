@@ -94,13 +94,13 @@ fn deferred_bridge_script() -> [RebornScriptedReply; 4] {
 
 async fn assert_deferred_bridge_flow(harness: &RebornIntegrationHarness) {
     harness
-        .assert_model_message_content_contains("tool_search returned catalog matches")
+        .assert_model_tool_result_content_occurrences("get repository", 1)
         .await
-        .expect("tool_search completion reaches the next production model request");
+        .expect("bounded search result reaches the next production model request");
     harness
-        .assert_model_message_content_contains("tool_describe returned schema")
+        .assert_model_tool_result_content_occurrences("additionalProperties", 1)
         .await
-        .expect("tool_describe completion reaches the next production model request");
+        .expect("describe schema reaches the next production model request");
     harness
         .assert_tool_invoked("github.get_repo")
         .await
@@ -283,15 +283,15 @@ async fn discovery_batch_classifies_parallel_and_preserves_valid_siblings() {
         .await
         .expect("side-effect-free discovery bridges classify parallel");
     harness
-        .assert_model_message_content_contains("tool_search returned catalog matches")
+        .assert_model_tool_result_content_occurrences("get repository", 1)
         .await
-        .expect("valid search sibling reaches the next model request");
+        .expect("valid bounded search sibling reaches the next model request");
     harness
-        .assert_model_message_content_contains("tool_describe returned schema")
+        .assert_model_tool_result_content_occurrences("additionalProperties", 1)
         .await
-        .expect("valid describe sibling reaches the next model request");
+        .expect("valid describe schema sibling reaches the next model request");
     harness
-        .assert_model_message_content_contains("tool_describe target is unknown")
+        .assert_model_tool_result_content_occurrences("tool_describe target is unknown", 1)
         .await
         .expect("recoverable invalid describe reaches the next model request");
     harness
