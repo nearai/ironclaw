@@ -740,15 +740,15 @@ fn project_call_tool_result(result: &Value) -> Option<Value> {
 
 fn project_content_block(block: &Value) -> Option<Value> {
     let source = block.as_object()?;
-    let block_type = source.get("type").and_then(Value::as_str);
+    let block_type = source.get("type").and_then(Value::as_str)?;
     let mut projected = serde_json::Map::new();
     match block_type {
-        Some("text") => {
+        "text" => {
             let text = source.get("text").and_then(Value::as_str)?;
             projected.insert("type".to_string(), Value::String("text".to_string()));
             projected.insert("text".to_string(), Value::String(text.to_string()));
         }
-        Some(kind @ ("image" | "audio")) => {
+        kind @ ("image" | "audio") => {
             let mime_type = source.get("mimeType").and_then(Value::as_str)?;
             source.get("data").and_then(Value::as_str)?;
             projected.insert("type".to_string(), Value::String(kind.to_string()));
@@ -758,7 +758,7 @@ fn project_content_block(block: &Value) -> Option<Value> {
                 Value::String("binary_unsupported".to_string()),
             );
         }
-        Some("resource_link") => {
+        "resource_link" => {
             let (Some(name), Some(uri)) = (
                 source.get("name").and_then(Value::as_str),
                 source.get("uri").and_then(Value::as_str),
@@ -783,7 +783,7 @@ fn project_content_block(block: &Value) -> Option<Value> {
                 projected.insert("size".to_string(), Value::from(size));
             }
         }
-        Some("resource") => {
+        "resource" => {
             let resource = source.get("resource").and_then(Value::as_object)?;
             let uri = resource.get("uri").and_then(Value::as_str)?;
             let mut projected_resource = serde_json::Map::new();
@@ -811,28 +811,26 @@ fn project_content_block(block: &Value) -> Option<Value> {
         }
         other => {
             projected.insert("type".to_string(), Value::String("unsupported".to_string()));
-            if let Some(original_type) = other {
-                let mut normalized: String = original_type
-                    .chars()
-                    .map(|character| {
-                        if character.is_control() {
-                            ' '
-                        } else {
-                            character
-                        }
-                    })
-                    .collect();
-                if normalized.len() > MAX_MCP_CONTENT_TYPE_BYTES {
-                    const ELLIPSIS: &str = "...";
-                    let mut end = MAX_MCP_CONTENT_TYPE_BYTES - ELLIPSIS.len();
-                    while end > 0 && !normalized.is_char_boundary(end) {
-                        end -= 1;
+            let mut normalized: String = other
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        ' '
+                    } else {
+                        character
                     }
-                    normalized.truncate(end);
-                    normalized.push_str(ELLIPSIS);
+                })
+                .collect();
+            if normalized.len() > MAX_MCP_CONTENT_TYPE_BYTES {
+                const ELLIPSIS: &str = "...";
+                let mut end = MAX_MCP_CONTENT_TYPE_BYTES - ELLIPSIS.len();
+                while end > 0 && !normalized.is_char_boundary(end) {
+                    end -= 1;
                 }
-                projected.insert("original_type".to_string(), Value::String(normalized));
+                normalized.truncate(end);
+                normalized.push_str(ELLIPSIS);
             }
+            projected.insert("original_type".to_string(), Value::String(normalized));
             projected.insert(
                 "status".to_string(),
                 Value::String("unsupported_content_type".to_string()),

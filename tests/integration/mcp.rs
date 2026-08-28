@@ -463,6 +463,50 @@ async fn mcp_mixed_content_is_normalized_before_durable_result_storage() {
         .expect("builtin.result_read returns the normalized durable JSON");
 }
 
+/// A successful JSON-RPC envelope with a malformed content block is a
+/// model-visible output-decode failure, never a successful durable result.
+#[tokio::test]
+async fn mcp_malformed_success_result_surfaces_output_decode_failure() {
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"results": []}),
+    }])
+    .await;
+    server.set_tool_call_result(
+        "search",
+        serde_json::json!({
+            "content": [{"text": "missing discriminator"}],
+            "isError": false
+        }),
+    );
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_mock_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("search").await.expect("turn recovers");
+    assert_recorded_tools_call(&server, "search", "x");
+    h.assert_mcp_tool_called("search")
+        .await
+        .expect("MCP tool call reached the loopback server");
+    h.assert_tool_error(ToolErrorClass::Failed, "output_decode")
+        .await
+        .expect("malformed MCP output became a model-visible decode failure");
+    h.assert_reply_contains("done")
+        .await
+        .expect("run recovered and finalized");
+    assert!(
+        h.tool_result_output("mock-mcp.search").await.is_err(),
+        "malformed MCP output must not be recorded as successful durable output"
+    );
+}
+
 /// Twin of `mcp_tool_call_reaches_mock_server`: same client `Accept:
 /// application/json, text/event-stream` header (`crates/lanes/ironclaw_mcp/src/lib.rs`),
 /// but here the mock server answers every leg with SSE framing instead of

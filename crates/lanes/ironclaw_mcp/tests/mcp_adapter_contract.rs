@@ -407,6 +407,74 @@ async fn concrete_mcp_http_client_rejects_malformed_success_result() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_rejects_malformed_content_block_discriminators() {
+    for (egress, description) in [
+        (
+            RecordingRuntimeEgress::malformed_content_block_type(false),
+            "a content block without a discriminator",
+        ),
+        (
+            RecordingRuntimeEgress::malformed_content_block_type(true),
+            "a content block with a non-string discriminator",
+        ),
+    ] {
+        let error = call_recorded_tool(egress).await.expect_err(description);
+        assert_eq!(error.stable_reason(), "mcp_invalid_tool_result");
+    }
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_enforces_content_block_boundaries() {
+    let output = call_recorded_tool(RecordingRuntimeEgress::content_blocks(1024))
+        .await
+        .expect("the configured content-block ceiling is inclusive");
+    assert_eq!(output.output["content"].as_array().unwrap().len(), 1024);
+
+    let error = call_recorded_tool(RecordingRuntimeEgress::content_blocks(1025))
+        .await
+        .expect_err("content above the configured block ceiling is malformed");
+    assert_eq!(error.stable_reason(), "mcp_invalid_tool_result");
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_truncates_multibyte_unknown_type_at_utf8_boundary() {
+    let output = call_recorded_tool(RecordingRuntimeEgress::long_multibyte_unknown_type())
+        .await
+        .expect("an explicit unknown string discriminator remains unsupported content");
+
+    let original_type = output.output["content"][0]["original_type"]
+        .as_str()
+        .unwrap();
+    assert!(original_type.ends_with("..."));
+    assert!(original_type.len() <= 128);
+    let prefix = original_type.strip_suffix("...").unwrap();
+    assert!(!prefix.is_empty());
+    assert!(prefix.chars().all(|character| character == '界'));
+    assert_eq!(prefix.len() % "界".len(), 0);
+}
+
+async fn call_recorded_tool(
+    egress: RecordingRuntimeEgress,
+) -> Result<McpClientOutput, McpClientError> {
+    McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress)),
+        RecordingEgressPlanner::new(host_http_plan()),
+    )
+    .call_tool(McpClientRequest {
+        provider: ExtensionId::new("github-mcp").unwrap(),
+        capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+        scope: sample_scope(),
+        transport: "http".to_string(),
+        command: None,
+        args: vec![],
+        url: Some("https://mcp.example.test/mcp".to_string()),
+        input: json!({"query": "ironclaw"}),
+        max_output_bytes: 4096,
+    })
+    .await
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_client_surfaces_call_tool_error_content() {
     let client = McpHostHttpClient::new(
         McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::tool_error())),
@@ -2006,6 +2074,9 @@ enum RecordedResponseMode {
     Json,
     MixedContent,
     InvalidToolResult,
+    MalformedContentBlockType(bool),
+    ContentBlocks(usize),
+    LongMultibyteUnknownType,
     ToolError,
     AuthRequired,
     InitializedAuthRequired,
@@ -2049,6 +2120,30 @@ impl RecordingRuntimeEgress {
     fn invalid_tool_result() -> Self {
         Self {
             mode: RecordedResponseMode::InvalidToolResult,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn malformed_content_block_type(non_string: bool) -> Self {
+        Self {
+            mode: RecordedResponseMode::MalformedContentBlockType(non_string),
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn content_blocks(count: usize) -> Self {
+        Self {
+            mode: RecordedResponseMode::ContentBlocks(count),
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn long_multibyte_unknown_type() -> Self {
+        Self {
+            mode: RecordedResponseMode::LongMultibyteUnknownType,
             protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
@@ -2216,6 +2311,30 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                         vec![],
                         request.body.len() as u64,
                     )),
+                    RecordedResponseMode::ContentBlocks(count) => {
+                        let content = (0..count)
+                            .map(|_| json!({"type":"text","text":"ok"}))
+                            .collect::<Vec<_>>();
+                        Ok(runtime_json_response(
+                            id,
+                            json!({"content": content, "isError": false}),
+                            vec![],
+                            request.body.len() as u64,
+                        ))
+                    }
+                    RecordedResponseMode::MalformedContentBlockType(non_string) => {
+                        let block = if non_string {
+                            json!({"type": 42, "text": "numeric type"})
+                        } else {
+                            json!({"text": "missing type"})
+                        };
+                        Ok(runtime_json_response(
+                            id,
+                            json!({"content": [block], "isError": false}),
+                            vec![],
+                            request.body.len() as u64,
+                        ))
+                    }
                     RecordedResponseMode::MixedContent => Ok(runtime_json_response(
                         id,
                         json!({
@@ -2267,6 +2386,15 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                             "structuredContent": {"items": [{"id": 7, "title": "semantic JSON"}]},
                             "isError": false,
                             "_meta": {"transport": "omit"}
+                        }),
+                        vec![],
+                        request.body.len() as u64,
+                    )),
+                    RecordedResponseMode::LongMultibyteUnknownType => Ok(runtime_json_response(
+                        id,
+                        json!({
+                            "content": [{"type": "界".repeat(100)}],
+                            "isError": false
                         }),
                         vec![],
                         request.body.len() as u64,
@@ -2412,6 +2540,9 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     RecordedResponseMode::Json
                     | RecordedResponseMode::MixedContent
                     | RecordedResponseMode::InvalidToolResult
+                    | RecordedResponseMode::MalformedContentBlockType(_)
+                    | RecordedResponseMode::LongMultibyteUnknownType
+                    | RecordedResponseMode::ContentBlocks(_)
                     | RecordedResponseMode::JsonMissingProtocolVersion
                     | RecordedResponseMode::DeepOpenApiSchema
                     | RecordedResponseMode::InvalidToolCatalog
