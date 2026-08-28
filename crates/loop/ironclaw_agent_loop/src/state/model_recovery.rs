@@ -17,13 +17,6 @@ pub struct ModelErrorRecoveryObservation {
 }
 
 impl ModelErrorRecoveryObservation {
-    pub fn context_overflow() -> Self {
-        Self {
-            schema_version: MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
-            detail: ModelErrorRecoveryDetail::ContextOverflow,
-        }
-    }
-
     pub fn content_filtered() -> Self {
         Self {
             schema_version: MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
