@@ -2437,11 +2437,20 @@ fn convert_messages(
                     if next_provider_call.provider_turn_id != provider_turn_id {
                         break;
                     }
-                    provider_results.push((
-                        next_provider_call,
-                        next.model_content,
-                        next.structured_json_view,
-                    ));
+                    let replay_is_duplicate = provider_results.iter().any(
+                        |(existing_call, existing_content, existing_structured_json_view)| {
+                            existing_call == &next_provider_call
+                                && existing_content == &next.model_content
+                                && *existing_structured_json_view == next.structured_json_view
+                        },
+                    );
+                    if !replay_is_duplicate {
+                        provider_results.push((
+                            next_provider_call,
+                            next.model_content,
+                            next.structured_json_view,
+                        ));
+                    }
                     index += 1;
                 }
                 converted.extend(provider_tool_roundtrip_messages(provider_results));
