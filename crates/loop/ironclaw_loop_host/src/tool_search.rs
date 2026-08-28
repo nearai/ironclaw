@@ -35,8 +35,8 @@ const EXACT_IDENTIFIER_BONUS: f64 = 1_000_000.0;
 /// 21 times and "data__" 12 times, each returning the same five unrelated hits, because a
 /// `data`-ish term appears somewhere in unrelated tools. The model reads "results exist" as
 /// "the tool is in here somewhere" and rephrases instead of stopping. A benchmark run
-/// reproduced it verbatim — `run shell command execute code python` returned
-/// `github.rerun_failed_workflow_run_jobs`, which shares only "run".
+/// reproduced it verbatim: "run shell command execute code python" returned a
+/// workflow-rerun capability from an unrelated provider, which shares only "run".
 ///
 /// Coverage is measured against the query's ANSWERABLE terms — those that appear anywhere in the
 /// index — not against every word typed. A term the catalog has never heard of ("vimeo", "noise0")
@@ -45,10 +45,10 @@ const EXACT_IDENTIFIER_BONUS: f64 = 1_000_000.0;
 /// `query_term_budget_uses_only_the_first_unique_terms` honest: a rare identifier plus 32 unknown
 /// words is 1-of-1 answerable coverage, not 1-of-33.
 ///
-/// So "slack send message" and "github list issues" match fully and are untouched, while
-/// "run shell command execute code python" — where several terms ARE answerable and a workflow
-/// tool matches only "run" — now yields `SearchQueryClass::NoMatch`, which is the honest answer
-/// and is already plumbed through.
+/// So short queries like "send message" or "list issues" match fully and are untouched, while
+/// "run shell command execute code python" — where several terms ARE answerable and a
+/// workflow-rerun tool matches only "run" — now yields `SearchQueryClass::NoMatch`, which is the
+/// honest answer and is already plumbed through.
 const MIN_QUERY_TERM_COVERAGE: f64 = 0.5;
 
 /// Below this many answerable terms, a single match is enough and coverage is not applied.
