@@ -1637,9 +1637,11 @@ mod tests {
     }
 
     #[test]
-    fn get_file_content_rejects_malformed_or_unknown_encoding_without_returning_blob() {
+    fn get_file_content_rejects_malformed_responses_without_returning_provider_content() {
         let malformed_blob = "%%%not-base64%%%";
         let unknown_blob = "opaque-provider-content";
+        let missing_encoding_blob = "missing-encoding-provider-content";
+        let missing_content_blob = "missing-base64-content-provider-blob";
         test_support::set_responses([
             Ok(json!({
                 "path": "src/lib.rs",
@@ -1654,17 +1656,44 @@ mod tests {
                 "encoding": "rot13",
                 "content": unknown_blob
             })
+                .to_string()),
+            Ok(r#"{"path":"src/lib.rs","type":"file","encoding":"base64","content":"malformed-json-provider-content""#.to_string()),
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "content": missing_encoding_blob
+            })
+            .to_string()),
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "encoding": "base64",
+                "blob": missing_content_blob
+            })
             .to_string()),
         ]);
 
-        for blob in [malformed_blob, unknown_blob] {
+        for (expected_code, provider_content) in [
+            ("github_api_invalid_response", malformed_blob),
+            ("github_api_unsupported_file_encoding", unknown_blob),
+            (
+                "github_api_invalid_response",
+                "malformed-json-provider-content",
+            ),
+            ("github_api_invalid_response", missing_encoding_blob),
+            ("github_api_invalid_response", missing_content_blob),
+        ] {
             let error = execute_inner(
                 r#"{"owner":"nearai","repo":"ironclaw","path":"src/lib.rs"}"#,
                 Some(r#"{"capability_id":"github.get_file_content"}"#),
             )
-            .expect_err("malformed or unknown encoding should fail visibly");
+            .expect_err("malformed file responses should fail visibly");
             assert!(
-                !error.contains(blob),
+                error.starts_with(expected_code),
+                "expected {expected_code} for malformed file response, got: {error}"
+            );
+            assert!(
+                !error.contains(provider_content),
                 "provider content must not be returned in the failure: {error}"
             );
         }

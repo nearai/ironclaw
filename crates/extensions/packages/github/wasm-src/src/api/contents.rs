@@ -82,10 +82,8 @@ pub(crate) fn get_file_content(
                 }
             }
         }
-        unsupported => {
-            return Err(format!(
-                "github_api_invalid_response: unsupported file encoding {unsupported}"
-            ));
+        _ => {
+            return Err("github_api_unsupported_file_encoding".to_string());
         }
     }
 

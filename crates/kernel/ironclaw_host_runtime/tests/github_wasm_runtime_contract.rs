@@ -2062,6 +2062,137 @@ async fn host_runtime_services_normalize_bundled_github_text_file_content() {
 }
 
 #[tokio::test]
+async fn host_runtime_services_marks_bundled_github_binary_file_content_unsupported() {
+    let capability_id = CapabilityId::new("github.get_file_content").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{
+            "path":"assets/data.bin",
+            "type":"file",
+            "encoding":"base64",
+            "content":"//4="
+        }"#
+        .to_vec(),
+    );
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "path": "assets/data.bin"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["encoding"], json!("binary_unsupported"));
+            assert!(completed.output.get("content").is_none());
+            assert!(completed.output.get("blob").is_none());
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(requests[0].policy, github_policy());
+    assert_github_token_header(&requests[0], "ghp_fake_fixture_token");
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/contents/assets/data.bin"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_maps_bundled_github_malformed_file_content_to_operation_failed() {
+    let encoded_blob = "%%%not-base64%%%";
+    let capability_id = CapabilityId::new("github.get_file_content").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = RecordingNetworkHttpEgress::with_body(
+        format!(
+            r#"{{"path":"src/main.rs","type":"file","encoding":"base64","content":"{encoded_blob}"}}"#
+        )
+        .into_bytes(),
+    );
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "path": "src/main.rs"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let failure = match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
+        other => panic!("expected failed outcome, got {other:?}"),
+    };
+    assert_eq!(failure.capability_id, capability_id);
+    assert_eq!(failure.kind, FailureKind::OperationFailed);
+    assert!(
+        failure.message.as_deref().is_some_and(
+            |message| message.starts_with("provider error code: github_api_invalid_response")
+        ),
+        "malformed provider output should retain only its sanitized error code: {failure:?}"
+    );
+    assert!(!format!("{failure:?}").contains(encoded_blob));
+
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(requests[0].policy, github_policy());
+    assert_github_token_header(&requests[0], "ghp_fake_fixture_token");
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/contents/src/main.rs"
+    );
+}
+
+#[tokio::test]
 async fn bundled_github_wasm_marks_binary_file_content_unsupported() {
     let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 200,
