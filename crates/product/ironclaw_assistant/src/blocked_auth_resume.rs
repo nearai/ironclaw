@@ -128,6 +128,14 @@ impl BlockedAuthResumeFanout {
                 let Some(lifecycle_ref) = notification.source.lifecycle_ref.as_ref() else {
                     continue;
                 };
+                if !notification
+                    .source
+                    .credential_providers
+                    .iter()
+                    .any(|provider| provider.as_str() == event.provider.as_str())
+                {
+                    continue;
+                }
                 let gate_is_active = active_gates.iter().any(|gate| {
                     turn_run_id_from_process_id(gate.process_id) == run_id
                         && gate
@@ -641,6 +649,65 @@ mod tests {
         ))
     }
 
+    fn notification_inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/blocked-auth-provider-notifications")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(InMemoryBackend::new()),
+                mounts,
+            )),
+            ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
+    }
+
+    async fn seed_auth_notification(
+        inbox: &dyn NotificationInboxStorePort,
+        run: &ProcessGateRecord,
+    ) {
+        let run_id = turn_run_id_from_process_id(run.process_id);
+        let gate_ref = run.suspension.gate_ref.as_ref().expect("gate ref");
+        let thread_id = run.scope.thread_id.clone().expect("thread");
+        inbox
+            .publish(PublishNotificationRequest {
+                id: crate::run_delivery::run_notification_inbox_id(
+                    run_id,
+                    NotificationKind::AuthenticationRequired,
+                    Some(gate_ref.as_str()),
+                )
+                .expect("notification id"),
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(OWNER).expect("owner"),
+                },
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: thread_id.clone(),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(
+                        LifecycleRef::new(gate_ref.as_str()).expect("lifecycle ref"),
+                    ),
+                    credential_providers: run
+                        .suspension
+                        .credential_requirements
+                        .iter()
+                        .map(|requirement| requirement.provider.clone())
+                        .collect(),
+                },
+                action: NotificationAction::OpenThread { thread_id },
+                initial_state: NotificationInitialState::Open,
+                occurred_at: Utc::now(),
+            })
+            .await
+            .expect("seed auth notification");
+    }
+
     #[tokio::test]
     async fn turn_gate_completion_fans_out_to_other_provider_blocked_runs_only() {
         let primary = blocked_run(OWNER, TurnRunId::new(), slack_requirement());
@@ -699,6 +766,46 @@ mod tests {
         assert_eq!(
             run_ids, expected,
             "a Settings-page connect resumes every blocked chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_recovery_does_not_resolve_a_stale_google_notification() {
+        let waiting_slack = blocked_run(OWNER, TurnRunId::new(), slack_requirement());
+        let mut denied_google = blocked_run(OWNER, TurnRunId::new(), google_requirement());
+        denied_google.historical = true;
+        let google_run_id = turn_run_id_from_process_id(denied_google.process_id);
+        let inbox = notification_inbox();
+        seed_auth_notification(inbox.as_ref(), &denied_google).await;
+        let (fanout, _coordinator, _inner) = fanout_with(vec![waiting_slack], 0);
+        let fanout = fanout
+            .with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
+
+        fanout
+            .dispatch_auth_continuation(event("slack", AuthContinuationRef::SetupOnly))
+            .await
+            .expect("slack recovery completes");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(OWNER).expect("owner"),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list provider notifications");
+        let google = page
+            .notifications
+            .iter()
+            .find(|notification| notification.source.turn_run_id == Some(google_run_id))
+            .expect("google denial notification");
+        assert!(
+            google.resolved_at.is_none(),
+            "recovering Slack cannot settle a Google authentication notification"
         );
     }
 
@@ -776,6 +883,7 @@ mod tests {
                     lifecycle_ref: Some(
                         LifecycleRef::new(waiting_gate_ref.as_str()).expect("lifecycle ref"),
                     ),
+                    credential_providers: vec![VendorId::new("slack").expect("provider")],
                 },
                 action: NotificationAction::OpenThread {
                     thread_id: waiting_thread_id,

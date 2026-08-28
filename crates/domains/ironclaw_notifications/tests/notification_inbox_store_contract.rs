@@ -10,7 +10,7 @@ use ironclaw_filesystem::{
     ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
-    ids::{TenantId, ThreadId, UserId},
+    ids::{TenantId, ThreadId, UserId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
     turn::TurnRunId,
@@ -61,6 +61,7 @@ fn request(id: &str, timestamp: i64) -> PublishNotificationRequest {
             thread_id: thread_id.clone(),
             turn_run_id: Some(TurnRunId::new()),
             lifecycle_ref: Some(LifecycleRef::new(format!("gate-{id}")).expect("lifecycle ref")),
+            credential_providers: Vec::new(),
         },
         action: NotificationAction::OpenThread { thread_id },
         initial_state: NotificationInitialState::Open,
@@ -169,6 +170,54 @@ async fn notification_inbox_is_durable_paginated_and_idempotent() {
         .await
         .expect("resume after archived anchor");
     assert_eq!(second_page.notifications[0].id.as_str(), "notification-1");
+}
+
+#[tokio::test]
+async fn auth_notification_retry_enriches_legacy_provider_metadata_without_cross_provider_reuse() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = NotificationInboxStore::new(
+        scoped(backend),
+        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+    );
+    let mut legacy = request("legacy-auth-provider", 1_700_000_001);
+    legacy.kind = NotificationKind::AuthenticationRequired;
+    store
+        .publish(legacy.clone())
+        .await
+        .expect("publish legacy auth notification");
+
+    let mut enriched = legacy.clone();
+    enriched.source.credential_providers = vec![VendorId::new("slack").expect("slack provider")];
+    store
+        .publish(enriched)
+        .await
+        .expect("enrich provider metadata on replay");
+    store
+        .publish(legacy.clone())
+        .await
+        .expect("mixed-version replay preserves enrichment");
+
+    let page = store
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list enriched notification");
+    assert_eq!(
+        page.notifications[0].source.credential_providers,
+        vec![VendorId::new("slack").expect("slack provider")]
+    );
+
+    let mut conflicting = legacy;
+    conflicting.source.credential_providers =
+        vec![VendorId::new("google").expect("google provider")];
+    assert!(matches!(
+        store.publish(conflicting).await,
+        Err(NotificationInboxError::InvalidRequest { .. })
+    ));
 }
 
 #[tokio::test]

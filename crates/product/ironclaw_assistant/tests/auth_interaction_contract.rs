@@ -656,6 +656,7 @@ async fn credential_provided_resumes_completed_auth_gate() {
                 lifecycle_ref: Some(
                     LifecycleRef::new(gate_ref.as_str()).expect("auth lifecycle reference"),
                 ),
+                credential_providers: Vec::new(),
             },
             action: NotificationAction::OpenThread {
                 thread_id: scope.thread_id.clone(),
@@ -971,6 +972,7 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
                 lifecycle_ref: Some(
                     LifecycleRef::new(gate_ref.as_str()).expect("auth lifecycle reference"),
                 ),
+                credential_providers: Vec::new(),
             },
             action: NotificationAction::OpenThread {
                 thread_id: scope.thread_id.clone(),

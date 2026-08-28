@@ -208,16 +208,19 @@ impl ProductAuthTurnGateResumeDispatcher {
             .await
             .map_err(map_auth_resume_error)?;
         let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
+        let denied = resume_disposition == Some(GateResumeDisposition::Denied);
         let gate_is_current = state.status == TurnStatus::BlockedAuth
             && state.gate_ref.as_ref() == Some(&gate_resolution_ref);
         if ignore_stale_gate && !gate_is_current {
-            self.resolve_auth_notification(
-                &state.scope,
-                &event.scope.resource.user_id,
-                run_id,
-                &gate_resolution_ref,
-            )
-            .await?;
+            if !denied {
+                self.resolve_auth_notification(
+                    &state.scope,
+                    &event.scope.resource.user_id,
+                    run_id,
+                    &gate_resolution_ref,
+                )
+                .await?;
+            }
             return Ok(run_id);
         }
         let actor = state
@@ -231,8 +234,6 @@ impl ProductAuthTurnGateResumeDispatcher {
             binding_id.push_str(&binding_ref_segment("disposition", disposition.as_str()));
         }
         let idempotency_key = idempotency_key_for_binding(&binding_id)?;
-        let denied = resume_disposition == Some(GateResumeDisposition::Denied);
-
         self.turn_coordinator
             .resume_turn(ResumeTurnRequest {
                 scope,
@@ -883,6 +884,7 @@ mod tests {
                     lifecycle_ref: Some(
                         LifecycleRef::new(gate_ref.as_str()).expect("lifecycle ref"),
                     ),
+                    credential_providers: Vec::new(),
                 },
                 action: NotificationAction::OpenThread {
                     thread_id: ThreadId::new("thread-auth").expect("thread"),
@@ -945,16 +947,49 @@ mod tests {
     #[tokio::test]
     async fn canceled_continuation_leaves_stale_or_non_turn_gate_untouched() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+        let inbox = notification_inbox();
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone())
+            .with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
         let run_id = TurnRunId::new();
+        let stale_gate_ref = TurnGateRef::new("gate:stale-auth").expect("stale gate ref");
         coordinator.set_state(run_state(
             run_id,
             TurnStatus::BlockedAuth,
             Some("gate:new-auth"),
         ));
+        inbox
+            .publish(PublishNotificationRequest {
+                id: crate::run_delivery::run_notification_inbox_id(
+                    run_id,
+                    NotificationKind::AuthenticationRequired,
+                    Some(stale_gate_ref.as_str()),
+                )
+                .expect("notification id"),
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: ThreadId::new("thread-auth").expect("thread"),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(
+                        LifecycleRef::new(stale_gate_ref.as_str()).expect("lifecycle ref"),
+                    ),
+                    credential_providers: Vec::new(),
+                },
+                action: NotificationAction::OpenThread {
+                    thread_id: ThreadId::new("thread-auth").expect("thread"),
+                },
+                initial_state: NotificationInitialState::Open,
+                occurred_at: Utc::now(),
+            })
+            .await
+            .expect("seed stale auth notification");
         let stale = scoped_event(AuthContinuationRef::TurnGateResume {
             turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
-            gate_ref: AuthGateRef::new("gate:stale-auth").unwrap(),
+            gate_ref: AuthGateRef::new(stale_gate_ref.as_str()).unwrap(),
         });
 
         dispatcher
@@ -967,6 +1002,22 @@ mod tests {
             .expect("setup-only cancellation has no turn side effect");
 
         assert!(coordinator.resumes().is_empty());
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list stale denied notification");
+        assert!(
+            page.notifications[0].resolved_at.is_none(),
+            "a stale denial replay cannot prove credential recovery"
+        );
     }
 
     /// A replayed RESUME continuation whose gate already settled converges as

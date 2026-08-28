@@ -6036,6 +6036,7 @@ where
                                 thread_id: approval.scope.thread_id.clone(),
                                 turn_run_id: Some(approval.run_id),
                                 lifecycle_ref: Some(lifecycle_ref),
+                                credential_providers: Vec::new(),
                             },
                             action: NotificationAction::OpenThread {
                                 thread_id: approval.scope.thread_id,

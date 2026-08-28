@@ -30,6 +30,7 @@ async fn oauth_turn_gate_continuation_resolves_only_the_committed_gate_instance(
                 thread_id: ThreadId::new("thread-auth").expect("thread"),
                 turn_run_id: Some(run_id),
                 lifecycle_ref: Some(LifecycleRef::new(gate_ref.as_str()).expect("lifecycle ref")),
+                credential_providers: Vec::new(),
             },
             action: NotificationAction::OpenThread {
                 thread_id: ThreadId::new("thread-auth").expect("thread"),

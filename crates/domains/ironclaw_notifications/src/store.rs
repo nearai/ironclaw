@@ -80,6 +80,7 @@ where
         request: PublishNotificationRequest,
     ) -> Result<NotificationRecord, NotificationInboxError> {
         validate_notification_action(&request.source, &request.action)?;
+        validate_notification_source(request.kind, &request.source)?;
         let scope = notification_resource_scope(&request.recipient);
         let path = notification_inbox_path()?;
         let recipient = request.recipient.clone();
@@ -105,15 +106,38 @@ where
                         .iter_mut()
                         .find(|record| record.id == request.id)
                     {
+                        let same_source_identity = existing.source.thread_id
+                            == request.source.thread_id
+                            && existing.source.turn_run_id == request.source.turn_run_id
+                            && existing.source.lifecycle_ref == request.source.lifecycle_ref;
+                        let providers_match = existing.source.credential_providers
+                            == request.source.credential_providers;
+                        let provider_metadata_is_compatible = providers_match
+                            || (request.kind == crate::NotificationKind::AuthenticationRequired
+                                && (existing.source.credential_providers.is_empty()
+                                    || request.source.credential_providers.is_empty()));
                         if existing.recipient != request.recipient
                             || existing.kind != request.kind
                             || existing.severity != request.severity
-                            || existing.source != request.source
+                            || !same_source_identity
+                            || !provider_metadata_is_compatible
                             || existing.action != request.action
                         {
                             return Err(NotificationInboxError::InvalidRequest {
                                 reason: "notification id conflicts with an existing event",
                             });
+                        }
+                        if existing.source.credential_providers.is_empty()
+                            && !request.source.credential_providers.is_empty()
+                        {
+                            // One-way compatibility enrichment for records
+                            // written before auth sources carried providers.
+                            // Mixed-version retries with an empty set remain a
+                            // no-op and never erase trusted metadata.
+                            existing.source.credential_providers =
+                                request.source.credential_providers.clone();
+                            let record = existing.clone();
+                            return Ok(CasApply::new(snapshot, record));
                         }
                         if matches!(
                             request.kind,
@@ -422,6 +446,20 @@ fn validate_notification_action(
         }
         NotificationAction::OpenThread { .. } => Ok(()),
     }
+}
+
+fn validate_notification_source(
+    kind: crate::NotificationKind,
+    source: &NotificationSource,
+) -> Result<(), NotificationInboxError> {
+    if kind != crate::NotificationKind::AuthenticationRequired
+        && !source.credential_providers.is_empty()
+    {
+        return Err(NotificationInboxError::InvalidRequest {
+            reason: "credential providers are only valid for authentication notifications",
+        });
+    }
+    Ok(())
 }
 
 fn validate_snapshot(

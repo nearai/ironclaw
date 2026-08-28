@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    ids::{TenantId, ThreadId, UserId},
+    ids::{TenantId, ThreadId, UserId, VendorId},
     turn::TurnRunId,
 };
 use serde::{Deserialize, Serialize};
@@ -176,6 +176,10 @@ pub struct NotificationSource {
     pub thread_id: ThreadId,
     pub turn_run_id: Option<TurnRunId>,
     pub lifecycle_ref: Option<LifecycleRef>,
+    /// Trusted credential-authority namespaces associated with an auth
+    /// notification. Empty for non-auth notifications and legacy records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_providers: Vec<VendorId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

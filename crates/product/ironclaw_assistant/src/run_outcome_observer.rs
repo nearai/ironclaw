@@ -90,6 +90,7 @@ impl RunOutcomeProcessCommitObserver {
                     thread_id: thread_id.clone(),
                     turn_run_id: Some(run_id),
                     lifecycle_ref: Some(outcome_lifecycle_ref("process-terminal")?),
+                    credential_providers: Vec::new(),
                 },
                 action: NotificationAction::OpenThread { thread_id },
                 initial_state: NotificationInitialState::Resolved,
@@ -122,7 +123,14 @@ impl RunOutcomeProcessCommitObserver {
             return Ok(());
         };
         if !Self::auth_gate_is_current(process_journal_source, snapshot, gate_ref).await? {
-            return Self::resolve_authentication_required(inbox, snapshot, run_id, gate_ref).await;
+            return Self::resolve_authentication_required(
+                inbox,
+                snapshot,
+                run_id,
+                gate_ref,
+                occurred_at,
+            )
+            .await;
         }
         let thread_id = snapshot
             .scope
@@ -156,6 +164,11 @@ impl RunOutcomeProcessCommitObserver {
                     thread_id: thread_id.clone(),
                     turn_run_id: Some(run_id),
                     lifecycle_ref: Some(lifecycle_ref),
+                    credential_providers: suspension
+                        .credential_requirements
+                        .iter()
+                        .map(|requirement| requirement.provider.clone())
+                        .collect(),
                 },
                 action: NotificationAction::OpenThread { thread_id },
                 initial_state: NotificationInitialState::Open,
@@ -179,7 +192,8 @@ impl RunOutcomeProcessCommitObserver {
         // state read and the Inbox CAS. Re-read after the write and retire the
         // just-published record if recovery won that race.
         if !Self::auth_gate_is_current(process_journal_source, snapshot, gate_ref).await? {
-            Self::resolve_authentication_required(inbox, snapshot, run_id, gate_ref).await?;
+            Self::resolve_authentication_required(inbox, snapshot, run_id, gate_ref, occurred_at)
+                .await?;
         }
         Ok(())
     }
@@ -228,6 +242,7 @@ impl RunOutcomeProcessCommitObserver {
         snapshot: &JournaledProcessSnapshot,
         run_id: TurnRunId,
         gate_ref: &ironclaw_host_api::turn::TurnGateRef,
+        occurred_at: Timestamp,
     ) -> Result<(), String> {
         let Some(owner_user_id) = snapshot.owner_user_id.clone() else {
             return Ok(());
@@ -245,7 +260,7 @@ impl RunOutcomeProcessCommitObserver {
                     user_id: owner_user_id,
                 },
                 notification_id,
-                occurred_at: chrono::Utc::now(),
+                occurred_at,
             })
             .await
         {
@@ -616,7 +631,7 @@ fn outcome_notification_id(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use chrono::Utc;
+    use chrono::{TimeDelta, Utc};
     use ironclaw_filesystem::{
         Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
     };
@@ -1102,6 +1117,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_auth_publication_resolves_at_the_committed_transition_time() {
+        let inbox = inbox();
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:recovered-before-replay").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let publisher = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        publisher
+            .observe_process_commit(suspended.clone())
+            .await
+            .expect("publish auth notification");
+
+        let mut recovered = suspended.state.clone();
+        recovered.status = ProcessLifecycleStatus::Queued;
+        recovered.suspension = None;
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        )
+        .with_process_journal_source(Arc::new(CurrentProcessSource::new(recovered)));
+        let committed_at = Utc::now() + TimeDelta::hours(1);
+        suspended.occurred_at = Some(committed_at);
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("stale publication reconciles against recovered state");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list resolved auth notification");
+        assert_eq!(page.notifications[0].resolved_at, Some(committed_at));
+    }
+
+    #[tokio::test]
     async fn resumed_commit_retries_auth_resolution_after_an_inbox_outage() {
         let inbox = inbox_failing_second_write();
         let observer = RunOutcomeProcessCommitObserver::new(
@@ -1441,6 +1513,7 @@ mod tests {
                             LifecycleRef::new(crate::run_delivery::TIMEOUT_LIFECYCLE_REF)
                                 .expect("timeout lifecycle ref"),
                         ),
+                        credential_providers: Vec::new(),
                     },
                     action: NotificationAction::OpenThread {
                         thread_id: thread(),
