@@ -4360,17 +4360,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
     }
 
     // `trigger_poller_handle` and the test-support
-    // `trigger_conversation_pairing_value` are produced atomically inside a
-    // single `if trigger_poller.enabled` expression. Avoid a
-    // `let mut … = None` sentinel pattern flagged by code review
-    // (review f-ptr-3): the `let X;` deferred-init form is single-assign
-    // per branch and Rust's borrow checker prevents reads before init.
-    let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
+    // `trigger_conversation_pairing_value` are produced from the same
+    // `trigger_poller.enabled` branch. Avoid a `let mut … = None` sentinel
+    // pattern flagged by code review (review f-ptr-3).
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     >;
-    if trigger_poller.enabled {
+    let trigger_poller_handle: Option<TriggerPollerRuntimeHandle> = if trigger_poller.enabled {
         // Fire-time authorizer: an explicit override wins (tests/advanced),
         // otherwise build one from the deployment's `TriggerFireAccessPolicy`
         // (arch-simplification §4.4 — the former `local_trigger_access` store is
@@ -4504,7 +4501,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 "generic triggered-run delivery hook slot was already occupied; keeping the first hook"
             );
         }
-        trigger_poller_handle = spawn_trigger_poller(
+        spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
                 repository: trigger_repository,
@@ -4517,14 +4514,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger poller could not be started: {error}"),
-        })?;
+        })?
     } else {
-        trigger_poller_handle = None;
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value = None;
         }
-    }
+        None
+    };
 
     let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
