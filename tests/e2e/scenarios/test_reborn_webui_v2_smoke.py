@@ -1692,9 +1692,15 @@ async def test_reborn_v2_model_capability_tags_persist_after_policy_reload(
         )
         await expect(vision_checkbox).to_be_visible()
         vision_row = vision_checkbox.locator("xpath=..")
-        await expect(vision_row).to_contain_text("Text")
-        await expect(vision_row).to_contain_text("Image input")
-        await expect(vision_row).to_contain_text("Image output")
+        await expect(vision_row.locator("[data-capability='text']")).to_have_attribute(
+            "title", "Text"
+        )
+        await expect(
+            vision_row.locator("[data-capability='image-input']")
+        ).to_have_attribute("title", "Image input")
+        await expect(
+            vision_row.locator("[data-capability='image-output']")
+        ).to_have_attribute("title", "Image output")
         await vision_checkbox.check()
 
         await page.locator(SEL_V2["settings_model_policy_save"]).click()
@@ -1714,21 +1720,33 @@ async def test_reborn_v2_model_capability_tags_persist_after_policy_reload(
         persisted_vision_row = page.locator(
             "[data-testid='settings-model-policy-model-nearai-vision-model']"
         ).locator("xpath=..")
-        await expect(persisted_vision_row).to_contain_text("Image input")
-        await expect(persisted_vision_row).to_contain_text("Image output")
+        await expect(
+            persisted_vision_row.locator("[data-capability='image-input']")
+        ).to_have_attribute("title", "Image input")
+        await expect(
+            persisted_vision_row.locator("[data-capability='image-output']")
+        ).to_have_attribute("title", "Image output")
 
         selector = page.locator(SEL_V2["settings_model_selector"])
-        await expect(selector.get_by_role("button")).to_contain_text("Text")
+        await expect(
+            selector.get_by_role("button").locator("[data-capability='text']")
+        ).to_have_attribute("title", "Text")
         await selector.get_by_role("button").click()
         vision_option = page.get_by_role("option").filter(has_text=vision_model)
-        await expect(vision_option).to_contain_text("Image input")
-        await expect(vision_option).to_contain_text("Image output")
+        await expect(
+            vision_option.locator("[data-capability='image-input']")
+        ).to_have_attribute("title", "Image input")
+        await expect(
+            vision_option.locator("[data-capability='image-output']")
+        ).to_have_attribute("title", "Image output")
 
         await page.keyboard.press("Escape")
         backend_summary = page.get_by_text("Backend", exact=True).locator("xpath=..")
         active_summary = backend_summary.locator("xpath=following-sibling::div[1]")
         await expect(active_summary).to_contain_text(text_model)
-        await expect(active_summary).to_contain_text("Text")
+        await expect(
+            active_summary.locator("[data-capability='text']")
+        ).to_have_attribute("title", "Text")
         assert await page.locator(SEL_V2["model_capability_badges"]).count() >= 4
     finally:
         await context.close()

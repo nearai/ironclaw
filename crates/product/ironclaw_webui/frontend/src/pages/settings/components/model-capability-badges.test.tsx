@@ -20,10 +20,12 @@ test("model capabilities use compact semantic icon chips", () => {
   assert.match(markup, /data-capability="text"/);
   assert.match(markup, /data-capability="image-input"/);
   assert.match(markup, /data-capability="image-output"/);
-  assert.match(markup, />Text</);
-  assert.match(markup, />Image input</);
-  assert.match(markup, />Image output</);
+  assert.match(markup, /aria-label="Text"[^>]*title="Text"/);
+  assert.match(markup, /aria-label="Image input"[^>]*title="Image input"/);
+  assert.match(markup, /aria-label="Image output"[^>]*title="Image output"/);
+  assert.doesNotMatch(markup, />Text</);
+  assert.doesNotMatch(markup, />Image input</);
+  assert.doesNotMatch(markup, />Image output</);
   assert.equal(markup.match(/<svg/g)?.length, 3);
   assert.doesNotMatch(markup, /uppercase/);
 });
-

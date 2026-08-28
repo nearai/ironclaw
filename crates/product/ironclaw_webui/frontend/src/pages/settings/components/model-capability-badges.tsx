@@ -35,7 +35,7 @@ export function ModelCapabilityBadges({
 
   return (
     <span
-      className={cn("inline-flex min-w-0 flex-wrap items-center gap-1.5", className)}
+      className={cn("inline-flex min-w-0 flex-wrap items-center gap-1", className)}
       data-testid="model-capability-badges"
     >
       {labels.map((label) => {
@@ -44,18 +44,19 @@ export function ModelCapabilityBadges({
           <span
             key={label}
             className={cn(
-              "inline-flex h-5 shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 text-[0.6875rem] font-medium leading-none",
+              "inline-flex h-5 w-5 shrink-0 cursor-help items-center justify-center rounded-md transition-colors",
               presentation.className,
             )}
+            aria-label={label}
             data-capability={presentation.id}
+            role="img"
             title={label}
           >
             <Icon
               name={presentation.icon}
-              className="h-3 w-3 shrink-0"
+              className="h-3.5 w-3.5 shrink-0"
               strokeWidth={1.9}
             />
-            <span>{label}</span>
           </span>
         );
       })}

@@ -177,8 +177,12 @@ test("fetched capabilities render and only allowed entries are saved", async () 
     assert.ok(fetchModels);
     await act(async () => fetchModels.click());
 
-    assert.match(rendered.container.textContent ?? "", /Image input/);
-    assert.match(rendered.container.textContent ?? "", /Image output/);
+    const imageInput = rendered.container.querySelector('[data-capability="image-input"]');
+    const imageOutput = rendered.container.querySelector('[data-capability="image-output"]');
+    assert.equal(imageInput?.getAttribute("aria-label"), "Image input");
+    assert.equal(imageInput?.getAttribute("title"), "Image input");
+    assert.equal(imageOutput?.getAttribute("aria-label"), "Image output");
+    assert.equal(imageOutput?.getAttribute("title"), "Image output");
     const vision = rendered.container.querySelector<HTMLInputElement>(
       '[data-testid="settings-model-policy-model-vision-model"]'
     );
