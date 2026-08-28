@@ -320,6 +320,7 @@ SEL_V2 = {
     "settings_model_policy_add_model": "[data-testid='settings-model-policy-add-model']",
     "settings_model_policy_save": "[data-testid='settings-model-policy-save']",
     "settings_model_policy_status": "[data-testid='settings-model-policy-status']",
+    "model_capability_badges": "[data-testid='model-capability-badges']",
     "appearance_theme_light": "[data-testid='appearance-theme-light']",
     "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
