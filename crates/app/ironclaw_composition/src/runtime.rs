@@ -4350,18 +4350,13 @@ pub(crate) async fn build_runtime_with_resource_governor(
         })?;
     }
 
-    // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
-    // `trigger_conversation_pairing_value` are produced atomically inside
-    // a single `if trigger_poller.enabled` expression. Avoid a
+    // `trigger_poller_handle` and the test-support
+    // `trigger_conversation_pairing_value` are produced atomically inside a
+    // single `if trigger_poller.enabled` expression. Avoid a
     // `let mut … = None` sentinel pattern flagged by code review
     // (review f-ptr-3): the `let X;` deferred-init form is single-assign
     // per branch and Rust's borrow checker prevents reads before init.
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
-    let runtime_post_submit_hook_slot: Option<
-        Arc<
-            std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
-        >,
-    >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
@@ -4454,7 +4449,52 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
         let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
-        runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
+        // Install the settlement hook before the poller task can observe a due
+        // fire. `tokio::spawn` may schedule on another runtime worker
+        // immediately, so late binding after `spawn_trigger_poller` creates a
+        // startup race. The observer still waits defensively for test/custom
+        // assembly seams, but production never needs an in-memory handoff.
+        // ONE background-run notifier for every channel extension, built by
+        // the SAME product-side workflow factory the channel host graphs are
+        // built by (§12.11 D-A). It decodes each stored notification target
+        // through the assembly's LIVE codec view, so a channel activated after
+        // boot still decodes its own targets. Channel egress stays optional.
+        let notifier = match (
+            channel_host_assembly.as_ref(),
+            channel_workflow_factory.as_ref(),
+        ) {
+            (Some(assembly), Some(workflow_factory)) => workflow_factory.background_run_notifier(
+                Arc::new(
+                ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
+                    Arc::clone(assembly),
+                ),
+                ),
+            ),
+            _ => None,
+        };
+        // Inbox publication must not depend on channel-host assembly. The
+        // durable store is a core runtime service, so install this publisher
+        // even in web-only/custom deployments with no channel egress.
+        let pre_submit_failure_notifier = Some(Arc::new(
+            ironclaw_assistant::PreSubmitFailureInboxNotifier::new(Arc::clone(
+                &services.notification_inbox,
+            )),
+        )
+            as Arc<dyn ironclaw_outbound::TriggeredRunDelivery>);
+        let generic_trigger_hook: Arc<
+            dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
+        > = Arc::new(
+            ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
+                notifier,
+                pre_submit_failure_notifier,
+                Arc::clone(&services.triggered_run_delivery),
+            ),
+        );
+        if hook_slot.set(generic_trigger_hook).is_err() {
+            tracing::debug!(
+                "generic triggered-run delivery hook slot was already occupied; keeping the first hook"
+            );
+        }
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
@@ -4471,48 +4511,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
         })?;
     } else {
         trigger_poller_handle = None;
-        runtime_post_submit_hook_slot = None;
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value = None;
-        }
-    }
-
-    // Generic triggered-run delivery (extension-runtime P6): one hook routes
-    // each settled trigger fire to the owning channel extension's driver via
-    // the assembly's vendor codecs.
-    if let (Some(slot), Some(assembly), Some(workflow_factory), Some(local_runtime)) = (
-        runtime_post_submit_hook_slot.as_ref(),
-        channel_host_assembly.as_ref(),
-        channel_workflow_factory.as_ref(),
-        local_runtime,
-    ) {
-        let triggered_run_delivery = &local_runtime.triggered_run_delivery;
-        // ONE background-run notifier for every channel extension, built by
-        // the SAME product-side workflow factory the channel host graphs are
-        // built by (§12.11 D-A). It decodes each stored notification target
-        // through the assembly's LIVE codec view, so a channel activated
-        // after boot still decodes its own targets.
-        let notifier = workflow_factory.background_run_notifier(Arc::new(
-            ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
-                Arc::clone(assembly),
-            ),
-        ));
-        let pre_submit_failure_notifier = workflow_factory.pre_submit_failure_notifier();
-
-        let generic_trigger_hook: Arc<
-            dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
-        > = Arc::new(
-            ironclaw_extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
-                notifier,
-                pre_submit_failure_notifier,
-                Arc::clone(triggered_run_delivery),
-            ),
-        );
-        if slot.set(generic_trigger_hook).is_err() {
-            tracing::debug!(
-                "generic triggered-run delivery hook slot was already occupied; keeping the first hook"
-            );
         }
     }
 
