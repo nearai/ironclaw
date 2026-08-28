@@ -35,6 +35,10 @@ use crate::ProjectionUpdateRef;
 pub enum TriggeredRunDeliveryOutcomeKind {
     /// The final reply (or gate prompt) was delivered successfully.
     Delivered,
+    /// The provider accepted the notification, but the durable terminal
+    /// `Delivered` confirmation could not be committed. The provider must not
+    /// be retried, and callers must not present this as confirmed delivery.
+    Unconfirmed,
     /// No default communication target is configured for this creator.
     NoDefaultConfigured,
     /// The resolved target is unavailable or rejected the delivery.
@@ -222,6 +226,7 @@ mod tests {
     fn all_outcome_kinds_serialize_as_snake_case() {
         let cases = [
             (TriggeredRunDeliveryOutcomeKind::Delivered, "delivered"),
+            (TriggeredRunDeliveryOutcomeKind::Unconfirmed, "unconfirmed"),
             (
                 TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured,
                 "no_default_configured",

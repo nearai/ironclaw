@@ -138,7 +138,8 @@ pub use channel_workflow::{
     RebornChannelWorkflowServices, build_session_inbound_ledger, channel_conversation_services,
 };
 pub use run_outcome_observer::{
-    AuthNotificationBackfillProcessCommitObserver, RunOutcomeProcessCommitObserver,
+    AuthNotificationBackfillProcessCommitObserver, ResourceBlockBackfillProcessCommitObserver,
+    RunOutcomeProcessCommitObserver,
 };
 // The conversation-binding family moved to
 // `ironclaw_product_contracts::binding` (§12.11 D-A): the channel host's

@@ -37,8 +37,9 @@ use ironclaw_assistant::{
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
     AuthNotificationBackfillProcessCommitObserver, DefaultApprovalInteractionService,
     DefaultAuthInteractionService, OutboundPreferencesProductService,
-    PersistentApprovalGranteeResolver, RunOutcomeProcessCommitObserver,
-    RunStateApprovalInteractionReadModel, SuggestionsProcessCommitObserver,
+    PersistentApprovalGranteeResolver, ResourceBlockBackfillProcessCommitObserver,
+    RunOutcomeProcessCommitObserver, RunStateApprovalInteractionReadModel,
+    SuggestionsProcessCommitObserver,
 };
 use ironclaw_event_log::{
     DurableAuditLog, DurableEventLog, EventError, NonBlockingEventSink, RuntimeEvent,
@@ -3291,6 +3292,15 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("auth notification backfill observer wiring failed: {error}"),
+        })?;
+    processes
+        .subscribe_process_observer(Arc::new(ResourceBlockBackfillProcessCommitObserver::new(
+            Arc::clone(&services.notification_inbox),
+            Arc::clone(&thread_service),
+            Arc::clone(&process_journal_source),
+        )))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("resource-block notification backfill wiring failed: {error}"),
         })?;
     let filesystem_skill_context_runtime = filesystem_skill_context_runtime(&services);
     let (skill_context_source, skill_activation_source, skill_execution_adapter) = match (

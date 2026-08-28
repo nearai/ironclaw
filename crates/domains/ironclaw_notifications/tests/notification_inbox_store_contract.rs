@@ -249,7 +249,7 @@ async fn terminal_retry_repairs_legacy_open_state_without_reopening_lifecycle() 
     first
         .archive(NotificationMutationRequest {
             recipient: recipient(),
-            notification_id,
+            notification_id: notification_id.clone(),
             occurred_at: archived_at,
         })
         .await
@@ -281,6 +281,17 @@ async fn terminal_retry_repairs_legacy_open_state_without_reopening_lifecycle() 
     assert_eq!(reconciled.read_at, before.read_at);
     assert_eq!(reconciled.archived_at, before.archived_at);
     assert_eq!(reconciled.updated_at, before.updated_at);
+    assert_eq!(
+        reopened
+            .reopen(NotificationMutationRequest {
+                recipient: recipient(),
+                notification_id,
+                occurred_at: Utc.timestamp_opt(1_700_000_031, 0).single().expect("time"),
+            })
+            .await
+            .expect("terminal notifications cannot be reopened"),
+        NotificationMutationOutcome::AlreadySettled,
+    );
 
     reopened
         .publish(request("gate-after-legacy-terminal", 1_700_000_040))
@@ -317,9 +328,47 @@ async fn notification_lifecycle_is_scoped_archivable_and_idempotent() {
         .await
         .expect("idempotent mark read");
     store
-        .resolve(lifecycle)
+        .resolve(lifecycle.clone())
         .await
         .expect("resolve notification");
+    assert_eq!(
+        store
+            .reopen(lifecycle.clone())
+            .await
+            .expect("reopen authoritative actionable notification"),
+        NotificationMutationOutcome::Applied,
+    );
+    assert_eq!(
+        store
+            .reopen(lifecycle.clone())
+            .await
+            .expect("idempotent reopen"),
+        NotificationMutationOutcome::AlreadySettled,
+    );
+    let reopened_page = store
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list reopened notification");
+    let reopened_lifecycle = reopened_page
+        .notifications
+        .iter()
+        .find(|record| record.id.as_str() == "notification-lifecycle")
+        .expect("reopened lifecycle notification");
+    assert_eq!(reopened_lifecycle.resolved_at, None);
+    assert_eq!(
+        reopened_lifecycle.read_at,
+        Some(read_at),
+        "reopen must not clear read state"
+    );
+    store
+        .resolve(lifecycle)
+        .await
+        .expect("resolve reopened notification");
 
     store
         .resolve(NotificationMutationRequest {
@@ -347,14 +396,23 @@ async fn notification_lifecycle_is_scoped_archivable_and_idempotent() {
     assert_eq!(resolved_unread.resolved_at, Some(read_at));
 
     let archived_at = Utc.timestamp_opt(1_700_000_020, 0).single().expect("time");
+    let archived = NotificationMutationRequest {
+        recipient: recipient(),
+        notification_id: NotificationId::new("notification-archived").expect("id"),
+        occurred_at: archived_at,
+    };
     store
-        .archive(NotificationMutationRequest {
-            recipient: recipient(),
-            notification_id: NotificationId::new("notification-archived").expect("id"),
-            occurred_at: archived_at,
-        })
+        .resolve(archived.clone())
+        .await
+        .expect("resolve notification before archive");
+    store
+        .archive(archived.clone())
         .await
         .expect("archive notification");
+    store
+        .reopen(archived)
+        .await
+        .expect("reopen archived notification");
     store
         .mark_all_read(MarkAllNotificationsReadRequest {
             recipient: recipient(),
@@ -397,6 +455,10 @@ async fn notification_lifecycle_is_scoped_archivable_and_idempotent() {
         .find(|record| record.id.as_str() == "notification-archived")
         .expect("archived notification");
     assert_eq!(archived.archived_at, Some(archived_at));
+    assert_eq!(
+        archived.resolved_at, None,
+        "reopen must preserve archive state while restoring actionability"
+    );
     assert_eq!(archived.read_at, None, "archive must not imply read");
 
     let foreign = NotificationRecipient {
@@ -489,16 +551,17 @@ async fn explicit_reopen_reactivates_lifecycle_without_weakening_publish_idempot
             recipient: recipient(),
             limit: 10,
             cursor: None,
-            include_archived: false,
+            include_archived: true,
         })
         .await
         .expect("list reopened notification");
     assert_eq!(page.notifications.len(), 1);
     let reopened = &page.notifications[0];
     assert!(reopened.resolved_at.is_none());
-    assert!(
-        reopened.archived_at.is_none(),
-        "reopened actionable notifications must return to the default visible list"
+    assert_eq!(
+        reopened.archived_at,
+        Some(settled_at),
+        "reopen must preserve the user's archive state"
     );
     assert_eq!(
         reopened.read_at,

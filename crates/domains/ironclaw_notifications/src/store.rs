@@ -345,11 +345,16 @@ where
         request: NotificationMutationRequest,
     ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
         mutate_notification(self, request, |record, _occurred_at| {
-            if record.resolved_at.is_none() {
+            if !matches!(
+                record.kind,
+                crate::NotificationKind::ApprovalRequired
+                    | crate::NotificationKind::AuthenticationRequired
+                    | crate::NotificationKind::RunBlocked
+            ) || record.resolved_at.is_none()
+            {
                 return false;
             }
             record.resolved_at = None;
-            record.archived_at = None;
             true
         })
         .await

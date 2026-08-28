@@ -238,9 +238,9 @@ pub struct MarkAllNotificationsReadRequest {
 }
 
 /// Whether a mutation actually changed durable state. A repeated mark-read,
-/// resolve, reopen, or archive succeeds without changing anything, and a caller that
-/// reports success as a change would be inventing evidence the store never
-/// produced.
+/// resolve, reopen, or archive succeeds without changing anything, and a
+/// caller that reports success as a change would be inventing evidence the
+/// store never produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotificationMutationOutcome {
     Applied,
@@ -280,10 +280,9 @@ pub trait NotificationInboxStorePort: Send + Sync {
         request: NotificationMutationRequest,
     ) -> Result<NotificationMutationOutcome, NotificationInboxError>;
 
-    /// Re-activate an actionable lifecycle record after its originating
-    /// workflow proves that the same stable condition became current again.
-    /// This is deliberately separate from `publish`: ordinary publication
-    /// retries remain idempotent and cannot revive settled notifications.
+    /// Restore an actionable notification that authoritative workflow
+    /// reconciliation proves is current. Read and archive state remain
+    /// orthogonal and are not changed.
     async fn reopen(
         &self,
         request: NotificationMutationRequest,

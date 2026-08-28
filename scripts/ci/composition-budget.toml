@@ -292,15 +292,13 @@ observed_date = "2026-08-08"
 # `bash scripts/ci/check-composition-budget.sh --print` on the merged tree
 # measures 42732. No new composition code in this merge commit; the mirrored
 # COMPOSITION_ABSOLUTE_SRC_LOC moves to the same figure in this commit.
-# Re-seeded 42732 -> 42925 on 2026-08-28 for #7875. Current main already
-# measures 42879, leaving only 3 lines of effective headroom; this branch adds
-# 46 lines of service-graph assembly to thread the durable notification Inbox
-# through product-auth continuation/interaction services and subscribe the
-# assistant-owned auth notification observer. The lifecycle behavior remains
-# in ironclaw_assistant/ironclaw_notifications. Measured on the merged tree with
-# `bash scripts/ci/check-composition-budget.sh --print`, not padded; the mirrored
-# COMPOSITION_ABSOLUTE_SRC_LOC moves to the same figure in this commit.
-loc_ceiling = 42925
+# Re-measured 42732 -> 42935 on 2026-08-28 after merging current main into
+# #7875. Main contributes the resource-block observer wiring and #7875 adds
+# the durable auth notification observer wiring. Both lifecycle policies stay
+# in ironclaw_assistant/ironclaw_notifications; composition only supplies their
+# dependencies. Measured on the merged tree with
+# `bash scripts/ci/check-composition-budget.sh --print`, not padded.
+loc_ceiling = 42935
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -311,7 +309,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42925
+loc_observed = 42935
 loc_observed_date = "2026-08-28"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------

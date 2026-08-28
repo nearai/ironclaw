@@ -2526,6 +2526,81 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
 }
 
 #[tokio::test]
+async fn gateway_deduplicates_identical_tool_result_replay_but_keeps_distinct_calls() {
+    let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let shared_envelope = ToolResultReferenceEnvelope::new(
+        "result:shared-tool",
+        ToolResultSafeSummary::new("shared tool result").unwrap(),
+    )
+    .unwrap();
+    let first_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: provider_name("demo__echo"),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"shared"}),
+        response_reasoning: Some("provider reasoning".to_string()),
+        reasoning: Some("provider reasoning".to_string()),
+        signature: Some("sig-1".to_string()),
+    };
+    let mut second_provider_call = first_provider_call.clone();
+    second_provider_call.provider_call_id = "call_2".to_string();
+    second_provider_call.signature = Some("sig-2".to_string());
+    let message = |content_ref, provider_call| HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: serde_json::to_string(&shared_envelope).unwrap(),
+        content_ref: LoopMessageRef::new(content_ref).unwrap(),
+        tool_result_provider_call: Some(provider_call),
+        tool_result_content: tool_result_reference_content(&shared_envelope),
+        image_parts: Vec::new(),
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![
+        message(
+            "msg:11111111-1111-1111-1111-111111111111",
+            first_provider_call.clone(),
+        ),
+        message(
+            "msg:22222222-2222-2222-2222-222222222222",
+            first_provider_call,
+        ),
+        message(
+            "msg:33333333-3333-3333-3333-333333333333",
+            second_provider_call,
+        ),
+    ];
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.complete_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 3);
+    let assistant = &requests[0].messages[0];
+    let tool_calls = assistant.tool_calls.as_ref().expect("assistant tool calls");
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0].id, "call_1");
+    assert_eq!(tool_calls[1].id, "call_2");
+    assert_eq!(
+        requests[0].messages[1].tool_call_id.as_deref(),
+        Some("call_1")
+    );
+    assert_eq!(
+        requests[0].messages[2].tool_call_id.as_deref(),
+        Some("call_2")
+    );
+    assert_eq!(requests[0].messages[1].content, "shared tool result");
+    assert_eq!(requests[0].messages[2].content, "shared tool result");
+}
+
+#[tokio::test]
 async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
     let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
     let gateway = LlmProviderModelGateway::with_provider_identity(
