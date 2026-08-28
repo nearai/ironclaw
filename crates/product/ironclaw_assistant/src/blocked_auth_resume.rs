@@ -41,8 +41,8 @@ use ironclaw_processes::{
     ProcessGateQuery, ProcessGateQuerySource, ProcessGateRecord, ProcessSuspensionKind,
 };
 use ironclaw_turns::{
-    IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId,
+    GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor,
+    TurnCoordinator, TurnError, TurnRunId, TurnStatus,
 };
 use uuid::Uuid;
 
@@ -128,12 +128,10 @@ impl BlockedAuthResumeFanout {
                 let Some(lifecycle_ref) = notification.source.lifecycle_ref.as_ref() else {
                     continue;
                 };
-                if !notification
-                    .source
-                    .credential_providers
-                    .iter()
-                    .any(|provider| provider.as_str() == event.provider.as_str())
-                {
+                let [provider] = notification.source.credential_providers.as_slice() else {
+                    continue;
+                };
+                if provider.as_str() != event.provider.as_str() {
                     continue;
                 }
                 let gate_is_active = active_gates.iter().any(|gate| {
@@ -276,23 +274,53 @@ impl BlockedAuthResumeFanout {
             match self.turn_coordinator.resume_turn(request).await {
                 Ok(_) => {
                     resumed += 1;
-                    if let Some(inbox) = self.notification_inbox.as_ref()
-                        && let Err(error) = crate::auth_continuation::resolve_auth_notification(
-                            inbox.as_ref(),
-                            &scope,
-                            user_id,
-                            run_id,
-                            &gate_ref,
-                        )
-                        .await
-                    {
-                        tracing::debug!(
-                            %run_id,
-                            flow_id = %event.flow_id,
-                            %error,
-                            "blocked-auth fan-out resumed a run but its Inbox notification remains retryable"
-                        );
-                        incomplete = true;
+                    if let Some(inbox) = self.notification_inbox.as_ref() {
+                        // `resume_turn` may return an idempotency-cache hit
+                        // before checking the current process cursor. Read
+                        // back committed state before settling the stable
+                        // gate-derived Inbox id so a replay cannot close a
+                        // same-gate notification that the run just reopened.
+                        match self
+                            .turn_coordinator
+                            .get_run_state(GetRunStateRequest {
+                                scope: scope.clone(),
+                                run_id,
+                            })
+                            .await
+                        {
+                            Ok(state)
+                                if state.status == TurnStatus::BlockedAuth
+                                    && state.gate_ref.as_ref() == Some(&gate_ref) => {}
+                            Ok(state) => {
+                                if let Err(error) =
+                                    crate::auth_continuation::resolve_auth_notification(
+                                        inbox.as_ref(),
+                                        &state.scope,
+                                        user_id,
+                                        run_id,
+                                        &gate_ref,
+                                    )
+                                    .await
+                                {
+                                    tracing::debug!(
+                                        %run_id,
+                                        flow_id = %event.flow_id,
+                                        %error,
+                                        "blocked-auth fan-out resumed a run but its Inbox notification remains retryable"
+                                    );
+                                    incomplete = true;
+                                }
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    %run_id,
+                                    flow_id = %event.flow_id,
+                                    %error,
+                                    "blocked-auth fan-out could not verify committed run state before Inbox resolution"
+                                );
+                                incomplete = true;
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -365,7 +393,10 @@ impl RebornAuthContinuationDispatcher for BlockedAuthResumeFanout {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Mutex};
+    use std::{
+        collections::{HashMap, VecDeque},
+        sync::Mutex,
+    };
 
     use super::*;
     use chrono::Utc;
@@ -375,7 +406,7 @@ mod tests {
     use ironclaw_filesystem::{
         Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
     };
-    use ironclaw_host_api::turn::{EventCursor, TurnGateRef, TurnScope, TurnStatus};
+    use ironclaw_host_api::turn::{EventCursor, TurnGateRef, TurnScope};
     use ironclaw_host_api::{
         capability::RuntimeCredentialAccountSetup,
         decision::RuntimeCredentialAuthRequirement,
@@ -391,8 +422,8 @@ mod tests {
     };
     use ironclaw_processes::{ProcessGateRecord, ProcessSuspension};
     use ironclaw_turns::{
-        CancelRunRequest, CancelRunResponse, GetRunStateRequest, SubmitTurnRequest,
-        SubmitTurnResponse, TurnError, TurnRunState,
+        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, RunProfileId,
+        RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, TurnError, TurnId, TurnRunState,
     };
 
     struct RecordingInnerDispatcher {
@@ -475,6 +506,8 @@ mod tests {
         /// transient coordinator/store outage that a re-driven dispatch
         /// recovers from.
         fail_next_resumes: Mutex<usize>,
+        state_after_resume: Mutex<Option<TurnRunState>>,
+        resume_cache: Mutex<HashMap<String, ironclaw_turns::ResumeTurnResponse>>,
     }
 
     #[async_trait]
@@ -494,6 +527,16 @@ mod tests {
             &self,
             request: ResumeTurnRequest,
         ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+            if let Some(response) = self
+                .resume_cache
+                .lock()
+                .expect("resume cache lock")
+                .get(request.idempotency_key.as_str())
+                .cloned()
+            {
+                self.resumed.lock().expect("resume lock").push(request);
+                return Ok(response);
+            }
             {
                 let mut fail_next = self.fail_next_resumes.lock().expect("fail counter");
                 if *fail_next > 0 {
@@ -504,12 +547,18 @@ mod tests {
                 }
             }
             let run_id = request.run_id;
+            let cache_key = request.idempotency_key.as_str().to_string();
             self.resumed.lock().expect("resume lock").push(request);
-            Ok(ironclaw_turns::ResumeTurnResponse {
+            let response = ironclaw_turns::ResumeTurnResponse {
                 run_id,
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(1),
-            })
+            };
+            self.resume_cache
+                .lock()
+                .expect("resume cache lock")
+                .insert(cache_key, response.clone());
+            Ok(response)
         }
 
         async fn retry_turn(
@@ -528,9 +577,47 @@ mod tests {
 
         async fn get_run_state(
             &self,
-            _request: GetRunStateRequest,
+            request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
-            unreachable!("fan-out tests do not read run state")
+            if let Some(state) = self
+                .state_after_resume
+                .lock()
+                .expect("state after resume lock")
+                .clone()
+            {
+                return Ok(state);
+            }
+            let resumed = self.resumed.lock().expect("resume lock");
+            let resume = resumed
+                .iter()
+                .rev()
+                .find(|resume| resume.run_id == request.run_id)
+                .ok_or(TurnError::ScopeNotFound)?;
+            Ok(TurnRunState {
+                scope: resume.scope.clone(),
+                actor: Some(resume.actor.clone()),
+                turn_id: TurnId::new(),
+                run_id: resume.run_id,
+                status: TurnStatus::Running,
+                accepted_message_ref: AcceptedMessageRef::new("message-fanout")
+                    .expect("accepted message ref"),
+                resolved_run_profile_id: RunProfileId::default_profile(),
+                resolved_run_profile_version: RunProfileVersion::new(1),
+                output_contract: Default::default(),
+                allow_steering: true,
+                resolved_model_route: None,
+                model_usage: None,
+                execution_outcome: None,
+                received_at: Utc::now(),
+                checkpoint_id: None,
+                gate_ref: None,
+                blocked_activity_id: None,
+                credential_requirements: Vec::new(),
+                failure: None,
+                event_cursor: EventCursor::default(),
+                product_context: None,
+                resume_disposition: None,
+            })
         }
     }
 
@@ -618,6 +705,8 @@ mod tests {
         let coordinator = Arc::new(RecordingTurnCoordinator {
             resumed: Mutex::new(Vec::new()),
             fail_next_resumes: Mutex::new(fail_next_resumes),
+            state_after_resume: Mutex::new(None),
+            resume_cache: Mutex::new(HashMap::new()),
         });
         let fanout = BlockedAuthResumeFanout::new(
             inner.clone(),
@@ -806,6 +895,138 @@ mod tests {
         assert!(
             google.resolved_at.is_none(),
             "recovering Slack cannot settle a Google authentication notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_provider_recovery_does_not_resolve_a_stale_multi_provider_notification() {
+        let mut denied_multi_provider = blocked_run(OWNER, TurnRunId::new(), slack_requirement());
+        denied_multi_provider
+            .suspension
+            .credential_requirements
+            .push(google_requirement());
+        denied_multi_provider.historical = true;
+        let run_id = turn_run_id_from_process_id(denied_multi_provider.process_id);
+        let inbox = notification_inbox();
+        seed_auth_notification(inbox.as_ref(), &denied_multi_provider).await;
+        let (fanout, _coordinator, _inner) = fanout_with(Vec::new(), 0);
+        let fanout = fanout
+            .with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
+
+        fanout
+            .dispatch_auth_continuation(event("slack", AuthContinuationRef::SetupOnly))
+            .await
+            .expect("single-provider recovery completes");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(OWNER).expect("owner"),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list multi-provider notification");
+        let notification = page
+            .notifications
+            .iter()
+            .find(|notification| notification.source.turn_run_id == Some(run_id))
+            .expect("multi-provider notification");
+        assert!(
+            notification.resolved_at.is_none(),
+            "recovering one provider cannot prove every provider requirement is satisfied"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_fan_out_resume_does_not_resolve_a_reopened_current_gate() {
+        let waiting = blocked_run(OWNER, TurnRunId::new(), slack_requirement());
+        let waiting_run_id = turn_run_id_from_process_id(waiting.process_id);
+        let waiting_gate_ref = waiting.suspension.gate_ref.clone().expect("gate ref");
+        let inbox = notification_inbox();
+        seed_auth_notification(inbox.as_ref(), &waiting).await;
+        let (fanout, coordinator, _inner) = fanout_with(vec![waiting.clone()], 0);
+        let fanout = fanout
+            .with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
+        let completion = event("slack", AuthContinuationRef::SetupOnly);
+
+        fanout
+            .dispatch_auth_continuation(completion.clone())
+            .await
+            .expect("first fan-out resume completes");
+        seed_auth_notification(inbox.as_ref(), &waiting).await;
+        inbox
+            .reopen(NotificationMutationRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(OWNER).expect("owner"),
+                },
+                notification_id: crate::run_delivery::run_notification_inbox_id(
+                    waiting_run_id,
+                    NotificationKind::AuthenticationRequired,
+                    Some(waiting_gate_ref.as_str()),
+                )
+                .expect("notification id"),
+                occurred_at: Utc::now(),
+            })
+            .await
+            .expect("same gate becomes actionable again");
+        *coordinator
+            .state_after_resume
+            .lock()
+            .expect("state after resume lock") = Some(TurnRunState {
+            scope: turn_scope_from_process_gate(&waiting.scope).expect("turn scope"),
+            actor: Some(TurnActor::new(UserId::new(OWNER).expect("owner"))),
+            turn_id: TurnId::new(),
+            run_id: waiting_run_id,
+            status: TurnStatus::BlockedAuth,
+            accepted_message_ref: AcceptedMessageRef::new("message-reblocked")
+                .expect("accepted message ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            output_contract: Default::default(),
+            allow_steering: true,
+            resolved_model_route: None,
+            model_usage: None,
+            execution_outcome: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: Some(waiting_gate_ref),
+            blocked_activity_id: None,
+            credential_requirements: vec![slack_requirement()],
+            failure: None,
+            event_cursor: EventCursor::default(),
+            product_context: None,
+            resume_disposition: None,
+        });
+        fanout
+            .dispatch_auth_continuation(completion)
+            .await
+            .expect("cached resume replay converges");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(OWNER).expect("owner"),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list reblocked notification");
+        assert!(
+            page.notifications[0].resolved_at.is_none(),
+            "a cached resume must not settle the same gate after it becomes current again"
+        );
+        assert_eq!(
+            coordinator.resumed.lock().expect("resumed").len(),
+            2,
+            "the regression drives the same idempotency key through the coordinator cache"
         );
     }
 
