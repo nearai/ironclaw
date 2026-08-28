@@ -178,6 +178,12 @@ pub enum McpClientError {
     InvalidToolCatalog {
         reason: String,
     },
+    /// The server completed `tools/call`, but its successful result violated
+    /// the MCP output contract. Usage is retained because transport completed.
+    InvalidToolResult {
+        reason: String,
+        usage: ResourceUsage,
+    },
     AuthRequired {
         usage: ResourceUsage,
     },
@@ -208,7 +214,9 @@ impl McpClientError {
 
     pub fn stable_reason(&self) -> &str {
         match self {
-            Self::Client { reason } | Self::InvalidToolCatalog { reason } => reason,
+            Self::Client { reason }
+            | Self::InvalidToolCatalog { reason }
+            | Self::InvalidToolResult { reason, .. } => reason,
             Self::AuthRequired { .. } | Self::AuthChallenge { .. } => "auth_required",
             Self::ProviderRejected { diagnostic, .. } => diagnostic
                 .code
@@ -243,6 +251,13 @@ impl std::fmt::Debug for McpProviderRejection {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpInvalidToolResult {
+    pub reason: String,
+    pub receipt: ResourceReceipt,
+    pub usage: ResourceUsage,
+}
+
 /// MCP runtime failures.
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -254,6 +269,8 @@ pub enum McpError {
     ProviderRejected(Box<McpProviderRejection>),
     #[error("MCP server advertised an invalid tool catalog: {reason}")]
     InvalidToolCatalog { reason: String },
+    #[error("MCP server returned an invalid tool result: {}", .0.reason)]
+    InvalidToolResult(Box<McpInvalidToolResult>),
     #[error("MCP capability requires authentication")]
     AuthRequired {
         required_secrets: Vec<SecretHandle>,

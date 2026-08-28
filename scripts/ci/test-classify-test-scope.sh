@@ -485,6 +485,15 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "integration inventory authority is integration-test scoped" \
+  "scripts/ci/lib/integration_test_inventory.py
+scripts/ci/test_integration_test_inventory.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "test suite boundaries checker script" \
   "scripts/ci/check-test-suite-boundaries.sh" \
   "docs_only=false

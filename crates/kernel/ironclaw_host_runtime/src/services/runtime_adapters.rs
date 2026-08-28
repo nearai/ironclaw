@@ -1320,6 +1320,7 @@ fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
         McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
         McpError::ProviderRejected(_) => RuntimeDispatchErrorKind::Client,
         McpError::InvalidToolCatalog { .. } => RuntimeDispatchErrorKind::OutputDecode,
+        McpError::InvalidToolResult(_) => RuntimeDispatchErrorKind::OutputDecode,
         McpError::AuthRequired { .. } => RuntimeDispatchErrorKind::Client,
         McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
         McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,

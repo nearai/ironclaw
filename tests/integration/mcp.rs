@@ -316,6 +316,197 @@ async fn mcp_tool_call_reaches_mock_server() {
         .expect("MCP output round-trips through durable result_read");
 }
 
+/// A mixed MCP result crosses the real loopback HTTP runtime and the unified
+/// durable result writer. Semantic JSON/text/resource fields remain readable,
+/// while protocol-owned inline binary never reaches the model or result_read.
+#[tokio::test]
+async fn mcp_mixed_content_is_normalized_before_durable_result_storage() {
+    const IMAGE_DATA: &str = "IMAGE_BASE64_MUST_NOT_REACH_DURABLE_STORAGE";
+    const AUDIO_DATA: &str = "AUDIO_BASE64_MUST_NOT_REACH_DURABLE_STORAGE";
+    const BLOB_DATA: &str = "BLOB_BASE64_MUST_NOT_REACH_DURABLE_STORAGE";
+    const UNKNOWN_DATA: &str = "UNKNOWN_PAYLOAD_MUST_NOT_REACH_DURABLE_STORAGE";
+
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"unused": "exact MCP result override follows"}),
+    }])
+    .await;
+    server.set_tool_call_result(
+        "search",
+        serde_json::json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": "readable MCP answer",
+                    "annotations": {
+                        "audience": ["assistant"],
+                        "priority": 0.8,
+                        "transport": "omit"
+                    },
+                    "_meta": {"transport": "omit"}
+                },
+                {"type": "image", "mimeType": "image/png", "data": IMAGE_DATA},
+                {"type": "audio", "mimeType": "audio/wav", "data": AUDIO_DATA},
+                {
+                    "type": "resource_link",
+                    "name": "report",
+                    "title": "Readable report",
+                    "uri": "file:///reports/summary.md",
+                    "description": "Generated summary",
+                    "mimeType": "text/markdown",
+                    "size": 42
+                },
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///reports/inline.txt",
+                        "mimeType": "text/plain",
+                        "text": "embedded readable text"
+                    }
+                },
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///reports/inline.pdf",
+                        "mimeType": "application/pdf",
+                        "blob": BLOB_DATA
+                    }
+                },
+                {"type": "future_content", "payload": UNKNOWN_DATA}
+            ],
+            "structuredContent": {"items": [{"id": 7, "title": "semantic JSON"}]},
+            "isError": false,
+            "_meta": {"transport": "omit"}
+        }),
+    );
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call(
+                "mock-mcp.search",
+                serde_json::json!({"query": "mixed-content"}),
+            ),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_mock_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("read the mixed MCP result")
+        .await
+        .expect("turn completes");
+    assert_recorded_tools_call(&server, "search", "mixed-content");
+
+    let output = h
+        .tool_result_output("mock-mcp.search")
+        .await
+        .expect("normalized MCP result was durably recorded");
+    assert_eq!(
+        output,
+        serde_json::json!({
+            "content": [
+                {"type": "text", "text": "readable MCP answer"},
+                {"type": "image", "mimeType": "image/png", "encoding": "binary_unsupported"},
+                {"type": "audio", "mimeType": "audio/wav", "encoding": "binary_unsupported"},
+                {
+                    "type": "resource_link",
+                    "name": "report",
+                    "title": "Readable report",
+                    "uri": "file:///reports/summary.md",
+                    "description": "Generated summary",
+                    "mimeType": "text/markdown",
+                    "size": 42
+                },
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///reports/inline.txt",
+                        "mimeType": "text/plain",
+                        "text": "embedded readable text"
+                    }
+                },
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///reports/inline.pdf",
+                        "mimeType": "application/pdf",
+                        "encoding": "binary_unsupported"
+                    }
+                },
+                {
+                    "type": "unsupported",
+                    "original_type": "future_content",
+                    "status": "unsupported_content_type"
+                }
+            ],
+            "structuredContent": {"items": [{"id": 7, "title": "semantic JSON"}]},
+            "isError": false
+        })
+    );
+    let rendered = output.to_string();
+    for forbidden in [IMAGE_DATA, AUDIO_DATA, BLOB_DATA, UNKNOWN_DATA] {
+        assert!(
+            !rendered.contains(forbidden),
+            "encoded/unknown payload leaked into durable output: {forbidden}"
+        );
+        assert!(
+            h.assert_model_request_contains(forbidden).await.is_err(),
+            "encoded/unknown payload leaked into a model request: {forbidden}"
+        );
+    }
+    h.assert_model_request_contains("readable MCP answer")
+        .await
+        .expect("semantic MCP text reached the next model request");
+    h.assert_latest_result_json_round_trips("mock-mcp.search")
+        .await
+        .expect("builtin.result_read returns the normalized durable JSON");
+}
+
+/// A successful JSON-RPC envelope with a malformed content block is a
+/// model-visible output-decode failure, never a successful durable result.
+#[tokio::test]
+async fn mcp_malformed_success_result_surfaces_output_decode_failure() {
+    let server = start_mock_mcp_server(vec![MockToolResponse {
+        name: "search".to_string(),
+        content: serde_json::json!({"results": []}),
+    }])
+    .await;
+    server.set_tool_call_result(
+        "search",
+        serde_json::json!({
+            "content": [{"text": "missing discriminator"}],
+            "isError": false
+        }),
+    );
+
+    let h = RebornIntegrationHarness::test_default()
+        .script([
+            RebornScriptedReply::tool_call("mock-mcp.search", serde_json::json!({"query": "x"})),
+            RebornScriptedReply::text("done"),
+        ])
+        .with_mock_mcp(server.mcp_url())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("search").await.expect("turn recovers");
+    assert_recorded_tools_call(&server, "search", "x");
+    h.assert_mcp_tool_called("search")
+        .await
+        .expect("MCP tool call reached the loopback server");
+    h.assert_tool_error(ToolErrorClass::Failed, "output_decode")
+        .await
+        .expect("malformed MCP output became a model-visible decode failure");
+    h.assert_reply_contains("done")
+        .await
+        .expect("run recovered and finalized");
+    assert!(
+        h.tool_result_output("mock-mcp.search").await.is_err(),
+        "malformed MCP output must not be recorded as successful durable output"
+    );
+}
+
 /// Twin of `mcp_tool_call_reaches_mock_server`: same client `Accept:
 /// application/json, text/event-stream` header (`crates/lanes/ironclaw_mcp/src/lib.rs`),
 /// but here the mock server answers every leg with SSE framing instead of

@@ -114,6 +114,24 @@ auth probe for hosted-MCP registration. It performs `initialize` plus
 `tools/list`; extension catalog discovery and admission remain lifecycle
 preparation work rather than part of registration.
 
+For a successful `tools/call`, the concrete client projects the MCP
+`CallToolResult` before it leaves the protocol lane. The projection remains
+open JSON rather than a host-wide content DTO:
+
+- `structuredContent` is preserved as JSON.
+- Text and embedded text resources retain their semantic fields.
+- Inline image, audio, and embedded blob base64 payloads are omitted and
+  represented as unsupported binary with their media type or resource URI.
+- Resource links retain their model-useful link metadata.
+- Unknown content-block types become a bounded unsupported marker; their
+  arbitrary payload does not cross into the generic output pipeline.
+
+The generic capability output path then applies its normal redaction, durable
+storage, preview, and `builtin.result_read` behavior to that projected value.
+Tool-declared `isError` results keep the provider-rejection path and accounting;
+malformed successful `CallToolResult` values fail with
+`mcp_invalid_tool_result` instead of being stored as if they were valid output.
+
 Important boundaries:
 
 - command, args, URL, and transport come from the validated manifest, not model text
@@ -121,6 +139,11 @@ Important boundaries:
 - raw secrets are not included
 - MCP server network/process behavior remains host-adapter policy, not dispatcher policy
 - stdio MCP usage is accounted as at least one process in V1
+
+Primary regression coverage:
+
+- `tests/integration/mcp.rs::mcp_mixed_content_is_normalized_before_durable_result_storage`
+- `RUST_MIN_STACK=8388608 cargo test -p ironclaw_integration_tests --test reborn_integration_mcp mcp_mixed_content_is_normalized_before_durable_result_storage -- --exact`
 
 ---
 
