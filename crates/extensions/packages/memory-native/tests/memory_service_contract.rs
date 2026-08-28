@@ -1775,3 +1775,90 @@ fn memory_guidance_is_a_compact_self_contained_section() {
         "guidance is appended to every turn's prompt and must stay compact; {lines} lines"
     );
 }
+
+/// Reading a path that holds no document is a domain answer, not a malformed
+/// request. Classifying it as `Input` renders as "the tool input could not be
+/// encoded", which tells the model to re-encode a request that was already
+/// correct.
+#[tokio::test]
+async fn reading_a_missing_document_is_an_operation_failure_not_an_input_error() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    let error = service
+        .read(
+            invocation(),
+            MemoryServiceReadRequest {
+                path: "projects/commitments/README.md".to_string(),
+            },
+        )
+        .await
+        .expect_err("a document that was never written cannot be read");
+
+    assert_eq!(
+        error.kind(),
+        MemoryServiceErrorKind::Operation,
+        "absence is a domain failure; `Input` would tell the model its arguments were wrong"
+    );
+    assert!(
+        error.message().contains("no memory document"),
+        "the model needs the cause, not a generic failure: {}",
+        error.message()
+    );
+}
+
+/// The same condition reached through `patch`, which took the correct kind
+/// already but reported it with the generic operation message.
+#[tokio::test]
+async fn patching_a_missing_document_names_the_absence() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    let error = service
+        .write(
+            invocation(),
+            MemoryServiceWriteRequest {
+                target: "notes/never-written.md".to_string(),
+                content: String::new(),
+                append: false,
+                old_string: Some("a".to_string()),
+                new_string: Some("b".to_string()),
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+                expected_content_hash: None,
+            },
+        )
+        .await
+        .expect_err("patching a document that does not exist cannot succeed");
+
+    assert_eq!(error.kind(), MemoryServiceErrorKind::Operation);
+    assert!(
+        error.message().contains("no memory document"),
+        "unexpected message: {}",
+        error.message()
+    );
+}
+
+/// Negative control for the two tests above: a genuinely malformed path is
+/// still an `Input` error. Absence became `Operation`, and this pins that the
+/// change did not drag real input validation along with it.
+#[tokio::test]
+async fn a_malformed_path_is_still_an_input_error() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+
+    for bad in ["../escape.md", "/absolute.md", "  "] {
+        let error = service
+            .read(
+                invocation(),
+                MemoryServiceReadRequest {
+                    path: bad.to_string(),
+                },
+            )
+            .await
+            .expect_err("a malformed path must be rejected");
+        assert_eq!(
+            error.kind(),
+            MemoryServiceErrorKind::Input,
+            "`{bad}` is a bad request, not a missing document"
+        );
+    }
+}

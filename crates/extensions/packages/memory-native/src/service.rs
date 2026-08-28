@@ -384,7 +384,7 @@ impl NativeMemoryService {
             .await
             .map_err(MemoryServiceError::operation_from)?
         else {
-            return Err(MemoryServiceError::input());
+            return Err(MemoryServiceError::not_found());
         };
         let content = String::from_utf8(bytes).map_err(MemoryServiceError::operation_from)?;
         Ok(MemoryServiceReadResponse {
@@ -759,7 +759,7 @@ impl NativeMemoryService {
                 .await
                 .map_err(MemoryServiceError::operation_from)?
             else {
-                return Err(MemoryServiceError::operation());
+                return Err(MemoryServiceError::not_found());
             };
             let existing = String::from_utf8(bytes).map_err(MemoryServiceError::operation_from)?;
             let current_hash = content_bytes_sha256(existing.as_bytes());
