@@ -213,7 +213,7 @@ struct SatisfiedPolicyFacts;
 impl HostPolicyFacts for SatisfiedPolicyFacts {
     async fn credential_presence(
         &self,
-        _capability_id: &CapabilityId,
+        _descriptor: &CapabilityDescriptor,
         _scope: &ResourceScope,
     ) -> CredentialPresence {
         CredentialPresence::Satisfied
@@ -240,7 +240,7 @@ struct GrantWithExpiryPolicyFacts {
 impl HostPolicyFacts for GrantWithExpiryPolicyFacts {
     async fn credential_presence(
         &self,
-        _capability_id: &CapabilityId,
+        _descriptor: &CapabilityDescriptor,
         _scope: &ResourceScope,
     ) -> CredentialPresence {
         CredentialPresence::Satisfied
@@ -307,7 +307,89 @@ input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
 "#;
 
-fn echo_registry() -> ExtensionRegistry {
+const ATLAS_MANIFEST_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "atlas"
+name = "Atlas"
+version = "0.1.0"
+description = "Atlas credential fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "atlas.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "atlas.test"
+description = "Atlas credential fixture"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/atlas/test.input.v1.json"
+output_schema_ref = "schemas/atlas/test.output.v1.json"
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "atlas_runtime_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.atlas.test" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+placeholder_env = "ATLAS_TOKEN"
+required = true
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "atlas_admin_token"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "admin.atlas.test" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+placeholder_env = "ATLAS_ADMIN_TOKEN"
+required = true
+"#;
+
+const UNRELATED_AUTH_MANIFEST_FIXTURE: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "unrelated"
+name = "Unrelated"
+version = "0.1.0"
+description = "Unrelated product auth fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "unrelated.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "unrelated.test"
+description = "Unrelated product auth fixture"
+effects = ["dispatch_capability", "use_secret"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/unrelated/test.input.v1.json"
+output_schema_ref = "schemas/unrelated/test.output.v1.json"
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "atlas_runtime_token"
+source = { type = "product_auth_account", provider = "atlas" }
+audience = { scheme = "https", host_pattern = "api.atlas.test" }
+target = { type = "header", name = "authorization", prefix = "Bearer " }
+required = true
+"#;
+
+fn package_from_manifest(
+    manifest_toml: &str,
+    root: &str,
+) -> ironclaw_extension_registry::ExtensionPackage {
     use ironclaw_extension_registry::{
         CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
         HostApiContractRegistry, ManifestSource,
@@ -320,20 +402,25 @@ fn echo_registry() -> ExtensionRegistry {
         ))
         .expect("register capability provider contract");
     let manifest = ExtensionManifest::parse(
-        ECHO_MANIFEST_FIXTURE,
+        manifest_toml,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
         &contracts,
     )
     .unwrap();
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/echo").unwrap(),
-    )
-    .unwrap();
+    ExtensionPackage::from_manifest(manifest, VirtualPath::new(root).unwrap()).unwrap()
+}
+
+fn registry_from_manifest(manifest_toml: &str, root: &str) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
-    registry.insert(package).unwrap();
     registry
+        .insert(package_from_manifest(manifest_toml, root))
+        .unwrap();
+    registry
+}
+
+fn echo_registry() -> ExtensionRegistry {
+    registry_from_manifest(ECHO_MANIFEST_FIXTURE, "/system/extensions/echo")
 }
 
 fn allow_request() -> InvocationInput {
@@ -389,6 +476,26 @@ impl TrustPolicy for StaticTrustPolicy {
     }
 }
 
+fn privileged_local_manifest_policy(
+    package_id: &str,
+    manifest_path: &str,
+) -> ironclaw_trust::HostTrustPolicy {
+    use ironclaw_host_api::ids::PackageId;
+    use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries([
+        AdminEntry::for_local_manifest(
+            PackageId::new(package_id).unwrap(),
+            manifest_path.to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![ironclaw_host_api::capability::EffectKind::UseSecret],
+            None,
+        ),
+    ]))])
+    .unwrap()
+}
+
 /// Permissive runtime policy so the in-fold planner never denies the echo
 /// capability (echo declares only `dispatch_capability`, so no backend
 /// constraint is even exercised).
@@ -408,6 +515,151 @@ fn permissive_runtime_policy() -> EffectiveRuntimePolicy {
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::LocalMinimal,
     }
+}
+
+#[tokio::test]
+async fn sandbox_shell_enrichment_uses_explicit_manifest_credential_context() {
+    use ironclaw_host_api::{
+        capability::{EffectKind, RuntimeCredentialRequirementSource},
+        runtime_policy::{ProcessBackendKind, RuntimeProfile},
+    };
+
+    let mut registry = registry_from_manifest(ATLAS_MANIFEST_FIXTURE, "/system/extensions/atlas");
+    registry
+        .insert(package_from_manifest(
+            UNRELATED_AUTH_MANIFEST_FIXTURE,
+            "/system/extensions/unrelated",
+        ))
+        .unwrap();
+    let dispatcher =
+        ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|request, _| {
+            Err(DispatchError::UnknownCapability {
+                capability: request.invocation.capability.clone(),
+            })
+        });
+    let authorizer = AllowAuthorizer;
+    let trust_policy =
+        privileged_local_manifest_policy("atlas", "/system/extensions/atlas/manifest.toml");
+    let mut runtime_policy = permissive_runtime_policy();
+    runtime_policy.requested_profile = RuntimeProfile::HostedSafe;
+    runtime_policy.resolved_profile = RuntimeProfile::HostedSafe;
+    runtime_policy.process_backend = ProcessBackendKind::UserSandbox;
+    let policy_facts = SatisfiedPolicyFacts;
+    let host = CapabilityHost::new(
+        &registry,
+        &dispatcher,
+        &authorizer,
+        &trust_policy,
+        &runtime_policy,
+        &policy_facts,
+    );
+    let shell_id = CapabilityId::new("builtin.shell").unwrap();
+    let mut descriptor = registry
+        .get_capability(&CapabilityId::new("atlas.test").unwrap())
+        .unwrap()
+        .clone();
+    descriptor.runtime_credentials.clear();
+
+    let enriched = host
+        .enrich_invocation_descriptor(
+            &descriptor,
+            &shell_id,
+            &serde_json::json!({
+                "command": "set -e; atlas resources list | jq '.items'; atlas-admin audit",
+                "credential_contexts": ["atlas"]
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(enriched.effects.contains(&EffectKind::UseSecret));
+    assert_eq!(
+        enriched
+            .runtime_credentials
+            .iter()
+            .map(|requirement| requirement.handle.as_str())
+            .collect::<Vec<_>>(),
+        ["atlas_runtime_token", "atlas_admin_token"]
+    );
+    assert!(
+        enriched.runtime_credentials.iter().all(|requirement| {
+            requirement.source == RuntimeCredentialRequirementSource::SecretHandle
+        }),
+        "credential authority must come only from the selected extension"
+    );
+
+    let unchanged = host
+        .enrich_invocation_descriptor(
+            &descriptor,
+            &shell_id,
+            &serde_json::json!({
+                "command": "atlas resources list",
+                "credential_contexts": []
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        unchanged, descriptor,
+        "command text alone must not acquire a credential context"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_shell_enrichment_rejects_unknown_credential_context() {
+    use ironclaw_host_api::runtime_policy::{ProcessBackendKind, RuntimeProfile};
+
+    let registry = registry_from_manifest(ATLAS_MANIFEST_FIXTURE, "/system/extensions/atlas");
+    let dispatcher =
+        ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|request, _| {
+            Err(DispatchError::UnknownCapability {
+                capability: request.invocation.capability.clone(),
+            })
+        });
+    let authorizer = AllowAuthorizer;
+    let trust_policy = StaticTrustPolicy;
+    let mut runtime_policy = permissive_runtime_policy();
+    runtime_policy.requested_profile = RuntimeProfile::HostedSafe;
+    runtime_policy.resolved_profile = RuntimeProfile::HostedSafe;
+    runtime_policy.process_backend = ProcessBackendKind::UserSandbox;
+    let policy_facts = SatisfiedPolicyFacts;
+    let host = CapabilityHost::new(
+        &registry,
+        &dispatcher,
+        &authorizer,
+        &trust_policy,
+        &runtime_policy,
+        &policy_facts,
+    );
+    let shell_id = CapabilityId::new("builtin.shell").unwrap();
+    let mut descriptor = registry
+        .get_capability(&CapabilityId::new("atlas.test").unwrap())
+        .unwrap()
+        .clone();
+    descriptor.runtime_credentials.clear();
+
+    let error = host
+        .enrich_invocation_descriptor(
+            &descriptor,
+            &shell_id,
+            &serde_json::json!({
+                "command": "echo safe",
+                "credential_contexts": ["missing"]
+            }),
+        )
+        .await
+        .unwrap_err();
+    let CapabilityInvocationError::AuthorizationDenied {
+        reason: DenyReason::PolicyDenied,
+        detail: Some(detail),
+        ..
+    } = error
+    else {
+        panic!("an unknown credential context must fail closed as a policy denial");
+    };
+    assert_eq!(
+        detail,
+        "shell credential context `missing` is not an active extension"
+    );
 }
 
 // The Allow decision seals an `Authorized` whose lane is resolved from the
@@ -453,6 +705,15 @@ async fn authorize_allow_path_seals_authorized_with_lane_and_invocation() {
         panic!("allow path with a sealed actor must mint an Authorized witness");
     };
     assert_eq!(authorized.lane(), RuntimeLane::Wasm);
+    assert_eq!(
+        authorized.descriptor(),
+        Some(
+            registry
+                .get_capability(&CapabilityId::new("echo.say").unwrap())
+                .unwrap()
+        ),
+        "the witness must freeze the exact descriptor that authorization evaluated"
+    );
     let invocation = authorized.invocation();
     assert_eq!(
         invocation.capability,

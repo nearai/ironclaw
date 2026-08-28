@@ -133,7 +133,7 @@ CapabilityHost::spawn_json(...)
 
 Authorization denial happens before runtime dispatch, process creation, and resource reservation.
 
-The dispatcher remains policy/approval-unaware: it receives a sealed `Authorized` witness from `CapabilityHost` or another kernel-minted continuation, consumes that authorization state, and rejects expired witnesses fail-closed as `AuthorizationExpired` (`crates/contracts/ironclaw_host_api/src/authorized.rs`, `crates/kernel/ironclaw_capabilities/src/dispatch.rs`). The witness carries the invocation, runtime lane, prepared mounts, resource reservation, and deadline; callers do not provide those as witness-free dispatch fields.
+The dispatcher remains policy/approval-unaware: it receives a sealed `Authorized` witness from `CapabilityHost` or another kernel-minted continuation, consumes that authorization state, and rejects expired witnesses fail-closed as `AuthorizationExpired` (`crates/contracts/ironclaw_host_api/src/authorized.rs`, `crates/kernel/ironclaw_capabilities/src/dispatch.rs`). The witness carries the invocation, the exact capability descriptor authorization evaluated, runtime lane, prepared mounts, resource reservation, and deadline; callers do not provide those as witness-free dispatch fields. Dispatch uses that frozen descriptor rather than re-deriving credential or effect facts from the registry. A durable process continuation persists the descriptor for the same reason. Records written before this field existed deserialize, but reminting rejects their missing frozen descriptor rather than substituting mutable registry authority.
 
 ---
 

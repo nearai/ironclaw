@@ -28,8 +28,8 @@ pub const SLACK_V2_ADAPTER_ID: &str = "slack_v2";
 
 pub use channel::SlackChannelAdapter;
 pub use payload::{
-    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackInboundEvent, SlackPayloadParseError,
-    normalize_slack_event,
+    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackIgnoreReason, SlackInboundEvent,
+    SlackPayloadParseError, normalize_slack_event,
 };
 pub use preference_targets::{
     SlackPreferenceTargetCodec, SlackReplyTargetError,

@@ -24,7 +24,7 @@ id = "github.get_repo"
 description = "Get a GitHub repository."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -38,7 +38,7 @@ id = "github.create_repo"
 description = "Create a GitHub repository."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -52,7 +52,7 @@ id = "github.list_issues"
 description = "List issues in one repository."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -66,7 +66,7 @@ id = "github.create_issue"
 description = "Create an issue."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -80,7 +80,7 @@ id = "github.update_issue"
 description = "Update an issue."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -94,7 +94,7 @@ id = "github.add_issue_labels"
 description = "Add labels to an issue or pull request."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -108,7 +108,7 @@ id = "github.remove_issue_label"
 description = "Remove one label from an issue or pull request."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -122,7 +122,7 @@ id = "github.add_issue_assignees"
 description = "Add assignees to an issue or pull request."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -136,7 +136,7 @@ id = "github.remove_issue_assignees"
 description = "Remove assignees from an issue or pull request."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -150,7 +150,7 @@ id = "github.get_issue"
 description = "Fetch one issue or pull request by issue number."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -164,7 +164,7 @@ id = "github.list_issue_comments"
 description = "List issue or pull request timeline comments."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -178,7 +178,7 @@ id = "github.create_issue_comment"
 description = "Add an issue or pull request comment."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -192,7 +192,7 @@ id = "github.comment_issue"
 description = "Compatibility alias for github.create_issue_comment."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -206,7 +206,7 @@ id = "github.list_pull_requests"
 description = "List pull requests in one repository."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -220,7 +220,7 @@ id = "github.create_pull_request"
 description = "Create a pull request."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -234,7 +234,7 @@ id = "github.update_pull_request"
 description = "Update pull request metadata."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -248,7 +248,7 @@ id = "github.get_pull_request"
 description = "Fetch one pull request."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -262,7 +262,7 @@ id = "github.get_pull_request_files"
 description = "List files changed in a pull request."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -276,7 +276,7 @@ id = "github.create_pr_review"
 description = "Create a pull request review."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -290,7 +290,7 @@ id = "github.list_pull_request_comments"
 description = "List pull request review comments."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -304,7 +304,7 @@ id = "github.reply_pull_request_comment"
 description = "Reply to a pull request review comment."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -318,7 +318,7 @@ id = "github.get_pull_request_reviews"
 description = "List pull request reviews."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -332,7 +332,7 @@ id = "github.list_pull_request_review_threads"
 description = "List inline pull request review threads."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -346,7 +346,7 @@ id = "github.resolve_review_thread"
 description = "Resolve an inline pull request review thread."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -360,7 +360,7 @@ id = "github.unresolve_review_thread"
 description = "Unresolve an inline pull request review thread."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -374,7 +374,7 @@ id = "github.get_combined_status"
 description = "Fetch combined commit status for a ref."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -388,7 +388,7 @@ id = "github.merge_pull_request"
 description = "Merge a pull request."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -402,7 +402,7 @@ id = "github.get_authenticated_user"
 description = "Get the authenticated GitHub user for the configured token."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -416,7 +416,7 @@ id = "github.list_repos"
 description = "List repositories visible to the authenticated GitHub user, or public repositories for a named user or organization."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -430,7 +430,7 @@ id = "github.search_repositories"
 description = "Search repositories."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -444,7 +444,7 @@ id = "github.search_code"
 description = "Search code."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -458,7 +458,7 @@ id = "github.search_issues"
 description = "Compatibility alias for github.search_issues_pull_requests."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -472,7 +472,7 @@ id = "github.search_issues_pull_requests"
 description = "Search GitHub issues and pull requests."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -486,7 +486,7 @@ id = "github.list_branches"
 description = "List repository branches."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -500,7 +500,7 @@ id = "github.create_branch"
 description = "Create a branch from another branch or tag ref."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -514,7 +514,7 @@ id = "github.get_file_content"
 description = "Fetch repository file content metadata/content."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -528,7 +528,7 @@ id = "github.create_or_update_file"
 description = "Create or update a repository file."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -542,7 +542,7 @@ id = "github.delete_file"
 description = "Delete a repository file."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -556,7 +556,7 @@ id = "github.list_releases"
 description = "List repository releases."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -570,7 +570,7 @@ id = "github.create_release"
 description = "Create a repository release."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -584,7 +584,7 @@ id = "github.trigger_workflow"
 description = "Dispatch a GitHub Actions workflow."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -598,7 +598,7 @@ id = "github.get_workflow_runs"
 description = "List GitHub Actions workflow runs."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -612,7 +612,7 @@ id = "github.get_workflow_run_jobs"
 description = "List jobs for a GitHub Actions workflow run."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -626,7 +626,7 @@ id = "github.get_job_logs"
 description = "Get the plain-text logs for a GitHub Actions workflow job."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -643,7 +643,7 @@ id = "github.get_workflow_run_artifacts"
 description = "List artifacts for a GitHub Actions workflow run."
 effects = ["network", "use_secret"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "allow"
 visibility = "model"
@@ -657,7 +657,7 @@ id = "github.rerun_failed_workflow_run_jobs"
 description = "Rerun failed jobs in a GitHub Actions workflow run."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -671,7 +671,7 @@ id = "github.rerun_workflow_job"
 description = "Rerun one GitHub Actions workflow job."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"
@@ -685,7 +685,7 @@ id = "github.fork_repo"
 description = "Fork a repository."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 runtime_credentials = [
-  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "token " } },
 ]
 default_permission = "ask"
 visibility = "model"

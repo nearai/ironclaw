@@ -185,13 +185,32 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// on the merged tree with `bash scripts/ci/check-composition-budget.sh
 /// --print`; this record moves with `scripts/ci/composition-budget.toml`'s
 /// `loc_ceiling`/`loc_observed` to the same figure in this commit.
+/// ✎ Re-measured 42_198 -> 42_316 on 2026-08-20 for #7770 phase 1 (memory
+/// curation wired through composition). Two parts: +7 for the
+/// `[memory].curation_interval_turns` input field/setter plus the lines that
+/// hand the runtime's thread service and coordinator to the curation crate's
+/// own dispatcher-factory builder (hook/phase/trust-class assembly stays
+/// there), and +109 for the approach-audit fix that fails startup closed when
+/// the bound memory provider cannot replace the standing document
+/// (`memory_provider_factory::curation_interval_for_binding` and its tests) —
+/// composition is the only layer that sees both the `[memory]` config and the
+/// resolved binding. Measured with `bash scripts/ci/check-composition-budget.sh`;
+/// this record moves with `scripts/ci/composition-budget.toml`'s
+/// `loc_ceiling`/`loc_observed` to the same figure in this commit.
 /// ✎ Re-seeded 42_198 -> 42_371 on 2026-08-24 for #7833 (unattended-safe
 /// suggestion tools). The manifest's `loc_ceiling`/`loc_observed` moved to
 /// 42_371 in the same PR to absorb `unattended_denied_capability_ids()`'s
 /// assembly wiring; this record moves with them to the same figure in this
 /// commit, per the pairing this file's own history keeps. Measured with
 /// `bash scripts/ci/check-composition-budget.sh --print`, not padded.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_371;
+/// ✎ Re-measured 42_479 / 42_371 -> 42_732 on 2026-08-26 merging main
+/// (#7833 seed and the subagent background-mode slices) into the #7770
+/// branch (curation wiring, 08-21 entry above). Same pair hazard as 08-21:
+/// the two parents' ceilings cannot be summed or max'd — measured on the
+/// merged tree with `bash scripts/ci/check-composition-budget.sh --print`;
+/// the manifest's `loc_ceiling`/`loc_observed` move to the same figure in
+/// this commit. No new composition code in the merge itself.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_732;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

@@ -62,6 +62,9 @@ pub struct MemoryServiceWriteRequest {
     pub target: String,
     pub content: String,
     pub append: bool,
+    /// Optional hash returned by a prior read. Providers that support
+    /// conditional writes reject the write when the document has changed.
+    pub expected_content_hash: Option<String>,
     pub old_string: Option<String>,
     pub new_string: Option<String>,
     pub replace_all: bool,
@@ -74,11 +77,12 @@ impl MemoryServiceWriteRequest {
         // Lenient parsing matching the pre-lift host `parse_write_command`: an
         // explicit JSON `null` target is treated as omitted (defaults to the
         // daily log), but any other present-but-wrong-typed `target` (number,
-        // bool, object, array) is rejected. Every other present-but-wrong-typed
-        // optional field coerces to its default rather than failing (exact
-        // original behavior). `new_string`/`timezone` are only consulted by the
-        // native write path when relevant (patch / daily_log), preserving origin
-        // semantics.
+        // bool, object, array) is rejected. Most other present-but-wrong-typed
+        // optional fields retain their historical coercion. The exception is
+        // `expected_content_hash`: silently coercing a malformed expectation to
+        // `None` would turn a conditional write into an unconditional one.
+        // `new_string`/`timezone` are only consulted by the native write path
+        // when relevant (patch / daily_log), preserving origin semantics.
         let target = match input.get("target") {
             Some(Value::String(target)) => target.to_string(),
             Some(Value::Null) | None => "daily_log".to_string(),
@@ -99,6 +103,11 @@ impl MemoryServiceWriteRequest {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let expected_content_hash = match input.get("expected_content_hash") {
+            Some(Value::String(hash)) => Some(hash.to_string()),
+            Some(Value::Null) | None => None,
+            Some(_) => return Err(MemoryServiceError::input()),
+        };
         let old_string = input
             .get("old_string")
             .and_then(Value::as_str)
@@ -127,6 +136,7 @@ impl MemoryServiceWriteRequest {
         Ok(Self {
             target,
             content,
+            expected_content_hash,
             append,
             old_string,
             new_string,
@@ -147,13 +157,13 @@ pub enum MemoryProfileSetStatus {
     Ok,
 }
 
-/// Serializes to exactly `"cleared"` / `"written"` / `"patched"` via serde
-/// snake_case, preserving the historical wire format that previously lived in
-/// a `String` status field.
+/// Serializes to stable snake_case wire strings. `Conflict` is a correctable,
+/// model-visible outcome; storage and host failures remain errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryWriteStatus {
     Cleared,
+    Conflict,
     Written,
     Patched,
 }
@@ -163,6 +173,7 @@ impl MemoryWriteStatus {
     pub fn as_wire_str(&self) -> &'static str {
         match self {
             MemoryWriteStatus::Cleared => "cleared",
+            MemoryWriteStatus::Conflict => "conflict",
             MemoryWriteStatus::Written => "written",
             MemoryWriteStatus::Patched => "patched",
         }
@@ -202,6 +213,8 @@ pub struct MemoryServiceReadResponse {
     pub path: String,
     pub content: String,
     pub word_count: usize,
+    /// SHA-256 hash of `content`, used for conditional follow-up writes.
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -844,6 +857,11 @@ pub fn write_response_output(response: MemoryServiceWriteResponse) -> Value {
             "path": response.path,
             "message": response.message.unwrap_or_default(),
         }),
+        MemoryWriteStatus::Conflict => json!({
+            "status": response.status,
+            "path": response.path,
+            "message": response.message.unwrap_or_default(),
+        }),
         MemoryWriteStatus::Patched => json!({
             "status": response.status,
             "path": response.path,
@@ -864,6 +882,7 @@ pub fn read_response_output(response: MemoryServiceReadResponse) -> Value {
     json!({
         "path": response.path,
         "content": response.content,
+        "content_hash": response.content_hash,
         "word_count": response.word_count,
     })
 }
@@ -1117,6 +1136,67 @@ mod tests {
         let request =
             MemoryServiceWriteRequest::from_tool_input(&input).expect("default target is in-scope");
         assert_eq!(request.target, "daily_log");
+    }
+
+    #[test]
+    fn write_request_parses_expected_content_hash() {
+        let request = MemoryServiceWriteRequest::from_tool_input(&json!({
+            "target": "memory",
+            "content": "curated",
+            "append": false,
+            "expected_content_hash": "abc123"
+        }))
+        .expect("conditional write input parses");
+
+        assert_eq!(request.expected_content_hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn write_request_rejects_malformed_expected_content_hash() {
+        let error = MemoryServiceWriteRequest::from_tool_input(&json!({
+            "target": "memory",
+            "content": "curated",
+            "append": false,
+            "expected_content_hash": 1
+        }))
+        .expect_err("a malformed expectation must not become an unconditional write");
+
+        assert_eq!(error.kind(), MemoryServiceErrorKind::Input);
+    }
+
+    #[test]
+    fn write_request_allows_null_or_omitted_expected_content_hash() {
+        for input in [
+            json!({"target": "memory", "content": "x"}),
+            json!({
+                "target": "memory",
+                "content": "x",
+                "expected_content_hash": null
+            }),
+        ] {
+            let request = MemoryServiceWriteRequest::from_tool_input(&input)
+                .expect("null or omitted expectation remains optional");
+            assert_eq!(request.expected_content_hash, None);
+        }
+    }
+
+    #[test]
+    fn conflict_write_output_is_model_visible() {
+        let output = write_response_output(MemoryServiceWriteResponse {
+            status: MemoryWriteStatus::Conflict,
+            path: "MEMORY.md".to_string(),
+            append: false,
+            content_length: 0,
+            replacements: None,
+            message: Some("Document changed since it was read.".to_string()),
+        });
+
+        assert_eq!(output["status"], "conflict");
+        assert!(
+            output["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("changed"))
+        );
     }
 
     #[test]

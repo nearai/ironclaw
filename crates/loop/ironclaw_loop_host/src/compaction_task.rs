@@ -11,7 +11,8 @@ use ironclaw_loop_contracts::{
 use ironclaw_safety::{InjectionScanner, LeakDetector, LeakScanner, Sanitizer};
 use ironclaw_threads::{
     CreateSummaryArtifactRequest, MessageContent, MessageKind, MessageStatus, SessionThreadService,
-    SummaryKind, SummaryModelContextPolicy, ThreadMessageRangeRequest, ThreadScope,
+    SummaryArtifact, SummaryContextMode, SummaryKind, SummaryModelContextPolicy,
+    ThreadHistoryRequest, ThreadMessageRangeRequest, ThreadScope,
 };
 use thiserror::Error;
 
@@ -88,6 +89,7 @@ where
     prompt_id: SystemPromptId,
     system_prompt: String,
     max_input_bytes: usize,
+    max_summary_bytes: usize,
     max_input_tokens: u64,
 }
 
@@ -118,8 +120,16 @@ struct ValidatedCompactionRange {
     messages: Vec<ValidatedCompactionMessage>,
 }
 
+struct PriorSummaryContext {
+    start_sequence: Option<u64>,
+    compacted_through: u64,
+    summary_artifact_id: Option<ironclaw_threads::SummaryArtifactId>,
+    messages: Vec<ValidatedCompactionMessage>,
+}
+
 enum CompactionRangeDecision {
     Ready(ValidatedCompactionRange),
+    AlreadyCompacted(LoopCompactionResponse),
     Deferred { safe_summary: LoopSafeSummary },
 }
 
@@ -248,6 +258,7 @@ where
             prompt_id,
             system_prompt: system_prompt.into(),
             max_input_bytes: 256 * 1024,
+            max_summary_bytes: 128 * 1024,
             max_input_tokens: 64 * 1024,
         }
     }
@@ -258,6 +269,9 @@ where
     ) -> Result<LoopCompactionOutcome, CompactionError> {
         let range = match self.validate_range(&request).await? {
             CompactionRangeDecision::Ready(range) => range,
+            CompactionRangeDecision::AlreadyCompacted(response) => {
+                return Ok(LoopCompactionOutcome::Compacted(response));
+            }
             CompactionRangeDecision::Deferred { safe_summary } => {
                 return Ok(LoopCompactionOutcome::Deferred { safe_summary });
             }
@@ -289,7 +303,6 @@ where
         ) {
             return Err(CompactionError::UnsupportedMode);
         }
-        let start_exclusive = request.last_compacted_through_seq.unwrap_or(0);
         if self.threads.supports_resolve_scope() {
             match self.threads.resolve_scope(request.thread_id.clone()).await {
                 Ok(scope) if scope == request.expected_scope => {}
@@ -305,6 +318,35 @@ where
                 }
             }
         }
+        let prior_context = self
+            .load_prior_summary_context(request, request.last_compacted_through_seq)
+            .await?;
+        let start_exclusive = request
+            .last_compacted_through_seq
+            .unwrap_or(0)
+            .max(prior_context.compacted_through);
+        if request.drop_through_seq <= start_exclusive {
+            if request.drop_through_seq == prior_context.compacted_through
+                && let Some(summary_artifact_id) = prior_context.summary_artifact_id
+            {
+                return Ok(CompactionRangeDecision::AlreadyCompacted(
+                    LoopCompactionResponse {
+                        summary_artifact_id: LoopSummaryArtifactId::new(
+                            summary_artifact_id.to_string(),
+                        )
+                        .map_err(|error| {
+                            tracing::debug!(%error, "summary artifact id is invalid");
+                            CompactionError::PersistenceFailed {
+                                safe_summary: safe("summary artifact id is invalid"),
+                            }
+                        })?,
+                        compression_ratio_ppm: 0,
+                        redacted_leak_count: 0,
+                    },
+                ));
+            }
+            return Err(CompactionError::InvalidCutPoint);
+        }
         let range = self
             .threads
             .list_thread_messages_range(ThreadMessageRangeRequest {
@@ -314,8 +356,11 @@ where
                 through_sequence: request.drop_through_seq,
             })
             .await
-            .map_err(|_| CompactionError::PersistenceFailed {
-                safe_summary: safe("thread message range unavailable"),
+            .map_err(|error| {
+                tracing::debug!(%error, "thread message range unavailable");
+                CompactionError::PersistenceFailed {
+                    safe_summary: safe("thread message range unavailable"),
+                }
             })?;
         if range.thread.scope != request.expected_scope {
             return Err(CompactionError::PersistenceFailed {
@@ -390,14 +435,76 @@ where
             Some(message) => message.sequence,
             None => return Err(CompactionError::InvalidCutPoint),
         };
+        let cumulative_start_sequence = prior_context.start_sequence;
+        let mut prior_summaries = prior_context.messages;
+        prior_summaries.append(&mut validated_messages);
 
         Ok(CompactionRangeDecision::Ready(ValidatedCompactionRange {
             thread_id: request.thread_id.clone(),
             thread_scope,
-            start_sequence: start_exclusive.saturating_add(1),
+            start_sequence: cumulative_start_sequence
+                .unwrap_or_else(|| start_exclusive.saturating_add(1)),
             end_sequence: last_visible_seq,
-            messages: validated_messages,
+            messages: prior_summaries,
         }))
+    }
+
+    async fn load_prior_summary_context(
+        &self,
+        request: &CompactionTaskRequest,
+        compacted_through: Option<u64>,
+    ) -> Result<PriorSummaryContext, CompactionError> {
+        let history = self
+            .threads
+            .list_thread_history(ThreadHistoryRequest {
+                scope: request.expected_scope.clone(),
+                thread_id: request.thread_id.clone(),
+            })
+            .await
+            .map_err(|error| {
+                tracing::debug!(%error, "previous compaction summaries unavailable");
+                CompactionError::PersistenceFailed {
+                    safe_summary: safe("previous compaction summaries unavailable"),
+                }
+            })?;
+        let selected =
+            select_prior_compaction_summaries(history.summary_artifacts, compacted_through);
+        if selected.is_empty() && compacted_through.is_some() {
+            return Err(CompactionError::PersistenceFailed {
+                safe_summary: safe("previous compaction checkpoint missing"),
+            });
+        }
+        let latest_summary = selected
+            .iter()
+            .max_by_key(|summary| (summary.end_sequence, summary.summary_id));
+        let start_sequence = selected.iter().map(|summary| summary.start_sequence).min();
+        let durable_compacted_through = latest_summary
+            .map(|summary| summary.end_sequence)
+            .unwrap_or(0);
+        let summary_artifact_id = latest_summary.map(|summary| summary.summary_id);
+        let messages = selected
+            .into_iter()
+            .map(|summary| ValidatedCompactionMessage {
+                sequence: summary.end_sequence,
+                kind: MessageKind::Summary,
+                body: summary.content,
+            })
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            let sanitized = self.sanitizer().sanitize_messages(&messages)?;
+            if sanitized.content.len() > self.max_summary_bytes {
+                return Err(CompactionError::InputTooLarge {
+                    cap: self.max_summary_bytes,
+                    observed_bytes: sanitized.content.len(),
+                });
+            }
+        }
+        Ok(PriorSummaryContext {
+            start_sequence,
+            compacted_through: durable_compacted_through,
+            summary_artifact_id,
+            messages,
+        })
     }
 
     fn build_input(
@@ -416,6 +523,14 @@ where
             self.injection_scanner.as_ref(),
             self.leak_detector.as_ref(),
             self.max_input_bytes,
+        )
+    }
+
+    fn summary_sanitizer(&self) -> CompactionSanitizer<'_> {
+        CompactionSanitizer::new(
+            self.injection_scanner.as_ref(),
+            self.leak_detector.as_ref(),
+            self.max_summary_bytes,
         )
     }
 
@@ -449,7 +564,9 @@ where
         response: &SystemInferenceResponse,
         input_bytes: usize,
     ) -> Result<SanitizedSummary, CompactionError> {
-        let sanitized = self.sanitizer().sanitize_summary(&response.output_text)?;
+        let sanitized = self
+            .summary_sanitizer()
+            .sanitize_summary(&response.output_text)?;
         let compression_ratio_ppm = compression_ratio_ppm(input_bytes, sanitized.content.len());
         Ok(SanitizedSummary {
             content: sanitized.content,
@@ -473,6 +590,7 @@ where
                 summary_kind: SummaryKind::Compaction,
                 content: MessageContent::text(summary.content),
                 model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+                context_mode: Some(SummaryContextMode::CumulativeBarrier),
             })
             .await
             .map_err(|error| {
@@ -483,13 +601,54 @@ where
             })?;
         Ok(LoopCompactionResponse {
             summary_artifact_id: LoopSummaryArtifactId::new(artifact.summary_id.to_string())
-                .map_err(|_| CompactionError::PersistenceFailed {
-                    safe_summary: safe("summary artifact id is invalid"),
+                .map_err(|error| {
+                    tracing::debug!(%error, "summary artifact id is invalid");
+                    CompactionError::PersistenceFailed {
+                        safe_summary: safe("summary artifact id is invalid"),
+                    }
                 })?,
             compression_ratio_ppm: summary.compression_ratio_ppm,
             redacted_leak_count: summary.redacted_leak_count,
         })
     }
+}
+
+fn select_prior_compaction_summaries(
+    summaries: Vec<SummaryArtifact>,
+    compacted_through: Option<u64>,
+) -> Vec<SummaryArtifact> {
+    let mut eligible = summaries
+        .into_iter()
+        .filter(|summary| {
+            summary.summary_kind == SummaryKind::Compaction
+                && compacted_through.is_none_or(|through| summary.end_sequence <= through)
+                && summary.model_context_policy
+                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+        })
+        .collect::<Vec<_>>();
+    if let Some(newest_barrier) = eligible
+        .iter()
+        .filter(|summary| summary.context_mode == Some(SummaryContextMode::CumulativeBarrier))
+        .max_by(|left, right| {
+            left.end_sequence
+                .cmp(&right.end_sequence)
+                .then_with(|| left.summary_id.cmp(&right.summary_id))
+        })
+        .cloned()
+    {
+        eligible.retain(|summary| {
+            summary.summary_id == newest_barrier.summary_id
+                || (summary.context_mode.is_none()
+                    && summary.start_sequence > newest_barrier.end_sequence)
+        });
+    }
+    eligible.sort_unstable_by(|left, right| {
+        left.start_sequence
+            .cmp(&right.start_sequence)
+            .then_with(|| left.end_sequence.cmp(&right.end_sequence))
+            .then_with(|| left.summary_id.cmp(&right.summary_id))
+    });
+    eligible
 }
 
 pub fn default_host_managed_loop_compaction_port<S>(
@@ -715,6 +874,24 @@ mod tests {
         }
     }
 
+    fn summary(
+        start_sequence: u64,
+        end_sequence: u64,
+        context_mode: Option<SummaryContextMode>,
+        content: &str,
+    ) -> SummaryArtifact {
+        SummaryArtifact {
+            summary_id: ironclaw_threads::SummaryArtifactId::new(),
+            thread_id: ThreadId::new("thread-compaction-body").unwrap(),
+            start_sequence,
+            end_sequence,
+            summary_kind: SummaryKind::Compaction,
+            content: content.to_string(),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode,
+        }
+    }
+
     #[test]
     fn compaction_visibility_matches_model_context_reference_kinds() {
         assert!(is_compaction_model_visible(
@@ -750,6 +927,42 @@ mod tests {
         let message = record_with_content(MessageKind::ToolResultReference, Some("tool summary"));
 
         assert_eq!(compaction_message_body(&message), Ok("tool summary"));
+    }
+
+    #[test]
+    fn prior_summary_selection_keeps_mixed_version_deltas_after_the_newest_barrier() {
+        let old_incremental = summary(1, 3, None, "old incremental");
+        let old_barrier = summary(
+            1,
+            5,
+            Some(SummaryContextMode::CumulativeBarrier),
+            "old barrier",
+        );
+        let newest_barrier = summary(
+            1,
+            8,
+            Some(SummaryContextMode::CumulativeBarrier),
+            "newest barrier",
+        );
+        let rolling_deploy_delta = summary(9, 11, None, "rolling deploy delta");
+
+        let selected = select_prior_compaction_summaries(
+            vec![
+                rolling_deploy_delta.clone(),
+                old_barrier,
+                old_incremental,
+                newest_barrier.clone(),
+            ],
+            Some(11),
+        );
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|summary| summary.summary_id)
+                .collect::<Vec<_>>(),
+            vec![newest_barrier.summary_id, rolling_deploy_delta.summary_id]
+        );
     }
 
     #[test]

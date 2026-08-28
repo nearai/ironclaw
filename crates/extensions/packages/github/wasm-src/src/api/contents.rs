@@ -35,7 +35,59 @@ pub(crate) fn get_file_content(
             encoded_owner, encoded_repo, encoded_path
         )
     };
-    github_request("GET", &url_path, None)
+    let response = github_request("GET", &url_path, None)?;
+    let mut output: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|error| format!("github_api_invalid_response: {error}"))?;
+    let Some(file) = output.as_object_mut() else {
+        return Ok(response);
+    };
+    if file.get("type").and_then(serde_json::Value::as_str) != Some("file") {
+        return Ok(response);
+    }
+
+    let encoding = file
+        .get("encoding")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "github_api_invalid_response: file encoding is missing".to_string())?
+        .to_string();
+    match encoding.as_str() {
+        "none" => return Ok(response),
+        "base64" => {
+            let encoded = file
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    "github_api_invalid_response: base64 file content is missing".to_string()
+                })?
+                .chars()
+                .filter(|character| !character.is_ascii_whitespace())
+                .collect::<String>();
+            let decoded = BASE64_STANDARD
+                .decode(encoded)
+                .map_err(|error| format!("github_api_invalid_response: {error}"))?;
+            match String::from_utf8(decoded) {
+                Ok(content) => {
+                    file.insert("content".to_string(), serde_json::Value::String(content));
+                    file.insert(
+                        "encoding".to_string(),
+                        serde_json::Value::String("utf-8".to_string()),
+                    );
+                }
+                Err(_) => {
+                    file.remove("content");
+                    file.insert(
+                        "encoding".to_string(),
+                        serde_json::Value::String("binary_unsupported".to_string()),
+                    );
+                }
+            }
+        }
+        _ => {
+            return Err("github_api_unsupported_file_encoding".to_string());
+        }
+    }
+
+    serde_json::to_string(&output).map_err(|error| format!("github_api_invalid_response: {error}"))
 }
 
 // arch-exempt: too_many_args, file write inputs stay split to mirror GitHub payload shape, plan #5171

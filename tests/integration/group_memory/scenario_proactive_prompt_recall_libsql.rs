@@ -157,6 +157,7 @@ pub async fn run() -> HarnessResult<()> {
                 replace_all: false,
                 metadata: None,
                 timezone: None,
+                expected_content_hash: None,
             },
         )
         .await

@@ -40,7 +40,7 @@ async fn wedged_tool_call_is_reaped_by_lease_expiry_not_left_running_forever() {
     let _guard = gate.release_guard();
 
     let harness = RebornIntegrationHarness::test_default()
-        .with_builtin_http_tools()
+        .with_live_shell()
         .park_tool_dispatch(gate.clone())
         .with_runner_lease_ttl_for_test(chrono::Duration::milliseconds(200))
         .with_lease_recovery_interval_for_test(Duration::from_millis(50))

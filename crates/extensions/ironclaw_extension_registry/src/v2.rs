@@ -1331,6 +1331,7 @@ impl CapabilityDeclV2 {
             });
         }
         let mut credential_handles_seen = BTreeSet::new();
+        let mut placeholder_envs_seen = BTreeSet::new();
         let mut runtime_credentials = Vec::with_capacity(raw.runtime_credentials.len());
         for raw_credential in raw.runtime_credentials {
             let handle = SecretHandle::new(raw_credential.handle)?;
@@ -1341,6 +1342,26 @@ impl CapabilityDeclV2 {
                     ),
                 });
             }
+            if let Some(placeholder_env) = raw_credential.placeholder_env.as_deref() {
+                if !ironclaw_host_api::process::is_valid_sandbox_credential_env_name(
+                    placeholder_env,
+                ) {
+                    return Err(ManifestV2Error::Invalid {
+                        reason: format!(
+                            "capability {id} declares invalid shell credential environment \
+                             {placeholder_env}"
+                        ),
+                    });
+                }
+                if !placeholder_envs_seen.insert(placeholder_env.to_string()) {
+                    return Err(ManifestV2Error::Invalid {
+                        reason: format!(
+                            "capability {id} declares duplicate shell credential environment \
+                             {placeholder_env}"
+                        ),
+                    });
+                }
+            }
             raw_credential
                 .target
                 .validate_declaration()
@@ -1349,6 +1370,16 @@ impl CapabilityDeclV2 {
                         "capability {id} declares invalid runtime credential target: {error}"
                     ),
                 })?;
+            if raw_credential.placeholder_env.is_some()
+                && !matches!(
+                    raw_credential.target,
+                    RuntimeCredentialTarget::Header { .. }
+                )
+            {
+                return Err(ManifestV2Error::Invalid {
+                    reason: format!("capability {id} shell credential requires a header target"),
+                });
+            }
             raw_credential
                 .audience
                 .validate_declaration()
@@ -1369,6 +1400,7 @@ impl CapabilityDeclV2 {
                 provider_scopes,
                 audience: raw_credential.audience,
                 target: raw_credential.target,
+                placeholder_env: raw_credential.placeholder_env,
                 required: raw_credential.required,
             });
         }
@@ -1986,6 +2018,8 @@ pub(crate) struct RawRuntimeCredentialV2 {
     pub(crate) provider_scopes: Vec<String>,
     pub(crate) audience: NetworkTargetPattern,
     pub(crate) target: RuntimeCredentialTarget,
+    #[serde(default)]
+    pub(crate) placeholder_env: Option<String>,
     #[serde(default = "default_runtime_credential_required")]
     pub(crate) required: bool,
 }

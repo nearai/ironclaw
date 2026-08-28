@@ -47,7 +47,7 @@ use ironclaw_memory::{
     MemoryServiceProfileSetRequest, MemoryServiceProfileSetResponse, MemoryServiceReadRequest,
     MemoryServiceReadResponse, MemoryServiceSearchRequest, MemoryServiceSearchResponse,
     MemoryServiceSearchResult, MemoryServiceTreeRequest, MemoryServiceTreeResponse,
-    MemoryServiceWriteRequest, MemoryServiceWriteResponse, MemoryWriteStatus,
+    MemoryServiceWriteRequest, MemoryServiceWriteResponse, MemoryWriteStatus, content_bytes_sha256,
     memory_context_disabled,
 };
 use serde_json::{Map, Value, json};
@@ -263,6 +263,9 @@ impl Mem0MemoryService {
         // (`append == false`, no patch) cannot be honored, so reject it explicitly
         // as a stable, recoverable "unsupported" operation rather than silently
         // adding a memory and then misreporting `append: true` back to the caller.
+        // `expected_content_hash` is best-effort for this provider. mem0 has no
+        // addressable document or conditional-write primitive. Its supported
+        // append operation cannot overwrite the content represented by the hash.
         if !request.append {
             return Err(MemoryServiceError::operation_from(Mem0Error::Unsupported {
                 operation: "write.replace",
@@ -330,6 +333,7 @@ impl Mem0MemoryService {
         let content = parts.join("\n");
         Ok(MemoryServiceReadResponse {
             word_count: content.split_whitespace().count(),
+            content_hash: content_bytes_sha256(content.as_bytes()),
             path: request.path,
             content,
         })
@@ -634,6 +638,7 @@ mod tests {
                     replace_all: false,
                     metadata: None,
                     timezone: None,
+                    expected_content_hash: None,
                 },
             )
             .await
@@ -669,6 +674,7 @@ mod tests {
                     replace_all: false,
                     metadata: None,
                     timezone: None,
+                    expected_content_hash: None,
                 },
             )
             .await
@@ -696,6 +702,7 @@ mod tests {
                     replace_all: false,
                     metadata: None,
                     timezone: None,
+                    expected_content_hash: None,
                 },
             )
             .await

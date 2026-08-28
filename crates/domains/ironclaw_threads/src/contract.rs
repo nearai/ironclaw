@@ -322,6 +322,10 @@ pub struct SummaryArtifact {
     /// content, even though thread messages may carry richer side-channel data.
     pub content: String,
     pub model_context_policy: Option<SummaryModelContextPolicy>,
+    /// Additive projection metadata. Older readers ignore this unknown field
+    /// and continue projecting the artifact as a range replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_mode: Option<SummaryContextMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +386,18 @@ pub enum SummaryKind {
 #[serde(rename_all = "snake_case")]
 pub enum SummaryModelContextPolicy {
     ReplaceRangeWhenSelected,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryContextMode {
+    /// Replace all model context through this artifact's end sequence.
+    ///
+    /// The summary content must cumulatively carry every earlier checkpoint.
+    /// Older transcript rows and summary artifacts remain durable but do not
+    /// enter model context while this barrier is eligible.
+    CumulativeBarrier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -625,6 +641,7 @@ pub struct ReadToolResultRecordRequest {
     pub result_ref: String,
     pub offset: u64,
     pub max_bytes: usize,
+    pub selection: ToolResultRecordSelection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -632,6 +649,28 @@ pub struct ToolResultRecordChunk {
     pub content: Vec<u8>,
     pub total_bytes: u64,
     pub next_offset: Option<u64>,
+}
+
+/// Selection requested while reading a durable tool-result record.
+///
+/// `Bytes` preserves the original opaque byte reader. `Json` is an additive
+/// model-facing view over records whose producers already stored JSON; the
+/// record itself remains unchanged and durable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolResultRecordSelection {
+    Bytes,
+    Json {
+        pointer: String,
+        limit: Option<usize>,
+    },
+}
+
+/// The result of one durable tool-result read. JSON pages carry a real
+/// `serde_json::Value` so callers do not have to parse a JSON string again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolResultRecordRead {
+    Bytes(ToolResultRecordChunk),
+    Json(ironclaw_host_api::model_result_preview::ModelResultJsonPage),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -864,6 +903,7 @@ pub struct CreateSummaryArtifactRequest {
     /// are model-visible text artifacts, not rich message payload snapshots.
     pub content: MessageContent,
     pub model_context_policy: Option<SummaryModelContextPolicy>,
+    pub context_mode: Option<SummaryContextMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1125,6 +1165,43 @@ mod tests {
         assert_eq!(record.created_at, None);
         assert_eq!(record.updated_at, None);
         assert_eq!(record.content.as_deref(), Some("legacy row"));
+    }
+    #[test]
+    fn cumulative_context_mode_is_ignored_by_legacy_summary_readers() {
+        #[derive(serde::Deserialize)]
+        struct LegacySummaryArtifact {
+            summary_id: SummaryArtifactId,
+            thread_id: ThreadId,
+            start_sequence: u64,
+            end_sequence: u64,
+            summary_kind: SummaryKind,
+            content: String,
+            model_context_policy: Option<SummaryModelContextPolicy>,
+        }
+
+        let artifact = SummaryArtifact {
+            summary_id: SummaryArtifactId::new(),
+            thread_id: ThreadId::new("thread-legacy-reader").unwrap(),
+            start_sequence: 1,
+            end_sequence: 4,
+            summary_kind: SummaryKind::Compaction,
+            content: "checkpoint".to_string(),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: Some(SummaryContextMode::CumulativeBarrier),
+        };
+        let encoded = serde_json::to_vec(&artifact).unwrap();
+        let legacy: LegacySummaryArtifact = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(legacy.summary_id, artifact.summary_id);
+        assert_eq!(legacy.thread_id, artifact.thread_id);
+        assert_eq!(legacy.start_sequence, 1);
+        assert_eq!(legacy.end_sequence, 4);
+        assert_eq!(legacy.summary_kind, SummaryKind::Compaction);
+        assert_eq!(legacy.content, "checkpoint");
+        assert_eq!(
+            legacy.model_context_policy,
+            Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+        );
     }
 }
 

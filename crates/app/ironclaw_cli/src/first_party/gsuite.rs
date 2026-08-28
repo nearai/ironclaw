@@ -139,6 +139,7 @@ fn runtime_credentials(
             name: "authorization".to_string(),
             prefix: Some("Bearer ".to_string()),
         },
+        placeholder_env: None,
         required: true,
     }])
 }

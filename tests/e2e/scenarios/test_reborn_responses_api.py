@@ -477,7 +477,9 @@ async def test_reborn_models_v1_lists_configured_mock_model(reborn_responses_cli
     models = body["data"]
     assert models
 
-    mock_model = next(model for model in models if model["id"] == "mock-model")
+    mock_models = [model for model in models if model.get("id") == "mock-model"]
+    assert len(mock_models) == 1, body
+    mock_model = mock_models[0]
     assert mock_model["object"] == "model"
     assert mock_model["owned_by"] == "openai"
     assert isinstance(mock_model["created"], int)
@@ -599,6 +601,86 @@ async def test_reborn_responses_repeated_external_tools_round_trip(
         assert tool_output in forwarded_messages
 
 
+async def test_reborn_responses_external_success_round_trips_through_result_read(
+    reborn_responses_client, mock_llm_server
+):
+    """A client-submitted success uses durable storage and host result_read."""
+    await _reset_mock_chat_requests(mock_llm_server)
+
+    response = await create_response(
+        reborn_responses_client,
+        input="Run reborn external tool result read for Boston.",
+        tools=[_lookup_weather_tool()],
+    )
+    calls = _function_calls(response)
+    assert len(calls) == 1, response
+    call = calls[0]
+    assert call["name"] == "lookup_weather"
+    assert json.loads(call["arguments"]) == {"city": "Boston"}
+
+    external_output = {
+        "items": [
+            {"id": 1, "marker": "external-success-result-read"},
+            *[{"id": index, "value": f"row-{index}"} for index in range(2, 120)],
+        ]
+    }
+    final = await create_response(
+        reborn_responses_client,
+        previous_response_id=response["id"],
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": call["call_id"],
+                "output": external_output,
+            }
+        ],
+    )
+
+    assert final["status"] == "completed"
+    chat_requests = await _mock_chat_requests(mock_llm_server)
+    messages = chat_requests[-1].get("messages", [])
+    external_calls = [
+        call
+        for message in messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls", [])
+        if call.get("function", {}).get("name") == "lookup_weather"
+    ]
+    assert len(external_calls) == 1, messages
+    result_read_calls = [
+        call
+        for message in messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls", [])
+        if call.get("function", {}).get("name") == "builtin__result_read"
+    ]
+    assert len(result_read_calls) == 1
+    result_read_arguments = json.loads(result_read_calls[0]["function"]["arguments"])
+    assert result_read_arguments["json_pointer"] == "/items"
+    external_messages = [
+        message
+        for message in messages
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == external_calls[0]["id"]
+    ]
+    assert len(external_messages) == 1, messages
+    external_result = json.loads(external_messages[0]["content"])
+    assert external_result["detail"]["result_ref"] == result_read_arguments["result_ref"]
+
+    result_read_messages = [
+        message
+        for message in messages
+        if message.get("role") == "tool"
+        and message.get("tool_call_id") == result_read_calls[0]["id"]
+    ]
+    assert len(result_read_messages) == 1, messages
+    result_read_observation = json.loads(result_read_messages[0]["content"])
+    result_read_page = json.loads(result_read_observation["detail"]["preview"])
+    assert result_read_page["node_type"] == "array"
+    assert result_read_page["result_ref"] == result_read_arguments["result_ref"]
+    assert result_read_page["content"][0]["marker"] == "external-success-result-read"
+
+
 async def test_reborn_responses_external_tool_failure_output_reaches_llm(
     reborn_responses_client, mock_llm_server
 ):
@@ -690,7 +772,9 @@ async def test_reborn_responses_mixed_internal_and_external_tools_same_assistant
     call_names = [call["name"] for call in calls]
     assert "lookup_weather" in call_names, response
 
-    weather_call = next(call for call in calls if call["name"] == "lookup_weather")
+    weather_calls = [call for call in calls if call.get("name") == "lookup_weather"]
+    assert len(weather_calls) == 1, response
+    weather_call = weather_calls[0]
     assert json.loads(weather_call["arguments"]) == {"city": "Boston"}
 
     output_items = _function_call_outputs(response)

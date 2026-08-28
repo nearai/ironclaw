@@ -2048,6 +2048,7 @@ impl HostRuntimeCapabilityHarness {
             .collect();
         let parts = ironclaw_composition::test_support::RefreshingCapabilityPortTestParts {
             runtime: self.runtime.lock().unwrap().clone(),
+            process_backend: ironclaw_host_api::runtime_policy::ProcessBackendKind::LocalHost,
             run_context: run_context.clone(),
             surface_policy,
             fallback_user_id: dispatch_user,
@@ -2100,6 +2101,7 @@ impl HostRuntimeCapabilityHarness {
             extension_management: self.reborn_services.as_ref().and_then(|services| {
                 ironclaw_composition::test_support::build_extension_management_for_test(services)
             }),
+            extension_surface_override: None,
             outbound_preferences_service,
             outbound_preference_write_requires_approval,
             tool_permission_overrides,
@@ -2148,6 +2150,12 @@ impl HostRuntimeCapabilityHarness {
     /// request persists under the capability user, and the run never verifies.
     pub(crate) fn with_user_id(mut self, user_id: UserId) -> Self {
         self.user_id = user_id;
+        self
+    }
+
+    /// Use the same durable capability-result IO that production composes.
+    pub(crate) fn with_durable_capability_io(mut self) -> Self {
+        self.durable_capability_io_requested = true;
         self
     }
 

@@ -3,19 +3,20 @@ use ironclaw_filesystem::FilesystemError;
 use std::time::Duration;
 
 use ironclaw_host_api::{
-    capability::{EffectKind, PermissionMode},
+    capability::{EffectKind, PermissionMode, RuntimeCredentialRequirement},
     dispatch::RuntimeDispatchErrorKind,
+    http::RuntimeCredentialTarget,
     path::{ScopedPath, VirtualPath},
+    process::{
+        CommandExecutionRequest, CredentialedSandboxCommandRequest, RuntimeProcessError,
+        SandboxCommandCredentialBinding, SavedCommandOutput, SavedCommandOutputSanitization,
+    },
     resource::{ResourceCeiling, ResourceEstimate, ResourceProfile, SandboxQuota},
 };
 use serde_json::{Value, json};
 
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityRequest, process_output::saved_output_filename,
-};
-use ironclaw_host_api::process::{
-    CommandExecutionRequest, RuntimeProcessError, SavedCommandOutput,
-    SavedCommandOutputSanitization,
 };
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest};
@@ -34,7 +35,7 @@ const SAVED_OUTPUT_SCOPED_DIR: &str = "command-outputs";
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         SHELL_CAPABILITY_ID,
-        "Execute shell commands with copied v1 validation and saved-file references for large local output",
+        "Execute shell commands with copied v1 validation and saved-file references for large local output. Prefer computing the answer in the pipeline (`grep | sort | uniq -c`, `awk`) over reading raw data into the conversation — return conclusions, not content.",
         vec![
             EffectKind::DispatchCapability,
             EffectKind::SpawnProcess,
@@ -73,24 +74,56 @@ pub(super) async fn dispatch(
         .timeout_secs
         .is_some_and(|timeout_secs| timeout_secs > MAX_SHELL_TIMEOUT_SECS)
     {
-        return Err(FirstPartyCapabilityError::new(
+        // Name the ceiling. The model can only lower its `timeout` when the
+        // failure says what the maximum is; a bare `resource` category makes
+        // it retry the same over-limit value.
+        return Err(FirstPartyCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::Resource,
+            format!(
+                "requested timeout exceeds the maximum of {MAX_SHELL_TIMEOUT_SECS}s for this capability"
+            ),
         ));
     }
     shell_core::validate_command(&parsed.command, false).map_err(shell_error)?;
-    let output = request
-        .services
-        .process
-        .run_command(CommandExecutionRequest {
-            scope: request.scope.clone(),
-            mounts: request.mounts.clone(),
-            command: parsed.command,
-            workdir: parsed.workdir,
-            timeout_secs: parsed.timeout_secs,
-            extra_env: parsed.extra_env,
-        })
-        .await
-        .map_err(process_error)?;
+    let output = if request.runtime_credentials.is_empty() {
+        request
+            .services
+            .process
+            .run_command(CommandExecutionRequest {
+                scope: request.scope.clone(),
+                mounts: request.mounts.clone(),
+                command: parsed.command,
+                workdir: parsed.workdir,
+                timeout_secs: parsed.timeout_secs,
+                extra_env: parsed.extra_env,
+            })
+            .await
+    } else {
+        if !request.services.process.supports_credentialed_command() {
+            return Err(process_error(RuntimeProcessError::ExecutionFailed(
+                "authorized shell credentials require managed sandbox egress".to_string(),
+            )));
+        }
+        let bindings = credential_bindings(&request.runtime_credentials).map_err(process_error)?;
+        request
+            .services
+            .process
+            .run_credentialed_command(
+                CredentialedSandboxCommandRequest {
+                    capability_id: request.capability_id.clone(),
+                    scope: request.scope.clone(),
+                    mounts: request.mounts.clone(),
+                    command: parsed.command,
+                    workdir: parsed.workdir,
+                    timeout_secs: parsed.timeout_secs,
+                    extra_env: parsed.extra_env,
+                    credential_bindings: bindings,
+                },
+                Vec::new(),
+            )
+            .await
+    }
+    .map_err(process_error)?;
 
     let saved_output_path =
         publish_saved_output_for_file_read(request, output.saved_output.as_ref()).await?;
@@ -128,15 +161,19 @@ async fn publish_saved_output_for_file_read(
         cleanup_saved_output("unpublished").await;
         return Ok(None);
     };
+    // Every leg below names what failed. A bare `operation_failed` told the
+    // model only that "something" broke while publishing the saved output, so
+    // it re-ran the identical command and hit the identical fault.
     let content = tokio::fs::read(&saved_output.path)
         .await
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+        .map_err(|error| saved_output_error("read saved command output", &error))?;
     if let Some(parent) = virtual_parent(&virtual_path) {
         match request.services.filesystem.create_dir_all(&parent).await {
             Ok(()) | Err(FilesystemError::Unsupported { .. }) => {}
-            Err(_) => {
-                return Err(FirstPartyCapabilityError::new(
-                    RuntimeDispatchErrorKind::OperationFailed,
+            Err(error) => {
+                return Err(saved_output_error(
+                    "create saved command output directory",
+                    &error,
                 ));
             }
         }
@@ -146,7 +183,7 @@ async fn publish_saved_output_for_file_read(
         .filesystem
         .write_file(&virtual_path, &content)
         .await
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed))?;
+        .map_err(|error| saved_output_error("write saved command output", &error))?;
     cleanup_saved_output("published").await;
     Ok(Some(scoped_path))
 }
@@ -233,22 +270,37 @@ fn reject_unbacked_scoped_workdir(
     else {
         return Ok(());
     };
-    let scoped_path = ScopedPath::new(workdir.to_string())
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
-    let (_virtual_path, grant) = mounts
-        .resolve_with_grant(&scoped_path)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Client))?;
-    if !grant.permissions.execute {
-        return Err(FirstPartyCapabilityError::new(
+    // Every rejection below is model-correctable — it can drop `workdir` and
+    // `cd` inside the command instead — but only if the failure says which
+    // rule it broke. A bare `client`/`input_encode` category left it retrying
+    // the same workdir.
+    let scoped_path = ScopedPath::new(workdir.to_string()).map_err(|error| {
+        FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::InputEncode,
+            bounded_failure_reason(format!("workdir is not a valid scoped path: {error}")),
+        )
+    })?;
+    let (_virtual_path, grant) = mounts.resolve_with_grant(&scoped_path).map_err(|error| {
+        FirstPartyCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::Client,
+            bounded_failure_reason(format!(
+                "workdir does not resolve to a granted mount: {error}"
+            )),
+        )
+    })?;
+    if !grant.permissions.execute {
+        return Err(FirstPartyCapabilityError::with_safe_summary(
+            RuntimeDispatchErrorKind::Client,
+            "workdir resolves to a mount without execute permission",
         ));
     }
 
     // Shell execution still uses the local process fallback. Until the resolved
     // process backend can receive virtual cwd + scoped mounts, fail closed rather
     // than translating scoped paths to ambient host paths in this handler.
-    Err(FirstPartyCapabilityError::new(
+    Err(FirstPartyCapabilityError::with_safe_summary(
         RuntimeDispatchErrorKind::Client,
+        "scoped workdir is not supported by this shell backend; omit workdir and cd inside the command instead",
     ))
 }
 
@@ -284,6 +336,48 @@ fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityEr
     FirstPartyCapabilityError::with_safe_summary(kind, bounded_failure_reason(reason))
 }
 
+/// Name the failing leg of saved-output publication instead of collapsing every
+/// filesystem fault into a bare `operation_failed`.
+///
+/// `error` is untrusted host text (it carries paths). It rides the same channel
+/// as `shell_error`'s reasons: strict-validated as a safe summary downstream,
+/// and preserved on the scrubbed model-visible diagnostic detail when it fails
+/// that validation.
+fn saved_output_error(
+    leg: &'static str,
+    error: &dyn std::fmt::Display,
+) -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::with_safe_summary(
+        RuntimeDispatchErrorKind::OperationFailed,
+        bounded_failure_reason(format!("failed to {leg}: {error}")),
+    )
+}
+
+fn credential_bindings(
+    requirements: &[RuntimeCredentialRequirement],
+) -> Result<Vec<SandboxCommandCredentialBinding>, RuntimeProcessError> {
+    let bindings = requirements
+        .iter()
+        .filter_map(|requirement| {
+            let placeholder_env = requirement.placeholder_env.as_ref()?;
+            if !matches!(requirement.target, RuntimeCredentialTarget::Header { .. }) {
+                return None;
+            }
+            Some(SandboxCommandCredentialBinding {
+                placeholder_env: placeholder_env.clone(),
+                requirement: requirement.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if bindings.len() != requirements.len() {
+        return Err(RuntimeProcessError::ExecutionFailed(
+            "authorized shell credentials require placeholder environments and header targets"
+                .to_string(),
+        ));
+    }
+    Ok(bindings)
+}
+
 fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
     let (kind, reason) = match error {
         RuntimeProcessError::Timeout(duration) => (
@@ -301,6 +395,72 @@ fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use parking_lot::Mutex;
+
+    use ironclaw_host_api::{
+        action::{NetworkScheme, NetworkTargetPattern},
+        capability::{RuntimeCredentialRequirement, RuntimeCredentialRequirementSource},
+        ids::{CapabilityId, SecretHandle},
+        process::{CommandExecutionOutput, SandboxCommandCredential},
+        resource::ResourceScope,
+    };
+
+    #[derive(Debug, Default)]
+    struct RecordingProcessPort {
+        credentialed_requests: Mutex<Vec<CredentialedSandboxCommandRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::RuntimeProcessPort for RecordingProcessPort {
+        async fn run_command(
+            &self,
+            _request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            Err(RuntimeProcessError::ExecutionFailed(
+                "unexpected shell fallback".to_string(),
+            ))
+        }
+
+        fn supports_credentialed_command(&self) -> bool {
+            true
+        }
+
+        async fn run_credentialed_command(
+            &self,
+            request: CredentialedSandboxCommandRequest,
+            credentials: Vec<SandboxCommandCredential>,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            assert!(credentials.is_empty());
+            self.credentialed_requests.lock().push(request);
+            Ok(CommandExecutionOutput {
+                output: "[]".to_string(),
+                saved_output: None,
+                exit_code: 0,
+                sandboxed: true,
+                duration: Duration::from_millis(1),
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct OrdinaryOnlyProcessPort {
+        requests: Mutex<Vec<CommandExecutionRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::RuntimeProcessPort for OrdinaryOnlyProcessPort {
+        async fn run_command(
+            &self,
+            request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            self.requests.lock().push(request);
+            Err(RuntimeProcessError::ExecutionFailed(
+                "ordinary process path reached".to_string(),
+            ))
+        }
+    }
 
     fn dispatch_safe_summary(error: &FirstPartyCapabilityError) -> Option<&str> {
         match error {
@@ -454,6 +614,93 @@ mod tests {
         );
 
         assert!(rendered.contains("saved output capped at 123 bytes per stream"));
+    }
+
+    #[test]
+    fn generic_adapter_maps_declared_requirement_to_binding() {
+        let requirement = atlas_requirement();
+        let bindings = credential_bindings(std::slice::from_ref(&requirement)).unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].placeholder_env, "ATLAS_TOKEN");
+        assert_eq!(bindings[0].requirement, requirement);
+    }
+
+    #[tokio::test]
+    async fn dispatch_preserves_compound_command_for_credentialed_shell() {
+        let process = Arc::new(RecordingProcessPort::default());
+        let command = "set -e; atlas resources list | jq '.items'; atlas audit";
+        let mut request = FirstPartyCapabilityRequest::request_for_test(
+            CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
+            ResourceScope::system(),
+            json!({
+                "command": command,
+                "credential_contexts": ["atlas"]
+            }),
+            None,
+        );
+        request.runtime_credentials = vec![atlas_requirement()];
+        request.services.process = process.clone();
+
+        dispatch(&request).await.unwrap();
+
+        let requests = process.credentialed_requests.lock();
+        let credentialed = &requests[0];
+        assert_eq!(credentialed.capability_id, request.capability_id);
+        assert_eq!(credentialed.command, command);
+        assert!(credentialed.extra_env.is_empty());
+        assert_eq!(credentialed.credential_bindings.len(), 1);
+        assert_eq!(
+            credentialed.credential_bindings[0].placeholder_env,
+            "ATLAS_TOKEN"
+        );
+        assert_eq!(
+            credentialed.credential_bindings[0].requirement,
+            request.runtime_credentials[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_requires_managed_egress_for_credential_contexts() {
+        let process = Arc::new(OrdinaryOnlyProcessPort::default());
+        let mut request = FirstPartyCapabilityRequest::request_for_test(
+            CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
+            ResourceScope::system(),
+            json!({
+                "command": "atlas resources list",
+                "credential_contexts": ["atlas"]
+            }),
+            None,
+        );
+        request.runtime_credentials = vec![atlas_requirement()];
+        request.services.process = process.clone();
+
+        let error = dispatch(&request).await.unwrap_err();
+
+        assert!(dispatch_safe_summary(&error).is_some_and(|summary| {
+            summary.contains("authorized shell credentials require managed sandbox egress")
+                && !summary.contains("not staged")
+        }));
+        assert!(process.requests.lock().is_empty());
+    }
+
+    fn atlas_requirement() -> RuntimeCredentialRequirement {
+        RuntimeCredentialRequirement {
+            handle: SecretHandle::new("atlas_runtime_token").unwrap(),
+            source: RuntimeCredentialRequirementSource::SecretHandle,
+            provider_scopes: Vec::new(),
+            audience: NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.atlas.test".to_string(),
+                port: None,
+            },
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            placeholder_env: Some("ATLAS_TOKEN".to_string()),
+            required: true,
+        }
     }
 
     fn saved_output() -> SavedCommandOutput {

@@ -252,10 +252,9 @@ mod tests {
             "list_repos schema should not expose username"
         );
         assert!(find_schema("GitHub list_pull_requests input")["properties"]["head"].is_object());
-        assert!(
-            find_schema("GitHub get_file_content input")["properties"]["path"]["description"]
-                .as_str()
-                .is_some_and(|description| description.contains("base64"))
+        assert_eq!(
+            find_schema("GitHub get_file_content input")["properties"]["path"]["description"],
+            "Repository file path."
         );
         assert!(
             find_schema("GitHub search_issues_pull_requests input")["properties"]["sort"]["enum"]
@@ -1587,24 +1586,156 @@ mod tests {
     }
 
     #[test]
-    fn get_file_content_uses_ref_query() {
+    fn get_file_content_decodes_whitespace_wrapped_base64_and_uses_ref_query() {
         test_support::set_response(Ok(json!({
             "path": "src/lib.rs",
+            "type": "file",
             "encoding": "base64",
-            "content": "Zm4gbWFpbigpIHt9"
+            "content": " \nZm4g\tbWFpbigp\nIHt9 "
         })
         .to_string()));
 
-        execute_inner(
+        let output = execute_inner(
             r#"{"owner":"nearai","repo":"ironclaw","path":"src/lib.rs","ref":"main"}"#,
             Some(r#"{"capability_id":"github.get_file_content"}"#),
         )
         .expect("github.get_file_content should fetch content");
+        let output: serde_json::Value =
+            serde_json::from_str(&output).expect("mock output should be JSON");
+        assert_eq!(output["content"], "fn main() {}");
+        assert_eq!(output["encoding"], "utf-8");
 
         let requests = test_support::requests();
         assert_eq!(
             requests[0].path,
             "/repos/nearai/ironclaw/contents/src/lib.rs?ref=main"
+        );
+    }
+
+    #[test]
+    fn get_file_content_marks_non_utf8_as_unsupported_without_content() {
+        test_support::set_response(Ok(json!({
+            "path": "assets/data.bin",
+            "type": "file",
+            "encoding": "base64",
+            "content": "//4="
+        })
+        .to_string()));
+
+        let output = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","path":"assets/data.bin"}"#,
+            Some(r#"{"capability_id":"github.get_file_content"}"#),
+        )
+        .expect("binary file metadata should remain a successful result");
+        let output: serde_json::Value =
+            serde_json::from_str(&output).expect("mock output should be JSON");
+        assert_eq!(output["encoding"], "binary_unsupported");
+        assert!(!output
+            .as_object()
+            .expect("file response should remain an object")
+            .contains_key("content"));
+    }
+
+    #[test]
+    fn get_file_content_rejects_malformed_responses_without_returning_provider_content() {
+        let malformed_blob = "%%%not-base64%%%";
+        let unknown_blob = "opaque-provider-content";
+        let missing_encoding_blob = "missing-encoding-provider-content";
+        let missing_content_blob = "missing-base64-content-provider-blob";
+        test_support::set_responses([
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "encoding": "base64",
+                "content": malformed_blob
+            })
+            .to_string()),
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "encoding": "rot13",
+                "content": unknown_blob
+            })
+                .to_string()),
+            Ok(r#"{"path":"src/lib.rs","type":"file","encoding":"base64","content":"malformed-json-provider-content""#.to_string()),
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "content": missing_encoding_blob
+            })
+            .to_string()),
+            Ok(json!({
+                "path": "src/lib.rs",
+                "type": "file",
+                "encoding": "base64",
+                "blob": missing_content_blob
+            })
+            .to_string()),
+        ]);
+
+        for (expected_code, provider_content) in [
+            ("github_api_invalid_response", malformed_blob),
+            ("github_api_unsupported_file_encoding", unknown_blob),
+            (
+                "github_api_invalid_response",
+                "malformed-json-provider-content",
+            ),
+            ("github_api_invalid_response", missing_encoding_blob),
+            ("github_api_invalid_response", missing_content_blob),
+        ] {
+            let error = execute_inner(
+                r#"{"owner":"nearai","repo":"ironclaw","path":"src/lib.rs"}"#,
+                Some(r#"{"capability_id":"github.get_file_content"}"#),
+            )
+            .expect_err("malformed file responses should fail visibly");
+            assert!(
+                error.starts_with(expected_code),
+                "expected {expected_code} for malformed file response, got: {error}"
+            );
+            assert!(
+                !error.contains(provider_content),
+                "provider content must not be returned in the failure: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_file_content_preserves_directory_and_large_file_responses() {
+        let directory = json!([
+            {
+                "name": "src",
+                "path": "src",
+                "type": "dir"
+            }
+        ]);
+        let large_file = json!({
+            "path": "assets/data.bin",
+            "type": "file",
+            "encoding": "none",
+            "size": 10_000_000
+        });
+        test_support::set_responses([Ok(directory.to_string()), Ok(large_file.to_string())]);
+
+        let directory_output = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","path":"src"}"#,
+            Some(r#"{"capability_id":"github.get_file_content"}"#),
+        )
+        .expect("directory response should remain successful");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&directory_output)
+                .expect("directory output should be JSON"),
+            directory
+        );
+
+        let large_file_output = execute_inner(
+            r#"{"owner":"nearai","repo":"ironclaw","path":"assets/data.bin"}"#,
+            Some(r#"{"capability_id":"github.get_file_content"}"#),
+        )
+        .expect("large-file response should remain successful");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&large_file_output)
+                .expect("large-file output should be JSON"),
+            large_file
         );
     }
 

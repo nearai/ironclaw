@@ -33,8 +33,8 @@ function reduceProductActivity(observed: ProductInspectorActivity[]) {
         activity_id: activity.activityId,
         model_call_id: null,
         summary: {
-          content: activity.summary,
-          original_bytes: activity.summary.length,
+          content: activity.summaryKey,
+          original_bytes: activity.summaryKey.length,
           truncated: false,
         },
       },
@@ -175,5 +175,34 @@ test("terminal tool and run failures settle their started activity", () => {
   assert.equal(
     rows.some((row) => row.kind === ActivityKind.FinalResponseCompleted),
     true,
+  );
+});
+
+test("product activity publishes locale-independent inspector summary keys", () => {
+  const observed: ProductInspectorActivity[] = [];
+  const unsubscribe = subscribeProductInspectorActivity(
+    "thread-localized-activity",
+    "run-localized-activity",
+    (activity) => observed.push(activity),
+  );
+
+  publishProductInspectorEnvelope({
+    type: "capability_activity",
+    frame: {
+      activity: {
+        turn_run_id: "run-localized-activity",
+        invocation_id: "invocation-localized",
+        status: "started",
+      },
+    },
+  }, "thread-localized-activity", null);
+  unsubscribe();
+
+  const activity = observed[0] as ProductInspectorActivity & { summaryKey?: string };
+  assert.equal(activity.summaryKey, "inspector.activity.summary.toolStarted");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(activity, "summary"),
+    false,
+    "provisional activity must not persist English display copy",
   );
 });

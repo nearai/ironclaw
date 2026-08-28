@@ -74,6 +74,39 @@ async fn backend_filesystem_adapter_fails_closed_when_file_documents_unsupported
 }
 
 #[tokio::test]
+async fn backend_without_atomic_compare_write_fails_closed() {
+    let backend = RecordingBackend::new();
+    let context = MemoryContext::new(MemoryDocumentScope::new("tenant-a", "alice", None).unwrap());
+    let path = MemoryDocumentPath::new("tenant-a", "alice", None, "notes/curated.md").unwrap();
+
+    let error = backend
+        .compare_and_write_document_with_backend_options(
+            &context,
+            &path,
+            Some("sha256:stale"),
+            b"must not write",
+            &MemoryBackendWriteOptions::default(),
+        )
+        .await
+        .expect_err("a backend without atomic compare-and-write must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not support atomic conditional writes")
+    );
+    assert!(
+        backend
+            .repository
+            .read_document(&path)
+            .await
+            .unwrap()
+            .is_none(),
+        "the fallback must not perform a blind write"
+    );
+}
+
+#[tokio::test]
 async fn backend_filesystem_adapter_defers_prompt_safety_to_enforcing_backend_by_default() {
     let backend = Arc::new(BackendPromptSafetyRejects::default());
     let filesystem = MemoryBackendFilesystemAdapter::new(backend.clone());

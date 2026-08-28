@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub get file content output",
+  "description": "GitHub file metadata with provider-owned base64 removed from model-visible file content. Directory and non-file responses retain their provider shape.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "type": "string" },
+        "path": { "type": "string" },
+        "encoding": {
+          "type": "string",
+          "description": "For files, utf-8 means content is decoded text, binary_unsupported means content is omitted, and none means GitHub did not inline content."
+        },
+        "content": {
+          "type": "string",
+          "description": "Decoded UTF-8 file content when available."
+        }
+      }
+    },
+    {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  ]
+}

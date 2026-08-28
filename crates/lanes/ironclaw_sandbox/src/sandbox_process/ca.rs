@@ -4,10 +4,9 @@
 //! Generates a root key/cert pair in memory at construction and signs
 //! short-lived leaf certificates for the older host-mediated credential
 //! firewall path. The public root certificate can be installed in an
-//! untrusted user container. This module never serializes or exports the root
-//! private key.
-//!
-//! Managed egress uses the upstream proxy's own leaf issuance instead.
+//! untrusted user container. Managed egress may serialize the root key only
+//! into its proxy-private material directory so the trusted proxy can issue
+//! leaves; the key is never exposed to the user container or logs.
 
 use std::{
     collections::HashMap,
@@ -19,6 +18,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
+use secrecy::SecretString;
 use time::{Duration as CertValidityDuration, OffsetDateTime};
 
 use ironclaw_host_api::process::RuntimeProcessError;
@@ -190,14 +190,18 @@ impl SandboxCertificateAuthority {
         })
     }
 
-    /// The CA's public trust anchor — the only artifact of this CA meant
-    /// to reach a container (read-only bind-mount + `SSL_CERT_FILE` and
-    /// friends is W5's remaining trust-distribution work). Contains no
-    /// private key material; see this module's
-    /// `root_certificate_pem_never_contains_key_material` test.
-    #[allow(dead_code)] // consumed by W6; not wired yet
+    /// The CA's public trust anchor. Managed egress binds this file read-only
+    /// into the user container and points common TLS clients at it.
     pub(crate) fn root_certificate_pem(&self) -> &str {
         &self.root_cert_pem
+    }
+
+    /// The signing key consumed only by the trusted proxy sidecar.
+    ///
+    /// Wrapping the serialized value keeps debug output redacted and zeroizes
+    /// the allocation when the caller finishes writing its private material.
+    pub(crate) fn proxy_private_key_pem(&self) -> SecretString {
+        SecretString::new(self.issuer.key().serialize_pem().into_boxed_str())
     }
 
     /// Returns a leaf certificate for `host`: a live cached one if present,

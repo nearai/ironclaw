@@ -12,11 +12,12 @@ use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::stored_message::serialize_stored_thread_message;
-use crate::summary_artifacts::find_overlapping_summary;
+use crate::summary_artifacts::{
+    find_overlapping_summary, newest_context_barrier, sorted_context_summaries,
+};
 use crate::title::derive_thread_title;
 use crate::tool_result_records::{
-    tool_result_record_chunk, validate_tool_result_record_content,
-    validate_tool_result_record_read, validate_tool_result_record_ref,
+    validate_tool_result_record_content, validate_tool_result_record_ref,
 };
 use crate::{
     AcceptInboundMessageRequest, AcceptSubagentResultRequest, AcceptedInboundMessage,
@@ -34,7 +35,7 @@ use crate::{
     SessionThreadRecord, SessionThreadService, StructuredFinalizationRecord, SummaryArtifact,
     SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope,
-    ToolResultRecordChunk, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    ToolResultRecordRead, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
     UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
@@ -1236,15 +1237,23 @@ impl SessionThreadService for InMemorySessionThreadService {
     async fn read_tool_result_record(
         &self,
         request: ReadToolResultRecordRequest,
-    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+    ) -> Result<Option<ToolResultRecordRead>, SessionThreadError> {
         validate_tool_result_record_ref(&request.result_ref)?;
-        validate_tool_result_record_read(request.max_bytes)?;
         let state = self.state.lock().await;
         let thread = get_thread(&state, &request.scope, &request.thread_id)?;
-        Ok(thread
+        thread
             .tool_result_records
             .get(&request.result_ref)
-            .map(|content| tool_result_record_chunk(content, request.offset, request.max_bytes)))
+            .map(|content| {
+                crate::tool_result_records::read_tool_result_record(
+                    content,
+                    &request.result_ref,
+                    request.offset,
+                    request.max_bytes,
+                    &request.selection,
+                )
+            })
+            .transpose()
     }
 
     async fn update_tool_result_record(
@@ -1596,6 +1605,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             summary_kind: request.summary_kind,
             content,
             model_context_policy: request.model_context_policy,
+            context_mode: request.context_mode,
         };
         thread.summary_artifacts.push(artifact.clone());
         Ok(artifact)
@@ -1850,15 +1860,37 @@ fn ensure_user_accepted(
 }
 
 fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<ContextMessage> {
-    let replacement_summaries = thread
-        .summary_artifacts
-        .iter()
-        .filter(|summary| {
-            summary.model_context_policy
-                == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-                && !summary_covers_hidden_content(thread, summary)
-        })
-        .collect::<Vec<_>>();
+    if let Some(barrier) = newest_context_barrier(&thread.summary_artifacts, |summary| {
+        !summary_covers_hidden_content(thread, summary)
+    }) {
+        let mut context = vec![ContextMessage {
+            message_id: None,
+            summary_id: Some(barrier.summary_id),
+            sequence: barrier.end_sequence,
+            kind: MessageKind::Summary,
+            tool_result_provider_call: None,
+            content: barrier.content.clone(),
+            image_attachments: Vec::new(),
+        }];
+        context.extend(
+            thread
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.sequence > barrier.end_sequence && is_model_context_visible(message)
+                })
+                .filter_map(|message| {
+                    let content = message.content.clone()?;
+                    Some(ContextMessage::from_transcript_message(message, content))
+                }),
+        );
+        return context;
+    }
+
+    let replacement_summaries = sorted_context_summaries(&thread.summary_artifacts, |summary| {
+        summary.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+            && !summary_covers_hidden_content(thread, summary)
+    });
     let mut skip_through = 0;
     let mut emitted_summaries = HashSet::new();
     let mut context = Vec::new();

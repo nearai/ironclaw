@@ -168,8 +168,11 @@ still live under the local filesystem root. The image default is
 `/data/ironclaw-reborn`; without a Railway volume, that path is ephemeral. The
 hosted single-tenant volume profile stores runtime/control-plane state under
 that Reborn home on the mounted volume and does not require
-`IRONCLAW_REBORN_POSTGRES_URL`. The container workdir is `/workspace` so the
-workspace root stays separate from Reborn's state and skill roots.
+`IRONCLAW_REBORN_POSTGRES_URL`. The Docker entrypoint defaults
+`IRONCLAW_REBORN_WORKSPACE_ROOT` to `$IRONCLAW_REBORN_HOME/workspace`, so project
+files and landed attachments stay on the same durable mount. If you override
+the workspace root, point it at durable storage too — on Railway the entrypoint
+fails closed when it resolves outside `RAILWAY_VOLUME_MOUNT_PATH`.
 
 The image includes `sqlite3` and `psql` for terminal inspection from Railway
 shells. Use `sqlite3` for mounted-volume libSQL/SQLite state and `psql` for
@@ -213,6 +216,31 @@ the agent connect a Google credential:
 ```bash
 IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/product-auth/oauth/google/callback
 ```
+
+## SSH Access
+
+The image ships `sshd` but the listener stays off unless
+`IRONCLAW_REBORN_SSH_PUBLIC_KEY` is set. When it is, the entrypoint (running as
+root at container start) writes that key as the sole `authorized_keys` entry
+and starts `sshd` on container port 2222 before dropping to the `ironclaw`
+user. Leaving the variable unset leaves no SSH listener running at all.
+
+Container port 2222 is `EXPOSE`d in the image but is not published by
+default — publish it explicitly to reach it, for example `docker run -p
+2222:2222` locally, or a Railway TCP proxy for a hosted deployment.
+
+Login is public-key-only, as user `agent`. The generated `sshd_config` sets
+`AllowUsers agent`, `AuthenticationMethods publickey`, `PubkeyAuthentication
+yes`, `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+`PermitEmptyPasswords no`, and `PermitRootLogin no` — there is no password or
+keyboard-interactive fallback for any account, including `agent`.
+
+`agent` is not a lower-privileged account: the runtime image creates it as a
+non-unique alias of uid 1000, the same uid as the `ironclaw` runtime user. An
+SSH session therefore holds the full runtime identity and can read and write
+everything the IronClaw process owns. Treat distributing the corresponding
+private key with the same care as granting shell access to the running
+service.
 
 ## Slack
 

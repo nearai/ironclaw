@@ -14,9 +14,10 @@ use ironclaw_threads::{
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
     RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy,
+    SessionThreadService, SummaryContextMode, SummaryKind, SummaryModelContextPolicy,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRangeRequest, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    ThreadMessageRangeRequest, ThreadScope, ToolResultRecordRead, ToolResultRecordReadError,
+    ToolResultRecordSelection, ToolResultReferenceEnvelope, ToolResultSafeSummary,
     UpdateAssistantDraftRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
@@ -238,13 +239,134 @@ async fn tool_result_records_are_scope_bound_idempotent_and_bounded() {
             result_ref: result_ref.clone(),
             offset: 5,
             max_bytes: 7,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect("read succeeds")
         .expect("stored result exists");
+    let ToolResultRecordRead::Bytes(chunk) = chunk else {
+        panic!("byte selection must return a byte chunk");
+    };
     assert_eq!(chunk.content, content[5..12]);
     assert_eq!(chunk.total_bytes, content.len() as u64);
     assert_eq!(chunk.next_offset, Some(12));
+
+    let json_ref = "result:json-selected".to_string();
+    let json_content = serde_json::to_vec(&serde_json::json!({
+        "a/b~c": {"marker": "escaped-key"},
+        "items": [{"id": 0}, {"id": 1}],
+        "message": "selected-json",
+    }))
+    .expect("JSON result serializes");
+    service
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: json_ref.clone(),
+            content: json_content.clone(),
+        })
+        .await
+        .expect("JSON result stores");
+    let selected = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: json_ref.clone(),
+            offset: 0,
+            max_bytes: 1024,
+            selection: ToolResultRecordSelection::Json {
+                pointer: "/a~1b~0c".to_string(),
+                limit: None,
+            },
+        })
+        .await
+        .expect("JSON selection succeeds")
+        .expect("JSON result exists");
+    let ToolResultRecordRead::Json(page) = selected else {
+        panic!("JSON selection must return a structured page");
+    };
+    let page = page.to_value().expect("JSON page serializes");
+    assert_eq!(page["result_ref"], json_ref);
+    assert_eq!(page["json_pointer"], "/a~1b~0c");
+    assert_eq!(page["node_type"], "object");
+    assert_eq!(page["content"]["marker"], "escaped-key");
+    assert!(page["content"].is_object());
+    assert_eq!(page["total_bytes"], json_content.len());
+    assert!(page["next_offset"].is_null());
+
+    let array_page = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: json_ref.clone(),
+            offset: 0,
+            max_bytes: 1024,
+            selection: ToolResultRecordSelection::Json {
+                pointer: "/items".to_string(),
+                limit: Some(1),
+            },
+        })
+        .await
+        .expect("JSON array page succeeds")
+        .expect("JSON result exists");
+    let ToolResultRecordRead::Json(array_page) = array_page else {
+        panic!("JSON selection must return a structured page");
+    };
+    let array_page = array_page.to_value().expect("JSON page serializes");
+    assert_eq!(array_page["content"], serde_json::json!([{"id": 0}]));
+    assert_eq!(array_page["next_offset"], 1);
+    assert_eq!(
+        array_page["next"],
+        serde_json::json!({
+            "result_ref": json_ref,
+            "json_pointer": "/items",
+            "offset": 1,
+            "max_bytes": 1024,
+            "limit": 1,
+        })
+    );
+
+    let missing = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: json_ref.clone(),
+            offset: 0,
+            max_bytes: 1024,
+            selection: ToolResultRecordSelection::Json {
+                pointer: "/missing".to_string(),
+                limit: None,
+            },
+        })
+        .await
+        .expect_err("missing JSON pointer must be typed");
+    assert!(matches!(
+        missing,
+        SessionThreadError::ToolResultRecordRead(
+            ToolResultRecordReadError::JsonPointerNotFound { .. }
+        )
+    ));
+
+    let malformed = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: result_ref.clone(),
+            offset: 0,
+            max_bytes: 1024,
+            selection: ToolResultRecordSelection::Json {
+                pointer: "".to_string(),
+                limit: None,
+            },
+        })
+        .await
+        .expect_err("malformed JSON must be typed separately");
+    assert!(matches!(
+        malformed,
+        SessionThreadError::ToolResultRecordRead(
+            ToolResultRecordReadError::MalformedStoredJson { .. }
+        )
+    ));
 
     let unicode_ref = "result:unicode-tool-result".to_string();
     service
@@ -263,10 +385,14 @@ async fn tool_result_records_are_scope_bound_idempotent_and_bounded() {
             result_ref: unicode_ref,
             offset: 0,
             max_bytes: 4,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect("unicode read succeeds")
         .expect("unicode record exists");
+    let ToolResultRecordRead::Bytes(unicode_chunk) = unicode_chunk else {
+        panic!("byte selection must return a byte chunk");
+    };
     assert_eq!(std::str::from_utf8(&unicode_chunk.content).unwrap(), "abc");
     assert_eq!(unicode_chunk.next_offset, Some(3));
 
@@ -277,6 +403,7 @@ async fn tool_result_records_are_scope_bound_idempotent_and_bounded() {
             result_ref: result_ref.clone(),
             offset: 0,
             max_bytes: 8,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect_err("wrong scope must not read a result record");
@@ -310,10 +437,14 @@ async fn tool_result_records_are_scope_bound_idempotent_and_bounded() {
             result_ref: result_ref.clone(),
             offset: 0,
             max_bytes: 128,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect("updated read succeeds")
         .expect("updated record exists");
+    let ToolResultRecordRead::Bytes(updated_chunk) = updated_chunk else {
+        panic!("byte selection must return a byte chunk");
+    };
     assert_eq!(updated_chunk.content, updated);
 
     service
@@ -332,6 +463,7 @@ async fn tool_result_records_are_scope_bound_idempotent_and_bounded() {
                 result_ref: "result:durable-tool-result".to_string(),
                 offset: 0,
                 max_bytes: 8,
+                selection: ToolResultRecordSelection::Bytes,
             })
             .await
             .expect("missing result remains non-enumerating")
@@ -390,10 +522,14 @@ async fn concurrent_duplicate_tool_result_writes_converge_without_conflict() {
             result_ref,
             offset: 0,
             max_bytes: 128,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect("read succeeds")
         .expect("stored result exists");
+    let ToolResultRecordRead::Bytes(chunk) = chunk else {
+        panic!("byte selection must return a byte chunk");
+    };
     assert_eq!(
         chunk.content, content,
         "concurrent duplicate writes must not lose or corrupt the result"
@@ -457,10 +593,14 @@ async fn tool_result_record_validation_enforces_write_and_read_boundaries() {
             result_ref: result_ref.clone(),
             offset: 0,
             max_bytes: 4,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect("minimum read size is accepted")
         .expect("stored record exists");
+    let ToolResultRecordRead::Bytes(min_read) = min_read else {
+        panic!("byte selection must return a byte chunk");
+    };
     assert_eq!(min_read.content, vec![b'x'; 4]);
 
     let max_read = service
@@ -470,10 +610,14 @@ async fn tool_result_record_validation_enforces_write_and_read_boundaries() {
             result_ref: result_ref.clone(),
             offset: 0,
             max_bytes: TOOL_RESULT_RECORD_READ_MAX_BYTES,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect("maximum read size is accepted")
         .expect("stored record exists");
+    let ToolResultRecordRead::Bytes(max_read) = max_read else {
+        panic!("byte selection must return a byte chunk");
+    };
     assert_eq!(max_read.content.len(), TOOL_RESULT_RECORD_READ_MAX_BYTES);
 
     for max_bytes in [3, TOOL_RESULT_RECORD_READ_MAX_BYTES + 1] {
@@ -484,6 +628,7 @@ async fn tool_result_record_validation_enforces_write_and_read_boundaries() {
                 result_ref: result_ref.clone(),
                 offset: 0,
                 max_bytes,
+                selection: ToolResultRecordSelection::Bytes,
             })
             .await
             .expect_err("out-of-range read sizes are rejected");
@@ -497,6 +642,7 @@ async fn tool_result_record_validation_enforces_write_and_read_boundaries() {
             result_ref: "not-a-result-ref".into(),
             offset: 0,
             max_bytes: 4,
+            selection: ToolResultRecordSelection::Bytes,
         })
         .await
         .expect_err("invalid result refs are rejected before reads");
@@ -635,6 +781,7 @@ async fn append_capability_display_preview_is_history_visible_and_model_hidden()
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("run a tool summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -1903,6 +2050,7 @@ async fn summaries_are_range_artifacts_and_policy_filtered_context_replacements(
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -1980,6 +2128,7 @@ async fn summary_covering_redacted_message_is_not_loaded_into_model_context() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary mentions secret token"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -2098,6 +2247,7 @@ async fn redaction_removes_tool_result_provider_metadata() {
                 result_ref: "result:redacted-tool".to_string(),
                 offset: 0,
                 max_bytes: 128,
+                selection: ToolResultRecordSelection::Bytes,
             })
             .await
             .expect("redaction keeps the thread readable")
@@ -2167,6 +2317,7 @@ async fn redacting_a_capability_display_preview_keeps_the_raw_tool_result() {
                 result_ref,
                 offset: 0,
                 max_bytes: 128,
+                selection: ToolResultRecordSelection::Bytes,
             })
             .await
             .unwrap()
@@ -2775,6 +2926,7 @@ async fn summary_covering_draft_message_is_not_loaded_into_model_context() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary leaks draft secret"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -2868,6 +3020,7 @@ async fn summary_spanning_interior_rejected_busy_is_applied() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("first and third summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -2954,6 +3107,7 @@ async fn summary_spanning_interior_draft_is_not_applied() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("should not appear"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3464,6 +3618,26 @@ async fn overlapping_replacement_summaries_are_rejected() {
             .await
             .unwrap();
     }
+    let non_prefix_barrier = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("invalid non-prefix barrier"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: Some(SummaryContextMode::CumulativeBarrier),
+        })
+        .await;
+    assert!(matches!(
+        non_prefix_barrier,
+        Err(SessionThreadError::InvalidSummaryRange {
+            start_sequence: 2,
+            end_sequence: 3
+        })
+    ));
+
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: scope("a"),
@@ -3473,6 +3647,7 @@ async fn overlapping_replacement_summaries_are_rejected() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3486,6 +3661,7 @@ async fn overlapping_replacement_summaries_are_rejected() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("two and three summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await;
 
@@ -3529,6 +3705,7 @@ async fn exact_compaction_replacement_summary_replay_is_idempotent() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3541,6 +3718,7 @@ async fn exact_compaction_replacement_summary_replay_is_idempotent() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3555,6 +3733,7 @@ async fn exact_compaction_replacement_summary_replay_is_idempotent() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("different summary"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await;
     assert!(matches!(
@@ -3610,6 +3789,7 @@ async fn policy_none_overlapping_summaries_are_allowed() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: None,
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3622,6 +3802,7 @@ async fn policy_none_overlapping_summaries_are_allowed() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("two and three summarized"),
             model_context_policy: None,
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3695,6 +3876,7 @@ async fn summary_replacement_still_applies_when_range_starts_with_redacted_messa
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("redacted range summary"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();

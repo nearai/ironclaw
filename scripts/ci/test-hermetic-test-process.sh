@@ -31,6 +31,7 @@ run_probe() {
     LLM_BACKEND="ambient-provider" \
     REBORN_TOOL_DISCLOSURE="Bridged" \
     REBORN_COV_COLLECT="false" \
+    REBORN_COV_LANES_JSON='[0,"groups"]' \
     COREPACK_HOME="${probe_dir}/corepack" \
     PLAYWRIGHT_BROWSERS_PATH="${probe_dir}/playwright-browsers" \
     REBORN_COV_COLLECT="false" \
@@ -110,6 +111,10 @@ run_probe() {
       if [[ "${REBORN_COV_COLLECT:-}" != "false" ]]; then
         echo "explicit Reborn coverage mode was not preserved" >&2
         exit 41
+      fi
+      if [[ "${REBORN_COV_LANES_JSON:-}" != "[0,\"groups\"]" ]]; then
+        echo "explicit integration batch selection was not preserved" >&2
+        exit 42
       fi
       if [[ "${IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER:-}" != "emulate-slack-channel-token" ]]; then
         echo "explicit Emulate Slack fixture bearer was not preserved" >&2
@@ -322,7 +327,7 @@ if [[ "${child_status}" -eq 0 || "${child_output}" != *"non-loopback network att
 fi
 
 for workflow_contract in \
-  ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh groups" \
+  ".github/workflows/reborn-tests.yml:scripts/ci/reborn-coverage-lane-run.sh" \
   ".github/workflows/reborn-tests.yml:scripts/ci/discover-reborn-package-crates.sh" \
   ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh command" \
   ".github/workflows/reborn-tests.yml:scripts/ci/run-hermetic-deterministic-suite.sh prepare-command" \
@@ -341,6 +346,22 @@ do
     exit 1
   fi
 done
+
+if ! grep -Fq \
+  "run-reborn-group-tests.sh" \
+  "${repo_root}/scripts/ci/reborn-coverage-lane-run.sh"
+then
+  echo "integration batch runner lost the canonical sequential group runner" >&2
+  exit 1
+fi
+
+if ! grep -Fq \
+  'cargo test -p ironclaw_integration_tests --test "${test_name}" --ignore-rust-version -- --nocapture' \
+  "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
+then
+  echo "group test runner must ignore the older pinned nightly's rust-version floor" >&2
+  exit 1
+fi
 
 evidence_contract_step="$(
   sed -n \

@@ -39,13 +39,17 @@ impl fmt::Display for ThreadMessageId {
 }
 
 /// Stable summary artifact identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SummaryArtifactId(Uuid);
 
 impl SummaryArtifactId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    pub(crate) fn as_uuid(&self) -> Uuid {
+        self.0
     }
 }
 

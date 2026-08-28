@@ -585,6 +585,34 @@ default_permission = "allow""#,
 }
 
 #[test]
+fn rejects_duplicate_runtime_credential_placeholder_environments() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization" }, placeholder_env = "ACME_TOKEN" },
+  { handle = "uploads_token", audience = { scheme = "https", host_pattern = "uploads.github.com" }, target = { type = "header", name = "authorization" }, placeholder_env = "ACME_TOKEN" },
+]
+default_permission = "allow""#,
+    );
+
+    let err = ExtensionManifestV2::parse(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &contracts(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    assert!(
+        err.to_string()
+            .contains("duplicate shell credential environment"),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn rejects_unknown_top_level_fields() {
     let toml = r#"
 schema_version = "reborn.extension_manifest.v2"

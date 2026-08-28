@@ -22,7 +22,7 @@ It does **not** own a parallel agent loop, channel-adapter lifecycles, or outbou
 | `TriggerSourceProvider` | Determining whether a stored trigger should fire and computing the canonical fire slot | Turn submission, binding internals, delivery resolution |
 | `TriggerFire` / `TriggerFireIdentity` | Normalized fire output and deterministic identity for a scheduled slot | Notification targets, reply routing policy, ad hoc retries |
 | `TriggerPollerWorker` | Polling eligible triggers and submitting due fires | Alternate execution loops, hidden queues, outbound send logic |
-| `trigger_create` / `trigger_list` / `trigger_remove` | First-party trigger management capabilities | Legacy tool-only management paths |
+| `trigger_create` / `trigger_list` / `trigger_status` / mutations | First-party trigger management capabilities | Legacy tool-only management paths |
 
 The trigger system is owned by `ironclaw_triggers` in implementation terms, but this contract freezes the behavior before code lands.
 
@@ -552,8 +552,9 @@ for idempotency, and records no `TurnRunId` because no run exists.
 
 ## 8. Capability surface
 
-The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove`,
-`trigger_pause`, and `trigger_resume` as first-party Reborn capabilities.
+The trigger system must expose `trigger_create`, `trigger_list`, `trigger_status`,
+`trigger_remove`, `trigger_pause`, and `trigger_resume` as first-party Reborn
+capabilities.
 
 - `trigger_create` validates the schedule and timezone, captures caller scope,
   pairs the caller as the host-trusted synthetic trigger actor used by the
@@ -575,6 +576,18 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
   `last_status` and a bounded `recent_runs` projection. Omitted `run_limit`
   defaults to 25 recent runs per trigger; callers that do not need embedded run
   history pass `run_limit = 0`.
+- `trigger_status` is a caller-scoped detail read for one trigger and one exact
+  retained run, defaulting to that trigger's latest run. It may surface bounded,
+  metadata-only capability invocation facts (`invocation_id`, `capability_id`,
+  lifecycle status, and sanitized `error_kind`) from the durable runtime-event
+  projection. These facts are informational: they do not replace run-history
+  status, grade semantic quality, prove an external side effect, retry a run,
+  or mutate trigger state. Production runtime events pass through an
+  intentionally lossy write-behind sink, so a successful replay is reported as
+  `incomplete`: its items are observed facts, not proof that no other call
+  occurred. A source may report `available` only when it can prove the bounded
+  read is exhaustive. An unavailable or truncated projection is reported
+  explicitly and must not be represented as an empty successful call list.
 - `trigger_remove` is caller-scoped delete.
 - `trigger_pause` and `trigger_resume` are caller-scoped state transitions
   (`Scheduled` <-> `Paused`); the poller does not fire a paused trigger.
@@ -595,8 +608,9 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
   denies `trigger_create`, `trigger_remove`, `trigger_pause`, and
   `trigger_resume` by subtracting them from the one resolved
   `ironclaw_host_api::capability_surface::CapabilitySurfacePolicy` in
-  `ironclaw_turn_runner::runtime`. Read-only `trigger_list` remains visible and
-  callable during a fire, so a routine can still inspect triggers. This
+  `ironclaw_turn_runner::runtime`. Read-only `trigger_list` and `trigger_status`
+  remain visible and callable during a fire, so a routine can still inspect
+  triggers. This
   prevents a fired trigger's own run from creating or mutating the trigger
   fleet — a malformed or self-referential routine prompt could otherwise
   cause a fire to re-invoke `trigger_create` and spawn more triggers.
@@ -665,6 +679,8 @@ notification-channel set fans gate/auth/failure notices to it when selected.)
 ## 10. Verification
 
 - Unit tests should cover schedule validation, identity stability, and status serialization.
+- Caller-level status tests must prove exact-run capability facts exclude
+  neighboring runs and do not synthesize an outcome assessment.
 - Caller-level tests should drive the poller through trusted inbound and into the normal turn pipeline.
 - PostgreSQL/libSQL parity is required for trigger persistence.
 - `trigger_create` caller-level tests must prove sub-minute and second-level

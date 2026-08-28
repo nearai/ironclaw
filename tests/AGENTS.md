@@ -36,8 +36,8 @@ them in the same commit; re-derive any of them with:
   | wc -l`.
 - Top-level Rust bins: `ls tests/*.rs | wc -l`.
 - E2E files: `ls tests/e2e/scenarios/test_*.py | wc -l`.
-- E2E test *functions* (the §2 "876" figure — every `test_*` function or
-  method, top-level or in a class, across all 102 files; this is an exhaustive
+- E2E test *functions* (the §2 "889" figure — every `test_*` function or
+  method, top-level or in a class, across all 103 files; this is an exhaustive
   syntactic count, not filtered by active/legacy status):
   ```
   python3 -c "
@@ -50,7 +50,7 @@ them in the same commit; re-derive any of them with:
   print(n)
   "
   ```
-- E2E collected pytest items (the §6 "1155 top-level tests" figure — pytest's
+- E2E collected pytest items (the §6 "1180 top-level tests" figure — pytest's
   own collection count, which differs from the syntactic function count above
   when a function is parametrized, skipped at collection, or a class groups
   several `test_*` methods under one node): `cd tests/e2e && python3 -m pytest
@@ -89,7 +89,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Extension lifecycle | 14 | 6 | ✓ | ✓ |
 | Channels (Slack/Telegram/webhook) | 5 | 3 | ✓ | ✓ |
 | Triggers / automations / routines | 10 | 2 | ✓ | ✓ |
-| Memory & workspace | 8 | 2 | — | ✓ |
+| Memory & workspace | 11 | 2 | — | ✓ |
 | Skills | 1 | 1 | — | ✓ |
 | Multi-user / scope isolation | 5 | 4 | 9 | ✓ |
 | Tools & tool dispatch | — | 11 | ✓ | ✓ |
@@ -100,15 +100,15 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **59** group scenarios · **62** flat integration bins (55 in
+Totals: **61** group scenarios · **62** flat integration bins (55 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
-**102** Python scenario files (**876** test functions) registered in the active
+**103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
 Python scenarios, so its exhaustive totals are intentionally broader.
 
 ---
 
-## 3. Group scenarios — `tests/integration/group_*/` (59)
+## 3. Group scenarios — `tests/integration/group_*/` (61)
 
 Multi-thread journeys over ONE shared runtime and ONE shared set of stores. These are
 the canonical "a user does X in one conversation and sees the effect in another" tests.
@@ -156,7 +156,7 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have a stored-but-expired credential rejected, reconnect, and have the tool retry **with the new credential** | `scenario_expired_credential_resume.rs` |
 | Not resolve another person's approval prompt — each user answers their own | `scenario_multi_actor_gate_isolation.rs` |
 
-### 3.4 Memory — `group_memory/` (9)
+### 3.4 Memory — `group_memory/` (11)
 
 | The user can… | Evidence |
 |---|---|
@@ -169,6 +169,8 @@ the canonical "a user does X in one conversation and sees the effect in another"
 | Have the assistant remember a preference you mentioned in passing and still know it in a later chat that opens on a completely unrelated subject — full-text retrieval cannot cover this, because it matches on the current message's words | `scenario_always_on_memory_recall_libsql.rs` |
 | Ask about a stored fact in their OWN words rather than the words it was saved in, and still have it recalled — the paraphrase shares only some of the saved sentence's terms and adds one it never contained (#7185) | `scenario_paraphrased_prompt_recall_libsql.rs` |
 | Tell from the run itself that memory retrieval BROKE rather than simply having nothing to say — the two used to be the same silent empty section (#7185/#7275) | `scenario_memory_retrieval_failure_is_visible.rs` |
+| Have their standing memory document tidied for them every so often — redundant entries merged, superseded facts resolved — by a background pass that runs with nobody present, as them and only them (#7276) | `scenario_memory_curation_rewrites_standing_document.rs` |
+| Not pay for that tidying on every single turn: below the configured interval no pass is submitted at all (#7276) | `scenario_memory_curation_below_threshold_never_fires.rs` |
 
 ### 3.5 Multi-user — `group_multiuser/` (5)
 
@@ -230,6 +232,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
+| A cumulative compaction barrier supersedes earlier summaries and raw covered history in the model prompt while every original row remains durable | `model_recovery.rs::cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_history` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
 | Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs` |
@@ -263,7 +266,9 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Behavior | Evidence |
 |---|---|
 | An HTTP tool call reaches the real egress boundary and the result reaches the model | `tool_call.rs`, `http_matcher.rs` |
+| Normalize a >100 KiB provider-heavy Gmail message into selected headers plus decoded safe Markdown before the same staged/durable result path, then round-trip it through `result_read` | `tool_call.rs::gmail_get_message_persists_semantic_markdown_without_provider_noise` |
 | Saved, transcript-shaped JSON can be queried through scoped storage with plain or `$`-rooted paths; bounded collection operations can select the last item and aggregate numeric rows; invalid JSON produces model-visible correction guidance | `tool_call.rs` |
+| Inspect a >100 KiB nested JSON capability result through bounded first-look, node/scalar, collection, credential-redaction, invalid-selection, and exact legacy-byte views | `tool_call.rs::{result_read_large_nested_result_first_look_is_bounded_and_parseable,result_read_selects_nested_json_node_and_scalar,result_read_pages_nested_json_collection,result_read_redacts_credential_json_within_requested_budget,invalid_json_result_selections_remain_model_correctable,result_read_preserves_exact_legacy_byte_reads}` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
 | A sandbox-profile shell turn executes as an unprivileged user in one reusable per-user Docker container, preserving workspace and container-local state across shell calls and sharing that container across the user's threads | `reborn_sandbox_shell_turn.rs` |
 | MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
@@ -372,7 +377,7 @@ channel-delivery journeys (two-lane model):
 |---|---|
 | A provider failure yields a sanitized, *retryable* failure and the user can retry and resume | `reborn_failure_retry_resume_e2e.rs` (6) |
 | Sub-agents spawn end-to-end | `reborn_subagent_spawn_e2e.rs` (5) |
-| The shipped Docker image has a usable runtime home | `dockerfile_runtime_home.rs` (19) |
+| The shipped Docker image has a usable runtime home and an in-worker public-key SSH shell | `dockerfile_runtime_home.rs` (21) |
 | Live GitHub API contracts still hold (ignored canary, needs a real PAT) | `reborn_live_github_pat_contract.rs` |
 
 **Scope isolation parity** — one bin per boundary; each proves data from one scope is
@@ -390,8 +395,8 @@ unreachable from another: `reborn_agent_scope_isolation_parity.rs`,
 `reborn_trace_core_builtin_tools_parity.rs`, `reborn_trace_file_tools_parity.rs`,
 `reborn_trace_coding_read_tools_parity.rs`, `reborn_trace_error_path_parity.rs`,
 `reborn_trace_wasm_github_fixture_parity.rs`,
-`reborn_trace_first_party_tool_coverage.rs` (10; including the product-triggered
-manual-run and scheduled-run denial evidence),
+`reborn_trace_first_party_tool_coverage.rs` (10; including model-visible trigger
+status reads, product-triggered manual runs, and scheduled-run denial evidence),
 `reborn_recorded_trace_parity.rs`, `reborn_minimal_dispatch_parity.rs`,
 `reborn_response_order_parity.rs`, `reborn_tool_param_coercion_parity.rs`,
 `reborn_approval_traces_parity.rs`, `reborn_turn_state_lock_free_submit_parity.rs`.
@@ -403,7 +408,7 @@ enums), `trace_format.rs`, `trace_llm_tests.rs`,
 
 ---
 
-## 6. Python E2E scenarios — `tests/e2e/scenarios/` (102 files, 1155 top-level tests)
+## 6. Python E2E scenarios — `tests/e2e/scenarios/` (103 files, 1180 top-level tests)
 
 This is an exhaustive inventory, not a claim that every retained scenario is
 currently executable. Current Reborn coverage starts `ironclaw serve` through the
@@ -495,7 +500,7 @@ entries.
 | Use the Missions tab instead of the removed Routines tab and activity strip | `test_v2_activity_shell.py` (2; pending legacy migration #6369) |
 | See routines created in one surface from another (owner scope) | `test_owner_scope.py` (3) |
 | Browse projects, create one, open a scoped chat, list and download workspace files | `test_reborn_webui_v2_legacy_projects.py` (6), `test_project_detail.py` (3), `test_reborn_v2_file_download.py` (4) |
-| Read approval, authentication, completed, and failed notifications from the generic server-backed Inbox; drive real scheduled approval/auth gates through resolution; persist read state across a fresh client; mark one or all as read; wait for a matching final reply before acknowledging completion; and open the source thread | `test_reborn_webui_v2_notifications.py` (11) |
+| Open notifications with immediate feedback while its lazy chunk loads; read approval, authentication, completed, and failed notifications from the generic server-backed Inbox; drive real scheduled approval/auth gates through resolution; persist read state across a fresh client; mark one or all as read; wait for a matching final reply before acknowledging completion; and open the source thread | `test_reborn_webui_v2_notifications.py` (12) |
 
 ### 6.7 Settings, skills & admin
 | The user can… | Evidence |
@@ -513,7 +518,7 @@ entries.
 ### 6.8 APIs (OpenAI-compatible, filesystem, operator)
 | The user can… | Evidence |
 |---|---|
-| Use the Responses API (non-streaming, streaming SSE, continue, retrieve, context injection, auth/validation errors) | `test_reborn_responses_api.py` (14), `test_reborn_webui_v2_legacy_responses_api.py` (14), `test_responses_api.py` (9) |
+| Use the Responses API (non-streaming, streaming SSE, continue, retrieve, context injection, auth/validation errors, and successful external output round-tripping through `result_read`) | `test_reborn_responses_api.py` (15), `test_reborn_webui_v2_legacy_responses_api.py` (14), `test_responses_api.py` (9) |
 | Use chat-completions with idempotency replay and streaming | `test_reborn_responses_api.py` |
 | Mix internal and external tools in one response and get failures back to the LLM | `test_reborn_responses_api.py` |
 | List thread files and browse filesystem mounts, with path traversal rejected | `test_reborn_webui_v2_filesystem_api.py` (3) |

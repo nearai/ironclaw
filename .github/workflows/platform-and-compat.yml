@@ -134,7 +134,7 @@ jobs:
             echo "has_wasm_abi_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(Dockerfile|\.dockerignore$|\.github/workflows/platform-and-compat\.yml$)'; then
+          if has_match '^(Dockerfile|\.dockerignore$|docker/reborn/(entrypoint|start-sshd)\.sh$|\.github/workflows/platform-and-compat\.yml$)'; then
             echo "has_docker_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_docker_risk=false" >> "$GITHUB_OUTPUT"
@@ -341,9 +341,9 @@ jobs:
     # Dockerfile changes must not be a main-only failure: the merge queue
     # builds the image when the merge group actually touches Docker inputs.
     # The merge_group arm deliberately does not require has_legacy_tests —
-    # the scope classifier matches the literal `Dockerfile`, so a
-    # .dockerignore-only merge group reports has_legacy_tests=false while
-    # has_docker_risk=true.
+    # the scope classifier matches Docker inputs directly, so a merge group
+    # changing only .dockerignore or a Reborn startup script reports
+    # has_legacy_tests=false while has_docker_risk=true.
     if: >
       needs.changes.outputs.docs_only != 'true' &&
       ((needs.changes.outputs.has_legacy_tests == 'true' &&
@@ -360,6 +360,102 @@ jobs:
           persist-credentials: false
       - name: Build Docker image
         run: docker build --target runtime -t ironclaw-reborn-test:ci .
+      - name: Verify in-worker SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(docker image inspect --format '{{.Config.User}}' ironclaw-reborn-test:ci)" = "root"
+          docker image inspect --format '{{json .Config.ExposedPorts}}' ironclaw-reborn-test:ci \
+            | grep -q '"2222/tcp"'
+
+          ssh_work="$(mktemp -d)"
+          container_name="ironclaw-reborn-ssh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          paste_container_name="${container_name}-paste"
+          cleanup() {
+            docker rm --force "$container_name" >/dev/null 2>&1 || true
+            docker rm --force "$paste_container_name" >/dev/null 2>&1 || true
+            rm -rf "$ssh_work"
+          }
+          trap cleanup EXIT
+
+          ssh-keygen -q -t ed25519 -N '' -f "$ssh_work/id_ed25519"
+          docker run --detach \
+            --name "$container_name" \
+            --publish 127.0.0.1::2222 \
+            --env IRONCLAW_REBORN_WEBUI_TOKEN=ssh-ci-webui-token-0123456789abcdef0123456789abcdef \
+            --env "IRONCLAW_REBORN_SSH_PUBLIC_KEY=$(cat "$ssh_work/id_ed25519.pub")" \
+            ironclaw-reborn-test:ci
+
+          ssh_port="$(docker port "$container_name" 2222/tcp | awk -F: 'NR == 1 { print $NF }')"
+          ssh_ready=false
+          for _ in $(seq 1 30); do
+            if ssh \
+              -i "$ssh_work/id_ed25519" \
+              -p "$ssh_port" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=1 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              agent@127.0.0.1 \
+              'test "$USER" = agent && test "$HOME" = /workspace && test "$PWD" = /workspace'
+            then
+              ssh_ready=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$container_name")" != "true" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ssh_ready" != "true" ]; then
+            docker logs "$container_name"
+            echo "Reborn runtime did not accept an SSH session as agent" >&2
+            exit 1
+          fi
+
+          paste_key="$(cat "$ssh_work/id_ed25519.pub")"$'\n'
+          # The key almost always arrives via `cat id_ed25519.pub`, so the value
+          # carries a trailing newline. start-sshd must tolerate that: it runs
+          # under the entrypoint's `set -e`, so rejecting a usable key does not
+          # merely disable SSH, it aborts the whole container boot. Reuses the
+          # image already built above -- no second build.
+          docker run --detach \
+            --name "$paste_container_name" \
+            --publish 127.0.0.1::2222 \
+            --env IRONCLAW_REBORN_WEBUI_TOKEN=ssh-ci-webui-token-0123456789abcdef0123456789abcdef \
+            --env "IRONCLAW_REBORN_SSH_PUBLIC_KEY=${paste_key}" \
+            ironclaw-reborn-test:ci
+
+          paste_port="$(docker port "$paste_container_name" 2222/tcp | awk -F: 'NR == 1 { print $NF }')"
+          paste_ready=false
+          for _ in $(seq 1 30); do
+            if ssh \
+              -i "$ssh_work/id_ed25519" \
+              -p "$paste_port" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=1 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              agent@127.0.0.1 'test "$USER" = agent'
+            then
+              paste_ready=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$paste_container_name")" != "true" ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$paste_ready" != "true" ]; then
+            docker logs "$paste_container_name"
+            echo "A public key with a trailing newline must still be accepted; rejecting it aborts container boot" >&2
+            exit 1
+          fi
 
   version-check:
     name: Version Bump Check

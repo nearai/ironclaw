@@ -35,6 +35,11 @@ tracing = "0.1"
 url = "2"
 
 [dev-dependencies]
+# The ingress drop log is the only trace a discarded human message leaves, so
+# it is asserted rather than assumed. `no-env-filter` because the drop log is
+# `debug!`, which the default filter would swallow — the assertion would then
+# pass vacuously.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 # Property testing for the ingress boundary (#6524 workstream 9).
 proptest = "1"
 # `test-support` exposes the shared channel-adapter conformance fakes.

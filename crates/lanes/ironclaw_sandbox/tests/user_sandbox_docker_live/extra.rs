@@ -310,9 +310,11 @@ async fn setup_failure_rolls_back_a_new_managed_egress_bundle() {
     .await
     .expect("Docker transport connects");
     let mut invalid = request(user.resource_scope(), "echo MUST_NOT_RUN");
+    // Fail after the managed-egress bundle is provisioned, at command-environment
+    // validation, so the rollback path has resources to remove.
     invalid
         .extra_env
-        .insert("PLACEHOLDER".to_string(), "rejected".to_string());
+        .insert("INVALID=NAME".to_string(), "rejected".to_string());
 
     transport
         .run_command(invalid)
@@ -801,6 +803,100 @@ async fn different_users_receive_distinct_private_networks_and_proxies() {
     assert!(
         String::from_utf8_lossy(&cross_user_proxy.stdout).contains("PROXY_ISOLATION_BLOCKED"),
         "proxy listener must bind only to its private worker network"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, public Internet access, and IRONCLAW_TEST_GITHUB_TOKEN"]
+async fn compound_github_cli_script_uses_proxy_placeholder_without_exposing_real_token() {
+    let Some((_image, _serial)) =
+        docker_worker_and_proxy_images("sandbox GitHub credential canary").await
+    else {
+        return;
+    };
+    let Ok(token) = std::env::var("IRONCLAW_TEST_GITHUB_TOKEN") else {
+        eprintln!("SKIP: GitHub credential canary — IRONCLAW_TEST_GITHUB_TOKEN is unset");
+        return;
+    };
+    assert!(!token.is_empty(), "GitHub canary token must not be empty");
+
+    let scope = TestScope::unique("github-credential");
+    let temp = docker_visible_tempdir();
+    let mut cleanup = DockerCleanup::with_scopes([scope.clone()]);
+    let transport = RebornScopedSandboxCommandTransport::connect(
+        RebornSandboxConfig::new(temp.path().join("sandbox-workspaces"))
+            .with_managed_egress_proxy()
+            .expect("managed egress policy is valid"),
+    )
+    .await
+    .expect("Docker transport connects");
+    let placeholder = format!(
+        "{}{}",
+        ironclaw_secrets::CREDENTIAL_PLACEHOLDER_PREFIX,
+        InvocationId::new()
+    );
+    let command = CredentialedSandboxCommandRequest {
+        capability_id: ironclaw_host_api::ids::CapabilityId::new("builtin.shell")
+            .expect("valid shell capability id"),
+        scope: scope.resource_scope(),
+        mounts: None,
+        command: "set -e; gh pr list --repo nearai/ironclaw --limit 1 --json number \
+                  >/tmp/first.json; gh pr list --repo nearai/ironclaw --limit 1 --json number"
+            .to_string(),
+        workdir: None,
+        timeout_secs: Some(60),
+        extra_env: HashMap::from([("GH_TOKEN".to_string(), placeholder.clone())]),
+        credential_bindings: Vec::new(),
+    };
+    let result = transport
+        .run_credentialed_command(
+            command,
+            vec![SandboxCommandCredential::new(
+                ironclaw_host_api::ids::SecretHandle::new("github_runtime_token")
+                    .expect("valid credential handle"),
+                "GH_TOKEN".to_string(),
+                placeholder,
+                "api.github.com".to_string(),
+                "Authorization".to_string(),
+                Some("token ".to_string()),
+                token.clone(),
+            )],
+        )
+        .await
+        .expect("compound credentialed gh script reaches GitHub through the proxy");
+
+    assert!(
+        !result.output.contains(&token),
+        "gh command output exposed the real token"
+    );
+    let redacted_output = result.output.replace(&token, "[REDACTED]");
+    assert_eq!(result.exit_code, 0, "gh command failed: {redacted_output}");
+    assert!(serde_json::from_str::<serde_json::Value>(&result.output).is_ok());
+    // This call also regresses the proxy's private-material boundary: the
+    // cap-dropped proxy retains only DAC_READ_SEARCH so it can read host-owned
+    // 0600 credentials through its per-user read-only bind mount.
+    let container = cleanup.capture(&scope);
+    let inspect = docker_command(&[
+        "container",
+        "inspect",
+        "--format",
+        "{{json .Config.Env}}",
+        &container.id,
+    ]);
+    assert!(inspect.status.success());
+    assert!(!String::from_utf8_lossy(&inspect.stdout).contains(&token));
+    let proxy_mount_probe = docker_command(&[
+        "container",
+        "exec",
+        &container.id,
+        "test",
+        "!",
+        "-e",
+        "/run/ironclaw-proxy",
+    ]);
+    assert!(
+        proxy_mount_probe.status.success(),
+        "proxy credential material must not be mounted in the command container"
     );
 }
 

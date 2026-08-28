@@ -1,0 +1,53 @@
+{
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "status": { "type": "integer" },
+    "body": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "id": { "type": "string" },
+        "thread_id": { "type": "string" },
+        "label_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "headers": {
+          "type": "object",
+          "description": "Selected message headers: from, to, cc, reply_to, subject, and date when present.",
+          "additionalProperties": { "type": "string" }
+        },
+        "body": {
+          "type": "object",
+          "description": "Decoded readable content. kind is text, markdown, encrypted, or unavailable.",
+          "additionalProperties": true,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["text", "markdown", "encrypted", "unavailable"]
+            },
+            "text": { "type": "string" },
+            "truncated": { "type": "boolean" },
+            "reason": { "type": "string" }
+          }
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "attachment_id": { "type": ["string", "null"] },
+              "filename": { "type": "string" },
+              "mime_type": { "type": "string" },
+              "size": { "type": ["integer", "null"], "minimum": 0 }
+            }
+          }
+        },
+        "attachments_truncated": { "type": "boolean" }
+      }
+    },
+    "redaction_applied": { "type": "boolean" }
+  }
+}

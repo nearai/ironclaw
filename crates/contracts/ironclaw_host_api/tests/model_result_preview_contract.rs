@@ -1,4 +1,4 @@
-use ironclaw_host_api::model_result_preview::ModelResultPreview;
+use ironclaw_host_api::model_result_preview::{ModelResultJsonPage, ModelResultPreview};
 use serde_json::json;
 
 #[test]
@@ -20,4 +20,25 @@ fn redacts_nested_and_malformed_structured_credentials() {
         assert!(preview.as_str().contains("safe-context"));
         assert!(!preview.as_str().contains(canary));
     }
+}
+
+#[test]
+fn json_page_requires_model_visible_content() {
+    let missing_content = json!({
+        "view": "ironclaw.json_page.v1",
+        "result_ref": "trr_test",
+        "json_pointer": "",
+        "node_type": "object",
+        "offset": 0,
+        "offset_unit": "items",
+        "omitted": [],
+        "total_bytes": 2,
+        "next_offset": null,
+        "next": null,
+    });
+
+    let error = ModelResultJsonPage::from_json_str(&missing_content.to_string())
+        .expect_err("a JSON page without content must fail closed");
+
+    assert!(error.to_string().contains("missing field `content`"));
 }

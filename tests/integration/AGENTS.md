@@ -313,7 +313,7 @@ under `tests/fixtures/hosted_mcp/`.
 capabilities behind a `GithubHarnessAuthorizer`, which authorizes every
 dispatch with an `InjectCredentialAccountOnce` obligation. A scripted
 `github.*` tool call executes the real WASM module; its outbound HTTP
-request gets a synthetic `Authorization: Bearer <token>` credential
+request gets a synthetic `Authorization: token <token>` credential
 injected by the host egress pipeline before it reaches the recording
 network egress. This is the credential-injection-reaches-the-wire proof
 (T0-SECRET-INJECT).

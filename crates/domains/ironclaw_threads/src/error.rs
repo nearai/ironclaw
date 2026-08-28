@@ -1,6 +1,7 @@
 use ironclaw_host_api::{ids::ThreadId, turn::TurnRunId};
 use thiserror::Error;
 
+use crate::tool_result_records::ToolResultRecordReadError;
 use crate::{MessageStatus, ThreadMessageId};
 
 /// Specific timestamp contract violation on a transcript message.
@@ -84,6 +85,8 @@ pub enum SessionThreadError {
     Serialization(String),
     #[error("deserialization error: {0}")]
     Deserialization(String),
+    #[error("tool result record read selection failed: {0}")]
+    ToolResultRecordRead(#[from] ToolResultRecordReadError),
     #[error("thread backend error: {0}")]
     Backend(String),
 }
@@ -114,6 +117,7 @@ impl SessionThreadError {
             Self::GeneratedThreadId(_) => "generated_thread_id",
             Self::Serialization(_) => "serialization",
             Self::Deserialization(_) => "deserialization",
+            Self::ToolResultRecordRead(_) => "tool_result_record_read",
             Self::Backend(_) => "backend",
         }
     }

@@ -9,7 +9,7 @@
 //! authority site.
 
 use ironclaw_extension_registry::{ExtensionPackage, ExtensionRegistry};
-use ironclaw_host_api::ids::CapabilityId;
+use ironclaw_host_api::ids::{CapabilityId, ExtensionId};
 use ironclaw_host_api::trust::TrustPolicyInput;
 use ironclaw_trust::{TrustDecision, TrustPolicy};
 use tracing::debug;
@@ -76,11 +76,19 @@ pub(crate) fn evaluate_invocation_trust(
     if package_descriptor != descriptor {
         return Err(TrustEvaluationError::ConflictingPackageDescriptor);
     }
+    evaluate_package_trust(registry, trust_policy, &descriptor.provider)
+}
+
+pub(crate) fn evaluate_package_trust(
+    registry: &ExtensionRegistry,
+    trust_policy: &dyn TrustPolicy,
+    extension_id: &ExtensionId,
+) -> Result<TrustDecision, TrustEvaluationError> {
+    let package = registry
+        .get_extension(extension_id)
+        .ok_or(TrustEvaluationError::MissingPackage)?;
     let input = trust_policy_input_for_package(package)?;
     trust_policy.evaluate(&input).map_err(|error| {
-        // The kernel→host mapping collapses this to `Policy`; log the bound
-        // `TrustError` so the underlying policy refusal is recoverable
-        // server-side. `debug!` avoids corrupting the REPL/TUI.
         debug!(%error, "host trust policy evaluation refused a decision");
         TrustEvaluationError::Policy
     })

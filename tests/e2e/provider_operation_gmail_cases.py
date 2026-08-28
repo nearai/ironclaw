@@ -209,12 +209,35 @@ GMAIL_PROVIDER_OPERATION_CASES = (
         capability_id="gmail.get_message",
         arguments={"message_id": "msg_provider_contract_empty"},
         assert_baseline=_assert_gmail_reply_baseline,
-        assert_outcome=exact_provider_http_output({}),
+        assert_outcome=exact_provider_http_output(
+            {
+                "id": "msg_provider_contract_empty",
+                "thread_id": "thr_provider_contract_empty",
+                "label_ids": [],
+                "headers": {},
+                "body": {
+                    "kind": "unavailable",
+                    "reason": "no supported readable message body",
+                },
+                "attachments": [],
+                "attachments_truncated": False,
+            }
+        ),
         outcome_class="empty",
         setup_provider_proxy=static_provider_json_response(
             method="GET",
             path="/gmail/v1/users/me/messages/msg_provider_contract_empty",
-            payload={},
+            payload={
+                "id": "msg_provider_contract_empty",
+                "threadId": "thr_provider_contract_empty",
+                "labelIds": [],
+                "payload": {
+                    "mimeType": "multipart/mixed",
+                    "headers": [],
+                    "body": {},
+                    "parts": [],
+                },
+            },
         ),
         expect_provider_forward=False,
         expected_proxy_profile="provider_contract_empty",

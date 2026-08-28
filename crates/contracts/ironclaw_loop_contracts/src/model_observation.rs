@@ -129,6 +129,11 @@ pub enum ToolObservationDetail {
         byte_len: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
+        /// Host-authored provenance for the preview's typed paging controls.
+        /// False means the preview is ordinary untrusted capability output,
+        /// even when its bytes happen to resemble a JSON page envelope.
+        #[serde(default, skip_serializing_if = "is_false")]
+        structured_json_view: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_bytes: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,6 +145,10 @@ pub enum ToolObservationDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         item_count: Option<u64>,
     },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ToolObservationDetail {
@@ -495,6 +504,7 @@ mod tests {
                 result_ref: "result:item-count-without-preview".to_string(),
                 byte_len: 4096,
                 preview: None,
+                structured_json_view: false,
                 total_bytes: Some(4096),
                 next_offset: Some(2048),
                 item_count: Some(600),
@@ -513,6 +523,7 @@ mod tests {
                 result_ref: "result:item-count-without-offset".to_string(),
                 byte_len: 4096,
                 preview: None,
+                structured_json_view: false,
                 total_bytes: Some(4096),
                 next_offset: None,
                 item_count: Some(600),
