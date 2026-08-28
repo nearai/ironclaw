@@ -91,6 +91,10 @@ pub(super) enum NotificationDeliveryOutcome {
     NoDelivery,
     Rejected,
     Delivered(Vec<DeliveredChannelMessage>),
+    /// The provider accepted the notification, but its durable terminal
+    /// delivery confirmation failed. Message refs remain valid for routing
+    /// and retraction, while callers retain the weaker evidence state.
+    Unconfirmed(Vec<DeliveredChannelMessage>),
 }
 
 impl std::fmt::Display for NotificationDeliveryFailure {
@@ -122,7 +126,8 @@ pub async fn notify(
     target: &NotificationChannelTarget,
 ) -> Result<Vec<DeliveredChannelMessage>, NotificationDeliveryFailure> {
     match notify_with_outcome(services, context, notification, target).await? {
-        NotificationDeliveryOutcome::Delivered(messages) => Ok(messages),
+        NotificationDeliveryOutcome::Delivered(messages)
+        | NotificationDeliveryOutcome::Unconfirmed(messages) => Ok(messages),
         NotificationDeliveryOutcome::NoDelivery | NotificationDeliveryOutcome::Rejected => {
             Ok(Vec::new())
         }
@@ -192,11 +197,13 @@ pub(super) async fn notify_with_outcome(
             NotificationDeliveryFailure::Other(format!("delivery failed: {failure_kind:?}")),
         ),
         CoordinatedDeliveryOutcome::Delivered { .. }
-        | CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. }
         | CoordinatedDeliveryOutcome::AlreadyDelivered { .. }
-        | CoordinatedDeliveryOutcome::StreamDelivered { .. }
-        | CoordinatedDeliveryOutcome::StreamDeliveredUnconfirmed { .. } => Ok(
+        | CoordinatedDeliveryOutcome::StreamDelivered { .. } => Ok(
             NotificationDeliveryOutcome::Delivered(delivered_messages_from_outcome(&outcome)),
+        ),
+        CoordinatedDeliveryOutcome::DeliveredUnconfirmed { .. }
+        | CoordinatedDeliveryOutcome::StreamDeliveredUnconfirmed { .. } => Ok(
+            NotificationDeliveryOutcome::Unconfirmed(delivered_messages_from_outcome(&outcome)),
         ),
     }
 }

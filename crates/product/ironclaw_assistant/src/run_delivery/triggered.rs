@@ -586,6 +586,7 @@ async fn notify_background_run(
 
     let mut observed_blocked_marker: Option<BlockedActionableMarker> = None;
     let mut external_delivery_succeeded = false;
+    let mut external_delivery_unconfirmed = false;
     // (extension that carried it, message) — the notification set spans
     // extensions, so retraction is per-message.
     let mut messages_to_delete_after_final: Vec<(String, DeliveredChannelMessage)> = Vec::new();
@@ -637,6 +638,8 @@ async fn notify_background_run(
                     TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
                 } else if external_delivery_succeeded {
                     TriggeredRunDeliveryOutcomeKind::Delivered
+                } else if external_delivery_unconfirmed {
+                    TriggeredRunDeliveryOutcomeKind::Unconfirmed
                 } else {
                     TriggeredRunDeliveryOutcomeKind::Skipped
                 };
@@ -897,6 +900,8 @@ async fn notify_background_run(
                 .await;
                 let outcome = if external_delivery_succeeded {
                     TriggeredRunDeliveryOutcomeKind::Delivered
+                } else if external_delivery_unconfirmed {
+                    TriggeredRunDeliveryOutcomeKind::Unconfirmed
                 } else {
                     TriggeredRunDeliveryOutcomeKind::Skipped
                 };
@@ -922,11 +927,13 @@ async fn notify_background_run(
         messages_to_delete_after_final.extend(fan.messages_to_retract_after_final);
         let PlanFanOut {
             any_delivered,
+            any_unconfirmed,
             any_denied,
             delivered_for_gate_route,
             ..
         } = fan;
         external_delivery_succeeded |= any_delivered;
+        external_delivery_unconfirmed |= any_unconfirmed;
 
         // Every conversation the prompt landed in becomes a reply route for
         // this gate, so a bare `approve` from ANY notification channel
@@ -947,7 +954,7 @@ async fn notify_background_run(
             .await;
         }
 
-        if !any_delivered {
+        if !any_delivered && !any_unconfirmed {
             let outcome = if any_denied {
                 TriggeredRunDeliveryOutcomeKind::Denied
             } else {
@@ -984,7 +991,11 @@ async fn notify_background_run(
             &mut messages_to_delete_after_final,
         )
         .await;
-        let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
+        let outcome = if external_delivery_succeeded {
+            TriggeredRunDeliveryOutcomeKind::Delivered
+        } else {
+            TriggeredRunDeliveryOutcomeKind::Unconfirmed
+        };
         record_triggered_run_outcome(delivery_store, run_id, outcome).await;
         return outcome;
     }
@@ -1307,8 +1318,12 @@ async fn deliver_pre_submit_failure_to_target(
 
 /// The aggregate of fanning one plan out to every matching target.
 struct PlanFanOut {
-    /// At least one channel accepted a delivery.
+    /// At least one channel accepted and durably confirmed a delivery.
     any_delivered: bool,
+    /// At least one channel provider accepted a delivery whose durable
+    /// terminal confirmation failed. This suppresses duplicate egress while
+    /// remaining distinct from confirmed delivery.
+    any_unconfirmed: bool,
     /// A permanent `Denied` from ANY channel — it must survive later
     /// transient failures: only the recorded outcome distinguishes "denied"
     /// from "failed", and last-writer-wins would lose the permanent signal.
@@ -1330,6 +1345,7 @@ async fn fan_out_plan(
 ) -> PlanFanOut {
     let mut out = PlanFanOut {
         any_delivered: false,
+        any_unconfirmed: false,
         any_denied: false,
         delivered_for_gate_route: Vec::new(),
         messages_to_retract_after_final: Vec::new(),
@@ -1349,14 +1365,11 @@ async fn fan_out_plan(
             {
                 Ok(super::notifications::NotificationDeliveryOutcome::Delivered(delivered)) => {
                     out.any_delivered = true;
-                    if notification.event_kind == RunNotificationEventKind::AuthRequired {
-                        out.messages_to_retract_after_final.extend(
-                            delivered
-                                .iter()
-                                .map(|message| (target.extension_id.clone(), message.clone())),
-                        );
-                    }
-                    out.delivered_for_gate_route.extend(delivered);
+                    retain_delivered_messages(&mut out, notification, target, delivered);
+                }
+                Ok(super::notifications::NotificationDeliveryOutcome::Unconfirmed(delivered)) => {
+                    out.any_unconfirmed = true;
+                    retain_delivered_messages(&mut out, notification, target, delivered);
                 }
                 Ok(super::notifications::NotificationDeliveryOutcome::NoDelivery) => {}
                 Ok(super::notifications::NotificationDeliveryOutcome::Rejected) => {
@@ -1376,7 +1389,7 @@ async fn fan_out_plan(
             }
         }
     }
-    if !targets.is_empty() && !out.any_delivered {
+    if !targets.is_empty() && !out.any_delivered && !out.any_unconfirmed {
         services
             .publish_inbox_notification(
                 &notification_context.actor.user_id,
@@ -1390,12 +1403,33 @@ async fn fan_out_plan(
     out
 }
 
+/// Provider-accepted messages remain routable and retractable even when the
+/// coordinator could not persist its terminal delivery confirmation.
+fn retain_delivered_messages(
+    out: &mut PlanFanOut,
+    notification: &TriggeredNotification,
+    target: &NotificationTarget,
+    delivered: Vec<DeliveredChannelMessage>,
+) {
+    if notification.event_kind == RunNotificationEventKind::AuthRequired {
+        out.messages_to_retract_after_final.extend(
+            delivered
+                .iter()
+                .map(|message| (target.extension_id.clone(), message.clone())),
+        );
+    }
+    out.delivered_for_gate_route.extend(delivered);
+}
+
 /// Reduce a plan fan-out to the recorded outcome kind. Nothing delivered is
-/// `Failed` (or `Denied` when any channel denied); anything delivered is
-/// `Delivered` — a delivered notice is the creator-visible terminal signal.
+/// `Failed` (or `Denied` when any channel denied). Provider acceptance whose
+/// durable confirmation failed remains `Unconfirmed` and is never promoted
+/// to `Delivered`.
 fn delivery_outcome_for_fan(fan: &PlanFanOut) -> TriggeredRunDeliveryOutcomeKind {
     if fan.any_delivered {
         TriggeredRunDeliveryOutcomeKind::Delivered
+    } else if fan.any_unconfirmed {
+        TriggeredRunDeliveryOutcomeKind::Unconfirmed
     } else if fan.any_denied {
         TriggeredRunDeliveryOutcomeKind::Denied
     } else {

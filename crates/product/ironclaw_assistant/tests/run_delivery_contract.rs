@@ -460,6 +460,105 @@ impl DeliveryReplyContextSource for NoStoredReplyContext {
     }
 }
 
+/// Delegates every outbound-store operation except the terminal
+/// `Delivered` write. The provider send still succeeds, reproducing the
+/// coordinator's `DeliveredUnconfirmed` evidence at the triggered caller.
+struct TerminalDeliveredWriteFailingStore {
+    inner: Arc<OutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+}
+
+#[async_trait]
+impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_run_delivery_cleanup(record).await
+    }
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: ironclaw_outbound::RunDeliveryCleanupRequest,
+    ) -> Result<Vec<ironclaw_outbound::RunDeliveryCleanupRecord>, OutboundError> {
+        self.inner.load_run_delivery_cleanup(request).await
+    }
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.complete_run_delivery_cleanup(record).await
+    }
+
+    async fn put_thread_notification_policy(
+        &self,
+        policy: ironclaw_outbound::ThreadNotificationPolicy,
+    ) -> Result<(), OutboundError> {
+        self.inner.put_thread_notification_policy(policy).await
+    }
+
+    async fn load_thread_notification_policy(
+        &self,
+        scope: TurnScope,
+    ) -> Result<ironclaw_outbound::ThreadNotificationPolicy, OutboundError> {
+        self.inner.load_thread_notification_policy(scope).await
+    }
+
+    async fn upsert_subscription(
+        &self,
+        record: ironclaw_outbound::ProjectionSubscriptionRecord,
+    ) -> Result<(), OutboundError> {
+        self.inner.upsert_subscription(record).await
+    }
+
+    async fn load_subscription_cursor(
+        &self,
+        request: ironclaw_outbound::LoadSubscriptionCursorRequest,
+    ) -> Result<Option<ironclaw_event_projections::ProjectionCursor>, OutboundError> {
+        self.inner.load_subscription_cursor(request).await
+    }
+
+    async fn record_delivery_attempt(
+        &self,
+        attempt: ironclaw_outbound::OutboundDeliveryAttempt,
+    ) -> Result<(), OutboundError> {
+        self.inner.record_delivery_attempt(attempt).await
+    }
+
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner.claim_delivery_attempt_for_send(request).await
+    }
+
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
+        self.inner
+            .recover_interrupted_delivery_attempt(request)
+            .await
+    }
+
+    async fn update_delivery_status(
+        &self,
+        request: ironclaw_outbound::UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        if request.status == ironclaw_outbound::OutboundDeliveryStatus::Delivered {
+            return Err(OutboundError::Backend);
+        }
+        self.inner.update_delivery_status(request).await
+    }
+
+    async fn list_delivery_attempts(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::OutboundDeliveryAttempt>, OutboundError> {
+        self.inner.list_delivery_attempts(scope).await
+    }
+}
+
 #[derive(Default)]
 struct ScriptedProjectFilesystemReader {
     files: Mutex<HashMap<String, Result<WorkspaceFile, ProjectFsError>>>,
@@ -2867,6 +2966,13 @@ struct TriggeredHarness {
     threads: Arc<InMemorySessionThreadService>,
 }
 
+#[derive(Clone, Copy)]
+enum TriggeredHarnessDeliveryMode {
+    Normal,
+    RequiresEnrollment,
+    FailTerminalDeliveredWrite,
+}
+
 /// `catalog` is the creator-owned notification catalog the notifier resolves
 /// stored target ids through; the same entries back the codec, so a resolved
 /// id decodes to a conversation and answers the DM predicate consistently.
@@ -2894,7 +3000,7 @@ fn build_triggered_harness_with_turns(
         initially_active,
         None,
         None,
-        false,
+        TriggeredHarnessDeliveryMode::Normal,
     )
 }
 
@@ -2944,7 +3050,7 @@ fn build_triggered_harness_with_catalog(
         initially_active,
         communication_preferences,
         delivery_targets,
-        false,
+        TriggeredHarnessDeliveryMode::Normal,
     )
 }
 
@@ -2956,7 +3062,7 @@ fn build_triggered_harness_with_turns_catalog(
     initially_active: Vec<TestNotificationTarget>,
     communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
     delivery_targets: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
-    requires_enrollment: bool,
+    delivery_mode: TriggeredHarnessDeliveryMode,
 ) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -2968,11 +3074,24 @@ fn build_triggered_harness_with_turns_catalog(
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
     let codecs = Arc::new(GrowableCodecs::with_initial(initially_active));
+    let coordinator_store: Arc<dyn OutboundStateStorePort> = if matches!(
+        delivery_mode,
+        TriggeredHarnessDeliveryMode::FailTerminalDeliveredWrite
+    ) {
+        Arc::new(TerminalDeliveredWriteFailingStore {
+            inner: Arc::clone(&store),
+        })
+    } else {
+        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>
+    };
     let coordinator = Arc::new(DeliveryCoordinator::new(
-        Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        Arc::clone(&coordinator_store),
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
-            requires_enrollment,
+            requires_enrollment: matches!(
+                delivery_mode,
+                TriggeredHarnessDeliveryMode::RequiresEnrollment
+            ),
         }),
         Arc::new(NoStoredReplyContext),
         Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
@@ -2988,7 +3107,7 @@ fn build_triggered_harness_with_turns_catalog(
         }),
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
         turn_coordinator: Arc::clone(&turns) as Arc<dyn TurnCoordinator>,
-        outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
+        outbound_store: coordinator_store,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: communication_preferences
             .unwrap_or_else(|| Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>),
@@ -3589,7 +3708,7 @@ async fn triggered_no_delivery_outcome_is_not_recorded_as_external_success() {
         vec![DM_TARGET],
         None,
         None,
-        true,
+        TriggeredHarnessDeliveryMode::RequiresEnrollment,
     );
     seed_notification_targets(&harness.store, &[DM_TARGET]).await;
     let run_id = TurnRunId::new();
@@ -3618,6 +3737,54 @@ async fn triggered_no_delivery_outcome_is_not_recorded_as_external_success() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::NoTarget,
         "the caller test must exercise the coordinator's typed NoDelivery outcome"
+    );
+}
+
+#[tokio::test]
+async fn triggered_unconfirmed_delivery_is_not_recorded_as_confirmed_or_retried() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000025";
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::BlockedApproval,
+        Some(GATE),
+    )]));
+    let harness = build_triggered_harness_with_turns_catalog(
+        turns,
+        None,
+        vec![DM_TARGET],
+        vec![DM_TARGET],
+        None,
+        None,
+        TriggeredHarnessDeliveryMode::FailTerminalDeliveredWrite,
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(
+        serde_json::to_value(outcome).expect("serialize outcome"),
+        serde_json::json!("unconfirmed"),
+        "provider acceptance without a durable Delivered write must retain weaker evidence"
+    );
+    assert_eq!(
+        harness.adapter.texts().len(),
+        1,
+        "unconfirmed provider acceptance must not retry egress"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("list delivery attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_ne!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered,
+        "the failed confirmation write must not fabricate durable delivery"
     );
 }
 
