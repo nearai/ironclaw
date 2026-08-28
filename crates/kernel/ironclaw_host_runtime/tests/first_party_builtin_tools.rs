@@ -10032,7 +10032,7 @@ impl TriggerRepository for RemoveFailingTriggerRepository {
     async fn clear_active_fire(
         &self,
         request: ironclaw_triggers::ClearActiveFireRequest,
-    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+    ) -> Result<Option<ironclaw_triggers::ClearedActiveFire>, ironclaw_triggers::TriggerError> {
         self.inner.clear_active_fire(request).await
     }
 }
@@ -10192,7 +10192,7 @@ impl TriggerRepository for BatchRunHistoryFailingTriggerRepository {
     async fn clear_active_fire(
         &self,
         request: ironclaw_triggers::ClearActiveFireRequest,
-    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+    ) -> Result<Option<ironclaw_triggers::ClearedActiveFire>, ironclaw_triggers::TriggerError> {
         self.inner.clear_active_fire(request).await
     }
 
@@ -10350,7 +10350,7 @@ impl TriggerRepository for FailingTriggerRepository {
     async fn clear_active_fire(
         &self,
         _request: ironclaw_triggers::ClearActiveFireRequest,
-    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+    ) -> Result<Option<ironclaw_triggers::ClearedActiveFire>, ironclaw_triggers::TriggerError> {
         unreachable!("failing test repository does not clear active fires")
     }
 }

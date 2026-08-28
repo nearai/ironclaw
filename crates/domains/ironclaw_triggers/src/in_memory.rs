@@ -623,19 +623,19 @@ impl TriggerRepository for InMemoryTriggerRepository {
     async fn clear_active_fire(
         &self,
         request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         let mut state = self.lock_state()?;
         let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
         // silent-ok: the run-history read can miss only on recovery; the
         // single-active-fire invariant keeps the active claim row newest and
         // therefore reachable during normal retention pruning.
-        let source = active_run_source(
+        let settled_source = active_run_source(
             &state,
             &request.tenant_id,
             request.trigger_id,
             request.fire_slot,
-        )
-        .unwrap_or(TriggerSourceKind::Schedule);
+        );
+        let source = settled_source.unwrap_or(TriggerSourceKind::Schedule);
         let run_key = TriggerRunRepositoryKey::new(
             &request.tenant_id,
             request.trigger_id,
@@ -691,7 +691,10 @@ impl TriggerRepository for InMemoryTriggerRepository {
         // Recovery may synthesize a completion row when the Running row is
         // missing, so this edge can still increase cardinality and must prune.
         prune_run_history_locked(&mut state, &request.tenant_id, request.trigger_id);
-        Ok(Some(record))
+        Ok(Some(ClearedActiveFire {
+            record,
+            source: settled_source,
+        }))
     }
 
     async fn find_trigger_run_by_thread_id(

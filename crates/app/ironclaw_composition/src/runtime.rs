@@ -715,6 +715,7 @@ pub struct RebornRuntime {
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    telemetry_handle: ironclaw_telemetry::BufferedTelemetryRecorderHandle,
     credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
     trace_flush_worker: ironclaw_trace_commons::capture::TraceQueueFlushWorkerHandle,
     skill_learning_extraction_tasks:
@@ -2509,6 +2510,8 @@ impl RebornRuntime {
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
                 .await;
         }
+        self.telemetry_handle.close_intake();
+        self.telemetry_handle.shutdown().await;
         if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
             credential_refresh_worker
                 .shutdown(ironclaw_auth::KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT)
@@ -4490,6 +4493,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
                 manual_fire_runner: Arc::clone(&services.trigger_manual_fire_runner),
+                telemetry_recorder: services.telemetry_recorder.clone(),
                 post_submit_hook_slot: hook_slot,
             },
         )
@@ -4748,6 +4752,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
+        telemetry_handle: services.telemetry_handle,
         credential_refresh_worker_handle,
         trace_flush_worker,
         skill_learning_extraction_tasks,

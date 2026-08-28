@@ -58,6 +58,8 @@ ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
 ironclaw_hooks = { path = "../../loop/ironclaw_hooks" }
 ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
 ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
+ironclaw_telemetry_contracts = { path = "../../contracts/ironclaw_telemetry_contracts", version = "0.1.0" }
+ironclaw_telemetry = { path = "../../domains/ironclaw_telemetry", version = "0.1.0" }
 ironclaw_extension_contracts = { path = "../../contracts/ironclaw_extension_contracts", version = "0.1.0" }
 ironclaw_host_ingress = { path = "../../product/ironclaw_host_ingress" }
 ironclaw_extension_host = { path = "../../extensions/ironclaw_extension_host" }

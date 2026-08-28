@@ -34,6 +34,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 | Global scope | Preserve optional `AgentId` as a first-class scope alongside tenant/user/project/mission/thread/process/invocation. |
 | Storage model | Hybrid: file-shaped content uses filesystem surfaces; structured/query-heavy/security/control-plane state uses typed repositories. |
 | Namespace map | Adopt the map in [`storage-placement.md`](storage-placement.md). |
+| Tenant BI telemetry | `ironclaw_telemetry` stores tenant-local hourly facts below `/tenant-shared/telemetry/v0` through one `ScopedFilesystem`; ordered projections lead with `tenant_id`, and bounded reads use half-open UTC ranges plus keyset cursors. |
 | Filesystem V1 API | `read_file`, `write_file`, `append_file`, `list_dir`, `stat`, `delete`, `create_dir_all`. CAS/streaming/rename are deferred. |
 | Memory service shape | Split services over shared memory backend: document/search/prompt/seed/profile/layer/version services. |
 | Memory multi-scope | Production-like explicit read scopes; writes primary by default; identity/system-prompt files primary-only. |
@@ -52,6 +53,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 | Migration | Reuse existing schemas where viable; bridge only when necessary. |
 | Runtime lanes | WASM, Script, and MCP are all first-class V1 lanes. |
 | Triggers | Trigger intake is a planned Reborn substrate slice. V1 is cron/schedule-only, enters through host-trusted ingress, and must not introduce a parallel agent loop. |
+| Trigger terminal settlement | `active_cleanup` emits one `TriggerRunTerminalSettlement` after trigger history and active-fire clearing are durable. `Completed`/`Stopped` → `Completed`, `Failed`/`Killed` → `Failed`, `Cancelled` → `Cancelled`, and `RecoveryRequired` → `RecoveryRequired`; recorder loss is best-effort and cannot change settlement. |
 
 ---
 

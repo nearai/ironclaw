@@ -151,7 +151,44 @@ not bypass domain invariants by mutating primitive storage rows directly.
 | `/turns` | thread/turn domain projections plus compatibility input for the canonical process journal | turn coordinator and migration APIs | no | `/turns/rows/v1` and older `/turns/state.json` lifecycle records are imported before `/processes` initialization. After migration, lifecycle/leases/checkpoints/dependencies are authoritative under `/processes`; remaining `/turns` data is projection or domain metadata only. |
 | `/resources` | typed resource-governor snapshot repository routed through `ironclaw_filesystem` (reservation/usage snapshots) | resource governor APIs | no | Consumer mount alias for `ironclaw_resources`; alias-relative under the per-invocation `MountView`. |
 | `/tenant-shared` | per-tenant shared mount; resolves to `/tenants/<tenant_id>/shared/...` under the per-invocation `MountView` | scoped filesystem | no | Data shared between users/agents in the same tenant. |
+| `/tenant-shared/telemetry/v0` | typed `ironclaw_telemetry::FilesystemTelemetryRepository` over the existing `ScopedFilesystem` mount | bounded typed telemetry reads and writes | tenant-leading ordered projections | Tenant-local BI facts use deterministic relative paths below this prefix; the repository never receives `RootFilesystem` authority or constructs `/tenants/...` paths. |
 | `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` | scoped filesystem | no | Not a consumer-visible alias; only consumed at the mount-table layer by the rewritten `VirtualPath` targets (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`). |
+
+---
+
+### 4.1 Tenant BI telemetry (V0)
+
+`ironclaw_telemetry` owns the typed record grammar and uses one injected
+`ScopedFilesystem` handle for all tenants. Its relative paths are below
+`/tenant-shared/telemetry/v0`; scope resolution maps that alias through the
+per-invocation `MountView`. The domain never sees a raw `RootFilesystem`,
+constructs a physical `/tenants/...` path, or chooses a backend.
+
+Telemetry readers use bounded, ascending, half-open UTC ranges and keyset
+cursors. Every ordered projection has `tenant_id` as its leading equality key,
+even though the scoped mount already provides physical isolation. The frozen
+ordered index shapes are equality prefix, ordered key, and tie-breaker:
+
+| Read shape | Ordered index keys |
+| --- | --- |
+| family by time | `tenant_id, record_family, window_start, tie_breaker` |
+| provider by time | `tenant_id, record_family, provider_id, window_start, tie_breaker` |
+| model by time | `tenant_id, record_family, effective_model_id, window_start, tie_breaker` |
+| provider + model by time | `tenant_id, record_family, provider_id, effective_model_id, window_start, tie_breaker` |
+| lifecycle by time | `tenant_id, record_family, occurred_at, event_id` |
+
+The reader derives the leading tenant equality filter from the trusted
+`ResourceScope`, selects the exact compatible index for each provider/model
+filter combination, and never performs an unbounded scan or an offset page.
+For `[from, to)` it starts after `(from, minimum_tie_breaker)`, includes every
+row exactly at `from`, excludes every row at `to`, continues from an opaque
+cursor, and returns no more than the requested page size. Existing history
+before `from` is skipped by the ordered starting cursor rather than scanned.
+
+Telemetry writes are additive hourly aggregates or idempotent lifecycle event
+records. A bounded drain may commit an explicit prefix; an ambiguous additive
+write is never replayed. Telemetry errors are best-effort and never alter the
+product result or trigger settlement. No telemetry deletion is introduced.
 
 ---
 

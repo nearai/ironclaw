@@ -35,7 +35,7 @@ use ironclaw_triggers::{
     FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
     TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerError,
     TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerSchedule, TriggerSourceKind, TriggerState, TriggerTerminalOutcome,
 };
 use ironclaw_turns::test_support::in_memory_agent_turn_runtime;
 use ironclaw_turns::{DefaultTurnCoordinator, TurnRunId};
@@ -484,7 +484,7 @@ impl TriggerRepository for ScriptedRepository {
     async fn clear_active_fire(
         &self,
         _: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ironclaw_triggers::ClearedActiveFire>, TriggerError> {
         Err(Self::backend_error())
     }
 }
@@ -1319,6 +1319,7 @@ async fn automation_service_active_hold_terminal_state_omits_hold() {
     let lookup = Arc::new(ScriptedActiveRunLookup {
         outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         }),
     });
     let service = RebornAutomationProductService::new(repo, lookup);

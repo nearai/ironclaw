@@ -391,6 +391,25 @@ pub(super) async fn build_backend_production(
             default_runtime_owner_scope(owner_user_id.clone()).map_err(RebornBuildError::Mount)?
         }
     };
+    // Telemetry is assembled once the production filesystem has been mounted,
+    // and owns the only background consumer for this runtime. Initialization
+    // is scoped to the deployment owner so indexes are ready before any
+    // trigger settlement can enqueue an observation.
+    let telemetry_repository = Arc::new(FilesystemTelemetryRepository::new(Arc::clone(
+        &stores.scoped_filesystem,
+    )));
+    telemetry_repository
+        .ensure_indexes(&turn_state_scope)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("telemetry indexes could not be initialized: {error}"),
+        })?;
+    let (telemetry_recorder, telemetry_worker) = BufferedTelemetryRecorder::spawn(
+        Default::default(),
+        telemetry_repository,
+        Arc::new(SystemTelemetryClock),
+    );
+    let telemetry_handle = telemetry_worker;
     let secret_store: Arc<dyn SecretStorePort> = stores.secret_credentials.secret_store.clone();
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let skill_management = Arc::new(ScopedSkillManagementPort::new_with_mount_resolver(
@@ -1453,6 +1472,8 @@ pub(super) async fn build_backend_production(
         extension_registry: Arc::clone(&extension_registry),
         shared_extension_registry,
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
+        telemetry_recorder,
+        telemetry_handle,
         processes,
         thread_service,
         trigger_repository: Arc::clone(&trigger_repository),

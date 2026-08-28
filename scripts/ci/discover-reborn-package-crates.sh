@@ -24,6 +24,8 @@ allowlist="$(
                 or (.name | startswith("ironclaw_reborn"))
                 or (.name | startswith("ironclaw_assistant"))
                 or (.name == "ironclaw_architecture_tests")
+                or (.name == "ironclaw_telemetry_contracts")
+                or (.name == "ironclaw_telemetry")
                 or (.name == "ironclaw_slack_extension")
                 or (.name == "ironclaw_telegram_extension")
                 or (.name | startswith("ironclaw_webui"))

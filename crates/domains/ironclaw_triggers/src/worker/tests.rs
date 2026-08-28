@@ -14,11 +14,11 @@ use ironclaw_host_api::{
 use super::*;
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimManualFireRequest,
-    ClaimedTriggerFire, ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
-    FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
-    InMemoryTriggerRepository, TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID,
-    TRIGGER_TRUSTED_ADAPTER_KIND, TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError,
-    TriggerFire, TriggerFireIdentity, TriggerId, TriggerInboundContentRef,
+    ClaimedTriggerFire, ClearActiveFireRequest, ClearedActiveFire, FireAcceptedRequest,
+    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
+    FireTerminalFailedRequest, InMemoryTriggerRepository, TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID,
+    TRIGGER_TRUSTED_ADAPTER_KIND, TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerAutomationKind,
+    TriggerError, TriggerFire, TriggerFireIdentity, TriggerId, TriggerInboundContentRef,
     TriggerMaterializedPrompt, TriggerPromptMaterializer, TriggerRecord, TriggerRepository,
     TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
     TriggerSourceKind, TriggerSourceProvider, TriggerState,
@@ -182,8 +182,7 @@ fn worker_with_config(
 }
 
 /// Like [`worker_with_config`] but with a custom settlement observer, so the
-/// `on_run_failure_settled` hook (#6896) can be asserted on active-cleanup
-/// terminal-failure clears.
+/// terminal settlement hook can be asserted on active-cleanup clears.
 fn worker_with_observer(
     repo: Arc<dyn TriggerRepository>,
     materializer: Arc<RecordingMaterializer>,
@@ -420,6 +419,10 @@ async fn tick_notifies_settlement_observer_after_permanent_pre_submit_failure_pe
     assert_eq!(persisted.state, TriggerState::Completed);
     let failed = observer.failed_events();
     assert_eq!(failed.len(), 1, "one durable permanent failure settlement");
+    assert!(
+        observer.terminal_events().is_empty(),
+        "pre-submit failure must not emit terminal run telemetry"
+    );
     assert_eq!(failed[0].fire.identity.trigger_id, trigger_id);
     assert_eq!(failed[0].fire.identity.fire_slot, fire_slot);
     assert_eq!(failed[0].fire.creator_user_id, record.creator_user_id);
@@ -742,6 +745,7 @@ async fn tick_clears_terminal_active_run() {
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
         TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         },
     ));
     let worker = worker(
@@ -798,6 +802,7 @@ async fn tick_records_failed_terminal_active_run_as_error() {
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Error,
+                outcome: TriggerTerminalOutcome::Failed,
             },
         )),
     );
@@ -818,10 +823,279 @@ async fn tick_records_failed_terminal_active_run_as_error() {
     assert!(runs[0].completed_at.is_some());
 }
 
+#[tokio::test]
+async fn terminal_cleanup_notifies_observer_with_authoritative_outcome_and_owner_scope() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZV").expect("ulid");
+    let tenant_id = tenant("tenant-terminal-observation");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5e").expect("run id");
+    let mut record = sample_record(trigger_id, tenant_id.clone(), ts(1_704_067_260));
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert active");
+    repo.upsert_running_run_history(&tenant_id, trigger_id, fire_slot, run_id, None, fire_slot)
+        .expect("persist running source");
+    let observer = Arc::new(
+        RecordingSettlementObserver::with_terminal_visibility_assertion(
+            repo.clone(),
+            tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            run_id,
+            TriggerRunHistoryStatus::Error,
+        ),
+    );
+    let worker = worker_with_observer(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Error,
+                outcome: TriggerTerminalOutcome::Cancelled,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+    worker
+        .tick_once(fire_slot)
+        .await
+        .expect("continued cleanup succeeds");
+
+    let events = observer.terminal_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].scope.tenant_id, tenant_id);
+    assert_eq!(events[0].scope.user_id, record.creator_user_id);
+    assert_eq!(events[0].scope.agent_id, record.agent_id);
+    assert_eq!(events[0].scope.project_id, record.project_id);
+    assert_eq!(events[0].trigger_id, trigger_id);
+    assert_eq!(events[0].fire_slot, fire_slot);
+    assert_eq!(events[0].run_id, run_id);
+    assert_eq!(events[0].automation_kind, TriggerAutomationKind::Cron);
+    assert_eq!(events[0].outcome, TriggerTerminalOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn terminal_cleanup_emits_each_terminal_outcome_once() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let tenant_id = tenant("tenant-terminal-outcomes");
+    let fire_slot = ts(1_704_067_200);
+    let outcomes = [
+        (
+            TriggerRunHistoryStatus::Ok,
+            TriggerTerminalOutcome::Completed,
+        ),
+        (
+            TriggerRunHistoryStatus::Error,
+            TriggerTerminalOutcome::Failed,
+        ),
+        (
+            TriggerRunHistoryStatus::Error,
+            TriggerTerminalOutcome::Cancelled,
+        ),
+        (
+            TriggerRunHistoryStatus::Error,
+            TriggerTerminalOutcome::RecoveryRequired,
+        ),
+    ];
+    let mut states = Vec::new();
+    for (index, (status, outcome)) in outcomes.iter().copied().enumerate() {
+        let trigger_id = TriggerId::new();
+        let run_id = TurnRunId::new();
+        let mut record = sample_record(
+            trigger_id,
+            tenant_id.clone(),
+            ts(1_704_067_260 + index as i64),
+        );
+        record.active_fire_slot = Some(fire_slot + chrono::Duration::seconds(index as i64));
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record.clone())
+            .await
+            .expect("insert active");
+        repo.upsert_running_run_history(
+            &tenant_id,
+            trigger_id,
+            fire_slot + chrono::Duration::seconds(index as i64),
+            run_id,
+            None,
+            fire_slot,
+        )
+        .expect("persist running source");
+        states.push(TriggerActiveRunState::Terminal { status, outcome });
+    }
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_results(
+            states.into_iter().map(Ok).collect(),
+        )),
+        Arc::clone(&observer),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    let observed = observer.terminal_events();
+    assert_eq!(observed.len(), outcomes.len());
+    for (_, expected) in outcomes {
+        assert!(
+            observed.iter().any(|event| event.outcome == expected),
+            "missing terminal outcome {expected:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn terminal_cleanup_uses_persisted_manual_source_for_automation_kind() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let tenant_id = tenant("tenant-manual-terminal-observation");
+    let trigger_id = TriggerId::new();
+    let fire_slot = ts(1_704_067_200);
+    let mut record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+    record.next_run_at = fire_slot + chrono::Duration::seconds(60);
+    repo.upsert_trigger(record).await.expect("insert trigger");
+    let claimed = repo
+        .claim_manual_fire(ClaimManualFireRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            now: fire_slot,
+        })
+        .await
+        .expect("claim manual fire");
+    assert!(matches!(claimed, ClaimDueFireOutcome::Claimed(_)));
+    let run_id = TurnRunId::new();
+    repo.mark_fire_accepted(FireAcceptedRequest {
+        tenant_id: tenant_id.clone(),
+        trigger_id,
+        fire_slot,
+        run_id,
+        thread_id: ThreadId::new("manual-terminal-thread").expect("thread id"),
+        submitted_at: fire_slot,
+    })
+    .await
+    .expect("persist accepted manual fire");
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo,
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    let observed = observer.terminal_events();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].automation_kind, TriggerAutomationKind::Manual);
+}
+
+#[tokio::test]
+async fn terminal_cleanup_suppresses_observation_when_settled_source_is_missing() {
+    let trigger_id = TriggerId::new();
+    let tenant_id = tenant("tenant-missing-terminal-source");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::new();
+    let mut record = sample_record(trigger_id, tenant_id, fire_slot);
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    let repo = Arc::new(ActiveClearFailsOnceRepository::new(
+        vec![record],
+        TriggerId::new(),
+    ));
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(observer.terminal_events().is_empty());
+    assert_eq!(repo.history_lookup_calls(), 0);
+}
+
+#[tokio::test]
+async fn terminal_cleanup_suppresses_observation_when_history_lookup_fails() {
+    let trigger_id = TriggerId::new();
+    let tenant_id = tenant("tenant-failed-terminal-source-lookup");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::new();
+    let mut record = sample_record(trigger_id, tenant_id, fire_slot);
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    let repo = Arc::new(ActiveClearFailsOnceRepository::with_history_lookup_failure(
+        vec![record],
+        TriggerId::new(),
+    ));
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo.clone(),
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Terminal {
+                status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
+            },
+        )),
+        Arc::clone(&observer),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(observer.terminal_events().is_empty());
+    assert_eq!(repo.history_lookup_calls(), 0);
+}
+
+#[tokio::test]
+async fn terminal_cleanup_does_not_observe_nonterminal_active_run() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let trigger_id = TriggerId::new();
+    let tenant_id = tenant("tenant-nonterminal-observation");
+    let fire_slot = ts(1_704_067_200);
+    let run_id = TurnRunId::new();
+    let mut record = sample_record(trigger_id, tenant_id, fire_slot);
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(run_id);
+    repo.upsert_trigger(record).await.expect("insert active");
+    let observer = Arc::new(RecordingSettlementObserver::default());
+    let worker = worker_with_observer(
+        repo,
+        Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+        Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+        Arc::new(RecordingActiveRunLookup::with_state(
+            TriggerActiveRunState::Nonterminal,
+        )),
+        Arc::clone(&observer),
+    );
+
+    worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+    assert!(observer.terminal_events().is_empty());
+}
+
 /// A terminal-failed active fire must surface to the settlement observer's
-/// `on_run_failure_settled` hook so automation-health telemetry can see
-/// post-accept failures (#6896). `Ok`/`Running` and already-cleared fires
-/// must NOT fire the hook.
+/// terminal hook so automation-health telemetry can see post-accept failures.
 #[tokio::test]
 async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
@@ -831,7 +1105,18 @@ async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
     let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
-    repo.upsert_trigger(record).await.expect("insert active");
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert active");
+    repo.upsert_running_run_history(
+        &record.tenant_id,
+        trigger_id,
+        fire_slot,
+        run_id,
+        None,
+        fire_slot,
+    )
+    .expect("persist running source");
     let observer = Arc::new(RecordingSettlementObserver::default());
     let worker = worker_with_observer(
         repo.clone(),
@@ -840,6 +1125,7 @@ async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Error,
+                outcome: TriggerTerminalOutcome::Failed,
             },
         )),
         Arc::clone(&observer),
@@ -851,9 +1137,9 @@ async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
         report.results.last().map(|result| &result.outcome),
         Some(&TriggerPollerFireOutcome::ClearedTerminalActive { run_id })
     );
-    let failed = observer.run_failure_events();
+    let failed = observer.terminal_events();
     assert_eq!(failed.len(), 1, "exactly one failed-fire settlement");
-    assert_eq!(failed[0].tenant_id, tenant("tenant-a"));
+    assert_eq!(failed[0].scope.tenant_id, tenant("tenant-a"));
     assert_eq!(failed[0].trigger_id, trigger_id);
     assert_eq!(failed[0].fire_slot, fire_slot);
     assert_eq!(failed[0].run_id, run_id);
@@ -863,10 +1149,9 @@ async fn tick_surfaces_failed_terminal_active_fire_to_settlement_observer() {
     );
 }
 
-/// A terminal-`Ok` active fire clears but must NOT fire `on_run_failure_settled`
-/// — the hook is failure-only.
+/// A terminal-`Ok` active fire clears and emits a completed settlement.
 #[tokio::test]
-async fn tick_does_not_surface_successful_terminal_active_fire_to_failure_hook() {
+async fn tick_surfaces_successful_terminal_active_fire_to_terminal_hook() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZW").expect("ulid");
     let fire_slot = ts(1_704_067_200);
@@ -874,7 +1159,18 @@ async fn tick_does_not_surface_successful_terminal_active_fire_to_failure_hook()
     let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
     record.active_fire_slot = Some(fire_slot);
     record.active_run_ref = Some(run_id);
-    repo.upsert_trigger(record).await.expect("insert active");
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("insert active");
+    repo.upsert_running_run_history(
+        &record.tenant_id,
+        trigger_id,
+        fire_slot,
+        run_id,
+        None,
+        fire_slot,
+    )
+    .expect("persist running source");
     let observer = Arc::new(RecordingSettlementObserver::default());
     let worker = worker_with_observer(
         repo.clone(),
@@ -883,6 +1179,7 @@ async fn tick_does_not_surface_successful_terminal_active_fire_to_failure_hook()
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
             },
         )),
         Arc::clone(&observer),
@@ -890,10 +1187,9 @@ async fn tick_does_not_surface_successful_terminal_active_fire_to_failure_hook()
 
     worker.tick_once(fire_slot).await.expect("tick succeeds");
 
-    assert!(
-        observer.run_failure_events().is_empty(),
-        "a successful terminal fire must not fire the failure hook"
-    );
+    let events = observer.terminal_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].outcome, TriggerTerminalOutcome::Completed);
 }
 
 #[tokio::test]
@@ -993,6 +1289,7 @@ async fn tick_active_cleanup_cursor_reaches_terminal_rows_after_blocked_page() {
         Ok(TriggerActiveRunState::Nonterminal),
         Ok(TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         }),
     ]));
     let worker = worker_with_config(
@@ -1206,15 +1503,19 @@ async fn tick_retries_active_page_when_clear_fails_before_advancing_cursor() {
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_results(vec![
         Ok(TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         }),
         Ok(TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         }),
         Ok(TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         }),
         Ok(TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         }),
     ]));
     let worker = worker_with_config(
@@ -1271,6 +1572,7 @@ async fn tick_reports_terminal_active_clear_race() {
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
             },
         )),
     );
@@ -1302,6 +1604,7 @@ async fn tick_does_not_surface_failed_terminal_fire_when_clear_loses_race() {
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Error,
+                outcome: TriggerTerminalOutcome::Failed,
             },
         )),
         Arc::clone(&observer),
@@ -1314,8 +1617,8 @@ async fn tick_does_not_surface_failed_terminal_fire_when_clear_loses_race() {
         Some(&TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id })
     );
     assert!(
-        observer.run_failure_events().is_empty(),
-        "a lost clear race must not emit duplicate failure telemetry"
+        observer.terminal_events().is_empty(),
+        "a lost clear race must not emit duplicate terminal telemetry"
     );
 }
 
@@ -1347,6 +1650,7 @@ async fn tick_clears_terminal_active_and_processes_due_trigger() {
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
             },
         )),
     );
@@ -1451,9 +1755,11 @@ async fn tick_retries_active_lookup_error_before_advancing_cursor() {
         }),
         Ok(TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         }),
         Ok(TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         }),
     ]));
     let worker = worker_with_config(
@@ -1564,6 +1870,7 @@ async fn tick_replayed_submit_can_be_cleared_on_a_later_tick_without_stopping_du
         Arc::new(RecordingActiveRunLookup::with_results(vec![Ok(
             TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
             },
         )])),
     );
@@ -1678,6 +1985,7 @@ async fn tick_keeps_fresh_claim_only_active_fire_blocked() {
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
         TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         },
     ));
     let worker = worker(
@@ -1829,6 +2137,7 @@ async fn tick_active_cleanup_cursor_advances_past_claim_only_record() {
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
         TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         },
     ));
     let worker = worker_with_config(
@@ -2694,6 +3003,7 @@ async fn tick_fire_once_trigger_becomes_completed_after_clear() {
     let active_lookup = Arc::new(RecordingActiveRunLookup::with_state(
         TriggerActiveRunState::Terminal {
             status: TriggerRunHistoryStatus::Ok,
+            outcome: TriggerTerminalOutcome::Completed,
         },
     ));
     let worker = worker(
@@ -2805,6 +3115,7 @@ async fn tick_fire_once_terminal_ok_active_run_clears_to_completed() {
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
             },
         )),
     );
@@ -2857,6 +3168,7 @@ async fn tick_fire_once_terminal_error_active_run_clears_to_completed() {
         Arc::new(RecordingActiveRunLookup::with_state(
             TriggerActiveRunState::Terminal {
                 status: TriggerRunHistoryStatus::Error,
+                outcome: TriggerTerminalOutcome::Failed,
             },
         )),
     );
@@ -3287,8 +3599,9 @@ impl TrustedTriggerFireSubmitter for RecordingSubmitter {
 struct RecordingSettlementObserver {
     events: Mutex<Vec<TriggerAcceptedFireSettlement>>,
     failed_events: Mutex<Vec<TriggerFailedFireSettlement>>,
-    run_failure_events: Mutex<Vec<TriggerRunFailureSettlement>>,
+    terminal_events: Mutex<Vec<TriggerRunTerminalSettlement>>,
     visibility_assertion: Option<SettlementVisibilityAssertion>,
+    terminal_visibility_assertion: Option<SettlementVisibilityAssertion>,
 }
 
 struct SettlementVisibilityAssertion {
@@ -3298,6 +3611,7 @@ struct SettlementVisibilityAssertion {
     fire_slot: Timestamp,
     run_id: TurnRunId,
     thread_id: ThreadId,
+    expected_terminal_status: Option<TriggerRunHistoryStatus>,
 }
 
 impl RecordingSettlementObserver {
@@ -3312,7 +3626,7 @@ impl RecordingSettlementObserver {
         Self {
             events: Mutex::new(Vec::new()),
             failed_events: Mutex::new(Vec::new()),
-            run_failure_events: Mutex::new(Vec::new()),
+            terminal_events: Mutex::new(Vec::new()),
             visibility_assertion: Some(SettlementVisibilityAssertion {
                 repository,
                 tenant_id,
@@ -3320,6 +3634,33 @@ impl RecordingSettlementObserver {
                 fire_slot,
                 run_id,
                 thread_id,
+                expected_terminal_status: None,
+            }),
+            terminal_visibility_assertion: None,
+        }
+    }
+
+    fn with_terminal_visibility_assertion(
+        repository: Arc<dyn TriggerRepository>,
+        tenant_id: TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        run_id: TurnRunId,
+        status: TriggerRunHistoryStatus,
+    ) -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            failed_events: Mutex::new(Vec::new()),
+            terminal_events: Mutex::new(Vec::new()),
+            visibility_assertion: None,
+            terminal_visibility_assertion: Some(SettlementVisibilityAssertion {
+                repository,
+                tenant_id,
+                trigger_id,
+                fire_slot,
+                run_id,
+                thread_id: ThreadId::new("unused-terminal-thread").expect("thread id"),
+                expected_terminal_status: Some(status),
             }),
         }
     }
@@ -3335,10 +3676,10 @@ impl RecordingSettlementObserver {
             .clone()
     }
 
-    fn run_failure_events(&self) -> Vec<TriggerRunFailureSettlement> {
-        self.run_failure_events
+    fn terminal_events(&self) -> Vec<TriggerRunTerminalSettlement> {
+        self.terminal_events
             .lock()
-            .expect("run failure events lock")
+            .expect("terminal events lock")
             .clone()
     }
 }
@@ -3379,10 +3720,33 @@ impl TriggerFireSettlementObserver for RecordingSettlementObserver {
             .push(event);
     }
 
-    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement) {
-        self.run_failure_events
+    async fn on_run_terminal_settled(&self, event: TriggerRunTerminalSettlement) {
+        if let Some(assertion) = &self.terminal_visibility_assertion {
+            let persisted = assertion
+                .repository
+                .get_trigger(assertion.tenant_id.clone(), assertion.trigger_id)
+                .await
+                .expect("load trigger during terminal settlement callback")
+                .expect("trigger must exist during terminal settlement callback");
+            assert_eq!(persisted.active_fire_slot, None);
+            assert_eq!(persisted.active_run_ref, None);
+            let history = assertion
+                .repository
+                .list_trigger_run_history(assertion.tenant_id.clone(), assertion.trigger_id, 1)
+                .await
+                .expect("run history during terminal settlement callback");
+            assert_eq!(
+                history.first().map(|run| run.status),
+                assertion.expected_terminal_status
+            );
+            assert_eq!(
+                history.first().and_then(|run| run.run_id),
+                Some(assertion.run_id)
+            );
+        }
+        self.terminal_events
             .lock()
-            .expect("run failure events lock")
+            .expect("terminal events lock")
             .push(event);
     }
 }
@@ -3593,7 +3957,7 @@ impl TriggerRepository for TickConcurrencyRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("tick-concurrency repository should not clear active fires")
     }
 }
@@ -3740,7 +4104,7 @@ impl TriggerRepository for ActiveListErrorRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("active-list-error repository should not clear active fires")
     }
 }
@@ -3916,7 +4280,7 @@ impl TriggerRepository for ActiveWrapRefetchErrorRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("active-wrap-refetch-error repository should not clear active fires")
     }
 }
@@ -4066,7 +4430,7 @@ impl TriggerRepository for ActiveClearRaceRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         Ok(None)
     }
 }
@@ -4076,6 +4440,8 @@ struct ActiveClearFailsOnceRepository {
     clear_requests: Mutex<Vec<TriggerId>>,
     fail_once_trigger_id: TriggerId,
     failed_once: Mutex<bool>,
+    fail_history_lookup: bool,
+    history_lookup_calls: Mutex<usize>,
 }
 
 impl ActiveClearFailsOnceRepository {
@@ -4085,7 +4451,25 @@ impl ActiveClearFailsOnceRepository {
             clear_requests: Mutex::new(Vec::new()),
             fail_once_trigger_id,
             failed_once: Mutex::new(false),
+            fail_history_lookup: false,
+            history_lookup_calls: Mutex::new(0),
         }
+    }
+
+    fn with_history_lookup_failure(
+        records: Vec<TriggerRecord>,
+        fail_once_trigger_id: TriggerId,
+    ) -> Self {
+        let mut repository = Self::new(records, fail_once_trigger_id);
+        repository.fail_history_lookup = true;
+        repository
+    }
+
+    fn history_lookup_calls(&self) -> usize {
+        *self
+            .history_lookup_calls
+            .lock()
+            .expect("history lookup calls lock")
     }
 
     fn clear_requests(&self) -> Vec<TriggerId> {
@@ -4269,7 +4653,7 @@ impl TriggerRepository for ActiveClearFailsOnceRepository {
     async fn clear_active_fire(
         &self,
         request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         self.clear_requests
             .lock()
             .expect("clear requests lock")
@@ -4293,7 +4677,29 @@ impl TriggerRepository for ActiveClearFailsOnceRepository {
         let updated = record.clone();
         record.active_fire_slot = None;
         record.active_run_ref = None;
-        Ok(Some(updated))
+        Ok(Some(ClearedActiveFire {
+            record: updated,
+            source: None,
+        }))
+    }
+
+    async fn list_trigger_run_history(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_id: TriggerId,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRunRecord>, TriggerError> {
+        *self
+            .history_lookup_calls
+            .lock()
+            .expect("history lookup calls lock") += 1;
+        if self.fail_history_lookup {
+            Err(TriggerError::Backend {
+                reason: "history lookup failed".to_string(),
+            })
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
@@ -4443,7 +4849,7 @@ impl TriggerRepository for AcceptedMissingRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("accepted-missing repository should not clear active fires")
     }
 }
@@ -4594,7 +5000,7 @@ impl TriggerRepository for ReplayedMissingRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("replayed-missing repository should not clear active fires")
     }
 }
@@ -4754,7 +5160,7 @@ impl TriggerRepository for DueErrorThenSuccessRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("due-error repository should not clear active fires")
     }
 }
@@ -4928,7 +5334,7 @@ impl TriggerRepository for ClaimRaceRepository {
     async fn clear_active_fire(
         &self,
         _request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         unreachable!("claim-race repository should not clear active fires")
     }
 }

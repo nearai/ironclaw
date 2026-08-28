@@ -42,7 +42,7 @@ that owns that boundary — never thread it through a UI or runtime crate.
 
 ## The ten families
 
-Counts updated 2026-08-12 (`cargo metadata --no-deps`; the enforcing gate is
+Counts updated 2026-08-26 (`cargo metadata --no-deps`; the enforcing gate is
 `python3 scripts/ci/check-target-tree.py`). Every family has an `AGENTS.md`
 (its boundary and crate table) and an in-depth spec in
 [`docs/internal/reborn/target-architecture/families/`](../docs/internal/reborn/target-architecture/families/);
@@ -50,10 +50,10 @@ every crate has a `README.md`.
 
 | Directory | Crates | What lives there |
 | --- | --- | --- |
-| [`contracts/`](./contracts/AGENTS.md) | 6 | `host_api`, `common`, `prompt_envelope`, `loop_contracts`, `extension_contracts`, `product_contracts` |
+| [`contracts/`](./contracts/AGENTS.md) | 7 | `host_api`, `common`, `prompt_envelope`, `loop_contracts`, `extension_contracts`, `product_contracts`, `telemetry_contracts` |
 | [`substrates/`](./substrates/AGENTS.md) | 7 | `filesystem`, `documents`, `libsql_runtime`, `secrets`, `network`, `safety`, `observability` |
 | [`events/`](./events/AGENTS.md) | 4 | `event_log`, `event_store`, `event_projections`, `event_streams` |
-| [`domains/`](./domains/AGENTS.md) | 12 | `threads`, `conversations`, `triggers`, `memory`, `skills`, `auth`, `attachments`, `extractors`, `identity`, `llm`, `trace_commons`, `outbound` |
+| [`domains/`](./domains/AGENTS.md) | 15 | `threads`, `conversations`, `triggers`, `memory`, `skills`, `auth`, `attachments`, `extractors`, `identity`, `llm`, `trace_commons`, `web_app`, `notifications`, `outbound`, `telemetry` |
 | [`kernel/`](./kernel/AGENTS.md) | 9 | `trust`, `authorization`, `approvals`, `resources`, `runtime_policy`, `capabilities`, `processes`, `turns`, `host_runtime` |
 | [`lanes/`](./lanes/AGENTS.md) | 4 | `wasm`, `wasm_limiter`, `mcp`, `sandbox` |
 | [`loop/`](./loop/AGENTS.md) | 4 | `agent_loop`, `loop_host`, `turn_runner`, `hooks` |
@@ -68,9 +68,9 @@ crate between families is never a rename. The exceptions are
 
 ### Extension packages
 
-`crates/extensions/packages/` holds 14 self-contained package directories —
-the only place in the workspace where vendor names may appear. Four are
-workspace crates: `slack` and `telegram` (channel adapters),
+`crates/extensions/packages/` holds 15 self-contained package directories —
+the only place in the workspace where vendor names may appear. Five are
+workspace crates: `slack`, `telegram`, and `web-app` (channel adapters),
 `memory-native` and `mem0` (memory providers). Ten are data-only packages
 (manifest + prompts/schemas, some with prebuilt WASM): `github`, `gmail`,
 `google-calendar`, `google-docs`, `google-drive`, `google-sheets`,
@@ -79,7 +79,7 @@ directory has its own `README.md`, crate or not.
 
 ### The workspace beyond `crates/`
 
-65 of the workspace's **67 packages** live under `crates/`. The other two are
+68 of the workspace's **70 packages** live under `crates/`. The other two are
 the root package `ironclaw_integration_tests` (the in-process integration
 suite driving `tests/integration/`) and `tools/ironclaw_stress`. One package
 is deliberately excluded from the workspace: `tools/ironclaw_silk_decoder`,

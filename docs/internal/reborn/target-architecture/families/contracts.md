@@ -1,6 +1,6 @@
 # `crates/contracts/` — neutral vocabulary and ports
 
-**Layer(s):** contracts · **Crates:** 6 — `ironclaw_host_api`, `ironclaw_common`, `ironclaw_prompt_envelope`, `ironclaw_loop_contracts`, `ironclaw_extension_contracts`, `ironclaw_product_contracts` · **Security posture:** executes nothing and persists nothing, yet is the only family that may declare sealed authority constructors — a defect here can misdescribe authority but can never grant it.
+**Layer(s):** contracts · **Crates:** 7 — `ironclaw_host_api`, `ironclaw_common`, `ironclaw_prompt_envelope`, `ironclaw_loop_contracts`, `ironclaw_extension_contracts`, `ironclaw_product_contracts`, `ironclaw_telemetry_contracts` · **Security posture:** executes nothing and persists nothing, yet is the only family that may declare sealed authority constructors — a defect here can misdescribe authority but can never grant it.
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
@@ -13,12 +13,13 @@ crates/contracts/
 ├── ironclaw_prompt_envelope       untrusted-snippet envelope
 ├── ironclaw_loop_contracts        the loop-tier port set
 ├── ironclaw_extension_contracts   extension surfaces, recipes & inbound evidence
-└── ironclaw_product_contracts     ProductSurface, wire DTOs & product ports
+├── ironclaw_product_contracts     ProductSurface, wire DTOs & product ports
+└── ironclaw_telemetry_contracts  provider-neutral tenant telemetry vocabulary
 ```
 
 ## Role
 
-Contracts is the vocabulary tier: the one family every other family depends on, and which depends on nothing itself. A type earns a home here by passing a four-part test — it names a concept that crosses an authority, host, or product boundary; it is neutral with respect to vendor, runtime, storage, and deployment; it is needed by two or more consumers that must not import one another; and it carries no execution, persistence, policy engine, or workflow. Four kinds of vocabulary live here: the identity and authority primitives shared by the whole workspace (`ironclaw_host_api`, `ironclaw_common`); the untrusted-content fence every prompt-construction path wraps snippets with (`ironclaw_prompt_envelope`); and three purpose-built membranes, one per adjacent family whose authority crosses a boundary, for the loop tier, the extension surface, and the product surface (`ironclaw_loop_contracts`, `ironclaw_extension_contracts`, `ironclaw_product_contracts`). Nothing in this family runs, stores, or decides; it only names.
+Contracts is the vocabulary tier: every other family depends on it, and it has no dependencies outside the contracts family. A type earns a home here by passing a four-part test — it names a concept that crosses an authority, host, or product boundary; it is neutral with respect to vendor, runtime, storage, and deployment; it is needed by two or more consumers that must not import one another; and it carries no execution, persistence, policy engine, or workflow. Six kinds of vocabulary live here: the identity and authority primitives shared by the whole workspace (`ironclaw_host_api`, `ironclaw_common`); the untrusted-content fence every prompt-construction path wraps snippets with (`ironclaw_prompt_envelope`); and four purpose-built membranes for the loop tier, extension surface, product surface, and tenant telemetry (`ironclaw_loop_contracts`, `ironclaw_extension_contracts`, `ironclaw_product_contracts`, `ironclaw_telemetry_contracts`). Nothing in this family runs, stores, or decides; it only names.
 
 ## Boundaries — what makes this family distinct
 
@@ -47,7 +48,7 @@ Contracts is the vocabulary tier: the one family every other family depends on, 
 
 ## Dependency direction
 
-- **Depends on:** nothing, for the three foundational crates (`host_api`, `common`, `prompt_envelope`) — each is a leaf. The three port crates depend only within the family: `loop_contracts` on `host_api`, `common`, and `prompt_envelope`; `extension_contracts` on `host_api` and `common`; `product_contracts` on `host_api` and `extension_contracts` for channel-facing DTO reuse (✎ *corrected 2026-08-01 (WS2.1): `common` was listed here and in §6.1.3 but the crate has never held that edge; the enforced allowlist is the two named*).
+- **Depends on:** nothing, for the three foundational crates (`host_api`, `common`, `prompt_envelope`) — each is a leaf. The three port crates depend only within the family: `loop_contracts` on `host_api`, `common`, and `prompt_envelope`; `extension_contracts` on `host_api` and `common`; `product_contracts` on `host_api` and `extension_contracts` for channel-facing DTO reuse (✎ *corrected 2026-08-01 (WS2.1): `common` was listed here and in §6.1.3 but the crate has never held that edge; the enforced allowlist is the two named*); `telemetry_contracts` on `host_api` only; durable telemetry storage belongs to the domains crate over `ScopedFilesystem`.
 - **Never depends on:** any crate outside this family; no HTTP framework, no database client, no WASM runtime.
 - **Depended on by:** every other family — substrate, events, domains, kernel, lanes, loop, extensions, product, and app all resolve to contracts somewhere in their dependency graph. No other family has that property; it is the definition of "leaf tier."
 - **Inversions:** every privileged port in this family is defined low and implemented high. `CapabilityDispatcher` is satisfied by the kernel's dispatch authority; `ChannelAdapter` and `ToolAdapter` are satisfied by extension packages; `ProductSurface` and its companion ports are satisfied by product, operator, the extension host, the extension manager, and composition; the `Loop*Port` set is satisfied by the loop-hosting tier. A port belongs here exactly when the lower layer must invoke behavior whose implementation cannot live below the caller — anything that fails that test is not a port, it is an unnecessary indirection, and has no place in this family.
@@ -161,6 +162,16 @@ Contracts holds the sealed constructors for the `Authorized` witness, the privil
 - **Never depends on:** product, operator, the extension host, or any transport crate.
 - **Security & authority role:** the compile-time enforcement of "a transport consumes DTOs and descriptors, never an implementation" — the discipline that keeps webui, the OpenAI-compatible adapter, and every channel package from reaching into product's internals.
 - **Why a separate crate:** operator's ports and DTOs belong beside operator, not inside product; a channel package's delivery-resolution needs belong beside the channel, not inside product. Declaring all of it here, once, removes every reason for a transport or an operator surface to depend on product's full implementation just to see its own port.
+
+### `ironclaw_telemetry_contracts`
+
+- **Purpose:** provider-neutral tenant BI telemetry vocabulary and the recorder membrane.
+- **Owns:** typed tenant/user identity references, bounded model-safe observation dimensions, and the synchronous recorder port used by telemetry producers. The contract crate contains only vocabulary; recorder implementations remain in the telemetry domain.
+- **Never contains:** SQL, migrations, queues, aggregation, exporters, prompt/content payloads, runtime orchestration, or concrete database/framework types.
+- **Public surface:** telemetry observation and recorder shapes, with identity vocabulary imported from `ironclaw_host_api`.
+- **Depends on:** `ironclaw_host_api` only; no storage, HTTP, runtime, or framework dependency.
+- **Security & authority role:** neutral contract membrane; it grants no persistence or execution authority.
+- **Why a separate crate:** telemetry producers and persistence/export adapters need a shared contract without importing one another or a storage owner.
 
 ## Family AGENTS.md requirements
 

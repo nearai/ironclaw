@@ -130,6 +130,8 @@ mod trigger_materializer;
 mod user_profile;
 
 #[cfg(feature = "test-support")]
+pub use crate::factory::test_support::open_standalone_telemetry_repository_for_test;
+#[cfg(feature = "test-support")]
 pub use automation::{
     rebind_standalone_trigger_source_turn_state_for_test,
     standalone_automation_product_service_for_test, standalone_trigger_active_run_lookup_for_test,

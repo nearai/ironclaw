@@ -1,11 +1,11 @@
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimManualFireRequest,
-    ClaimedTriggerFire, ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
-    FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
-    trigger_run_history_status_text,
+    ClaimedTriggerFire, ClearActiveFireRequest, ClearedActiveFire, FireAcceptedRequest,
+    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
+    FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 // arch-exempt: large_file, cancellation-safe transactions stay with trigger backend, plan #6815
 use crate::AutomationName;
@@ -1351,7 +1351,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
     async fn clear_active_fire(
         &self,
         request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         let conn = self.write_connection().await?;
         let transaction = begin_immediate(&conn, "begin clear active trigger fire").await?;
         let clear_result = async {
@@ -1368,14 +1368,14 @@ impl TriggerRepository for LibSqlTriggerRepository {
             }
             // silent-ok: this run-history read can miss only on recovery; the
             // single-active-fire invariant keeps the active claim row reachable.
-            let source = fetch_run_source(
+            let settled_source = fetch_run_source(
                 &transaction,
                 &request.tenant_id,
                 request.trigger_id,
                 request.fire_slot,
             )
-            .await?
-            .unwrap_or(TriggerSourceKind::Schedule);
+            .await?;
+            let source = settled_source.unwrap_or(TriggerSourceKind::Schedule);
             // Manual completion must not consume a once trigger or alter cadence.
             let next_slot = if source == TriggerSourceKind::Schedule {
                 current.schedule.next_slot_after(request.fire_slot)?
@@ -1427,13 +1427,16 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 Utc::now(),
             )
             .await?;
-            Ok(Some(record))
+            Ok(Some(ClearedActiveFire {
+                record,
+                source: settled_source,
+            }))
         }
         .await;
         match clear_result {
-            Ok(Some(record)) => {
+            Ok(Some(cleared)) => {
                 commit(transaction, "commit clear active trigger fire").await?;
-                Ok(Some(record))
+                Ok(Some(cleared))
             }
             Ok(None) => {
                 rollback(transaction, "roll back missed clear active trigger fire").await?;

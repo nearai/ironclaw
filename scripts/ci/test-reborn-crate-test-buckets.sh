@@ -22,14 +22,16 @@ packages='[
   "ironclaw_trace_commons",
   "ironclaw_slack_extension",
   "ironclaw_telegram_extension",
-  "ironclaw_triggers"
+  "ironclaw_triggers",
+  "ironclaw_telemetry_contracts",
+  "ironclaw_telemetry"
 ]'
 
 actual="$("${bucket_script}" "${packages}")"
 expected='[
   {"name":"channel-adapters","packages":["ironclaw_host_ingress","ironclaw_slack_extension","ironclaw_telegram_extension"]},
   {"name":"extension-operator","packages":["ironclaw_extension_host","ironclaw_extension_manager","ironclaw_extension_registry","ironclaw_operator"]},
-  {"name":"architecture-misc","packages":["ironclaw_architecture_tests","ironclaw_common","ironclaw_future_adapter","ironclaw_libsql_runtime","ironclaw_trace_commons","ironclaw_triggers"]}
+  {"name":"architecture-misc","packages":["ironclaw_architecture_tests","ironclaw_common","ironclaw_future_adapter","ironclaw_libsql_runtime","ironclaw_trace_commons","ironclaw_triggers","ironclaw_telemetry_contracts","ironclaw_telemetry"]}
 ]'
 
 if ! jq -e --argjson expected "${expected}" '. == $expected' <<< "${actual}" >/dev/null; then

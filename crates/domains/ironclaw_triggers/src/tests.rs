@@ -1033,9 +1033,9 @@ async fn fire_once_trigger_completes_after_clear_active_fire() {
         .await
         .expect("clear_active_fire succeeds")
         .expect("record returned");
-    assert_eq!(cleared.state, TriggerState::Completed);
-    assert_eq!(cleared.active_fire_slot, None);
-    assert_eq!(cleared.active_run_ref, None);
+    assert_eq!(cleared.record.state, TriggerState::Completed);
+    assert_eq!(cleared.record.active_fire_slot, None);
+    assert_eq!(cleared.record.active_run_ref, None);
 
     // Persisted record must also be Completed.
     let persisted = repo
@@ -1107,9 +1107,9 @@ async fn recurring_trigger_reschedules_after_clear_active_fire() {
         .expect("record returned");
 
     // Recurring triggers must stay Scheduled so the next slot can fire.
-    assert_eq!(cleared.state, TriggerState::Scheduled);
-    assert_eq!(cleared.active_fire_slot, None);
-    assert_eq!(cleared.active_run_ref, None);
+    assert_eq!(cleared.record.state, TriggerState::Scheduled);
+    assert_eq!(cleared.record.active_fire_slot, None);
+    assert_eq!(cleared.record.active_run_ref, None);
 }
 
 #[test]
@@ -1359,7 +1359,7 @@ async fn exhausted_finite_cron_transitions_to_completed_on_clear_active_fire() {
         .expect("record returned");
 
     assert_eq!(
-        cleared.state,
+        cleared.record.state,
         TriggerState::Completed,
         "exhausted schedule must transition to Completed"
     );

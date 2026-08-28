@@ -1,7 +1,7 @@
 
 # `crates/domains/` — typed record/service domains
 
-**Layer(s):** substrates · **Crates:** 14 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_identity, ironclaw_llm, ironclaw_trace_commons, ironclaw_web_app, ironclaw_notifications, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint trust narrowly (outbound — sealed constructors; triggers — ratchet-pinned minting), and one is a credential-custody domain (auth).
+**Layer(s):** substrates · **Crates:** 15 — ironclaw_threads, ironclaw_conversations, ironclaw_triggers, ironclaw_memory, ironclaw_skills, ironclaw_auth, ironclaw_attachments, ironclaw_extractors, ironclaw_identity, ironclaw_llm, ironclaw_trace_commons, ironclaw_web_app, ironclaw_notifications, ironclaw_telemetry, ironclaw_outbound · **Security posture:** typed record and service authorities behind the kernel — record grammar and invariants only, never an authorization, approval, or resource decision; two crates mint trust narrowly (outbound — sealed constructors; triggers — ratchet-pinned minting), and one is a credential-custody domain (auth).
 
 *This document specifies the target architecture as designed. Dispositions, migration constraints, evidence, and open decisions live in [PROPOSAL.md](../PROPOSAL.md), [CHECKLIST.md](../CHECKLIST.md), and [PLAN.md](../PLAN.md).*
 
@@ -20,6 +20,7 @@ crates/domains/
 ├── ironclaw_trace_commons    Trace Commons client & redaction
 ├── ironclaw_web_app          Web Push records, encryption & request planning
 ├── ironclaw_notifications    durable metadata-only user notification inbox
+├── ironclaw_telemetry        tenant BI telemetry aggregation over ScopedFilesystem
 └── ironclaw_outbound         outbound authority: sealed grants, at-most-once
 ```
 
@@ -48,7 +49,7 @@ The family favors narrow, single-purpose crates over shared infrastructure. Most
 - **Never belongs — authority decisions:** authorization, approval, and resource-reservation decisions stay in the kernel family.
 - **Never belongs — transport and framework code:** no domains crate touches Axum; HTTP appears only inside the narrow egress needs of the vendor-scoped and external-service charters.
 - **Never belongs — vendor names or vendor branches**, outside `ironclaw_llm` and `ironclaw_auth`.
-- **Persistence idiom:** `ScopedFilesystem` is the floor. Every domains crate is backend-neutral by construction, depending only on the filesystem substrate's virtual-path, mount, and compare-and-swap authority — never a database driver directly. A crate that instead needs a hand-written SQL backend is a deliberate, narrow design choice that must be justified by an ADR; `ironclaw_triggers` is the one domain crate built this way, alongside `ironclaw_hooks` in the loop family. **Both ADRs are written and both decided KEEP (2026-08-04): [`docs/internal/adr/0003-triggers-keeps-hand-written-sql.md`](../../../adr/0003-triggers-keeps-hand-written-sql.md) and [`docs/internal/adr/0004-hooks-keeps-its-predicate-state-backends.md`](../../../adr/0004-hooks-keeps-its-predicate-state-backends.md).** They are exceptions for different reasons and should not be cited as one precedent: triggers' claim/lease semantics are not expressible on the fabric *and* both its backends ship by profile, whereas hooks' backends are complete but **unwired** (composition hard-codes the in-memory one) and are kept as staged work against multi-host counters. A third crate wanting this exception needs its own ADR clearing the same bar, not a reference to these. Such a crate still does not get its own connections: it owns its SQL and its transactions, and takes admission from the substrate runtime that owns the pool, so its writes queue on the same lane as every other writer to that database.
+- **Persistence idiom:** `ScopedFilesystem` is the floor. Every domains crate is backend-neutral by construction, depending only on the filesystem substrate's virtual-path, mount, and compare-and-swap authority — never a database driver directly. A crate that instead needs a hand-written SQL backend is a deliberate, narrow design choice that must be justified by an ADR; `ironclaw_triggers` is the domain-family exception, alongside `ironclaw_hooks` in the loop family. Tenant telemetry uses a typed scoped-filesystem repository below `/tenant-shared/telemetry/v0`, with tenant-leading ordered projections and bounded half-open reads. SQL exceptions still take existing connection admission only: they own their SQL and transactions but never create a second pool or connection plane.
 
 ## Dependency direction
 
@@ -60,7 +61,7 @@ Domains crates depend only on `substrates/`, `events/`, and `contracts/` — nev
 
 HTTP and vendor SDKs are permitted only inside `ironclaw_llm`, `ironclaw_trace_commons`, and `ironclaw_auth`'s engine — the family's three named vendor and external-service cones. No other domains crate reaches HTTP directly.
 
-Inside the family, dependency edges are shallow and few: `ironclaw_conversations` depends on `ironclaw_triggers` for trusted-submission binding vocabulary; `ironclaw_attachments` depends on `ironclaw_extractors` for pure bytes-to-text transformation; `ironclaw_trace_commons` depends on `ironclaw_llm` to reuse its recording vocabulary. No other crate in the family depends on a sibling — the family's internal graph is a shallow forest, not a mesh.
+Inside the family, dependency edges are shallow and few: `ironclaw_conversations` depends on `ironclaw_triggers` for trusted-submission binding vocabulary; `ironclaw_attachments` depends on `ironclaw_extractors` for pure bytes-to-text transformation; `ironclaw_trace_commons` depends on `ironclaw_llm` to reuse its recording vocabulary. `ironclaw_telemetry` depends on the contracts-family telemetry membrane and `ironclaw_filesystem`, not on another domains crate. No other crate in the family depends on a sibling — the family's internal graph is a shallow forest, not a mesh.
 
 > ✎ **Corrected 2026-08-02 (Wave 2 truth audit) — there is a fourth edge, and Wave 2 created it.** Prior text, quoted: *"No other crate in the family depends on a sibling — the family's internal graph is a shallow forest, not a mesh."* `ironclaw_attachments` now depends on `ironclaw_threads` (`attachments/src/ports.rs:23`, `src/project_scoped.rs:24`, for `ThreadScope`), acquired with the WS5 attachments widening. It is a legal downward-within-layer edge and the forest is still a forest — four edges, no cycles — but the sentence claimed an exhaustive list and is now short by one. The `attachments` entry's own **Depends on** line below carries the same omission plus a second one, and is corrected there.
 
@@ -273,6 +274,16 @@ Memory *providers* are not domains crates. Each provider — the bundled native 
 - **Never depends on:** anything in kernel/; HTTP is permitted here specifically for Trace Commons submission.
 - **Security & authority role:** the family's security-critical redaction obligation — deterministic redaction of sensitive content before external submission is this crate's central promise.
 - **Why a separate crate:** a distinct external-service domain with a redaction obligation serious enough to warrant its own reviewable boundary, and an HTTP cone isolated from every other crate's build.
+
+### `ironclaw_telemetry`
+
+- **Purpose:** tenant BI telemetry domain for model-safe observations, typed hourly facts, and bounded export.
+- **Owns:** the telemetry record grammar, aggregation, and a typed `FilesystemTelemetryRepository` over `ScopedFilesystem` below `/tenant-shared/telemetry/v0`. Ordered projections lead with tenant identity and reads use bounded half-open UTC ranges with keyset cursors.
+- **Never contains:** authorization, approval, ProductSurface, WebUI, producers, or a second connection plane; no prompt/content payloads are persisted.
+- **Public surface:** typed recorder and bounded query contracts; no backend-specific types.
+- **Depends on:** `ironclaw_telemetry_contracts` and `ironclaw_filesystem`. Composition selects the concrete root filesystem and provides the scoped mount. It does not depend on a database driver, product, composition, or another domains crate.
+- **Security & authority role:** domain ownership for tenant-scoped, model-safe retention; tenant identity and time bounds are invariants, not authorization decisions.
+- **Why a separate crate:** tenant telemetry has independent retention, aggregation, and bounded export semantics while sharing only provider-neutral observations with its producers. The filesystem repository keeps that grammar out of both the generic substrate and the producer membrane.
 
 ### `ironclaw_outbound`
 

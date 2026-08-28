@@ -259,7 +259,7 @@ impl TriggerRepository for FailingThreadLookupRepository {
     async fn clear_active_fire(
         &self,
         _: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ironclaw_triggers::ClearedActiveFire>, TriggerError> {
         Err(TriggerError::Backend {
             reason: "stub".to_string(),
         })

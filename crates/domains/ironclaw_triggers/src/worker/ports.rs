@@ -5,12 +5,13 @@ use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_host_api::{
     Timestamp,
     ids::{TenantId, ThreadId},
+    resource::ResourceScope,
 };
 
 use super::report::TriggerPollerFailureReason;
 use crate::{
-    TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt, TriggerRecord,
-    TriggerRunHistoryStatus,
+    TriggerAutomationKind, TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt,
+    TriggerRecord, TriggerRunHistoryStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,16 +137,27 @@ pub struct TriggerFailedFireSettlement {
     pub reason: TriggerPollerFailureReason,
 }
 
-/// A previously-accepted fire whose run reached a terminal *failure* state
-/// observed by the active-cleanup sweep. Carries enough identity to let an
-/// observer correlate it back to the originating fire for automation-health
-/// telemetry without re-deriving it from display strings.
+/// Terminal outcome of a trigger-owned run, preserving the process lifecycle
+/// contract at the trigger settlement boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerTerminalOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+    RecoveryRequired,
+}
+
+/// A previously-accepted fire whose run reached a terminal state observed by
+/// the active-cleanup sweep. This is emitted only after both durable history
+/// settlement and active-fire clearing have succeeded.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TriggerRunFailureSettlement {
-    pub tenant_id: TenantId,
+pub struct TriggerRunTerminalSettlement {
+    pub scope: ResourceScope,
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub run_id: TurnRunId,
+    pub automation_kind: TriggerAutomationKind,
+    pub outcome: TriggerTerminalOutcome,
 }
 
 #[async_trait]
@@ -153,23 +165,24 @@ pub trait TriggerFireSettlementObserver: Send + Sync {
     /// The worker invokes these hooks **inline** while processing poller
     /// work: `on_accepted_fire_settled` from the per-fire submit path,
     /// `on_failed_fire_settled` from the claim-time failure path, and
-    /// `on_run_failure_settled` from the active-cleanup sweep. Implementors
+    /// `on_run_terminal_settled` from the active-cleanup sweep. Implementors
     /// MUST be cheap and non-blocking; any heavy work (delivery, telemetry
     /// egress) must be detached internally (for example a bounded spawn, as
-    /// the composition `PostSubmitHookObserver` does for accepted-fire
-    /// delivery) rather than awaited through this call.
+    /// the composition `TriggerSettlementObserver` does for accepted-fire
+    /// delivery and terminal-settlement telemetry) rather than awaited through
+    /// this call.
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement);
 
     async fn on_failed_fire_settled(&self, _event: TriggerFailedFireSettlement) {}
 
-    /// A previously-accepted fire settled into a terminal failure state.
+    /// A previously-accepted fire settled into any terminal state.
     ///
     /// Implementors must handle this explicitly so production composition
     /// cannot silently discard the automation-health signal. The callback is
     /// strictly observational — it must not mint runs or mutate trigger state.
     /// Invoked inline from the active-cleanup sweep; see the trait contract
     /// above: keep this implementation cheap and non-blocking.
-    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement);
+    async fn on_run_terminal_settled(&self, event: TriggerRunTerminalSettlement);
 }
 
 #[derive(Debug, Default)]
@@ -179,7 +192,7 @@ pub struct NoopTriggerFireSettlementObserver;
 impl TriggerFireSettlementObserver for NoopTriggerFireSettlementObserver {
     async fn on_accepted_fire_settled(&self, _event: TriggerAcceptedFireSettlement) {}
 
-    async fn on_run_failure_settled(&self, _event: TriggerRunFailureSettlement) {}
+    async fn on_run_terminal_settled(&self, _event: TriggerRunTerminalSettlement) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +218,7 @@ pub enum TriggerActiveRunState {
     },
     Terminal {
         status: TriggerRunHistoryStatus,
+        outcome: TriggerTerminalOutcome,
     },
 }
 
@@ -502,6 +516,7 @@ mod tests {
                 &record,
                 Some(TriggerActiveRunState::Terminal {
                     status: TriggerRunHistoryStatus::Ok,
+                    outcome: TriggerTerminalOutcome::Completed,
                 }),
                 now,
             )

@@ -18,7 +18,7 @@ It does **not** own a parallel agent loop, channel-adapter lifecycles, or outbou
 
 | Component | Owns | Does not own |
 | --- | --- | --- |
-| `TriggerRecord` / `TriggerRepository` | Trigger definitions, schedule state, eligibility state, run summary fields, PostgreSQL/libSQL persistence | Turn execution, reply delivery, product payload parsing |
+| `TriggerRecord` / `TriggerRepository` | Trigger definitions, schedule state, eligibility state, run summary fields, scoped trigger persistence | Turn execution, reply delivery, product payload parsing |
 | `TriggerSourceProvider` | Determining whether a stored trigger should fire and computing the canonical fire slot | Turn submission, binding internals, delivery resolution |
 | `TriggerFire` / `TriggerFireIdentity` | Normalized fire output and deterministic identity for a scheduled slot | Notification targets, reply routing policy, ad hoc retries |
 | `TriggerPollerWorker` | Polling eligible triggers and submitting due fires | Alternate execution loops, hidden queues, outbound send logic |
@@ -188,9 +188,10 @@ Pre-submit permanent failures are handled separately by the worker: `Once`
 triggers complete on failure so the one-shot slot is retired, while exhausted
 Cron triggers stay `Scheduled`/retryable for manual investigation or removal.
 After that state transition is durably visible, the settlement observer emits
-a typed failed-fire event. Composition may hand that event to the ordinary
-outbound notification policy, but the poller never sends a message itself and
-no synthetic run or thread-history row is created.
+a typed terminal-settlement event for both successful and failed terminal
+runs. Composition may hand that event to telemetry or the ordinary outbound
+notification policy, but the poller never sends a message itself and no
+synthetic run or thread-history row is created.
 
 Run threads for completed triggers remain accessible by design; their history is
 retained user data and must not become unreachable when the trigger transitions
@@ -527,12 +528,20 @@ and submit-result bookkeeping:
   `TriggerRepository::clear_active_fire` clears only the exact matching
   `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
   has observed a terminal turn outcome;
-- after an accepted run is durably cleared with `TriggerRunHistoryStatus::Error`,
-  `TriggerFireSettlementObserver::on_run_failure_settled` receives the exact
-  tenant, trigger, fire-slot, and run identities. Successful terminal runs and
-  clear races do not emit this failure settlement. The observer is an
-  automation-health signal only; it does not mint a replacement turn or bypass
-  the normal triggered-run delivery watcher.
+- after trigger history and active-fire clearing are durably committed,
+  `TriggerFireSettlementObserver::on_run_terminal_settled` receives one
+  `TriggerRunTerminalSettlement` for every terminal outcome. The event carries
+  the trusted creator scope, trigger/fire/run identities, trigger-owned
+  automation kind, and a closed `TriggerTerminalOutcome`:
+  `Completed` or `Stopped` → `Completed`; `Failed` or `Killed` → `Failed`;
+  `Cancelled` → `Cancelled`; and `RecoveryRequired` → `RecoveryRequired`. The
+  event is emitted exactly once by `active_cleanup`,
+  only after trigger history and active-fire clearing are durable.
+- telemetry handling is best-effort. `telemetry failure never changes trigger settlement`,
+  including when a recorder fails or its queue is full/closed; its history
+  status and the product run result are unchanged.
+  The observer is an automation-health signal only; it does not mint a
+  replacement turn or bypass the normal triggered-run delivery watcher.
 
 The poller treats per-record due-fire processing and active-run terminal lookup
 errors as structured tick report outcomes so one bad record does not block other

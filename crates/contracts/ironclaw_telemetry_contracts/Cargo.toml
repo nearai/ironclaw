@@ -1,0 +1,26 @@
+[package]
+name = "ironclaw_telemetry_contracts"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Provider-neutral tenant telemetry observation and recorder contracts"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "contracts"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

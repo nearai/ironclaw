@@ -1,0 +1,35 @@
+[package]
+name = "ironclaw_telemetry"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Tenant-scoped BI telemetry aggregation and persistence domain"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "substrates"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_host_api = { path = "../../contracts/ironclaw_host_api", version = "0.1.0" }
+ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem", version = "0.1.0" }
+ironclaw_telemetry_contracts = { path = "../../contracts/ironclaw_telemetry_contracts", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+ironclaw_libsql_runtime = { path = "../../substrates/ironclaw_libsql_runtime", version = "0.1.0" }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
+
+[lints]
+workspace = true

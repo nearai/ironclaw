@@ -2951,9 +2951,9 @@ mod fire_claim_contract {
             .await
             .expect("clear active fire")
             .expect("active fire should clear");
-        assert_eq!(cleared.active_fire_slot, None);
-        assert_eq!(cleared.active_run_ref, None);
-        assert_eq!(cleared.state, TriggerState::Scheduled);
+        assert_eq!(cleared.record.active_fire_slot, None);
+        assert_eq!(cleared.record.active_run_ref, None);
+        assert_eq!(cleared.record.state, TriggerState::Scheduled);
 
         let persisted = repo
             .get_trigger(tenant_id, trigger_id)
@@ -3003,10 +3003,10 @@ mod fire_claim_contract {
             .await
             .expect("clear paused active fire")
             .expect("paused active fire should clear");
-        assert_eq!(cleared_paused.active_fire_slot, None);
-        assert_eq!(cleared_paused.active_run_ref, None);
+        assert_eq!(cleared_paused.record.active_fire_slot, None);
+        assert_eq!(cleared_paused.record.active_run_ref, None);
         assert_eq!(
-            cleared_paused.state,
+            cleared_paused.record.state,
             TriggerState::Paused,
             "clear_active_fire must preserve a user pause applied while the fire was active"
         );
@@ -3050,12 +3050,12 @@ mod fire_claim_contract {
             .expect("clear fire-once active fire")
             .expect("fire-once active fire should clear");
         assert_eq!(
-            cleared_fire_once.state,
+            cleared_fire_once.record.state,
             TriggerState::Completed,
             "clear_active_fire must transition a CompleteAfterFirstFire trigger to Completed"
         );
-        assert_eq!(cleared_fire_once.active_fire_slot, None);
-        assert_eq!(cleared_fire_once.active_run_ref, None);
+        assert_eq!(cleared_fire_once.record.active_fire_slot, None);
+        assert_eq!(cleared_fire_once.record.active_run_ref, None);
 
         let persisted_fire_once = repo
             .get_trigger(fire_once_tenant_id, fire_once_trigger_id)
@@ -4016,7 +4016,7 @@ mod fire_claim_contract {
                 .await
                 .expect("clear retention fire")
                 .expect("active fire should clear");
-            fire_slot = cleared.next_run_at;
+            fire_slot = cleared.record.next_run_at;
         }
 
         let retained = repo
@@ -5011,7 +5011,7 @@ mod manual_fire_claim_contract {
             .await
             .expect("clear manual fire")
             .expect("manual fire clears");
-        assert_eq!(cleared.next_run_at, scheduled_next_run_at);
+        assert_eq!(cleared.record.next_run_at, scheduled_next_run_at);
         let history = repo
             .list_trigger_run_history(tenant_id.clone(), trigger_id, 10)
             .await
@@ -5125,8 +5125,8 @@ mod manual_fire_claim_contract {
             .await
             .expect("clear one-shot manual fire")
             .expect("one-shot manual fire clears");
-        assert_eq!(once_cleared.state, TriggerState::Scheduled);
-        assert_eq!(once_cleared.next_run_at, scheduled_next_run_at);
+        assert_eq!(once_cleared.record.state, TriggerState::Scheduled);
+        assert_eq!(once_cleared.record.next_run_at, scheduled_next_run_at);
 
         let terminal_id = TriggerId::parse("01J000000000000000000000M8").expect("ulid");
         let mut terminal_once =
@@ -5760,7 +5760,7 @@ async fn libsql_once_trigger_completes_on_clear_active_fire() {
         .expect("record returned");
 
     assert_eq!(
-        cleared.state,
+        cleared.record.state,
         TriggerState::Completed,
         "once trigger must transition to Completed after clear_active_fire"
     );

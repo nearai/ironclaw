@@ -4044,6 +4044,8 @@ dependencies = [
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_slack_extension",
+ "ironclaw_telemetry",
+ "ironclaw_telemetry_contracts",
  "ironclaw_threads",
  "ironclaw_trace_commons",
  "ironclaw_triggers",
@@ -4640,6 +4642,8 @@ dependencies = [
  "ironclaw_slack_extension",
  "ironclaw_stress",
  "ironclaw_telegram_extension",
+ "ironclaw_telemetry",
+ "ironclaw_telemetry_contracts",
  "ironclaw_threads",
  "ironclaw_trace_commons",
  "ironclaw_triggers",
@@ -5255,6 +5259,36 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "ironclaw_telemetry"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_libsql_runtime",
+ "ironclaw_telemetry_contracts",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_telemetry_contracts"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

@@ -103,6 +103,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_telegram_extension: "channel-adapters",
 
       ironclaw_extension_contracts: "extension-operator",
+      ironclaw_telemetry_contracts: "architecture-misc",
       ironclaw_extension_host: "extension-operator",
       ironclaw_extension_manager: "extension-operator",
       ironclaw_extension_registry: "extension-operator",
@@ -112,7 +113,8 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_common: "architecture-misc",
       ironclaw_libsql_runtime: "architecture-misc",
       ironclaw_trace_commons: "architecture-misc",
-      ironclaw_triggers: "architecture-misc"
+      ironclaw_triggers: "architecture-misc",
+      ironclaw_telemetry: "architecture-misc"
     };
 
   bucket_map as $bucket_map

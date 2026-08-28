@@ -182,6 +182,13 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         owner: "contracts/",
         decided_in: "WS1",
     },
+    SameLayerEdge {
+        crate_name: "ironclaw_telemetry_contracts",
+        dependency_name: "ironclaw_host_api",
+        layer: "contracts",
+        owner: "contracts/",
+        decided_in: "WS6 (tenant BI telemetry foundation)",
+    },
     // ---- kernel ----
     SameLayerEdge {
         crate_name: "ironclaw_approvals",
@@ -661,6 +668,13 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
         owner: "domains/",
         decided_in: "WS6",
     },
+    SameLayerEdge {
+        crate_name: "ironclaw_telemetry",
+        dependency_name: "ironclaw_filesystem",
+        layer: "substrates",
+        owner: "domains/",
+        decided_in: "tenant BI telemetry foundation (scoped filesystem placement)",
+    },
     // The trusted-trigger prompt scan moved *behind* the seam: it now runs in
     // `TrustedTriggerSubmitRequest::new`, so "this prompt passed the scan" is
     // an invariant of the sealed type rather than a step one submitter
@@ -750,7 +764,11 @@ const SAME_LAYER_EDGE_INVENTORY: &[SameLayerEdge] = &[
 // 72 -> 73 (#7688): the dedicated notification-record domain is introduced
 // directly at the substrates layer and stores its grammar through the shared
 // filesystem substrate rather than coupling notification state to outbound.
-const SAME_LAYER_EDGE_BASELINE: usize = 73;
+// 73 -> 75 (tenant BI telemetry foundation): the neutral telemetry contract
+// consumes host identity vocabulary, and the domain consumes the shared
+// filesystem substrate for scoped persistence. Both are deliberate same-layer
+// edges; neither is a layer-matrix exception.
+const SAME_LAYER_EDGE_BASELINE: usize = 75;
 
 /// Sanity floors for the metadata walk. A gate that scans nothing must never
 /// read as success; these are deliberately far below the live values (✎ **65**
@@ -846,6 +864,8 @@ const CRATE_LAYER_ORIGINS: &[(&str, &str)] = &[
     ("ironclaw_stress", "app"),
     ("ironclaw_telegram_extension", "products"),
     ("ironclaw_threads", "substrates"),
+    ("ironclaw_telemetry", "substrates"),
+    ("ironclaw_telemetry_contracts", "contracts"),
     ("ironclaw_triggers", "substrates"),
     ("ironclaw_web_app", "substrates"),
     ("ironclaw_web_app_extension", "products"),

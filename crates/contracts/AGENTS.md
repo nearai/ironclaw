@@ -1,6 +1,6 @@
 # `crates/contracts/` — neutral vocabulary and ports; nothing here runs, stores, or decides
 
-**Layer(s):** `contracts` (all 6 crates) · **Crates:** 6 · **May depend on:** nothing outside this family — the three foundational crates hold zero internal deps; the three port crates hold only the intra-family edges named below · **Depended on by:** every other family (re-derive the fan-in with `grep -rl '^ironclaw_host_api = ' --include=Cargo.toml crates tests Cargo.toml | wc -l`).
+**Layer(s):** `contracts` (all 7 crates) · **Crates:** 7 · **May depend on:** nothing outside this family — the four foundational crates hold zero or one foundational internal dep; the three existing port crates hold only the intra-family edges named below, and telemetry contracts holds only its host identity edge · **Depended on by:** every other family (re-derive the fan-in with `grep -rl '^ironclaw_host_api = ' --include=Cargo.toml crates tests Cargo.toml | wc -l`).
 
 ## What this family is
 
@@ -28,6 +28,7 @@ same rule from the trait side).
 | [`ironclaw_loop_contracts`](./ironclaw_loop_contracts) | The loop-tier port set: the `Loop*Port` family, `AgentLoopDriver`, run-profile vocabulary, and the `LoopExit` claim | a loop, hook, or host adapter must talk to the turn kernel without importing it |
 | [`ironclaw_extension_contracts`](./ironclaw_extension_contracts) | What an installable extension *is and exposes*: `ChannelAdapter`/`ToolAdapter`, manifest surfaces, auth recipes, lifecycle states, sealed verified-inbound evidence | lanes, hosts, packages, and product must share extension vocabulary without importing the registry |
 | [`ironclaw_product_contracts`](./ironclaw_product_contracts) | The `ProductSurface` membrane, product wire DTOs, and the product-side ports whose implementors sit beside or below product | a transport or collaborator must speak the product boundary without compiling `ironclaw_assistant` |
+| [`ironclaw_telemetry_contracts`](./ironclaw_telemetry_contracts) | Provider-neutral tenant telemetry observations and the synchronous recorder port | canonical producers and the domain-owned buffered recorder must share bounded observation vocabulary without importing persistence |
 
 ## What never belongs here
 
@@ -79,6 +80,7 @@ All gates live in `crates/app/ironclaw_architecture_tests` (run:
   `ironclaw_host_api` — zero workspace deps, asserted against every other
   crate; `ironclaw_extension_contracts` — `{host_api}`;
   `ironclaw_product_contracts` — `{host_api, extension_contracts}`;
+  `ironclaw_telemetry_contracts` — `{host_api}`;
   `ironclaw_loop_contracts` — `{host_api, common, prompt_envelope,
   extension_contracts}` (the manifest today uses `host_api` +
   `extension_contracts`). `ironclaw_common` and `ironclaw_prompt_envelope`
@@ -87,17 +89,17 @@ All gates live in `crates/app/ironclaw_architecture_tests` (run:
 - **Framework/driver deny**
   (`reborn_contracts_crates_hold_no_framework_dependencies`): no
   axum/hyper/tower/reqwest/tonic, no libsql/rusqlite/sqlx/tokio-postgres/
-  deadpool, no wasmtime — across all six crates. The one carve-out is
+  deadpool, no wasmtime — across every contracts crate. The one carve-out is
   `ironclaw_loop_contracts`' `tokio` with the `rt` feature only, documented in
   its manifest and pinned in the test.
 - **Size ceilings** (`reborn_contracts_crates_carry_a_checked_size_ceiling`):
   each crate carries a production-line ceiling raised only by explicit review,
   bounded below so banked slack fails too — the allowlist cannot see a crate
   that imports nothing and implements everything; this can.
-- **Same-layer edges** (`reborn_same_layer_edge_inventory.rs`): exactly five
-  intra-family edges are pinned with owners — `extension_contracts →
-  host_api`, `loop_contracts → {host_api, extension_contracts}`,
-  `product_contracts → {host_api, extension_contracts}`. A new one fails.
+- **Same-layer edges** (`reborn_same_layer_edge_inventory.rs`): the
+  intra-family edges are pinned with owners — the existing extension, loop,
+  and product contract edges plus `telemetry_contracts → host_api`. A new one
+  fails.
 - **Port location, one import path**
   (`reborn_loop_port_location_scan.rs`,
   `reborn_extension_contract_location_scan.rs`,

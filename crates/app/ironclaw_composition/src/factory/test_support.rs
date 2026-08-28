@@ -850,6 +850,25 @@ pub(crate) async fn open_standalone_root_filesystem_for_test(
     Ok(bundle.filesystem)
 }
 
+/// Test-only (tenant telemetry durability seam): open a fresh typed telemetry
+/// repository over the production standalone database mounts. The repository
+/// exposes only scoped telemetry reads; the database/root handles remain
+/// composition-owned and are never returned to the caller.
+#[cfg(feature = "test-support")]
+pub async fn open_standalone_telemetry_repository_for_test(
+    storage_root: &Path,
+) -> Result<
+    Arc<ironclaw_telemetry::FilesystemTelemetryRepository<CompositeRootFilesystem>>,
+    RebornBuildError,
+> {
+    let mut composite = CompositeRootFilesystem::new();
+    mount_default_database_roots(storage_root, &mut composite).await?;
+    let scoped = crate::wrap_scoped(Arc::new(composite));
+    Ok(Arc::new(
+        ironclaw_telemetry::FilesystemTelemetryRepository::new(scoped),
+    ))
+}
+
 /// Test-only (E-DURABLE seam): open a FRESH, independent
 /// [`ExtensionInstallationStore`] at an existing standalone `storage_root`,
 /// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql

@@ -564,7 +564,7 @@ impl TriggerRepository for CasMissRepository {
     async fn clear_active_fire(
         &self,
         request: ironclaw_triggers::ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ironclaw_triggers::ClearedActiveFire>, TriggerError> {
         self.inner.clear_active_fire(request).await
     }
 

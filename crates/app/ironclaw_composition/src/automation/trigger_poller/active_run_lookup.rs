@@ -9,7 +9,7 @@ use ironclaw_processes::{
 };
 use ironclaw_triggers::{
     BlockedActiveRunKind, TriggerActiveRunLookup, TriggerActiveRunState,
-    TriggerActiveRunStateRequest, TriggerError, TriggerRunHistoryStatus,
+    TriggerActiveRunStateRequest, TriggerError, TriggerRunHistoryStatus, TriggerTerminalOutcome,
 };
 use ironclaw_turns::{TurnError, TurnRunId};
 
@@ -107,9 +107,10 @@ fn active_run_state_from_process_lifecycle(
     match result {
         ProcessLifecycleLookupResult::Missing => TriggerActiveRunState::Missing,
         ProcessLifecycleLookupResult::Found { status, suspension } => {
-            if status.is_terminal() {
+            if let Some(outcome) = terminal_process_outcome(status) {
                 TriggerActiveRunState::Terminal {
                     status: terminal_process_history_status(status),
+                    outcome,
                 }
             } else if status == ProcessLifecycleStatus::Suspended {
                 TriggerActiveRunState::Blocked {
@@ -121,6 +122,24 @@ fn active_run_state_from_process_lifecycle(
                 TriggerActiveRunState::Nonterminal
             }
         }
+    }
+}
+
+fn terminal_process_outcome(status: ProcessLifecycleStatus) -> Option<TriggerTerminalOutcome> {
+    match status {
+        ProcessLifecycleStatus::Completed | ProcessLifecycleStatus::Stopped => {
+            Some(TriggerTerminalOutcome::Completed)
+        }
+        ProcessLifecycleStatus::Failed | ProcessLifecycleStatus::Killed => {
+            Some(TriggerTerminalOutcome::Failed)
+        }
+        ProcessLifecycleStatus::Cancelled => Some(TriggerTerminalOutcome::Cancelled),
+        ProcessLifecycleStatus::RecoveryRequired => Some(TriggerTerminalOutcome::RecoveryRequired),
+        ProcessLifecycleStatus::Queued
+        | ProcessLifecycleStatus::Running
+        | ProcessLifecycleStatus::Suspended
+        | ProcessLifecycleStatus::StopRequested
+        | ProcessLifecycleStatus::CancelRequested => None,
     }
 }
 
@@ -167,7 +186,7 @@ mod tests {
     use chrono::Utc;
     use ironclaw_host_api::ids::TenantId;
     use ironclaw_processes::ProcessSuspension;
-    use ironclaw_triggers::TriggerId;
+    use ironclaw_triggers::{TriggerId, TriggerTerminalOutcome};
     use ironclaw_turns::TurnRunId;
 
     #[derive(Default)]
@@ -302,6 +321,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminal_process_statuses_preserve_terminal_outcomes() {
+        let cases = [
+            (
+                ProcessLifecycleStatus::Completed,
+                TriggerTerminalOutcome::Completed,
+            ),
+            (
+                ProcessLifecycleStatus::Stopped,
+                TriggerTerminalOutcome::Completed,
+            ),
+            (
+                ProcessLifecycleStatus::Failed,
+                TriggerTerminalOutcome::Failed,
+            ),
+            (
+                ProcessLifecycleStatus::Killed,
+                TriggerTerminalOutcome::Failed,
+            ),
+            (
+                ProcessLifecycleStatus::Cancelled,
+                TriggerTerminalOutcome::Cancelled,
+            ),
+            (
+                ProcessLifecycleStatus::RecoveryRequired,
+                TriggerTerminalOutcome::RecoveryRequired,
+            ),
+        ];
+
+        for (process_status, expected) in cases {
+            assert_eq!(terminal_process_outcome(process_status), Some(expected));
+        }
+    }
+
     #[tokio::test]
     async fn active_run_batch_lookup_uses_one_lifecycle_lookup_for_page() {
         let lifecycle_source = Arc::new(CountingLifecycleSource::default());
@@ -387,7 +440,8 @@ mod tests {
         assert!(matches!(
             results[1],
             Ok(TriggerActiveRunState::Terminal {
-                status: TriggerRunHistoryStatus::Ok
+                status: TriggerRunHistoryStatus::Ok,
+                outcome: TriggerTerminalOutcome::Completed,
             })
         ));
         assert!(matches!(results[2], Ok(TriggerActiveRunState::Missing)));

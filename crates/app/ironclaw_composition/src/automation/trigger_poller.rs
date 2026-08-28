@@ -6,14 +6,21 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_telemetry_contracts::{
+    observation::{
+        AutomationId, AutomationKind, AutomationSettledObservation, ObservationContext, RunOutcome,
+        TelemetryObservation,
+    },
+    recorder::TelemetryRecorder,
+};
 use ironclaw_triggers::{
     ScheduleTriggerSourceProvider, TriggerActiveRunLookup, TriggerError, TriggerPollerWorker,
     TriggerPollerWorkerDeps, TriggerPromptMaterializer, TriggerRepository,
     TrustedTriggerFireSubmitter,
 };
 use ironclaw_triggers::{
-    TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFireSettlementObserver,
-    TriggerRunFailureSettlement,
+    TriggerAcceptedFireSettlement, TriggerAutomationKind, TriggerFailedFireSettlement,
+    TriggerFireSettlementObserver, TriggerRunTerminalSettlement, TriggerTerminalOutcome,
 };
 use rand::RngExt;
 use tokio::task::JoinHandle;
@@ -105,6 +112,7 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     pub(crate) manual_fire_runner: Arc<LateBoundTriggerManualFireRunner>,
+    pub(crate) telemetry_recorder: Arc<dyn TelemetryRecorder>,
     /// Late-binding slot for the post-submit delivery hook.
     pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
@@ -118,9 +126,12 @@ pub(crate) fn spawn_trigger_poller(
     }
     settings.worker.validate()?;
     let cancel = CancellationToken::new();
-    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = Arc::new(
-        PostSubmitHookObserver::new(deps.post_submit_hook_slot, cancel.clone()),
-    );
+    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> =
+        Arc::new(TriggerSettlementObserver::with_telemetry_recorder(
+            deps.post_submit_hook_slot,
+            cancel.clone(),
+            deps.telemetry_recorder,
+        ));
     let trusted_submitter = deps.trusted_submitter;
     let worker = Arc::new(TriggerPollerWorker::new(
         settings.worker.clone(),
@@ -163,23 +174,27 @@ fn spawn_post_submit_delivery(hook: Arc<dyn PostSubmitDeliveryHook>, event: Trig
 }
 
 /// Bridges trigger-domain settlement notifications to the composition-owned
-/// channel delivery hook. Delivery is detached from the poller tick only after
-/// the worker has persisted either the accepted run/thread mapping or the
-/// permanent pre-submit failure.
-pub(crate) struct PostSubmitHookObserver {
+/// channel delivery hook and telemetry recorder. Delivery is detached from the
+/// poller tick only after the worker has persisted either the accepted
+/// run/thread mapping or the permanent pre-submit failure; terminal trigger
+/// outcomes are recorded as best-effort telemetry observations.
+pub(crate) struct TriggerSettlementObserver {
     pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
+    telemetry_recorder: Arc<dyn TelemetryRecorder>,
     pending: Arc<Mutex<VecDeque<TriggerFireSettlement>>>,
     drain_scheduled: Arc<AtomicBool>,
     drain_cancel: CancellationToken,
 }
 
-impl PostSubmitHookObserver {
-    fn new(
+impl TriggerSettlementObserver {
+    fn with_telemetry_recorder(
         hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
         drain_cancel: CancellationToken,
+        telemetry_recorder: Arc<dyn TelemetryRecorder>,
     ) -> Self {
         Self {
             hook_slot,
+            telemetry_recorder,
             pending: Arc::new(Mutex::new(VecDeque::new())),
             drain_scheduled: Arc::new(AtomicBool::new(false)),
             drain_cancel,
@@ -246,7 +261,7 @@ impl PostSubmitHookObserver {
 }
 
 #[async_trait]
-impl TriggerFireSettlementObserver for PostSubmitHookObserver {
+impl TriggerFireSettlementObserver for TriggerSettlementObserver {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
         let Some(hook) = self.hook_slot.get().cloned() else {
             tracing::debug!(
@@ -271,19 +286,66 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
         spawn_post_submit_delivery(hook, TriggerFireSettlement::Failed(event));
     }
 
-    async fn on_run_failure_settled(&self, event: TriggerRunFailureSettlement) {
-        // The accepted fire's run reached a terminal failure state. The
-        // canonical delivery watcher owns the creator-facing notice; this
-        // observer only emits structured automation-health telemetry and
-        // must never mint a replacement run or bypass the delivery path.
-        tracing::warn!(
-            target: "ironclaw::reborn::trigger_poller",
-            tenant_id = %event.tenant_id,
-            trigger_id = %event.trigger_id,
-            fire_slot = %event.fire_slot,
-            run_id = %event.run_id,
-            "accepted trigger fire settled with a failed run"
+    async fn on_run_terminal_settled(&self, event: TriggerRunTerminalSettlement) {
+        let automation_id = match AutomationId::new(event.trigger_id.to_string()) {
+            Ok(automation_id) => automation_id,
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::trigger_poller",
+                    ?error,
+                    trigger_id = %event.trigger_id,
+                    "discarding invalid trigger terminal telemetry identity"
+                );
+                return;
+            }
+        };
+        let observation = match AutomationSettledObservation::new(
+            ObservationContext::new(event.fire_slot),
+            automation_id,
+            map_automation_kind(event.automation_kind),
+            map_run_outcome(event.outcome),
+        ) {
+            Ok(observation) => observation,
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::trigger_poller",
+                    ?error,
+                    trigger_id = %event.trigger_id,
+                    "discarding invalid trigger terminal telemetry observation"
+                );
+                return;
+            }
+        };
+        let result = self.telemetry_recorder.try_record(
+            event.scope,
+            TelemetryObservation::AutomationSettled(observation),
         );
+        if result != ironclaw_telemetry_contracts::recorder::RecordOutcome::Accepted {
+            tracing::debug!(
+                target: "ironclaw::reborn::trigger_poller",
+                ?result,
+                trigger_id = %event.trigger_id,
+                run_id = %event.run_id,
+                "trigger terminal telemetry recorder did not accept observation"
+            );
+        }
+    }
+}
+
+fn map_automation_kind(kind: TriggerAutomationKind) -> AutomationKind {
+    match kind {
+        TriggerAutomationKind::Cron => AutomationKind::Cron,
+        TriggerAutomationKind::Once => AutomationKind::Once,
+        TriggerAutomationKind::Manual => AutomationKind::Manual,
+    }
+}
+
+fn map_run_outcome(outcome: TriggerTerminalOutcome) -> RunOutcome {
+    match outcome {
+        TriggerTerminalOutcome::Completed => RunOutcome::Completed,
+        TriggerTerminalOutcome::Failed => RunOutcome::Failed,
+        TriggerTerminalOutcome::Cancelled => RunOutcome::Cancelled,
+        TriggerTerminalOutcome::RecoveryRequired => RunOutcome::RecoveryRequired,
     }
 }
 
@@ -338,441 +400,5 @@ fn jitter_delay(max: Duration) -> Duration {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ironclaw_triggers::TriggerPollerWorkerConfig;
-
-    #[test]
-    fn jitter_is_disabled_when_max_is_zero() {
-        assert_eq!(jitter_delay(Duration::ZERO), Duration::ZERO);
-    }
-
-    #[test]
-    fn jitter_is_bounded_by_max() {
-        let max = Duration::from_millis(25);
-
-        assert!(jitter_delay(max) <= max);
-    }
-
-    #[test]
-    fn trigger_poller_defaults_are_disabled_without_jitter() {
-        let settings = TriggerPollerSettings::default();
-
-        assert!(!settings.enabled);
-        assert_eq!(settings.startup_jitter_max, Duration::ZERO);
-        assert_eq!(settings.tick_jitter_max, Duration::ZERO);
-        assert_eq!(settings.worker, TriggerPollerWorkerConfig::default());
-    }
-
-    #[test]
-    fn trigger_poller_enabled_preserves_default_worker_without_jitter() {
-        let settings = TriggerPollerSettings::enabled();
-
-        assert!(settings.enabled);
-        assert_eq!(settings.startup_jitter_max, Duration::ZERO);
-        assert_eq!(settings.tick_jitter_max, Duration::ZERO);
-        assert_eq!(settings.worker, TriggerPollerWorkerConfig::default());
-    }
-
-    #[tokio::test]
-    async fn trigger_poller_runtime_handle_aborts_when_join_times_out() {
-        let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let handle = tokio::spawn(async move {
-            task_cancel.cancelled().await;
-            std::future::pending::<()>().await;
-        });
-        let runtime_handle = TriggerPollerRuntimeHandle { cancel, handle };
-
-        runtime_handle.shutdown(Duration::from_millis(1)).await;
-    }
-
-    // ── PostSubmitHookObserver tests ────────────────────────────────────────
-
-    mod post_submit_observer {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::{Arc, Mutex};
-        use std::time::Duration;
-
-        use super::super::PostSubmitDeliveryHook;
-        use async_trait::async_trait;
-        use chrono::Utc;
-        use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
-        use ironclaw_triggers::{
-            TriggerAcceptedFireSettlement, TriggerFailedFireSettlement, TriggerFire,
-            TriggerFireIdentity, TriggerFireSettlementObserver, TriggerId,
-            TriggerPollerFailureReason, TriggerRunFailureSettlement,
-        };
-        use ironclaw_turns::{TurnRunId, TurnScope};
-        use tokio::sync::Notify;
-        use tokio_util::sync::CancellationToken;
-        use tracing_test::traced_test;
-
-        use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
-
-        #[derive(Default)]
-        struct RecordingHook {
-            calls: Mutex<Vec<(TriggerFire, TurnRunId, TurnScope)>>,
-            failed_calls: Mutex<Vec<TriggerFailedFireSettlement>>,
-            notify: Notify,
-        }
-
-        impl RecordingHook {
-            fn calls(&self) -> Vec<(TriggerFire, TurnRunId, TurnScope)> {
-                self.calls.lock().unwrap_or_else(|p| p.into_inner()).clone()
-            }
-
-            async fn wait_for_calls(
-                &self,
-                expected: usize,
-            ) -> Vec<(TriggerFire, TurnRunId, TurnScope)> {
-                loop {
-                    let calls = self.calls();
-                    if calls.len() >= expected {
-                        return calls;
-                    }
-                    self.notify.notified().await;
-                }
-            }
-
-            async fn wait_for_failed_calls(
-                &self,
-                expected: usize,
-            ) -> Vec<TriggerFailedFireSettlement> {
-                loop {
-                    let calls = self
-                        .failed_calls
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .clone();
-                    if calls.len() >= expected {
-                        return calls;
-                    }
-                    self.notify.notified().await;
-                }
-            }
-        }
-
-        #[async_trait]
-        impl PostSubmitDeliveryHook for RecordingHook {
-            async fn on_trigger_submitted(
-                &self,
-                fire: TriggerFire,
-                run_id: TurnRunId,
-                scope: TurnScope,
-            ) {
-                self.calls
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push((fire, run_id, scope));
-                self.notify.notify_one();
-            }
-
-            async fn on_trigger_failed_before_submit(&self, event: TriggerFailedFireSettlement) {
-                self.failed_calls
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push(event);
-                self.notify.notify_one();
-            }
-        }
-
-        struct BlockingHook {
-            entered: Arc<Notify>,
-            release: Arc<Notify>,
-            completed: Arc<AtomicBool>,
-        }
-
-        #[async_trait]
-        impl PostSubmitDeliveryHook for BlockingHook {
-            async fn on_trigger_submitted(
-                &self,
-                _fire: TriggerFire,
-                _run_id: TurnRunId,
-                _scope: TurnScope,
-            ) {
-                self.entered.notify_one();
-                self.release.notified().await;
-                self.completed.store(true, Ordering::SeqCst);
-            }
-        }
-
-        fn observer_tenant() -> TenantId {
-            TenantId::new("post-submit-observer-tenant").expect("tenant")
-        }
-
-        fn observer_thread_id(run_id: TurnRunId) -> ThreadId {
-            ThreadId::new(format!("post-submit-observer-thread-{run_id}")).expect("thread id")
-        }
-
-        fn settlement_event(run_id: TurnRunId) -> TriggerAcceptedFireSettlement {
-            let trigger_id = TriggerId::new();
-            let fire = TriggerFire {
-                identity: TriggerFireIdentity::new(observer_tenant(), trigger_id, Utc::now()),
-                creator_user_id: UserId::new("hook-wrapper-user").expect("user"),
-                agent_id: Some(AgentId::new("hook-wrapper-agent").expect("agent")),
-                project_id: None,
-                prompt: "hook wrapper test prompt".to_string(),
-                execution_policy: None,
-            };
-            let scope = TurnScope::new_with_owner(
-                observer_tenant(),
-                fire.agent_id.clone(),
-                None,
-                observer_thread_id(run_id),
-                Some(fire.creator_user_id.clone()),
-            );
-            TriggerAcceptedFireSettlement {
-                fire,
-                run_id,
-                turn_scope: scope,
-            }
-        }
-
-        fn failed_settlement_event() -> TriggerFailedFireSettlement {
-            let accepted = settlement_event(TurnRunId::new());
-            TriggerFailedFireSettlement {
-                fire: accepted.fire,
-                reason: TriggerPollerFailureReason::InvalidMaterialization,
-            }
-        }
-
-        fn run_failure_settlement_event(run_id: TurnRunId) -> TriggerRunFailureSettlement {
-            TriggerRunFailureSettlement {
-                tenant_id: observer_tenant(),
-                trigger_id: TriggerId::new(),
-                fire_slot: Utc::now(),
-                run_id,
-            }
-        }
-
-        #[tokio::test]
-        #[traced_test]
-        async fn run_failure_settlement_emits_health_warning_without_delivery() {
-            let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let recording = Arc::new(RecordingHook::default());
-            let observer = PostSubmitHookObserver::new(hook_slot.clone(), CancellationToken::new());
-            hook_slot.set(recording.clone()).ok().expect("hook install");
-
-            observer
-                .on_run_failure_settled(run_failure_settlement_event(TurnRunId::new()))
-                .await;
-
-            assert!(
-                logs_contain("accepted trigger fire settled with a failed run"),
-                "production observer must emit the automation-health signal; buffer: {:?}",
-                String::from_utf8(
-                    tracing_test::internal::global_buf()
-                        .lock()
-                        .expect("buf")
-                        .to_vec()
-                )
-                .expect("utf8")
-            );
-            assert!(
-                recording.calls().is_empty()
-                    && recording
-                        .failed_calls
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .is_empty(),
-                "run-failure observation must not bypass the canonical delivery watcher"
-            );
-        }
-
-        #[tokio::test]
-        async fn uninstalled_hook_buffers_until_hook_is_installed() {
-            let run_id = TurnRunId::new();
-            let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let observer =
-                PostSubmitHookObserver::new(Arc::clone(&hook_slot), CancellationToken::new());
-            let recording = Arc::new(RecordingHook::default());
-
-            observer
-                .on_accepted_fire_settled(settlement_event(run_id))
-                .await;
-
-            assert!(
-                tokio::time::timeout(Duration::from_millis(50), recording.wait_for_calls(1))
-                    .await
-                    .is_err(),
-                "settlement must be buffered while hook is not installed"
-            );
-            hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
-                .ok()
-                .expect("first hook install must succeed");
-
-            let calls = tokio::time::timeout(Duration::from_secs(1), recording.wait_for_calls(1))
-                .await
-                .expect("buffered settlement should be delivered after hook install");
-            assert_eq!(calls[0].1, run_id);
-        }
-
-        #[tokio::test]
-        async fn uninstalled_hook_buffer_drops_oldest_when_full() {
-            let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let observer =
-                PostSubmitHookObserver::new(Arc::clone(&hook_slot), CancellationToken::new());
-            let recording = Arc::new(RecordingHook::default());
-            let run_ids: Vec<_> = (0..=POST_SUBMIT_HOOK_PENDING_CAPACITY)
-                .map(|_| TurnRunId::new())
-                .collect();
-
-            for run_id in run_ids.iter().copied() {
-                observer
-                    .on_accepted_fire_settled(settlement_event(run_id))
-                    .await;
-            }
-
-            hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
-                .ok()
-                .expect("first hook install must succeed");
-
-            let calls = tokio::time::timeout(
-                Duration::from_secs(1),
-                recording.wait_for_calls(POST_SUBMIT_HOOK_PENDING_CAPACITY),
-            )
-            .await
-            .expect("capped buffered settlements should be delivered after hook install");
-            let delivered_run_ids: Vec<_> = calls
-                .iter()
-                .map(|(_, delivered_run_id, _)| *delivered_run_id)
-                .collect();
-            assert_eq!(
-                delivered_run_ids.len(),
-                POST_SUBMIT_HOOK_PENDING_CAPACITY,
-                "startup buffer must deliver only the capped number of settlements"
-            );
-            assert!(
-                !delivered_run_ids.contains(&run_ids[0]),
-                "oldest settlement must be dropped on overflow"
-            );
-            assert!(
-                delivered_run_ids.contains(run_ids.last().expect("run ids")),
-                "newest settlement must be retained on overflow"
-            );
-        }
-
-        #[tokio::test]
-        async fn filled_slot_settlement_invokes_hook_with_run_id_and_scope() {
-            let run_id = TurnRunId::new();
-            let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let recording = Arc::new(RecordingHook::default());
-            hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
-                .ok()
-                .expect("hook install");
-            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
-
-            observer
-                .on_accepted_fire_settled(settlement_event(run_id))
-                .await;
-
-            let calls = tokio::time::timeout(Duration::from_secs(1), recording.wait_for_calls(1))
-                .await
-                .expect("hook should be invoked asynchronously");
-            assert_eq!(calls.len(), 1, "hook must fire exactly once");
-
-            let (recorded_fire, called_run_id, called_scope) = &calls[0];
-            assert_eq!(
-                *called_run_id, run_id,
-                "hook must receive the accepted run_id"
-            );
-            let expected_thread_id = observer_thread_id(run_id);
-            assert_eq!(
-                called_scope.thread_id, expected_thread_id,
-                "hook must receive the accepted turn_scope thread_id"
-            );
-            assert_eq!(
-                called_scope.explicit_owner_user_id(),
-                Some(&recorded_fire.creator_user_id),
-                "post-submit hook must receive a TurnScope owned by the trigger creator"
-            );
-        }
-
-        #[tokio::test]
-        async fn filled_slot_failed_settlement_invokes_no_run_hook() {
-            let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let recording = Arc::new(RecordingHook::default());
-            hook_slot
-                .set(Arc::clone(&recording) as Arc<dyn PostSubmitDeliveryHook>)
-                .ok()
-                .expect("hook install");
-            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
-            let event = failed_settlement_event();
-
-            observer.on_failed_fire_settled(event.clone()).await;
-
-            let calls =
-                tokio::time::timeout(Duration::from_secs(1), recording.wait_for_failed_calls(1))
-                    .await
-                    .expect("failed settlement hook should be invoked asynchronously");
-            assert_eq!(calls, vec![event]);
-        }
-
-        #[tokio::test]
-        async fn filled_slot_slow_hook_does_not_block_observer() {
-            let run_id = TurnRunId::new();
-            let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let entered = Arc::new(Notify::new());
-            let release = Arc::new(Notify::new());
-            let completed = Arc::new(AtomicBool::new(false));
-            hook_slot
-                .set(Arc::new(BlockingHook {
-                    entered: Arc::clone(&entered),
-                    release: Arc::clone(&release),
-                    completed: Arc::clone(&completed),
-                }) as Arc<dyn PostSubmitDeliveryHook>)
-                .ok()
-                .expect("hook install");
-            let observer = PostSubmitHookObserver::new(hook_slot, CancellationToken::new());
-
-            observer
-                .on_accepted_fire_settled(settlement_event(run_id))
-                .await;
-
-            tokio::time::timeout(Duration::from_secs(1), entered.notified())
-                .await
-                .expect("hook task should have started");
-            assert!(
-                !completed.load(Ordering::SeqCst),
-                "hook must still be blocked until the test releases it"
-            );
-
-            release.notify_one();
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while !completed.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("hook task should complete after release");
-        }
-
-        #[tokio::test]
-        async fn uninstalled_hook_drain_task_exits_when_cancelled() {
-            let hook_slot = Arc::new(std::sync::OnceLock::new());
-            let cancel = CancellationToken::new();
-            let observer = PostSubmitHookObserver::new(Arc::clone(&hook_slot), cancel.clone());
-
-            observer
-                .on_accepted_fire_settled(settlement_event(TurnRunId::new()))
-                .await;
-            assert!(
-                observer.drain_scheduled.load(Ordering::SeqCst),
-                "buffered settlement should schedule a drain task"
-            );
-
-            cancel.cancel();
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while observer.drain_scheduled.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("drain task should observe runtime cancellation");
-        }
-    }
-}
+#[path = "trigger_poller/tests.rs"]
+mod tests;

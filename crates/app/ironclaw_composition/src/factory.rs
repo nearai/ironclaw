@@ -185,6 +185,10 @@ use ironclaw_resources::{
 };
 use ironclaw_secrets::{SecretStore, SecretStorePort};
 use ironclaw_skills::ScopedSkillManagementPort;
+use ironclaw_telemetry::{
+    BufferedTelemetryRecorder, BufferedTelemetryRecorderHandle, FilesystemTelemetryRepository,
+    SystemTelemetryClock,
+};
 use ironclaw_threads::FilesystemSessionThreadService;
 use ironclaw_threads::SessionThreadService;
 use ironclaw_triggers::{
@@ -360,6 +364,8 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    pub(crate) telemetry_recorder: Arc<BufferedTelemetryRecorder>,
+    pub(crate) telemetry_handle: BufferedTelemetryRecorderHandle,
     pub(crate) processes: ProcessRuntimeSystem,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,

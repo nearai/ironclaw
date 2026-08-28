@@ -13,12 +13,12 @@ use tokio_postgres::Row;
 
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimManualFireRequest,
-    ClaimedTriggerFire, ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
-    FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
-    trigger_run_history_status_text,
+    ClaimedTriggerFire, ClearActiveFireRequest, ClearedActiveFire, FireAcceptedRequest,
+    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
+    FireTerminalFailedRequest, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
 
 const TRIGGER_TABLE: &str = "trigger_records";
@@ -1038,7 +1038,7 @@ impl TriggerRepository for PostgresTriggerRepository {
     async fn clear_active_fire(
         &self,
         request: ClearActiveFireRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
+    ) -> Result<Option<ClearedActiveFire>, TriggerError> {
         let mut client = self.connect().await?;
         let tx = client
             .transaction()
@@ -1062,7 +1062,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             return Ok(None);
         }
         let fire_slot = fmt_ts(&request.fire_slot);
-        let source = fetch_running_run_source_or_schedule(
+        let settled_source = fetch_running_run_source(
             &tx,
             request.tenant_id.as_str(),
             &trigger_id,
@@ -1070,6 +1070,7 @@ impl TriggerRepository for PostgresTriggerRepository {
             "read clearing trigger fire source",
         )
         .await?;
+        let source = settled_source.unwrap_or(TriggerSourceKind::Schedule);
         // Manual completion must not consume a once trigger or alter cadence.
         let next_slot = if source == TriggerSourceKind::Schedule {
             current.schedule.next_slot_after(request.fire_slot)?
@@ -1122,7 +1123,10 @@ impl TriggerRepository for PostgresTriggerRepository {
                 tx.commit()
                     .await
                     .map_err(|error| backend_error("commit clear active trigger fire", error))?;
-                Ok(Some(record))
+                Ok(Some(ClearedActiveFire {
+                    record,
+                    source: settled_source,
+                }))
             }
             None => {
                 tx.commit().await.map_err(|error| {
@@ -1272,6 +1276,20 @@ async fn fetch_running_run_source_or_schedule(
     fire_slot: &str,
     operation: &'static str,
 ) -> Result<TriggerSourceKind, TriggerError> {
+    Ok(
+        fetch_running_run_source(client, tenant_id, trigger_id, fire_slot, operation)
+            .await?
+            .unwrap_or(TriggerSourceKind::Schedule),
+    )
+}
+
+async fn fetch_running_run_source(
+    client: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    trigger_id: &str,
+    fire_slot: &str,
+    operation: &'static str,
+) -> Result<Option<TriggerSourceKind>, TriggerError> {
     let source = client
         .query_opt(
             &format!(
@@ -1294,10 +1312,7 @@ async fn fetch_running_run_source_or_schedule(
         .transpose()?
         .map(|value| crate::parse_source_kind_codec(&value))
         .transpose()?;
-    // silent-ok: settlement and recovery may encounter legacy active-fire
-    // state without a matching Running history row; scheduled semantics are
-    // the conservative compatibility default for that missing provenance.
-    Ok(source.unwrap_or(TriggerSourceKind::Schedule))
+    Ok(source)
 }
 
 async fn mark_successful_fire_result(
