@@ -144,7 +144,7 @@ impl RunOutcomeProcessCommitObserver {
                 kind: NotificationKind::RunBlocked,
                 severity: NotificationSeverity::Warning,
                 source: NotificationSource {
-                    thread_id: thread_id.clone(),
+                    thread_id: Some(thread_id.clone()),
                     turn_run_id: Some(run_id),
                     lifecycle_ref: Some(lifecycle_ref),
                 },

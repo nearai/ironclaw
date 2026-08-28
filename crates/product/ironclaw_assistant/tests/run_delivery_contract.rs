@@ -2974,6 +2974,13 @@ impl NotificationInboxStorePort for HangingNotificationInbox {
         NoopNotificationInboxStore.resolve(request).await
     }
 
+    async fn reopen(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        NoopNotificationInboxStore.reopen(request).await
+    }
+
     async fn archive(
         &self,
         request: NotificationMutationRequest,
