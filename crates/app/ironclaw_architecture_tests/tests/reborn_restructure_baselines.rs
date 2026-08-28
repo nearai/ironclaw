@@ -210,7 +210,12 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// merged tree with `bash scripts/ci/check-composition-budget.sh --print`;
 /// the manifest's `loc_ceiling`/`loc_observed` move to the same figure in
 /// this commit. No new composition code in the merge itself.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_732;
+/// ✎ Re-measured 42_732 -> 42_888 on 2026-08-28 after merging current main
+/// into #7874. Main-side composition growth consumed 147 lines of the working
+/// window; #7874 contributes 9 lines of service-graph assembly that register
+/// the resource-block backfill observer. The observer and replay policy remain
+/// in `ironclaw_assistant`; composition only supplies their dependencies.
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_888;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".
