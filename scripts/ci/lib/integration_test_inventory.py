@@ -19,7 +19,9 @@ GROUP_NAME_PREFIX = "reborn_group_"
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
-def _registered_tests(repo_root: str | pathlib.Path = ROOT) -> list[tuple[str, str]]:
+def _registered_test_records(
+    repo_root: str | pathlib.Path = ROOT,
+) -> list[tuple[str, str]]:
     root = pathlib.Path(repo_root)
     with (root / "Cargo.toml").open("rb") as manifest:
         data = tomllib.load(manifest)
@@ -29,7 +31,14 @@ def _registered_tests(repo_root: str | pathlib.Path = ROOT) -> list[tuple[str, s
         if isinstance(entry, dict)
         and isinstance(entry.get("name"), str)
         and isinstance(entry.get("path"), str)
-        and entry["path"].startswith(INTEGRATION_PATH_PREFIX)
+    ]
+
+
+def _registered_tests(repo_root: str | pathlib.Path = ROOT) -> list[tuple[str, str]]:
+    return [
+        (path, name)
+        for path, name in _registered_test_records(repo_root)
+        if path.startswith(INTEGRATION_PATH_PREFIX)
     ]
 
 
@@ -158,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             root = pathlib.Path(args.repo_root)
             registered_names: set[str] = set()
-            for path, name in _registered_tests(root):
+            for path, name in _registered_test_records(root):
                 if not name.startswith(GROUP_NAME_PREFIX):
                     continue
                 suffix = name.removeprefix(GROUP_NAME_PREFIX)

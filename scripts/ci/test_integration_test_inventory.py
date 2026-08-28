@@ -130,6 +130,28 @@ test = [
                 with self.assertRaisesRegex(ValueError, field):
                     inventory.validate_inventory_document(malformed)
 
+    def test_live_repository_group_topology_is_valid(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/ci/lib/integration_test_inventory.py"),
+                "--validate-group-topology",
+                str(ROOT),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(
+            completed.returncode,
+            0,
+            "live integration group topology validation failed:\n"
+            f"stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}",
+        )
+
     def test_group_runner_rejects_invalid_topology_before_execution(self) -> None:
         cases = (
             ([], (), "No integration test group directories"),
@@ -144,6 +166,14 @@ test = [
                 [("reborn_group_missing", "tests/integration/group_missing/main.rs")],
                 (),
                 "missing main.rs",
+            ),
+            (
+                [
+                    ("reborn_group_valid", "tests/integration/group_valid/main.rs"),
+                    ("reborn_group_outside", "tests/other.rs"),
+                ],
+                ("group_valid/main.rs",),
+                "group registration path mismatch",
             ),
         )
         for registrations, group_entries, error in cases:
