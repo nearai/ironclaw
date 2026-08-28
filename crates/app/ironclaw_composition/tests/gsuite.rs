@@ -9,11 +9,11 @@ use ironclaw_auth::{
 use ironclaw_extension_contracts::runtime::ExtensionRuntime;
 use ironclaw_extension_registry::ManifestSource;
 use ironclaw_extension_support::{
-    CALENDAR_LIST_CALENDARS_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID, GOOGLE_PROVIDER_ID,
-    GsuiteCapabilitySpec, GsuiteCredentialDispatchReason, GsuiteCredentialStageError,
-    GsuiteCredentialStageRequest, GsuiteCredentialStager, GsuiteDispatchError,
-    GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec, find_gsuite_capability,
-    google_provider_id, gsuite_package_specs,
+    CALENDAR_LIST_CALENDARS_CAPABILITY_ID, GMAIL_GET_MESSAGE_CAPABILITY_ID,
+    GMAIL_SEND_MESSAGE_CAPABILITY_ID, GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec,
+    GsuiteCredentialDispatchReason, GsuiteCredentialStageError, GsuiteCredentialStageRequest,
+    GsuiteCredentialStager, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
+    GsuitePackageSpec, find_gsuite_capability, google_provider_id, gsuite_package_specs,
 };
 use ironclaw_host_api::{
     action::{NetworkScheme, NetworkTargetPattern},
@@ -530,8 +530,11 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         "schemas/{}/{}.input.v1.json",
                         spec.schema_prefix, capability.short_name
                     ),
-                    // Manifest v3 declares no output schema refs.
-                    None,
+                    // Gmail get_message deliberately graduated from its
+                    // provider-shaped v1 asset to the semantic v2 contract.
+                    // Other GSuite v3 manifests still declare no output ref.
+                    (capability.id == GMAIL_GET_MESSAGE_CAPABILITY_ID)
+                        .then(|| "schemas/gmail/get_message.output.v2.json".to_string()),
                     Some(format!(
                         "prompts/{}/{}.md",
                         spec.schema_prefix, capability.short_name

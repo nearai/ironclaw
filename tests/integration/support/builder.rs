@@ -1182,6 +1182,7 @@ impl RebornIntegrationHarness {
         start_sequence: u64,
         end_sequence: u64,
         content: &str,
+        context_mode: Option<ironclaw_threads::SummaryContextMode>,
     ) -> HarnessResult<ironclaw_threads::SummaryArtifact> {
         let scope = thread_scope_from_binding(&self.binding)?;
         Ok(self
@@ -1196,6 +1197,7 @@ impl RebornIntegrationHarness {
                 model_context_policy: Some(
                     ironclaw_threads::SummaryModelContextPolicy::ReplaceRangeWhenSelected,
                 ),
+                context_mode,
             })
             .await?)
     }

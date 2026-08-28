@@ -820,7 +820,14 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
                 ("slack_team_id".to_string(), TEAM.to_string()),
                 ("slack_api_app_id".to_string(), "A-E2E".to_string()),
                 ("slack_installation_id".to_string(), "I-E2E".to_string()),
-                ("slack_bot_user_id".to_string(), "U-BOT-E2E".to_string()),
+                // Must match the `<@…>` id every fixture's `text` mentions
+                // (`UBOT`, not e.g. "U-BOT-E2E"): the adapter's
+                // `strip_leading_bot_mention` now strips a leading mention
+                // only when it names THIS configured bot, so a mismatch here
+                // silently leaves the mention in the normalized text instead
+                // of failing loudly — re-check every `<@UBOT>` fixture below
+                // if this value ever changes.
+                ("slack_bot_user_id".to_string(), "UBOT".to_string()),
                 (
                     "slack_oauth_client_id".to_string(),
                     "e2e-slack-client".to_string(),

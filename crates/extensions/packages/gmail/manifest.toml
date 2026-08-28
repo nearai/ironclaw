@@ -1,7 +1,7 @@
 schema_version = "reborn.extension_manifest.v3"
 id = "gmail"
 name = "Gmail"
-version = "0.1.0"
+version = "0.2.0"
 description = "First-party Gmail capabilities for Reborn."
 trust = "first_party_requested"
 
@@ -51,6 +51,7 @@ effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/gmail/get_message.input.v1.json"
+output_schema_ref = "schemas/gmail/get_message.output.v2.json"
 prompt_doc_ref = "prompts/gmail/get_message.md"
 
 network_targets = [

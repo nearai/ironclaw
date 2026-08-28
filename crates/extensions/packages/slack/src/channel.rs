@@ -55,8 +55,13 @@ impl ChannelIngress for SlackChannelAdapter {
                     reason: format!("invalid installation id: {error}"),
                 }
             })?;
-        match normalize_slack_inbound(request.body, request.headers, &installation_id)
-            .map_err(parse_error)?
+        match normalize_slack_inbound(
+            request.body,
+            request.headers,
+            &installation_id,
+            crate::payload::slack_bot_user_id(request.config),
+        )
+        .map_err(parse_error)?
         {
             SlackInboundEvent::UrlVerification { challenge } => {
                 Ok(InboundOutcome::Respond(ImmediateResponse {
@@ -70,7 +75,15 @@ impl ChannelIngress for SlackChannelAdapter {
                 content_type: None,
                 body: Vec::new(),
             })),
-            SlackInboundEvent::Ignore => Ok(InboundOutcome::Ignore),
+            // One line per drop. The router answers an ignored event with a
+            // bare 200 to satisfy Slack's retry machinery, so without this a
+            // human message discarded by mistake leaves no trace anywhere —
+            // which is exactly how `thread_broadcast` stayed invisible until
+            // someone compared response latencies.
+            SlackInboundEvent::Ignore { reason } => {
+                tracing::debug!(?reason, "slack inbound event produced no message");
+                Ok(InboundOutcome::Ignore)
+            }
             SlackInboundEvent::Message(parsed) => {
                 let ParsedSlackInboundMessage {
                     mut message,
@@ -745,10 +758,85 @@ mod tests {
         let message = &messages[0];
         assert_eq!(message.text, "hello there");
         assert_eq!(message.trigger, ProductTriggerReason::DirectChat);
-        assert_eq!(message.event_id.as_str(), "slack-install_alpha-Ev123");
+        // Keyed on the MESSAGE (team, channel, ts), not on Slack's per-event
+        // `event_id` — the twins Slack sends for one post carry different
+        // `event_id`s and would otherwise each admit their own run. The
+        // envelope's `event_id` is still required (see
+        // `oversized_payload_and_missing_event_id_fail_closed`), it just no
+        // longer decides identity.
+        assert_eq!(
+            message.event_id.as_str(),
+            "slack-install_alpha-msg-T-A-D123-1710000000.000100"
+        );
         assert_eq!(message.actor.id(), "U123");
         assert_eq!(message.conversation.conversation_id(), "D123");
         assert!(message.reply_context.is_none());
+    }
+
+    /// The incident's root symptom was not the drop — it was that the drop
+    /// left no trace. The router turns an ignore into a bare 200, so without
+    /// this log line a human message discarded by mistake is invisible in
+    /// every system we own. Deleting the `debug!` makes this fail.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn every_ignored_event_records_why_it_was_dropped() {
+        for (body, expected_reason) in [
+            (
+                br#"{
+                "type": "event_callback",
+                "event_id": "Ev-bot",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message", "channel": "D1", "channel_type": "im",
+                    "user": "U1", "bot_id": "B1", "text": "echo",
+                    "ts": "1710000000.000300"
+                }
+            }"#
+                .as_slice(),
+                "BotAuthored",
+            ),
+            (
+                br#"{
+                "type": "event_callback",
+                "event_id": "Ev-subtype",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message", "channel": "D1", "channel_type": "im",
+                    "user": "U1", "subtype": "channel_join",
+                    "text": "joined", "ts": "1710000000.000301"
+                }
+            }"#
+                .as_slice(),
+                "NonUserMessageSubtype",
+            ),
+            (
+                br#"{
+                "type": "event_callback",
+                "event_id": "Ev-ambient",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message", "channel": "C1", "user": "U1",
+                    "text": "chatter", "ts": "1710000000.000302"
+                }
+            }"#
+                .as_slice(),
+                "AmbientChannelMessage",
+            ),
+        ] {
+            let outcome = inbound(body).await.expect("payload parses");
+            assert!(
+                matches!(outcome, InboundOutcome::Ignore),
+                "expected Ignore for {expected_reason}"
+            );
+            assert!(
+                logs_contain("slack inbound event produced no message"),
+                "the drop for {expected_reason} produced no log line"
+            );
+            assert!(
+                logs_contain(expected_reason),
+                "the drop log did not carry reason {expected_reason}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -778,6 +866,150 @@ mod tests {
             messages[0].conversation.topic_id(),
             Some("1710000000.000200"),
             "mention without thread anchors on its own ts"
+        );
+    }
+
+    /// Regression for the "Also send to channel" drop (#7925): Slack stamps
+    /// the SAME `app_mention` event with `subtype: "thread_broadcast"` when a
+    /// threaded reply is broadcast to the channel. Coverage previously lived
+    /// only on the private `normalize_slack_event` helper — this drives the
+    /// production caller, `SlackChannelAdapter::receive`, so a regression in
+    /// the `receive`-level admission guard (not just the helper) fails here.
+    #[tokio::test]
+    async fn a_broadcast_mention_reaches_receive_as_a_bot_mention_anchored_on_its_thread() {
+        let outcome = inbound(
+            br#"{
+                "type": "event_callback",
+                "event_id": "EvBroadcast",
+                "team_id": "T-A",
+                "event": {
+                    "type": "app_mention",
+                    "user": "U123",
+                    "channel": "C123",
+                    "subtype": "thread_broadcast",
+                    "text": "<@UBOT> what do you think?",
+                    "thread_ts": "1710000000.000010",
+                    "ts": "1710000000.000011"
+                }
+            }"#,
+        )
+        .await
+        .expect("broadcast mention parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages, broadcast mention must not be dropped");
+        };
+        assert_eq!(messages[0].text, "what do you think?");
+        assert_eq!(messages[0].trigger, ProductTriggerReason::BotMention);
+        assert_eq!(
+            messages[0].conversation.topic_id(),
+            Some("1710000000.000010"),
+            "a broadcast mention stays anchored to the thread it was written in, not its own ts"
+        );
+    }
+
+    /// `inbound` with an explicit host-resolved config (the plain `inbound`
+    /// helper above always passes an empty config, so `mentions_bot` never
+    /// fires through it — this is the seam for driving a `message` event
+    /// that names the bot via text alone, with `slack_bot_user_id` resolved
+    /// the way the host actually resolves it).
+    async fn inbound_with_config(
+        body: &[u8],
+        config: &[(String, String)],
+    ) -> Result<InboundOutcome, ChannelError> {
+        SlackChannelAdapter
+            .receive(
+                VerifiedInbound {
+                    extension_id: "slack",
+                    installation_id: "install_alpha",
+                    config,
+                    body,
+                    headers: &[],
+                    can_reply_in_threads: true,
+                },
+                &ScriptedEgress::new(Vec::new()),
+            )
+            .await
+    }
+
+    /// The point of `TextMention` driven through the production caller: a
+    /// `message` event with NO `app_mention` twin, whose text names the bot,
+    /// still reaches `receive` as a `BotMention` rather than being dropped as
+    /// ambient chatter.
+    #[tokio::test]
+    async fn a_message_event_naming_the_bot_reaches_receive_as_a_bot_mention_with_no_app_mention_twin()
+     {
+        let config = vec![("slack_bot_user_id".to_string(), "UBOT".to_string())];
+        let outcome = inbound_with_config(
+            br#"{
+                "type": "event_callback",
+                "event_id": "EvTextMention",
+                "team_id": "T-A",
+                "event": {
+                    "type": "message",
+                    "user": "U123",
+                    "channel": "C123",
+                    "text": "<@UBOT> can you help",
+                    "ts": "1710000000.000950"
+                }
+            }"#,
+            &config,
+        )
+        .await
+        .expect("text mention parses");
+        let InboundOutcome::Messages(messages) = outcome else {
+            panic!("expected Messages, a message naming the bot must not be dropped");
+        };
+        assert_eq!(messages[0].text, "can you help");
+        assert_eq!(messages[0].trigger, ProductTriggerReason::BotMention);
+    }
+
+    /// The counterexample to the fix above: `app_mention` with
+    /// `subtype: "document_mention"` is a canvas-body mention, not a person
+    /// addressing the bot in conversation. Slack writes `text` itself (a
+    /// caption); the person's real words live only in `blocks`, a field
+    /// this contract never reads. Fixture is Slack's own documented example
+    /// payload (<https://docs.slack.dev/reference/events/message/document_mention/>).
+    /// Drives the production caller, `SlackChannelAdapter::receive`, so a
+    /// regression that re-admits this shape through the `AppMention`
+    /// exemption fails here, not just on the private normalization helper.
+    #[tokio::test]
+    async fn a_canvas_document_mention_is_ignored_by_receive() {
+        let outcome = inbound(
+            br#"{
+                "event": {
+                    "user": "UA1BCD3EF",
+                    "subtype": "document_mention",
+                    "document_mention": {
+                        "file_id": "F123ABCDEFG",
+                        "section_id": "temp:C:GQL...",
+                        "mentioning_user_ids": ["UA1BCD3EF"]
+                    },
+                    "type": "app_mention",
+                    "ts": "1716411280.657549",
+                    "text": "<@U123456ABC7> was mentioned in a canvas",
+                    "blocks": [{
+                        "type": "section",
+                        "block_id": "gcn3v",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ">>>Hey <@U123456ABC7>",
+                            "verbatim": false
+                        }
+                    }],
+                    "team": "T1ABC2DE3",
+                    "channel": "C012ABCDEFG",
+                    "event_ts": "1716411280.657549"
+                },
+                "type": "event_callback",
+                "team_id": "T1ABC2DE3",
+                "event_id": "EvDocumentMention"
+            }"#,
+        )
+        .await
+        .expect("document mention parses");
+        assert!(
+            matches!(outcome, InboundOutcome::Ignore),
+            "a canvas-body mention must not start a turn on Slack-written caption text"
         );
     }
 

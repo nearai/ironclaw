@@ -218,10 +218,12 @@ pub trait MemoryBackend: Send + Sync {
         bytes: &[u8],
         backend_options: &MemoryBackendWriteOptions,
     ) -> Result<MemoryWriteOutcome, FilesystemError> {
-        let _ = (expected_previous_hash, backend_options);
-        self.write_document(context, path, bytes)
-            .await
-            .map(|_| MemoryWriteOutcome::Written)
+        let _ = (path, expected_previous_hash, bytes, backend_options);
+        Err(memory_backend_unsupported(
+            context.scope(),
+            FilesystemOperation::WriteFile,
+            "memory backend does not support atomic conditional writes",
+        ))
     }
 
     async fn append_document_with_backend_options(

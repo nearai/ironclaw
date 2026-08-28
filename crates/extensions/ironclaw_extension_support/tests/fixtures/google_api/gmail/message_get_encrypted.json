@@ -1,0 +1,22 @@
+{
+  "id": "msg-encrypted",
+  "threadId": "thr-encrypted",
+  "payload": {
+    "mimeType": "multipart/encrypted",
+    "headers": [
+      { "name": "From", "value": "Ada <ada@example.com>" },
+      { "name": "Subject", "value": "Encrypted notes" }
+    ],
+    "parts": [
+      {
+        "mimeType": "application/pgp-encrypted",
+        "body": { "size": 10, "data": "VmVyc2lvbjogMQ" }
+      },
+      {
+        "mimeType": "application/octet-stream",
+        "filename": "encrypted.asc",
+        "body": { "attachmentId": "encrypted-001", "size": 8192 }
+      }
+    ]
+  }
+}

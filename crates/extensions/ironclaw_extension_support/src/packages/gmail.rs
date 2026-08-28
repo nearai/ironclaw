@@ -65,6 +65,7 @@ fn assets() -> Vec<super::PackageAsset> {
         gmail_schema_asset!("list_messages.output.v1.json"),
         gmail_schema_asset!("get_message.input.v1.json"),
         gmail_schema_asset!("get_message.output.v1.json"),
+        gmail_schema_asset!("get_message.output.v2.json"),
         gmail_schema_asset!("send_message.input.v1.json"),
         gmail_schema_asset!("send_message.output.v1.json"),
         gmail_schema_asset!("create_draft.input.v1.json"),

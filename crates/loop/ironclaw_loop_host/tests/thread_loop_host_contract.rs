@@ -1097,6 +1097,7 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
             summary_kind: ironclaw_threads::SummaryKind::Compaction,
             content: MessageContent::text("summarized hello"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();

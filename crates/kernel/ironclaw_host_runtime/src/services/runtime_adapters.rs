@@ -798,8 +798,11 @@ where
                         used_prepared_reservation,
                     );
                 })
-                .map_err(|_| {
-                    tracing::debug!("first-party runtime adapter resource reservation failed");
+                .map_err(|error| {
+                    tracing::debug!(
+                        %error,
+                        "first-party runtime adapter resource reservation failed"
+                    );
                     trace_first_party_stage_and_dispatch_error(
                         "reserve_resources",
                         latency_fields.as_ref(),
@@ -808,7 +811,18 @@ where
                         RuntimeDispatchErrorKind::Resource.as_str(),
                         used_prepared_reservation,
                     );
-                    first_party_dispatch_error(RuntimeDispatchErrorKind::Resource, None, None)
+                    // Carry the cause: a bare `resource` category tells the
+                    // model nothing, so it retries the identical call and
+                    // trips the identical limit. The reason names the tripped
+                    // dimension, which is the one thing that lets the model
+                    // shrink its request (a smaller timeout, less output).
+                    // Same shape as `resolve_services` above; the summary is
+                    // strict-validated and the cause scrubbed downstream.
+                    first_party_dispatch_error(
+                        RuntimeDispatchErrorKind::Resource,
+                        Some(error.to_string()),
+                        None,
+                    )
                 })?,
         };
         tracing::debug!(

@@ -14,7 +14,7 @@ use ironclaw_threads::{
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, PutToolResultRecordRequest, ReadToolResultRecordRequest,
     RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy,
+    SessionThreadService, SummaryContextMode, SummaryKind, SummaryModelContextPolicy,
     TOOL_RESULT_RECORD_READ_MAX_BYTES, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRangeRequest, ThreadScope, ToolResultRecordRead, ToolResultRecordReadError,
     ToolResultRecordSelection, ToolResultReferenceEnvelope, ToolResultSafeSummary,
@@ -781,6 +781,7 @@ async fn append_capability_display_preview_is_history_visible_and_model_hidden()
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("run a tool summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -2049,6 +2050,7 @@ async fn summaries_are_range_artifacts_and_policy_filtered_context_replacements(
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -2126,6 +2128,7 @@ async fn summary_covering_redacted_message_is_not_loaded_into_model_context() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary mentions secret token"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -2923,6 +2926,7 @@ async fn summary_covering_draft_message_is_not_loaded_into_model_context() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary leaks draft secret"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3016,6 +3020,7 @@ async fn summary_spanning_interior_rejected_busy_is_applied() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("first and third summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3102,6 +3107,7 @@ async fn summary_spanning_interior_draft_is_not_applied() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("should not appear"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3612,6 +3618,26 @@ async fn overlapping_replacement_summaries_are_rejected() {
             .await
             .unwrap();
     }
+    let non_prefix_barrier = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("invalid non-prefix barrier"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: Some(SummaryContextMode::CumulativeBarrier),
+        })
+        .await;
+    assert!(matches!(
+        non_prefix_barrier,
+        Err(SessionThreadError::InvalidSummaryRange {
+            start_sequence: 2,
+            end_sequence: 3
+        })
+    ));
+
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: scope("a"),
@@ -3621,6 +3647,7 @@ async fn overlapping_replacement_summaries_are_rejected() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3634,6 +3661,7 @@ async fn overlapping_replacement_summaries_are_rejected() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("two and three summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await;
 
@@ -3677,6 +3705,7 @@ async fn exact_compaction_replacement_summary_replay_is_idempotent() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3689,6 +3718,7 @@ async fn exact_compaction_replacement_summary_replay_is_idempotent() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3703,6 +3733,7 @@ async fn exact_compaction_replacement_summary_replay_is_idempotent() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("different summary"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await;
     assert!(matches!(
@@ -3758,6 +3789,7 @@ async fn policy_none_overlapping_summaries_are_allowed() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: None,
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3770,6 +3802,7 @@ async fn policy_none_overlapping_summaries_are_allowed() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("two and three summarized"),
             model_context_policy: None,
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -3843,6 +3876,7 @@ async fn summary_replacement_still_applies_when_range_starts_with_redacted_messa
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("redacted range summary"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
