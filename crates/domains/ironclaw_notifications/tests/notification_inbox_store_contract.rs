@@ -400,6 +400,10 @@ async fn explicit_reopen_reactivates_lifecycle_without_weakening_publish_idempot
         .resolve(mutation.clone())
         .await
         .expect("resolve notification");
+    store
+        .archive(mutation.clone())
+        .await
+        .expect("archive resolved notification");
 
     let retry = store
         .publish(publish_request)
@@ -436,12 +440,17 @@ async fn explicit_reopen_reactivates_lifecycle_without_weakening_publish_idempot
             recipient: recipient(),
             limit: 10,
             cursor: None,
-            include_archived: true,
+            include_archived: false,
         })
         .await
         .expect("list reopened notification");
+    assert_eq!(page.notifications.len(), 1);
     let reopened = &page.notifications[0];
     assert!(reopened.resolved_at.is_none());
+    assert!(
+        reopened.archived_at.is_none(),
+        "reopened actionable notifications must return to the default visible list"
+    );
     assert_eq!(
         reopened.read_at,
         Some(settled_at),

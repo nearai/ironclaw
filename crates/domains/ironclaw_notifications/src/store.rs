@@ -325,6 +325,7 @@ where
                 return false;
             }
             record.resolved_at = None;
+            record.archived_at = None;
             true
         })
         .await
