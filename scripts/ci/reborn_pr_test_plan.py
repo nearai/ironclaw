@@ -31,6 +31,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from crate_tree import CrateTreeError, crate_directory  # noqa: E402
+from integration_test_inventory import (  # noqa: E402
+    INTEGRATION_PARTITION_COUNT,
+    planner_test_lanes,
+)
 
 # Owns the publication fence (.mintignore parsing and matching).
 import docs_publication_boundary  # noqa: E402
@@ -74,7 +78,7 @@ MAX_PR_CRATE_BUCKETS = 3
 DIFF_EVENTS = {"pull_request", "merge_group"}
 FULL_EVENTS = {"push", "workflow_call", "workflow_dispatch", "schedule"}
 ALL_ROOT_PARTITIONS = (0, 1, 2, 3)
-ALL_INTEGRATION_LANES = (0, 1, 2, 3, "groups")
+ALL_INTEGRATION_LANES = (*range(INTEGRATION_PARTITION_COUNT), "groups")
 # Doc-fact contract tests (#7378) read `docs/` pages from inside owning
 # crates, so a published-page edit can fail a cargo test. Route those edits
 # to exactly the doc-fact test binaries (no reverse-dependency widening —
@@ -785,26 +789,7 @@ def _root_test_partitions() -> dict[str, int]:
 
 
 def _integration_test_lanes() -> dict[str, str | int]:
-    with (ROOT / "Cargo.toml").open("rb") as manifest:
-        data = tomllib.load(manifest)
-    tests = {
-        entry["path"]: entry["name"]
-        for entry in data.get("test", [])
-        if isinstance(entry, dict)
-        and isinstance(entry.get("name"), str)
-        and isinstance(entry.get("path"), str)
-        and entry["path"].startswith("tests/integration/")
-    }
-    flat_names = sorted(
-        name
-        for name in tests.values()
-        if name.startswith(("reborn_integration_", "reborn_generated_"))
-    )
-    flat_lanes = {name: index % 4 for index, name in enumerate(flat_names)}
-    return {
-        path: "groups" if name.startswith("reborn_group_") else flat_lanes[name]
-        for path, name in tests.items()
-    }
+    return planner_test_lanes(ROOT)
 
 
 def _workspace_packages(metadata: dict[str, Any]) -> tuple[dict[str, str], dict[str, set[str]]]:
