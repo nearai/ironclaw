@@ -241,6 +241,11 @@ impl LlmProvider for TokenRefreshingProvider {
         self.inner.list_models().await
     }
 
+    async fn list_model_catalog(&self) -> Result<Vec<crate::models::DiscoveredModel>, LlmError> {
+        self.ensure_fresh_token().await;
+        self.inner.list_model_catalog().await
+    }
+
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         self.ensure_fresh_token().await;
         self.inner.model_metadata().await

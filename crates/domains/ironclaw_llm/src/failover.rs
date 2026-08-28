@@ -548,10 +548,19 @@ impl LlmProvider for FailoverProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        Ok(self
+            .list_model_catalog()
+            .await?
+            .into_iter()
+            .map(|model| model.id)
+            .collect())
+    }
+
+    async fn list_model_catalog(&self) -> Result<Vec<crate::models::DiscoveredModel>, LlmError> {
         let mut all_models = Vec::new();
 
         for provider in &self.providers {
-            match provider.list_models().await {
+            match provider.list_model_catalog().await {
                 Ok(models) => all_models.extend(models),
                 Err(err) => {
                     tracing::warn!(
@@ -563,8 +572,8 @@ impl LlmProvider for FailoverProvider {
             }
         }
 
-        all_models.sort();
-        all_models.dedup();
+        all_models.sort_by(|left, right| left.id.cmp(&right.id));
+        all_models.dedup_by(|left, right| left.id == right.id);
         Ok(all_models)
     }
 

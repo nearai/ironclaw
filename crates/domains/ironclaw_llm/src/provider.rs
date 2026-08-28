@@ -998,6 +998,19 @@ pub trait LlmProvider: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// List available models with optional provider-discovered capabilities.
+    ///
+    /// Providers that only expose IDs inherit an empty-capability projection,
+    /// keeping existing implementations source-compatible.
+    async fn list_model_catalog(&self) -> Result<Vec<crate::models::DiscoveredModel>, LlmError> {
+        Ok(self
+            .list_models()
+            .await?
+            .into_iter()
+            .map(crate::models::DiscoveredModel::from_id)
+            .collect())
+    }
+
     /// Fetch metadata for the current model (context length, etc.).
     /// Default returns the model name with no size info.
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {

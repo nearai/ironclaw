@@ -226,6 +226,10 @@ impl LlmProvider for SwappableLlmProvider {
         self.current().list_models().await
     }
 
+    async fn list_model_catalog(&self) -> Result<Vec<crate::models::DiscoveredModel>, LlmError> {
+        self.current().list_model_catalog().await
+    }
+
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         self.current().model_metadata().await
     }

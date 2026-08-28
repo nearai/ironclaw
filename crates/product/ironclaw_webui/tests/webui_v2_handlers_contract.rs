@@ -1006,6 +1006,7 @@ impl StubServices {
                     selection_enabled: true,
                     workspace_default: Some("model-a".to_string()),
                     models: vec!["model-a".to_string(), "model-b".to_string()],
+                    model_entries: Vec::new(),
                 })
                 .expect("user model catalog payload"),
                 next_cursor: None,
@@ -1696,6 +1697,7 @@ impl StubServices {
         Ok(LlmModelsResult {
             ok: true,
             models: vec!["model-a".to_string()],
+            model_entries: Vec::new(),
             message: String::new(),
         })
     }

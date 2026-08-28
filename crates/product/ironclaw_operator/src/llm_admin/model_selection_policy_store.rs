@@ -102,6 +102,7 @@ mod tests {
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
+    use ironclaw_product_contracts::operator_llm::{LlmModelCatalogEntry, LlmModelModality};
 
     fn caller(tenant: &str, user: &str) -> ProductSurfaceCaller {
         ProductSurfaceCaller::new(
@@ -112,15 +113,21 @@ mod tests {
         )
     }
 
+    fn filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+        Arc::new(ScopedFilesystem::new(
+            Arc::new(InMemoryBackend::new()),
+            |scope| {
+                MountView::new(vec![MountGrant::new(
+                    MountAlias::new("/tenant-shared")?,
+                    VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id.as_str()))?,
+                    MountPermissions::read_write(),
+                )])
+            },
+        ))
+    }
+
     fn store() -> FilesystemModelSelectionPolicyStore<InMemoryBackend> {
-        let filesystem = ScopedFilesystem::new(Arc::new(InMemoryBackend::new()), |scope| {
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/tenant-shared")?,
-                VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id.as_str()))?,
-                MountPermissions::read_write(),
-            )])
-        });
-        FilesystemModelSelectionPolicyStore::new(Arc::new(filesystem))
+        FilesystemModelSelectionPolicyStore::new(filesystem())
     }
 
     fn policy(provider: &str) -> ModelSelectionPolicy {
@@ -128,6 +135,11 @@ mod tests {
             provider_id: provider.to_string(),
             workspace_default: "model-a".to_string(),
             allowed_models: vec!["model-a".to_string(), "model-b".to_string()],
+            model_entries: vec![LlmModelCatalogEntry {
+                id: "model-a".to_string(),
+                input_modalities: vec![LlmModelModality::Text, LlmModelModality::Image],
+                output_modalities: vec![LlmModelModality::Text],
+            }],
         }
     }
 
@@ -153,5 +165,30 @@ mod tests {
                 .expect("read"),
             None,
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_policy_record_loads_without_capability_metadata() {
+        let filesystem = filesystem();
+        let store = FilesystemModelSelectionPolicyStore::new(Arc::clone(&filesystem));
+        let policy_caller = caller("tenant-a", "admin");
+        filesystem
+            .write_bytes(
+                &FilesystemModelSelectionPolicyStore::<InMemoryBackend>::scope(&policy_caller),
+                &FilesystemModelSelectionPolicyStore::<InMemoryBackend>::path()
+                    .expect("policy path"),
+                br#"{"provider_id":"nearai","workspace_default":"model-a","allowed_models":["model-a"]}"#
+                    .to_vec(),
+            )
+            .await
+            .expect("write legacy policy");
+
+        let loaded = store
+            .read(&policy_caller)
+            .await
+            .expect("read legacy policy")
+            .expect("policy");
+
+        assert!(loaded.model_entries.is_empty());
     }
 }

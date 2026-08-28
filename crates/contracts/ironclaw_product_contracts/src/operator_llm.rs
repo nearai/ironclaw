@@ -515,12 +515,38 @@ pub struct LlmProbeResult {
     pub message: String,
 }
 
+/// Stable, display-only model modality exposed through product surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmModelModality {
+    Text,
+    Image,
+    Audio,
+    Video,
+    Embedding,
+}
+
+/// A model identifier and the directional capabilities reported by its provider.
+///
+/// These fields are presentation metadata and must not influence routing,
+/// authorization, or model-policy enforcement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmModelCatalogEntry {
+    pub id: String,
+    #[serde(default)]
+    pub input_modalities: Vec<LlmModelModality>,
+    #[serde(default)]
+    pub output_modalities: Vec<LlmModelModality>,
+}
+
 /// Result of a model-listing probe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmModelsResult {
     pub ok: bool,
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_entries: Vec<LlmModelCatalogEntry>,
     pub message: String,
 }
 
@@ -530,6 +556,8 @@ pub struct ModelSelectionPolicy {
     pub provider_id: String,
     pub workspace_default: String,
     pub allowed_models: Vec<String>,
+    #[serde(default)]
+    pub model_entries: Vec<LlmModelCatalogEntry>,
 }
 
 /// User-safe projection of the effective policy for the active provider.
@@ -540,6 +568,8 @@ pub struct UserModelCatalog {
     pub workspace_default: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_entries: Vec<LlmModelCatalogEntry>,
 }
 
 impl UserModelCatalog {
@@ -548,6 +578,7 @@ impl UserModelCatalog {
             selection_enabled: false,
             workspace_default: None,
             models: Vec::new(),
+            model_entries: Vec::new(),
         }
     }
 }
@@ -557,6 +588,8 @@ impl UserModelCatalog {
 pub struct SetUserModelPolicyRequest {
     pub workspace_default: String,
     pub allowed_models: Vec<String>,
+    #[serde(default)]
+    pub model_entries: Vec<LlmModelCatalogEntry>,
 }
 
 /// Caller-scoped model preference. `None` follows the workspace default.
@@ -837,6 +870,7 @@ mod tests {
             Ok(LlmModelsResult {
                 ok: true,
                 models: vec![request.adapter],
+                model_entries: Vec::new(),
                 message: request.provider_id,
             })
         }
@@ -1213,6 +1247,36 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&NearAiAuthProvider::Github).expect("serializes"),
             "\"github\""
+        );
+    }
+
+    #[test]
+    fn legacy_model_policy_defaults_capabilities_to_empty() {
+        let policy: ModelSelectionPolicy = serde_json::from_value(serde_json::json!({
+            "provider_id": "nearai",
+            "workspace_default": "model-a",
+            "allowed_models": ["model-a"]
+        }))
+        .expect("legacy policy");
+
+        assert!(policy.model_entries.is_empty());
+    }
+
+    #[test]
+    fn model_catalog_entry_serializes_directional_modalities() {
+        let entry = LlmModelCatalogEntry {
+            id: "vision-model".to_string(),
+            input_modalities: vec![LlmModelModality::Text, LlmModelModality::Image],
+            output_modalities: vec![LlmModelModality::Text],
+        };
+
+        assert_eq!(
+            serde_json::to_value(entry).expect("catalog entry"),
+            serde_json::json!({
+                "id": "vision-model",
+                "input_modalities": ["text", "image"],
+                "output_modalities": ["text"]
+            })
         );
     }
 }

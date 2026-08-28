@@ -1034,6 +1034,7 @@ async fn standalone_cli_send_uses_saved_user_model_preference() {
                     "workspace-default".to_string(),
                     "preferred-model".to_string(),
                 ],
+                model_entries: Vec::new(),
             },
         )
         .await
