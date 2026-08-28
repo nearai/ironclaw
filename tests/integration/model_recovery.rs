@@ -269,7 +269,7 @@ async fn cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_histor
 }
 
 #[tokio::test]
-async fn context_overflow_recovers_with_model_visible_observation() {
+async fn context_overflow_compacts_once_and_resumes() {
     // Seed one oversized user message so forced compaction exercises the real
     // compactor instead of taking its safe "nothing eligible" skip path.
     let input_secret = concat!("AKIA", "IOSFODNN7EXAMPLE");
@@ -282,7 +282,8 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         "compacted recovery history\n-----BEGIN ENCRYPTED PRIVATE KEY-----\n{output_secret}\n-----END ENCRYPTED PRIVATE KEY-----\nretained"
     );
     let harness = RebornIntegrationHarness::test_default()
-        .context_overflow_model_after(3, 3)
+        .with_durable_milestone_event_store_for_test()
+        .context_overflow_model_after(3, 1)
         .script([
             RebornScriptedReply::text("first setup reply"),
             RebornScriptedReply::text("second setup reply"),
@@ -312,17 +313,17 @@ async fn context_overflow_recovers_with_model_visible_observation() {
     harness
         .submit_turn("answer after compacting")
         .await
-        .expect("turn recovers after context overflow exhausts normal retries");
+        .expect("turn recovers after one context overflow");
     harness
         .assert_reply_contains("recovered after context overflow")
         .await
         .expect("recovered reply persisted");
     harness
-        .assert_model_message_content_contains(
+        .assert_model_message_content_not_contains(
             "model error observation: context overflowed; use the available context and continue",
         )
         .await
-        .expect("recovery request carries the typed context-overflow observation");
+        .expect("overflow recovery resumes from compaction without an observation retry");
     harness
         .assert_model_message_content_contains("compacted recovery history")
         .await
@@ -372,21 +373,90 @@ async fn context_overflow_recovers_with_model_visible_observation() {
         .await
         .expect("the durable compaction summary contains only redaction markers");
     harness
-        .assert_interactive_model_provider_call_count(7)
+        .assert_interactive_model_provider_call_count(5)
         .await
-        .expect("setup and context-overflow recovery use the bounded interactive budget");
+        .expect("setup, one overflow, and one resumed request use the bounded budget");
     harness
         .assert_text_model_provider_call_count_at_least(1)
         .await
         .expect("context overflow performs a real text-only compaction inference");
     harness
-        .assert_model_message_content_occurrences("model error observation", 1)
+        .assert_model_message_content_occurrences("model error observation", 0)
         .await
-        .expect("context overflow injects exactly one recovery observation");
+        .expect("context overflow does not inject an extra observation attempt");
     harness
         .assert_model_message_content_not_contains(&CONTEXT_OVERFLOW_USED_TOKENS.to_string())
         .await
         .expect("provider diagnostics do not enter the recovery prompt");
+    harness
+        .assert_model_recovery_class(
+            LoopRecoveryClass::ModelContextOverflow,
+            LoopRecoveryClass::ModelInvalidOutput,
+        )
+        .await
+        .expect("the consumed overflow recovery is recorded durably");
+}
+
+#[tokio::test]
+async fn second_context_overflow_fails_after_one_compaction() {
+    let harness = RebornIntegrationHarness::test_default()
+        .with_turn_event_sink()
+        .with_durable_milestone_event_store_for_test()
+        .context_overflow_model_after(3, 2)
+        .script([
+            RebornScriptedReply::text("first setup reply"),
+            RebornScriptedReply::text("second setup reply"),
+            RebornScriptedReply::text("third setup reply"),
+            RebornScriptedReply::text("single overflow compaction summary"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+    harness
+        .submit_turn("first setup turn")
+        .await
+        .expect("first setup turn");
+    harness
+        .submit_turn("second setup turn")
+        .await
+        .expect("second setup turn");
+    harness
+        .submit_turn(&format!("third setup turn {}", "history ".repeat(5_000)))
+        .await
+        .expect("third setup turn");
+
+    let run_id = harness
+        .submit_turn_async("fail after one overflow recovery")
+        .await
+        .expect("turn submitted");
+    harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("second overflow fails the run");
+
+    harness
+        .assert_summary_artifact_count_at_least(1)
+        .await
+        .expect("exactly one recovery path reaches durable compaction");
+    harness
+        .assert_interactive_model_provider_call_count(5)
+        .await
+        .expect("setup plus two overflow attempts are bounded");
+    harness
+        .assert_model_message_content_occurrences("model error observation", 0)
+        .await
+        .expect("a second overflow does not receive an observation retry");
+    harness
+        .assert_turn_event_recorded(TurnEventKind::Failed)
+        .await
+        .expect("terminal overflow failure is durable");
+    harness
+        .assert_model_recovery_class(
+            LoopRecoveryClass::ModelContextOverflow,
+            LoopRecoveryClass::ModelInvalidOutput,
+        )
+        .await
+        .expect("the single consumed recovery remains durably recorded");
 }
 
 #[tokio::test]

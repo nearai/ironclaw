@@ -846,12 +846,86 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
         "one failed model attempt must produce exactly one recovery numerator event"
     );
 
+    let recovery_checkpoint = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|request| request.kind == LoopCheckpointKind::BeforeModel)
+        .filter_map(|request| {
+            LoopExecutionState::from_checkpoint_payload(
+                &request.payload,
+                CheckpointKind::BeforeModel,
+            )
+            .ok()
+        })
+        .find(|state| {
+            state
+                .recovery_state
+                .attempts_for(crate::state::RecoveryAttemptClass::ModelContextOverflow)
+                == 1
+                && state.compaction_state.force_compact_on_next_iteration
+        })
+        .expect("recovery checkpoint persists the consumed attempt and compaction request");
+    assert!(
+        recovery_checkpoint
+            .pending_model_error_observation
+            .is_none()
+    );
+
     let final_state = final_staged_state(&host);
     assert_eq!(
         final_state.compaction_state.last_compacted_through_seq,
         Some(5)
     );
     assert!(!final_state.compaction_state.force_compact_on_next_iteration);
+}
+
+#[tokio::test]
+async fn second_model_context_overflow_aborts_without_another_compaction() {
+    let overflow = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ContextOverflow,
+            "model request exceeded its context budget",
+        )
+    };
+    let host = MockHost::new(Vec::new())
+        .with_model_errors(vec![overflow(), overflow()])
+        .with_prompt_compaction_indexes(vec![
+            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            active_task_preserving_compaction_index(),
+            Vec::new(),
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary:overflow-once")
+                .expect("valid summary id"),
+            compression_ratio_ppm: 100_000,
+            redacted_leak_count: 0,
+        }));
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Failed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.progress_events()
+            .into_iter()
+            .filter(|event| matches!(event, LoopProgressEvent::CompactionStarted { .. }))
+            .count(),
+        1,
+        "a second overflow must not start another compaction"
+    );
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state
+            .recovery_state
+            .attempts_for(crate::state::RecoveryAttemptClass::ModelContextOverflow),
+        2
+    );
+    assert!(final_state.pending_model_error_observation.is_none());
 }
 
 /// D-A integration: the `force_compact_initiator` threaded through state by
