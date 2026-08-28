@@ -47,6 +47,12 @@ use ironclaw_host_api::runtime_policy::{
 };
 use ironclaw_host_api::turn::TurnGateRef;
 use ironclaw_loop_host::{ModelCost, ModelCostTable, StaticModelCostTable};
+use ironclaw_product_contracts::{
+    notification_inbox::{
+        NOTIFICATIONS_VIEW, ProductListNotificationsResponse, ProductNotificationKind,
+    },
+    surface::{ProductSurfaceCaller, ProductSurfaceQueryRequest},
+};
 use ironclaw_resources::BudgetGateId;
 
 fn standalone_runtime_policy() -> EffectiveRuntimePolicy {
@@ -193,6 +199,51 @@ async fn budget_pause_blocks_run_on_budget_gate() {
     let gate_id = pump_until_pause(&runtime, &gateway).await;
     // A real, parseable budget gate id was surfaced (not a placeholder).
     assert_ne!(gate_id, BudgetGateId::from_uuid(uuid::Uuid::nil()));
+
+    let surface = runtime.product_surface(None).expect("product surface");
+    let caller = ProductSurfaceCaller::new(
+        ironclaw_host_api::ids::TenantId::new("pause-tenant").expect("tenant"),
+        ironclaw_host_api::ids::UserId::new("pause-owner").expect("user"),
+        Some(ironclaw_host_api::ids::AgentId::new("pause-agent").expect("agent")),
+        None,
+    );
+    let notification = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let page = surface
+                .query(
+                    caller.clone(),
+                    ProductSurfaceQueryRequest {
+                        view_id: NOTIFICATIONS_VIEW.id.to_string(),
+                        input: serde_json::json!({ "limit": 10 }),
+                        cursor: None,
+                        limit: None,
+                    },
+                )
+                .await
+                .expect("query notification Inbox");
+            let response: ProductListNotificationsResponse = serde_json::from_value(
+                page.items
+                    .into_iter()
+                    .next()
+                    .expect("notification response payload"),
+            )
+            .expect("decode notification response");
+            if let Some(notification) = response
+                .notifications
+                .into_iter()
+                .find(|notification| notification.kind == ProductNotificationKind::RunBlocked)
+            {
+                break notification;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("WebUI-origin resource block reaches Inbox");
+    assert!(
+        notification.resolved_at.is_none(),
+        "the durable resource gate remains actionable while the run is parked"
+    );
 
     runtime.shutdown().await.expect("shutdown");
 }

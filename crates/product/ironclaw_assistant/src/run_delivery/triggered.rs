@@ -582,7 +582,9 @@ async fn notify_background_run(
         );
     }
 
-    let mut delivered_blocked_marker: Option<BlockedActionableMarker> = None;
+    let mut observed_blocked_marker: Option<BlockedActionableMarker> = None;
+    let mut external_delivery_succeeded = false;
+    let mut external_delivery_unconfirmed = false;
     // (extension that carried it, message) — the notification set spans
     // extensions, so retraction is per-message.
     let mut messages_to_delete_after_final: Vec<(String, DeliveredChannelMessage)> = Vec::new();
@@ -614,30 +616,33 @@ async fn notify_background_run(
             &scope,
             run_id,
             settings,
-            delivered_blocked_marker.as_ref(),
+            observed_blocked_marker.as_ref(),
         )
         .await
         {
             Ok(state) => state,
-            Err(RunDeliveryError::RunWaitTimedOut { .. }) if delivered_blocked_marker.is_some() => {
-                // Parked awaiting the user after its prompt went out — a
-                // successful, terminal-for-delivery outcome. The prompt must
-                // stay actionable, so stale-prompt cleanup deliberately does
-                // NOT run here.
+            Err(RunDeliveryError::RunWaitTimedOut { .. }) if observed_blocked_marker.is_some() => {
+                // Parked after a blocked state was surfaced. Preserve any
+                // actionable prompt, but only claim external delivery when a
+                // channel adapter actually succeeded.
                 tracing::debug!(
                     target: TRACE_TARGET,
                     %run_id,
-                    "background run parked awaiting user after notifying; settling delivery outcome"
+                    "background run parked after surfacing a blocked state; settling delivery outcome"
                 );
                 let outcome = if lookup_failed_without_targets {
                     TriggeredRunDeliveryOutcomeKind::Failed
                 } else if web_inbox_only {
                     TriggeredRunDeliveryOutcomeKind::NoDefaultConfigured
-                } else {
+                } else if external_delivery_succeeded {
                     TriggeredRunDeliveryOutcomeKind::Delivered
+                } else if external_delivery_unconfirmed {
+                    TriggeredRunDeliveryOutcomeKind::Unconfirmed
+                } else {
+                    TriggeredRunDeliveryOutcomeKind::Skipped
                 };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
-                if let Some(marker) = delivered_blocked_marker.clone() {
+                if let Some(marker) = observed_blocked_marker.clone() {
                     spawn_inbox_gate_observer(
                         services,
                         *settings,
@@ -804,7 +809,7 @@ async fn notify_background_run(
         };
 
         let trigger_label = prompts::triggered_label_from_prompt(&prompt);
-        if let Some(previous) = delivered_blocked_marker.as_ref()
+        if let Some(previous) = observed_blocked_marker.as_ref()
             && blocked_actionable_marker(&state).as_ref() != Some(previous)
             && let Some(kind) = super::blocked_status_notification_kind(previous.status)
         {
@@ -844,12 +849,22 @@ async fn notify_background_run(
             record_triggered_run_outcome(delivery_store, run_id, outcome).await;
             return outcome;
         }
+        if state.status == TurnStatus::BlockedResource
+            && let Some(marker) = blocked_actionable_marker(&state)
+        {
+            // Resource/policy details stay on the durable WebUI surface, but
+            // the full watcher must remain alive. It owns any auth-prompt
+            // cleanup already queued and must still fan a later approval/auth
+            // gate out to the configured notification channels.
+            observed_blocked_marker = Some(marker);
+            continue;
+        }
         if targets.is_empty() {
             if let Some(marker) = blocked_actionable_marker(&state) {
                 // The Inbox is itself a destination. Keep observing a WebUI-only
                 // gate so the stable item can be resolved when that gate is
                 // cleared or replaced, without attempting external delivery.
-                delivered_blocked_marker = Some(marker);
+                observed_blocked_marker = Some(marker);
                 continue;
             }
             let outcome = if lookup_failed_without_targets {
@@ -881,7 +896,13 @@ async fn notify_background_run(
                     &mut messages_to_delete_after_final,
                 )
                 .await;
-                let outcome = TriggeredRunDeliveryOutcomeKind::Skipped;
+                let outcome = if external_delivery_succeeded {
+                    TriggeredRunDeliveryOutcomeKind::Delivered
+                } else if external_delivery_unconfirmed {
+                    TriggeredRunDeliveryOutcomeKind::Unconfirmed
+                } else {
+                    TriggeredRunDeliveryOutcomeKind::Skipped
+                };
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;
             }
@@ -904,10 +925,13 @@ async fn notify_background_run(
         messages_to_delete_after_final.extend(fan.messages_to_retract_after_final);
         let PlanFanOut {
             any_delivered,
+            any_unconfirmed,
             any_denied,
             delivered_for_gate_route,
             ..
         } = fan;
+        external_delivery_succeeded |= any_delivered;
+        external_delivery_unconfirmed |= any_unconfirmed;
 
         // Every conversation the prompt landed in becomes a reply route for
         // this gate, so a bare `approve` from ANY notification channel
@@ -928,7 +952,7 @@ async fn notify_background_run(
             .await;
         }
 
-        if !any_delivered {
+        if !any_delivered && !any_unconfirmed {
             let outcome = if any_denied {
                 TriggeredRunDeliveryOutcomeKind::Denied
             } else {
@@ -953,7 +977,7 @@ async fn notify_background_run(
         if plan.keeps_run_parked
             && let Some(marker) = next_blocked_marker
         {
-            delivered_blocked_marker = Some(marker);
+            observed_blocked_marker = Some(marker);
             continue;
         }
 
@@ -965,7 +989,11 @@ async fn notify_background_run(
             &mut messages_to_delete_after_final,
         )
         .await;
-        let outcome = TriggeredRunDeliveryOutcomeKind::Delivered;
+        let outcome = if external_delivery_succeeded {
+            TriggeredRunDeliveryOutcomeKind::Delivered
+        } else {
+            TriggeredRunDeliveryOutcomeKind::Unconfirmed
+        };
         record_triggered_run_outcome(delivery_store, run_id, outcome).await;
         return outcome;
     }
@@ -1288,8 +1316,12 @@ async fn deliver_pre_submit_failure_to_target(
 
 /// The aggregate of fanning one plan out to every matching target.
 struct PlanFanOut {
-    /// At least one channel accepted a delivery.
+    /// At least one channel accepted and durably confirmed a delivery.
     any_delivered: bool,
+    /// At least one channel provider accepted a delivery whose durable
+    /// terminal confirmation failed. This suppresses duplicate egress while
+    /// remaining distinct from confirmed delivery.
+    any_unconfirmed: bool,
     /// A permanent `Denied` from ANY channel — it must survive later
     /// transient failures: only the recorded outcome distinguishes "denied"
     /// from "failed", and last-writer-wins would lose the permanent signal.
@@ -1311,6 +1343,7 @@ async fn fan_out_plan(
 ) -> PlanFanOut {
     let mut out = PlanFanOut {
         any_delivered: false,
+        any_unconfirmed: false,
         any_denied: false,
         delivered_for_gate_route: Vec::new(),
         messages_to_retract_after_final: Vec::new(),
@@ -1328,16 +1361,17 @@ async fn fan_out_plan(
             )
             .await
             {
-                Ok(delivered) => {
+                Ok(super::notifications::NotificationDeliveryOutcome::Delivered(delivered)) => {
                     out.any_delivered = true;
-                    if notification.event_kind == RunNotificationEventKind::AuthRequired {
-                        out.messages_to_retract_after_final.extend(
-                            delivered
-                                .iter()
-                                .map(|message| (target.extension_id.clone(), message.clone())),
-                        );
-                    }
-                    out.delivered_for_gate_route.extend(delivered);
+                    retain_delivered_messages(&mut out, notification, target, delivered);
+                }
+                Ok(super::notifications::NotificationDeliveryOutcome::Unconfirmed(delivered)) => {
+                    out.any_unconfirmed = true;
+                    retain_delivered_messages(&mut out, notification, target, delivered);
+                }
+                Ok(super::notifications::NotificationDeliveryOutcome::NoDelivery) => {}
+                Ok(super::notifications::NotificationDeliveryOutcome::Rejected) => {
+                    out.any_denied = true;
                 }
                 Err(failure) => {
                     tracing::warn!(
@@ -1353,7 +1387,7 @@ async fn fan_out_plan(
             }
         }
     }
-    if !targets.is_empty() && !out.any_delivered {
+    if !targets.is_empty() && !out.any_delivered && !out.any_unconfirmed {
         services
             .publish_inbox_notification(
                 &notification_context.actor.user_id,
@@ -1367,12 +1401,33 @@ async fn fan_out_plan(
     out
 }
 
+/// Provider-accepted messages remain routable and retractable even when the
+/// coordinator could not persist its terminal delivery confirmation.
+fn retain_delivered_messages(
+    out: &mut PlanFanOut,
+    notification: &TriggeredNotification,
+    target: &NotificationTarget,
+    delivered: Vec<DeliveredChannelMessage>,
+) {
+    if notification.event_kind == RunNotificationEventKind::AuthRequired {
+        out.messages_to_retract_after_final.extend(
+            delivered
+                .iter()
+                .map(|message| (target.extension_id.clone(), message.clone())),
+        );
+    }
+    out.delivered_for_gate_route.extend(delivered);
+}
+
 /// Reduce a plan fan-out to the recorded outcome kind. Nothing delivered is
-/// `Failed` (or `Denied` when any channel denied); anything delivered is
-/// `Delivered` — a delivered notice is the creator-visible terminal signal.
+/// `Failed` (or `Denied` when any channel denied). Provider acceptance whose
+/// durable confirmation failed remains `Unconfirmed` and is never promoted
+/// to `Delivered`.
 fn delivery_outcome_for_fan(fan: &PlanFanOut) -> TriggeredRunDeliveryOutcomeKind {
     if fan.any_delivered {
         TriggeredRunDeliveryOutcomeKind::Delivered
+    } else if fan.any_unconfirmed {
+        TriggeredRunDeliveryOutcomeKind::Unconfirmed
     } else if fan.any_denied {
         TriggeredRunDeliveryOutcomeKind::Denied
     } else {
@@ -1387,7 +1442,7 @@ async fn deliver_notification_to_target(
     context: &TriggeredNotificationContext<'_>,
     notification: &TriggeredNotification,
     target: &NotificationTarget,
-) -> Result<Vec<DeliveredChannelMessage>, TriggeredNotificationFailure> {
+) -> Result<super::notifications::NotificationDeliveryOutcome, TriggeredNotificationFailure> {
     // One caller of the generic §7a facade among any number: the routine
     // driver decides WHEN and WHAT; the facade + adapter own HOW.
     let facade_context = super::notifications::ChannelNotificationContext {
@@ -1410,7 +1465,7 @@ async fn deliver_notification_to_target(
         extension_id: target.extension_id.clone(),
         direct_message: target.direct_message,
     };
-    super::notifications::notify(
+    super::notifications::notify_with_outcome(
         services,
         &facade_context,
         &facade_notification,
