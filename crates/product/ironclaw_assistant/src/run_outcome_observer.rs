@@ -400,27 +400,26 @@ impl ProcessJournalCommitObserver for ResourceBlockBackfillProcessCommitObserver
         };
         let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let current = self.current_snapshot(&commit.state).await?;
-        if current_resource_gate_ref(&current) != Some(historical_gate_ref.as_str()) {
-            // A previous attempt may have published this historical gate and
-            // then crashed while compensating after a post-write state read.
-            // Reconcile even when replay starts stale so the durable cursor
-            // cannot acknowledge the commit while leaving that record open.
-            self.outcome_observer
-                .reconcile_resource_block(&current, run_id, chrono::Utc::now())
-                .await?;
-            return Ok(());
-        }
+        let reconciliation_at =
+            if current_resource_gate_ref(&current) == Some(historical_gate_ref.as_str()) {
+                commit.occurred_at.unwrap_or(commit.state.created_at)
+            } else {
+                // A previous attempt may have published this historical gate and
+                // then crashed while compensating after a post-write state read.
+                // Reconcile even when replay starts stale so the durable cursor
+                // cannot acknowledge the commit while leaving that record open.
+                chrono::Utc::now()
+            };
 
-        let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
         self.outcome_observer
-            .reconcile_resource_block(&current, run_id, occurred_at)
+            .reconcile_resource_block(&current, run_id, reconciliation_at)
             .await?;
 
         // Recovery can win between the pre-publication state read and the
         // Inbox CAS. Re-read after the write and retire the just-published
         // record (or move it to the new gate) if the process changed.
         let latest = self.current_snapshot(&commit.state).await?;
-        if current_resource_gate_ref(&latest) != Some(historical_gate_ref.as_str()) {
+        if current_resource_gate_ref(&latest) != current_resource_gate_ref(&current) {
             self.outcome_observer
                 .reconcile_resource_block(&latest, run_id, chrono::Utc::now())
                 .await?;
@@ -1237,6 +1236,61 @@ mod tests {
         assert!(
             reconciled.notifications[0].resolved_at.is_some(),
             "replay must retire the stale record even when it did not publish it"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_backfill_rechecks_a_replacement_gate_after_reconciliation() {
+        const HISTORICAL_GATE: &str = "gate:budget-00000000-0000-0000-0000-000000000004";
+        const REPLACEMENT_GATE: &str = "gate:budget-00000000-0000-0000-0000-000000000005";
+        let notification_inbox = inbox();
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let run_id = TurnRunId::new();
+        let historical = resource_block_commit(run_id, "web_ui", HISTORICAL_GATE);
+        let replacement = resource_block_commit(run_id, "web_ui", REPLACEMENT_GATE);
+        let recovered = commit(
+            run_id,
+            ProcessLifecycleStatus::Queued,
+            ProcessJournalKind::Resumed,
+            "web_ui",
+        );
+        let source = Arc::new(CurrentProcessJournalSource::new(replacement.state.clone()));
+        source.set_sequence([replacement.state, recovered.state]);
+        let observer = ResourceBlockBackfillProcessCommitObserver::new(
+            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>,
+            threads as Arc<dyn SessionThreadService>,
+            source as Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+        );
+
+        observer
+            .observe_process_commit(historical)
+            .await
+            .expect("replacement gate recovery is reconciled");
+
+        let reconciled = notification_inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list replacement resource block");
+        assert_eq!(reconciled.notifications.len(), 1);
+        assert_eq!(
+            reconciled.notifications[0]
+                .source
+                .lifecycle_ref
+                .as_ref()
+                .map(LifecycleRef::as_str),
+            Some(REPLACEMENT_GATE)
+        );
+        assert!(
+            reconciled.notifications[0].resolved_at.is_some(),
+            "a replacement gate recovered during stale-on-entry reconciliation must not remain actionable"
         );
     }
 
