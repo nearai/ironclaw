@@ -106,6 +106,7 @@ pub(crate) enum McpProviderRejectionCause {
     HttpStatus(u16),
     JsonRpcError(i64),
     ToolRejected,
+    InvalidToolResult,
 }
 
 pub(crate) fn provider_error_code(cause: McpProviderRejectionCause) -> ProviderErrorCode {
@@ -113,6 +114,7 @@ pub(crate) fn provider_error_code(cause: McpProviderRejectionCause) -> ProviderE
         McpProviderRejectionCause::HttpStatus(status) => format!("mcp_http_status_{status}"),
         McpProviderRejectionCause::JsonRpcError(code) => format!("mcp_jsonrpc_error_{code}"),
         McpProviderRejectionCause::ToolRejected => "mcp_tool_rejected".to_string(),
+        McpProviderRejectionCause::InvalidToolResult => "mcp_invalid_tool_result".to_string(),
     })
 }
 

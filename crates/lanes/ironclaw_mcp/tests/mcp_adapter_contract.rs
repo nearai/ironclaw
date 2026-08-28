@@ -307,6 +307,106 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_projects_semantic_content_without_inline_binary() {
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::mixed_content())),
+        RecordingEgressPlanner::new(host_http_plan()),
+    );
+
+    let output = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 16_384,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.output,
+        json!({
+            "content": [
+                {"type": "text", "text": "readable answer"},
+                {"type": "image", "mimeType": "image/png", "encoding": "binary_unsupported"},
+                {"type": "audio", "mimeType": "audio/wav", "encoding": "binary_unsupported"},
+                {
+                    "type": "resource_link",
+                    "name": "report",
+                    "title": "Readable report",
+                    "uri": "file:///reports/summary.md",
+                    "description": "Generated summary",
+                    "mimeType": "text/markdown",
+                    "size": 42
+                },
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///reports/inline.txt",
+                        "mimeType": "text/plain",
+                        "text": "embedded readable text"
+                    }
+                },
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///reports/inline.pdf",
+                        "mimeType": "application/pdf",
+                        "encoding": "binary_unsupported"
+                    }
+                },
+                {
+                    "type": "unsupported",
+                    "original_type": "future_content",
+                    "status": "unsupported_content_type"
+                }
+            ],
+            "structuredContent": {"items": [{"id": 7, "title": "semantic JSON"}]},
+            "isError": false
+        })
+    );
+    let rendered = output.output.to_string();
+    assert!(!rendered.contains("IMAGE_BASE64_MUST_NOT_SURVIVE"));
+    assert!(!rendered.contains("AUDIO_BASE64_MUST_NOT_SURVIVE"));
+    assert!(!rendered.contains("BLOB_BASE64_MUST_NOT_SURVIVE"));
+    assert!(!rendered.contains("UNKNOWN_PAYLOAD_MUST_NOT_SURVIVE"));
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_rejects_malformed_success_result() {
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::invalid_tool_result())),
+        RecordingEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("malformed successful CallToolResult must not reach durable output");
+
+    assert_eq!(error.stable_reason(), "mcp_invalid_tool_result");
+    let McpClientError::ProviderRejected { usage, .. } = error else {
+        panic!("invalid CallToolResult must retain provider-attempt usage");
+    };
+    assert!(usage.output_bytes > 0);
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_client_surfaces_call_tool_error_content() {
     let client = McpHostHttpClient::new(
         McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::tool_error())),
@@ -1904,6 +2004,8 @@ impl McpClient for RecordingMcpClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecordedResponseMode {
     Json,
+    MixedContent,
+    InvalidToolResult,
     ToolError,
     AuthRequired,
     InitializedAuthRequired,
@@ -1932,6 +2034,22 @@ impl RecordingRuntimeEgress {
         Self {
             mode: RecordedResponseMode::Json,
             protocol_version,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn mixed_content() -> Self {
+        Self {
+            mode: RecordedResponseMode::MixedContent,
+            protocol_version: "2025-06-18",
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn invalid_tool_result() -> Self {
+        Self {
+            mode: RecordedResponseMode::InvalidToolResult,
+            protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -2098,9 +2216,70 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                         vec![],
                         request.body.len() as u64,
                     )),
+                    RecordedResponseMode::MixedContent => Ok(runtime_json_response(
+                        id,
+                        json!({
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "readable answer",
+                                    "annotations": {
+                                        "audience": ["assistant"],
+                                        "priority": 0.8,
+                                        "transport": "omit"
+                                    },
+                                    "_meta": {"transport": "omit"}
+                                },
+                                {"type": "image", "mimeType": "image/png", "data": "IMAGE_BASE64_MUST_NOT_SURVIVE"},
+                                {"type": "audio", "mimeType": "audio/wav", "data": "AUDIO_BASE64_MUST_NOT_SURVIVE"},
+                                {
+                                    "type": "resource_link",
+                                    "name": "report",
+                                    "title": "Readable report",
+                                    "uri": "file:///reports/summary.md",
+                                    "description": "Generated summary",
+                                    "mimeType": "text/markdown",
+                                    "size": 42,
+                                    "_meta": {"transport": "omit"}
+                                },
+                                {
+                                    "type": "resource",
+                                    "resource": {
+                                        "uri": "file:///reports/inline.txt",
+                                        "mimeType": "text/plain",
+                                        "text": "embedded readable text",
+                                        "_meta": {"transport": "omit"}
+                                    }
+                                },
+                                {
+                                    "type": "resource",
+                                    "resource": {
+                                        "uri": "file:///reports/inline.pdf",
+                                        "mimeType": "application/pdf",
+                                        "blob": "BLOB_BASE64_MUST_NOT_SURVIVE"
+                                    }
+                                },
+                                {
+                                    "type": "future_content",
+                                    "payload": "UNKNOWN_PAYLOAD_MUST_NOT_SURVIVE"
+                                }
+                            ],
+                            "structuredContent": {"items": [{"id": 7, "title": "semantic JSON"}]},
+                            "isError": false,
+                            "_meta": {"transport": "omit"}
+                        }),
+                        vec![],
+                        request.body.len() as u64,
+                    )),
                     RecordedResponseMode::Sse => Ok(runtime_sse_response(
                         id,
                         json!({"content":[{"type":"text","text":"ok from sse"}],"isError":false}),
+                        request.body.len() as u64,
+                    )),
+                    RecordedResponseMode::InvalidToolResult => Ok(runtime_json_response(
+                        id,
+                        json!({"content": [{"type": "text"}], "isError": false}),
+                        vec![],
                         request.body.len() as u64,
                     )),
                     RecordedResponseMode::ToolError => Ok(runtime_json_response(
@@ -2231,6 +2410,8 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                 });
                 match self.mode {
                     RecordedResponseMode::Json
+                    | RecordedResponseMode::MixedContent
+                    | RecordedResponseMode::InvalidToolResult
                     | RecordedResponseMode::JsonMissingProtocolVersion
                     | RecordedResponseMode::DeepOpenApiSchema
                     | RecordedResponseMode::InvalidToolCatalog
