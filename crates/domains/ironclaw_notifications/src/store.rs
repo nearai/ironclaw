@@ -30,6 +30,11 @@ const NOTIFICATION_INBOX_SCHEMA_VERSION: u8 = 1;
 /// action while retaining and mutating the snapshot. The decoder also
 /// recognizes the placeholder after a rollback writer drops additive fields.
 const LEGACY_NO_THREAD_COMPAT_ID: &str = "ironclaw-notification-no-thread-v1";
+/// Schema-v1-visible companion identity for a non-actionable record that the
+/// recipient really archived. Keeping the real archive bit in the legacy
+/// source/action identity lets a current reader distinguish it after a
+/// rollback writer strips additive lifecycle metadata.
+const LEGACY_NO_THREAD_ARCHIVED_COMPAT_ID: &str = "ironclaw-notification-no-thread-archived-v1";
 const TENANT_ID_INDEX_KEY: &str = "tenant_id";
 const NOTIFICATION_CURSOR_MAX_BYTES: usize = (20 + 1 + crate::types::NOTIFICATION_ID_MAX_BYTES) * 2;
 
@@ -489,7 +494,7 @@ fn validate_new_notification_action(
     if source
         .thread_id
         .as_ref()
-        .is_some_and(|thread_id| thread_id.as_str() == LEGACY_NO_THREAD_COMPAT_ID)
+        .is_some_and(is_reserved_compatibility_thread_id)
     {
         return Err(NotificationInboxError::InvalidRequest {
             reason: "notification source uses a reserved compatibility identity",
@@ -579,10 +584,13 @@ fn notification_record_to_persisted_v1(
 ) -> Result<PersistedNotificationRecordV1, NotificationInboxError> {
     let legacy_thread_id = match record.source.thread_id.as_ref() {
         Some(thread_id) => thread_id.clone(),
-        None => ThreadId::new(LEGACY_NO_THREAD_COMPAT_ID).map_err(|error| {
-            NotificationInboxError::Serialization {
-                reason: format!("notification compatibility identity is invalid: {error}"),
-            }
+        None => ThreadId::new(if record.archived_at.is_some() {
+            LEGACY_NO_THREAD_ARCHIVED_COMPAT_ID
+        } else {
+            LEGACY_NO_THREAD_COMPAT_ID
+        })
+        .map_err(|error| NotificationInboxError::Serialization {
+            reason: format!("notification compatibility identity is invalid: {error}"),
         })?,
     };
     let source_v2 = record
@@ -652,9 +660,15 @@ fn notification_record_from_persisted_v1(
         None if compatibility_placeholder => NotificationAction::None,
         None => record.action,
     };
-    let archived_at = record
-        .lifecycle_v2
-        .map_or(record.archived_at, |lifecycle| lifecycle.archived_at);
+    let archived_at = match record.lifecycle_v2 {
+        Some(lifecycle) => lifecycle.archived_at,
+        None if compatibility_placeholder
+            && record.source.thread_id.as_str() == LEGACY_NO_THREAD_COMPAT_ID =>
+        {
+            None
+        }
+        None => record.archived_at,
+    };
     NotificationRecord {
         id: record.id,
         recipient: record.recipient,
@@ -676,7 +690,7 @@ fn notification_record_from_persisted_v1(
 
 fn is_legacy_no_thread_compatibility_record(record: &PersistedNotificationRecordV1) -> bool {
     if record.kind != NotificationKind::RunFailed
-        || record.source.thread_id.as_str() != LEGACY_NO_THREAD_COMPAT_ID
+        || !is_reserved_compatibility_thread_id(&record.source.thread_id)
         || record.source.turn_run_id.is_some()
     {
         return false;
@@ -687,7 +701,7 @@ fn is_legacy_no_thread_compatibility_record(record: &PersistedNotificationRecord
     let action_uses_placeholder = matches!(
         &record.action,
         NotificationAction::OpenThread { thread_id }
-            if thread_id.as_str() == LEGACY_NO_THREAD_COMPAT_ID
+            if is_reserved_compatibility_thread_id(thread_id)
     );
     action_uses_placeholder
         && record.id.as_str()
@@ -696,6 +710,13 @@ fn is_legacy_no_thread_compatibility_record(record: &PersistedNotificationRecord
                 lifecycle_ref.as_str(),
                 NotificationKind::RunFailed.stable_key()
             )
+}
+
+fn is_reserved_compatibility_thread_id(thread_id: &ThreadId) -> bool {
+    matches!(
+        thread_id.as_str(),
+        LEGACY_NO_THREAD_COMPAT_ID | LEGACY_NO_THREAD_ARCHIVED_COMPAT_ID
+    )
 }
 
 /// Reclaim one slot from a snapshot that is at its bound, so a new event is
@@ -953,8 +974,38 @@ mod tests {
         assert_eq!(reopened.notifications[0].action, NotificationAction::None);
         assert!(reopened.notifications[0].source.thread_id.is_none());
         assert!(
-            reopened.notifications[0].archived_at.is_some(),
-            "a rollback mutation may hide the record but must never revive a dead thread action",
+            reopened.notifications[0].archived_at.is_none(),
+            "a rollback rewrite must not promote the compatibility archive into durable user state",
+        );
+        let mut capacity_candidate = reopened.clone();
+        assert!(
+            !evict_oldest_closed_record(&mut capacity_candidate),
+            "the synthetic rollback archive must never make an unarchived record eligible for eviction",
+        );
+
+        let archived_at = Utc
+            .timestamp_opt(1_700_000_020, 0)
+            .single()
+            .expect("archived at");
+        let mut archived_snapshot = snapshot;
+        archived_snapshot.notifications[0].archived_at = Some(archived_at);
+        archived_snapshot.notifications[0].updated_at = archived_at;
+        let archived_entry =
+            encode_snapshot(&archived_snapshot).expect("head writer encodes real archive");
+        let archived_legacy: LegacyNotificationInboxSnapshotV1 =
+            serde_json::from_slice(&archived_entry.body).expect("base reader decodes real archive");
+        assert_eq!(
+            archived_legacy.notifications[0].source.thread_id.as_str(),
+            LEGACY_NO_THREAD_ARCHIVED_COMPAT_ID,
+            "the base shape must retain a durable distinction for a real user archive",
+        );
+        let archived_legacy_mutation =
+            serde_json::to_vec(&archived_legacy).expect("base writer persists real archive");
+        let archived_reopened = decode_snapshot(&archived_legacy_mutation)
+            .expect("head reader reopens base real archive mutation");
+        assert_eq!(
+            archived_reopened.notifications[0].archived_at,
+            Some(archived_at)
         );
     }
 
@@ -1004,21 +1055,26 @@ mod tests {
 
     #[test]
     fn new_writes_cannot_claim_the_reserved_compatibility_thread() {
-        let thread_id = ThreadId::new(LEGACY_NO_THREAD_COMPAT_ID).expect("thread id");
-        let source = NotificationSource {
-            thread_id: Some(thread_id.clone()),
-            turn_run_id: None,
-            lifecycle_ref: None,
-        };
-        let action = NotificationAction::OpenThread { thread_id };
+        for compatibility_id in [
+            LEGACY_NO_THREAD_COMPAT_ID,
+            LEGACY_NO_THREAD_ARCHIVED_COMPAT_ID,
+        ] {
+            let thread_id = ThreadId::new(compatibility_id).expect("thread id");
+            let source = NotificationSource {
+                thread_id: Some(thread_id.clone()),
+                turn_run_id: None,
+                lifecycle_ref: None,
+            };
+            let action = NotificationAction::OpenThread { thread_id };
 
-        validate_notification_action(&source, &action)
-            .expect("the shape remains valid when reopening historical data");
-        let error = validate_new_notification_action(&source, &action)
-            .expect_err("new producers cannot claim the compatibility identity");
-        assert!(matches!(
-            error,
-            NotificationInboxError::InvalidRequest { .. }
-        ));
+            validate_notification_action(&source, &action)
+                .expect("the shape remains valid when reopening historical data");
+            let error = validate_new_notification_action(&source, &action)
+                .expect_err("new producers cannot claim a compatibility identity");
+            assert!(matches!(
+                error,
+                NotificationInboxError::InvalidRequest { .. }
+            ));
+        }
     }
 }

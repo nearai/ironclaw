@@ -45,8 +45,11 @@ as non-actionable, but its persisted form must remain readable and mutable by
 the schema-v1 rollback reader. Its legacy projection is archived so the
 rollback ProductSurface never exposes the compatibility placeholder as a dead
 thread link; the additive lifecycle metadata restores the real visibility for
-the current reader. A rollback writer may safely make the record remain hidden,
-but must never turn it into an actionable link.
+the current reader. The schema-v1 source/action placeholder also carries a
+stable distinction between a synthetic compatibility archive and a real user
+archive, so a rollback rewrite cannot permanently hide or make an unarchived
+record eligible for capacity eviction. A rollback reader must never receive an
+actionable link for either representation.
 
 ## Validation
 
