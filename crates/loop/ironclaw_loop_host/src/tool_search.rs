@@ -27,6 +27,41 @@ const PARAMETER_WEIGHT: f64 = 5.0;
 const DESCRIPTION_WEIGHT: f64 = 1.0;
 const EXACT_IDENTIFIER_BONUS: f64 = 1_000_000.0;
 
+/// Fraction of a query's terms a document must match before it is offered at all.
+///
+/// BM25 alone scores a document above zero for sharing ONE term with the query, so a search
+/// for a capability that does not exist still returns a plausible-looking ranked list. Observed
+/// in production trace `10626679` (652 tool calls, 216 of them `tool_search`): "data" was asked
+/// 21 times and "data__" 12 times, each returning the same five unrelated hits, because a
+/// `data`-ish term appears somewhere in unrelated tools. The model reads "results exist" as
+/// "the tool is in here somewhere" and rephrases instead of stopping. A benchmark run
+/// reproduced it verbatim: "run shell command execute code python" returned a
+/// workflow-rerun capability from an unrelated provider, which shares only "run".
+///
+/// Coverage is measured against the query's ANSWERABLE terms — those that appear anywhere in the
+/// index — not against every word typed. A term the catalog has never heard of ("vimeo", "noise0")
+/// cannot be matched by any document, so counting it against every document would punish
+/// documents for the query's own vocabulary. This is also what keeps
+/// `query_term_budget_uses_only_the_first_unique_terms` honest: a rare identifier plus 32 unknown
+/// words is 1-of-1 answerable coverage, not 1-of-33.
+///
+/// So short queries like "send message" or "list issues" match fully and are untouched, while
+/// "run shell command execute code python" — where several terms ARE answerable and a
+/// workflow-rerun tool matches only "run" — now yields `SearchQueryClass::NoMatch`, which is the
+/// honest answer and is already plumbed through.
+const MIN_QUERY_TERM_COVERAGE: f64 = 0.5;
+
+/// Below this many answerable terms, a single match is enough and coverage is not applied.
+///
+/// Short queries are where the coverage rule costs real recall: "list issues" or "send message"
+/// are two answerable terms, and demanding both drops legitimate results whose wording differs
+/// by a word. Measured against the committed corpus gate, applying coverage to every query took
+/// recall@10 to 0.9453 against a >= 0.95 floor — a real loss, correctly refused.
+///
+/// The waste this rule targets is long and descriptive — "run shell command execute code python"
+/// (six terms, matching a workflow tool on "run" alone) — so the rule only engages there.
+const MIN_ANSWERABLE_TERMS_FOR_COVERAGE: usize = 4;
+
 #[derive(Debug, Clone)]
 pub(crate) struct AuthorizedToolSearchIndex {
     documents: Vec<IndexedDocument>,
@@ -116,6 +151,19 @@ impl AuthorizedToolSearchIndex {
             };
         }
 
+        // Terms the catalog could answer at all. See `MIN_QUERY_TERM_COVERAGE`.
+        let answerable_terms = query_terms
+            .iter()
+            .filter(|term| {
+                self.document_frequencies
+                    .get(*term)
+                    .copied()
+                    .unwrap_or_default()
+                    > 0
+            })
+            .count();
+        let required_terms = required_term_coverage(answerable_terms);
+
         let exact = self
             .documents
             .iter()
@@ -127,10 +175,12 @@ impl AuthorizedToolSearchIndex {
             } else {
                 0.0
             };
+            let mut matched_terms = 0usize;
             for term in &query_terms {
                 let Some(term_weight) = document.term_weights.get(term) else {
                     continue;
                 };
+                matched_terms += 1;
                 let document_frequency = self
                     .document_frequencies
                     .get(term)
@@ -145,7 +195,9 @@ impl AuthorizedToolSearchIndex {
                 score += inverse_document_frequency * term_weight * (BM25_K1 + 1.0)
                     / (term_weight + length_normalization);
             }
-            if score > 0.0 {
+            // An exact identifier match is authoritative however few terms it shares.
+            let exact_match = document.exact_identifiers.contains(&normalized_query);
+            if score > 0.0 && (exact_match || matched_terms >= required_terms) {
                 scored.push((document.name.clone(), document.capability_id.clone(), score));
             }
         }
@@ -323,6 +375,17 @@ impl SearchDocumentBuilder {
             self.collect_schema(child, parent_depth.saturating_add(1), trusted_descriptions);
         }
     }
+}
+
+/// How many of a query's terms a document must match to be offered.
+///
+/// Takes the count of ANSWERABLE terms, not of typed words — see `MIN_QUERY_TERM_COVERAGE`.
+/// One answerable term needs that one match; everything else needs at least half, rounded up.
+fn required_term_coverage(answerable_term_count: usize) -> usize {
+    if answerable_term_count < MIN_ANSWERABLE_TERMS_FOR_COVERAGE {
+        return 1;
+    }
+    ((answerable_term_count as f64) * MIN_QUERY_TERM_COVERAGE).ceil() as usize
 }
 
 fn tokenize(value: &str) -> Vec<String> {

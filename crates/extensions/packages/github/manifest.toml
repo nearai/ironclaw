@@ -55,7 +55,7 @@ placeholder_env = "GH_TOKEN"
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "github.list_issues"
-description = "List issues in one repository."
+description = "List issues in ONE repository. For a question spanning an organisation, prefer github.search_issues_pull_requests with an `org:` qualifier — it answers in a single call, where this tool needs one call per repository and returns full issue objects."
 effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
@@ -565,7 +565,7 @@ placeholder_env = "GH_TOKEN"
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "github.search_issues_pull_requests"
-description = "Search compact GitHub issue and pull request summaries."
+description = "Search compact GitHub issue and pull request summaries. Accepts GitHub search qualifiers including `org:`, `repo:`, `label:`, `is:open`, so one query can span every repository in an organisation; read `total_count` for counts."
 effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
