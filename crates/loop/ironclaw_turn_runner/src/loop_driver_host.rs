@@ -1601,8 +1601,33 @@ where
         validate_thread_scope(&effective_scope, &request.loop_run_context)?;
 
         let max_messages = self.config.max_messages.max(1);
-        let prompt_context_budget = self.config.prompt_context_budget;
-        let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
+        let mut run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
+        let scoped_model_gateway = self.model_gateway.resolve_for_scope(&run_context.scope);
+        let model_context_window_tokens = if let Some(gateway) = scoped_model_gateway.as_ref() {
+            gateway
+                .model_context_window_tokens(
+                    &run_context.resolved_run_profile.model_profile_id,
+                    0,
+                    run_context.resolved_model_route.as_ref(),
+                )
+                .await
+        } else {
+            self.model_gateway
+                .model_context_window_tokens(
+                    &run_context.resolved_run_profile.model_profile_id,
+                    0,
+                    run_context.resolved_model_route.as_ref(),
+                )
+                .await
+        };
+        let prompt_context_budget = model_context_window_tokens
+            .map(|tokens| {
+                self.config
+                    .prompt_context_budget
+                    .with_context_limit_tokens(tokens)
+            })
+            .unwrap_or(self.config.prompt_context_budget);
+        run_context.model_context_window_tokens = model_context_window_tokens;
 
         // Kick off advisory communication-context fetches only for origins that
         // can use delivery/channel context. WebUI chat renders its origin without
@@ -1650,6 +1675,7 @@ where
             run_context.clone(),
             max_messages,
         )
+        .with_prompt_context_token_budget(prompt_context_budget)
         .with_context_window_cache(Arc::clone(&context_window_cache));
         // An unbound run's prepared context is its COMPLETE input by
         // contract: no skill, identity, or memory lane is folded in, so the
@@ -1948,62 +1974,58 @@ where
             )),
             None => Arc::new(NoExtraLoopInputPort::new(run_context.clone())),
         };
-        // Resolve a scope-specific gateway when available (test harnesses override
-        // resolve_for_scope to route per-thread scripted gateways). Production
-        // gateways inherit the default-None impl → falls to Arc::clone, byte-identical.
-        // Two arms (rather than one literal over a shared gateway binding) because
-        // `host_gateway` is the resolved `Arc<dyn _>` in the Some arm but the host's
-        // own `Arc<G>` (G: ?Sized, not coercible to `Arc<dyn _>`) in the fallback —
-        // see `build_compaction_ports` above. Each arm moves its owned fields.
+        // Reuse the scope-specific gateway resolved above for model metadata.
+        // Production gateways return None and use the shared gateway unchanged.
         let model_gateway_ports_started_at = ironclaw_observability::live_latency_started_at();
-        let model_gateway: Arc<dyn LoopModelGateway> =
-            if let Some(gw) = self.model_gateway.resolve_for_scope(&run_context.scope) {
-                Arc::new(ThreadResolvingLoopModelGateway::new(
-                    ThreadResolvingLoopModelGatewayParts {
-                        thread_service: Arc::clone(&self.thread_service),
-                        thread_scope: effective_scope.clone(),
-                        host_gateway: gw,
-                        max_messages,
-                        skill_context_source: (!unbound_run)
-                            .then(|| self.skill_context_source.clone())
-                            .flatten(),
-                        identity_context_source: (!unbound_run)
-                            .then(|| self.identity_context_source.clone())
-                            .flatten(),
-                        instruction_materialization_store: Some(Arc::clone(
-                            &instruction_materialization_store,
-                        )),
-                        capabilities: Some(Arc::clone(&capabilities)),
-                        prompt_authority,
-                        context_window_cache: Some(context_window_cache),
-                        attachment_read_port: self.attachment_read_port.clone(),
-                        prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
-                    },
-                ))
-            } else {
-                Arc::new(ThreadResolvingLoopModelGateway::new(
-                    ThreadResolvingLoopModelGatewayParts {
-                        thread_service: Arc::clone(&self.thread_service),
-                        thread_scope: effective_scope.clone(),
-                        host_gateway: Arc::clone(&self.model_gateway),
-                        max_messages,
-                        skill_context_source: (!unbound_run)
-                            .then(|| self.skill_context_source.clone())
-                            .flatten(),
-                        identity_context_source: (!unbound_run)
-                            .then(|| self.identity_context_source.clone())
-                            .flatten(),
-                        instruction_materialization_store: Some(Arc::clone(
-                            &instruction_materialization_store,
-                        )),
-                        capabilities: Some(Arc::clone(&capabilities)),
-                        prompt_authority,
-                        context_window_cache: Some(context_window_cache),
-                        attachment_read_port: self.attachment_read_port.clone(),
-                        prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
-                    },
-                ))
-            };
+        let model_gateway: Arc<dyn LoopModelGateway> = if let Some(gw) = scoped_model_gateway {
+            Arc::new(ThreadResolvingLoopModelGateway::new(
+                ThreadResolvingLoopModelGatewayParts {
+                    thread_service: Arc::clone(&self.thread_service),
+                    thread_scope: effective_scope.clone(),
+                    host_gateway: gw,
+                    max_messages,
+                    prompt_context_budget,
+                    skill_context_source: (!unbound_run)
+                        .then(|| self.skill_context_source.clone())
+                        .flatten(),
+                    identity_context_source: (!unbound_run)
+                        .then(|| self.identity_context_source.clone())
+                        .flatten(),
+                    instruction_materialization_store: Some(Arc::clone(
+                        &instruction_materialization_store,
+                    )),
+                    capabilities: Some(Arc::clone(&capabilities)),
+                    prompt_authority,
+                    context_window_cache: Some(context_window_cache),
+                    attachment_read_port: self.attachment_read_port.clone(),
+                    prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                },
+            ))
+        } else {
+            Arc::new(ThreadResolvingLoopModelGateway::new(
+                ThreadResolvingLoopModelGatewayParts {
+                    thread_service: Arc::clone(&self.thread_service),
+                    thread_scope: effective_scope.clone(),
+                    host_gateway: Arc::clone(&self.model_gateway),
+                    max_messages,
+                    prompt_context_budget,
+                    skill_context_source: (!unbound_run)
+                        .then(|| self.skill_context_source.clone())
+                        .flatten(),
+                    identity_context_source: (!unbound_run)
+                        .then(|| self.identity_context_source.clone())
+                        .flatten(),
+                    instruction_materialization_store: Some(Arc::clone(
+                        &instruction_materialization_store,
+                    )),
+                    capabilities: Some(Arc::clone(&capabilities)),
+                    prompt_authority,
+                    context_window_cache: Some(context_window_cache),
+                    attachment_read_port: self.attachment_read_port.clone(),
+                    prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                },
+            ))
+        };
         let structured_finalization: Option<Arc<dyn StructuredFinalizationPort>> =
             if run_context.output_contract.is_structured_output() {
                 Some(Arc::new(StructuredFinalizationCoordinator::new(

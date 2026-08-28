@@ -43,7 +43,7 @@ pub(crate) fn select_prompt_context_messages(
     budget: PromptContextTokenBudget,
     pinned_message_id: Option<ThreadMessageId>,
 ) -> Result<PromptContextSelection, AgentLoopHostError> {
-    let visible_tokens = budget.visible_transcript_tokens();
+    let visible_tokens = budget.admitted_transcript_tokens();
     let pinned = pinned_message_id
         .and_then(|message_id| {
             messages.iter().position(|message| {
@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn selector_returns_empty_when_visible_budget_is_zero() {
+    fn selector_uses_reserve_as_compaction_trigger_not_admission_limit() {
         let selected = select_prompt_context_messages(
             vec![message(1, "a")],
             PromptContextTokenBudget::new(1, 1, 0),
@@ -175,7 +175,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(selected.is_empty());
+        assert_eq!(selected.len(), 1);
     }
 
     #[test]

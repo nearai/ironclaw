@@ -574,6 +574,25 @@ impl LlmProvider for FailoverProvider {
             .await
     }
 
+    async fn model_metadata_for_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelMetadata, LlmError> {
+        let index = usize::try_from(fallback_index)
+            .map_err(|_| self.missing_fallback_error(fallback_index, requested_model))?;
+        let provider = self
+            .providers
+            .get(index)
+            .ok_or_else(|| self.missing_fallback_error(fallback_index, requested_model))?;
+        provider
+            .model_metadata_for_route(
+                0,
+                (fallback_index == 0).then_some(requested_model).flatten(),
+            )
+            .await
+    }
+
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         self.providers[self.last_used.load(Ordering::Relaxed)]
             .calculate_cost(input_tokens, output_tokens)

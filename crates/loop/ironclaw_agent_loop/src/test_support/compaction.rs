@@ -21,8 +21,8 @@ pub fn active_task_preserving_compaction_index() -> Vec<LoopContextCompactionMet
         compaction_metadata(3, LoopContextCompactionKind::User, 10),
         compaction_metadata(4, LoopContextCompactionKind::Assistant, 10),
         compaction_metadata(5, LoopContextCompactionKind::User, 10),
-        compaction_metadata(6, LoopContextCompactionKind::Assistant, 3_000),
+        compaction_metadata(6, LoopContextCompactionKind::Assistant, 10_000),
         compaction_metadata(7, LoopContextCompactionKind::User, 10),
-        compaction_metadata(8, LoopContextCompactionKind::Assistant, 6_000),
+        compaction_metadata(8, LoopContextCompactionKind::Assistant, 12_000),
     ]
 }

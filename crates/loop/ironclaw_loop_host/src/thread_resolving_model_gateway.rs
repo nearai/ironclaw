@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use ironclaw_loop_contracts::{
     InstructionMaterializationStore, LoopCapabilityPort, LoopModelGateway, LoopModelGatewayError,
     LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink, LoopModelResponse,
-    LoopPromptBundleAuthority,
+    LoopPromptBundleAuthority, PromptContextTokenBudget,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -33,6 +33,7 @@ where
     pub thread_scope: ThreadScope,
     pub host_gateway: Arc<G>,
     pub max_messages: usize,
+    pub prompt_context_budget: PromptContextTokenBudget,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     pub identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     pub instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
@@ -60,6 +61,7 @@ where
     thread_scope: ThreadScope,
     host_gateway: Arc<G>,
     max_messages: usize,
+    prompt_context_budget: PromptContextTokenBudget,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
@@ -81,6 +83,7 @@ where
             thread_scope,
             host_gateway,
             max_messages,
+            prompt_context_budget,
             skill_context_source,
             identity_context_source,
             instruction_materialization_store,
@@ -95,6 +98,7 @@ where
             thread_scope,
             host_gateway,
             max_messages,
+            prompt_context_budget,
             skill_context_source,
             identity_context_source,
             instruction_materialization_store,
@@ -139,13 +143,28 @@ where
         request: LoopModelGatewayRequest,
         progress_sink: Option<Arc<dyn LoopModelProgressSink>>,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        let mut run_context = request.context;
+        let model_request = request.request;
+        let context_window_tokens = self
+            .host_gateway
+            .model_context_window_tokens(
+                &run_context.resolved_run_profile.model_profile_id,
+                model_request.fallback_index,
+                run_context.resolved_model_route.as_ref(),
+            )
+            .await;
+        let prompt_context_budget = context_window_tokens
+            .map(|tokens| self.prompt_context_budget.with_context_limit_tokens(tokens))
+            .unwrap_or(self.prompt_context_budget);
+        run_context.model_context_window_tokens = context_window_tokens;
         let mut model_port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
-            request.context,
+            run_context,
             Arc::clone(&self.host_gateway),
             self.max_messages,
         )
+        .with_prompt_context_token_budget(prompt_context_budget)
         .with_prompt_bundle_authority(self.prompt_authority.clone());
         if let Some(source) = self.skill_context_source.as_ref() {
             model_port = model_port.with_skill_context_source(source.clone());
@@ -174,7 +193,7 @@ where
             }));
         }
         model_port
-            .stream_model(request.request)
+            .stream_model(model_request)
             .await
             .map_err(host_error_to_model_gateway_error)
     }

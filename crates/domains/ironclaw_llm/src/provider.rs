@@ -1007,6 +1007,32 @@ pub trait LlmProvider: Send + Sync {
         })
     }
 
+    /// Fetch metadata for the concrete route selected by `fallback_index`.
+    ///
+    /// Decorators delegate this method. Ordered providers override it to query
+    /// the indexed child directly instead of relying on mutable last-used state.
+    async fn model_metadata_for_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelMetadata, LlmError> {
+        if fallback_index != 0 {
+            return Err(LlmError::RequestFailed {
+                provider: self.provider_id(),
+                reason: format!("fallback model route index {fallback_index} is unavailable"),
+            });
+        }
+        let metadata = self.model_metadata().await?;
+        let selected_model = self.effective_model_name(requested_model);
+        if metadata.id != selected_model {
+            return Err(LlmError::RequestFailed {
+                provider: self.provider_id(),
+                reason: "model metadata does not match the selected model route".to_string(),
+            });
+        }
+        Ok(metadata)
+    }
+
     /// Resolve which model should be reported for a given request.
     ///
     /// Providers that ignore per-request model overrides should override this

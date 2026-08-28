@@ -943,6 +943,39 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert route dispatch and one cached metadata lookup per selected model.
+    pub async fn assert_fallback_vendor_and_metadata_calls(
+        &self,
+        expected_primary: usize,
+        expected_fallback: usize,
+        expected_primary_metadata: usize,
+        expected_fallback_metadata: usize,
+    ) -> HarnessResult<()> {
+        let probe = self
+            .fallback_provider_call_probe
+            .as_ref()
+            .ok_or("fallback provider call probe is not enabled for this harness")?;
+        let actual = (
+            probe.primary_calls(),
+            probe.fallback_calls(),
+            probe.primary_metadata_calls(),
+            probe.fallback_metadata_calls(),
+        );
+        let expected = (
+            expected_primary,
+            expected_fallback,
+            expected_primary_metadata,
+            expected_fallback_metadata,
+        );
+        if actual == expected {
+            return Ok(());
+        }
+        Err(
+            format!("expected fallback vendor/metadata calls {expected:?}, observed {actual:?}")
+                .into(),
+        )
+    }
+
     /// Assert the exact number of times `needle` occurs across every request
     /// seen by the recoverable-failure provider, including injected failures
     /// that never reach the delegated `TraceLlm`.
@@ -2167,6 +2200,19 @@ impl RebornIntegrationHarness {
             return Ok(());
         }
         Err(format!("expected at least {minimum} durable summary artifact(s), saw {count}").into())
+    }
+
+    /// Assert the compactor persisted exactly `expected` durable summaries.
+    pub async fn assert_summary_artifact_count(&self, expected: usize) -> HarnessResult<()> {
+        let count = self
+            .thread_harness
+            .summary_artifacts(self.binding.thread_id.clone())
+            .await?
+            .len();
+        if count == expected {
+            return Ok(());
+        }
+        Err(format!("expected exactly {expected} durable summary artifact(s), saw {count}").into())
     }
 
     /// Assert no durable compaction summary contains forbidden content. The

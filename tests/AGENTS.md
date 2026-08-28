@@ -233,6 +233,8 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
 | A cumulative compaction barrier supersedes earlier summaries and raw covered history in the model prompt while every original row remains durable | `model_recovery.rs::cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_history` |
+| The selected model's context window naturally triggers one checkpoint compaction, and the next model request contains only the cumulative barrier, retained tail, and live suffix | `model_recovery.rs::model_window_threshold_compacts_once_and_projects_barrier_tail_and_suffix` |
+| Ordered model fallback reapplies the fallback model's smaller cached context window to its provider request without dropping the recent suffix | `model_recovery.rs::fallback_request_uses_its_own_smaller_cached_context_window` |
 | Context overflow checkpoints one compact-and-resume attempt; oversized summarizer input emits typed durable drop evidence while preserving the complete original transcript, and a second overflow fails without another compaction or model observation | `model_recovery.rs::context_overflow_compacts_once_and_resumes`, `model_recovery.rs::second_context_overflow_fails_after_one_compaction` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |

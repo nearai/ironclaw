@@ -44,9 +44,9 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
     fn should_compact(
         &self,
         state: &LoopExecutionState,
-        _ctx: &LoopRunContext,
+        ctx: &LoopRunContext,
     ) -> CompactionDecision {
-        if !self.base.can_evaluate(state) {
+        if !self.base.can_evaluate(state, ctx) {
             return CompactionDecision::Skip;
         }
 
@@ -60,7 +60,7 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
                 prompt_fingerprint,
                 preserve_from_sequence,
             )
-            .map(|sequence| self.base.trigger_at(state, sequence))
+            .map(|sequence| self.base.trigger_at(state, sequence, ctx))
             .unwrap_or(CompactionDecision::Skip);
         }
         active_task_preserving_user_boundary(
@@ -70,7 +70,7 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
             self.minimum_tail_messages,
             self.minimum_compacted_messages,
         )
-        .map(|sequence| self.base.trigger_at(state, sequence))
+        .map(|sequence| self.base.trigger_at(state, sequence, ctx))
         .unwrap_or(CompactionDecision::Skip)
     }
 }
@@ -265,6 +265,29 @@ mod tests {
                 deadline_ms: 7,
                 effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
                     tokens: 90
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn threshold_uses_selected_model_context_window() {
+        let mut context = crate::test_support::test_run_context("selected-model-window");
+        context.model_context_window_tokens = Some(70);
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(active_task_message_index());
+        state.compaction_prompt.observed_prompt_tokens = 60;
+        let strategy = active_task_preserving_strategy(1);
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 5,
+                preserve_tail_tokens: 1,
+                deadline_ms: 7,
+                effectiveness_baseline: CompactionEffectivenessBaseline::TriggerThresholdTokens {
+                    tokens: 60
                 },
             }
         );

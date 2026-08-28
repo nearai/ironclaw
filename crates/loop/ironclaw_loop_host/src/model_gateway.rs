@@ -89,6 +89,9 @@ const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
     "arguments omitted because the provider emitted malformed tool-call JSON";
 const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
 
+type ModelContextWindowCache =
+    Arc<Mutex<HashMap<(String, u32, String), Arc<tokio::sync::OnceCell<Option<u64>>>>>>;
+
 fn trace_model_latency_ok(
     operation: &'static str,
     replay_identity: &ProviderReplayIdentity,
@@ -259,6 +262,22 @@ where
         request: LoopModelGatewayRequest,
         progress_sink: Option<Arc<dyn LoopModelProgressSink>>,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        let mut request = request;
+        let context_window_tokens = self
+            .host_gateway
+            .model_context_window_tokens(
+                &request.context.resolved_run_profile.model_profile_id,
+                request.request.fallback_index,
+                request.context.resolved_model_route.as_ref(),
+            )
+            .await;
+        request.context.model_context_window_tokens = context_window_tokens;
+        let prompt_context_budget = context_window_tokens
+            .map(|tokens| {
+                ironclaw_loop_contracts::PromptContextTokenBudget::default()
+                    .with_context_limit_tokens(tokens)
+            })
+            .unwrap_or_default();
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(EphemeralInstructionMaterializationStore::default());
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
@@ -270,7 +289,6 @@ where
                 Arc::clone(&context_window_cache),
             )
             .await?;
-        let mut request = request;
         request.request.messages = prompt_bundle.messages;
         let mut port = ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
@@ -279,6 +297,7 @@ where
             Arc::clone(&self.host_gateway),
             self.max_messages,
         )
+        .with_prompt_context_token_budget(prompt_context_budget)
         .with_instruction_materialization_store(instruction_materialization_store)
         .with_context_window_cache(context_window_cache);
         if let Some(progress_sink) = progress_sink {
@@ -321,6 +340,15 @@ where
                 self.thread_scope.clone(),
                 context.clone(),
                 self.max_messages,
+            )
+            .with_prompt_context_token_budget(
+                context
+                    .model_context_window_tokens
+                    .map(|tokens| {
+                        ironclaw_loop_contracts::PromptContextTokenBudget::default()
+                            .with_context_limit_tokens(tokens)
+                    })
+                    .unwrap_or_default(),
             )
             .with_context_window_cache(context_window_cache),
         );
@@ -372,6 +400,7 @@ where
     policy: LlmModelProfilePolicy,
     provider_turn_sequence: Arc<AtomicU64>,
     prompt_cache_activity: Arc<PromptCacheActivityLog>,
+    model_context_window_cache: ModelContextWindowCache,
 }
 
 impl<P> LlmProviderModelGateway<P>
@@ -394,6 +423,7 @@ where
             policy,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
             prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
+            model_context_window_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -423,6 +453,32 @@ where
         resolve_fallback_route(self.provider.as_ref(), fallback_index, &model_override)
             .ok()
             .and_then(|route| ProviderModelId::new(route.model).ok())
+    }
+
+    async fn model_context_window_tokens(
+        &self,
+        model_profile_id: &ModelProfileId,
+        fallback_index: u32,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<u64> {
+        let route = self.policy.route_for(model_profile_id)?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            resolved_model_route.map(HostManagedModelRouteSnapshot::model_id),
+        )
+        .ok()?;
+        let selected =
+            resolve_fallback_route(self.provider.as_ref(), fallback_index, &model_override).ok()?;
+        cached_provider_context_window_tokens(
+            self.provider.as_ref(),
+            &self.provider_id,
+            fallback_index,
+            &model_override,
+            &selected.model,
+            &self.model_context_window_cache,
+        )
+        .await
     }
 
     async fn stream_model(
@@ -747,6 +803,7 @@ where
     route_resolver: Arc<dyn ModelRouteResolver>,
     provider_turn_sequence: Arc<AtomicU64>,
     prompt_cache_activity: Arc<PromptCacheActivityLog>,
+    model_context_window_cache: ModelContextWindowCache,
 }
 
 impl<P> RoutedLlmProviderModelGateway<P>
@@ -759,6 +816,7 @@ where
             route_resolver,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
             prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
+            model_context_window_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -772,6 +830,38 @@ impl<P> HostManagedModelGateway for RoutedLlmProviderModelGateway<P>
 where
     P: ModelRouteProviderPool + ?Sized + Send + Sync,
 {
+    async fn model_context_window_tokens(
+        &self,
+        model_profile_id: &ModelProfileId,
+        fallback_index: u32,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<u64> {
+        let slot = slot_for_model_profile(model_profile_id).ok()?;
+        let request_snapshot = resolved_model_route?;
+        let policy_mode = self.validate_route_snapshot(slot, request_snapshot).ok()?;
+        let snapshot = snapshot_from_host_request(slot, request_snapshot, policy_mode).ok()?;
+        let provider = self
+            .provider_pool
+            .provider_for_route(&snapshot)
+            .await
+            .ok()?;
+        validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref()).ok()?;
+        let selected = resolve_fallback_route(
+            provider.as_ref(),
+            fallback_index,
+            snapshot.route().model_id(),
+        )
+        .ok()?;
+        cached_provider_context_window_tokens(
+            provider.as_ref(),
+            snapshot.route().provider_id(),
+            fallback_index,
+            snapshot.route().model_id(),
+            &selected.model,
+            &self.model_context_window_cache,
+        )
+        .await
+    }
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -1007,6 +1097,64 @@ fn with_model_diagnostic_evidence(
                 .with_diagnostic_effective_model(effective_model.clone())
         })
         .map_err(|error| error.with_diagnostic_effective_model(effective_model))
+}
+
+async fn cached_provider_context_window_tokens<P>(
+    provider: &P,
+    cache_provider_id: &str,
+    fallback_index: u32,
+    requested_model: &str,
+    selected_model: &str,
+    cache: &ModelContextWindowCache,
+) -> Option<u64>
+where
+    P: LlmProvider + ?Sized,
+{
+    let key = (
+        cache_provider_id.to_string(),
+        fallback_index,
+        selected_model.to_string(),
+    );
+    let cell = {
+        let Ok(mut cache) = cache.lock() else {
+            return None;
+        };
+        Arc::clone(
+            cache
+                .entry(key)
+                .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+        )
+    };
+    *cell
+        .get_or_init(|| async {
+            match provider
+                .model_metadata_for_route(fallback_index, Some(requested_model))
+                .await
+            {
+                Ok(metadata) if metadata.id == selected_model => metadata
+                    .context_length
+                    .filter(|tokens| *tokens > 0)
+                    .map(u64::from),
+                Ok(metadata) => {
+                    debug!(
+                        provider = %provider.provider_id(),
+                        selected_model,
+                        metadata_model = %metadata.id,
+                        "model metadata did not match selected model; retaining configured context limit"
+                    );
+                    None
+                }
+                Err(error) => {
+                    debug!(
+                        provider = %provider.provider_id(),
+                        error = %error,
+                        "model metadata unavailable; retaining configured context limit"
+                    );
+                    None
+                }
+            }
+        })
+        .await
 }
 
 fn resolve_fallback_route<P>(

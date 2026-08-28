@@ -251,6 +251,18 @@ envelope. The canonical loop treats an omitted user message or finalized
 tool-result reference as a forced compaction watermark and requests the
 dedicated `window_eviction` mode.
 
+Proactive compaction is evaluated only while the prompt stage holds a
+checkpoint boundary. Its trigger is the selected provider model's reported
+context window minus a 16,000-token reserve; provider metadata that is missing
+or does not match the selected model keeps the configured 128,000-token
+fallback. Ordered fallback routes resolve and cache metadata by route index and
+model. The canonical model-gateway seam reapplies that selected route's window
+on every provider request, so call-scope recovery cannot reuse the primary
+window for a smaller fallback. Prompt assembly may admit transcript up to the
+model window so the checkpoint decision runs before truncation. Ordinary
+compaction retains about 20,000 recent tokens. It never runs asynchronously
+between checkpoints.
+
 Ordinary compaction chooses the first retained user or assistant message, then
 replaces the complete prefix before it. This keeps normal cuts between user
 turns and permits a split inside one oversized turn at an assistant boundary.

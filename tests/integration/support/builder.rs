@@ -159,6 +159,7 @@ pub struct RebornIntegrationHarnessBuilder {
     /// Mutually exclusive raw-provider behavior for this one-thread harness.
     /// Each model-selecting builder method replaces the previous mode.
     model_mode: ThreadModelMode,
+    model_context_window_tokens: Option<u32>,
     /// Wire production's RootFilesystem-backed durable loop milestone sink.
     durable_milestone_event_store: bool,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
@@ -293,6 +294,12 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// Set the scripted provider's reported model context window.
+    pub fn with_model_context_window_for_test(mut self, tokens: u32) -> Self {
+        self.model_context_window_tokens = Some(tokens);
+        self
+    }
+
     /// Fail this harness's model call unconditionally with a fixed, non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS). See
     /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
@@ -314,6 +321,22 @@ impl RebornIntegrationHarnessBuilder {
     /// recovery and provider chain advance to scripted fallback index one.
     pub fn advance_fallback_after_unavailable(mut self) -> Self {
         self.model_mode = ThreadModelMode::FallbackAdvance;
+        self
+    }
+
+    /// Let the primary route serve `successful_primary_calls`, then fail over
+    /// to a route with a distinct reported context window.
+    pub fn advance_fallback_after_successes(
+        mut self,
+        successful_primary_calls: usize,
+        primary_context_window: u32,
+        fallback_context_window: u32,
+    ) -> Self {
+        self.model_mode = ThreadModelMode::FallbackAdvanceAfter {
+            successful_primary_calls,
+            primary_context_window,
+            fallback_context_window,
+        };
         self
     }
 
@@ -810,6 +833,7 @@ impl RebornIntegrationHarnessBuilder {
             .thread(self.conversation_id)
             .script(self.replies)
             .model_mode(self.model_mode)
+            .model_context_window_tokens(self.model_context_window_tokens)
             .record_model_calls_for_test(self.record_model_calls)
             .build()
             .await
@@ -912,6 +936,7 @@ impl RebornIntegrationHarness {
             safety_context: None,
             shell_mode: ShellMode::default(),
             model_mode: ThreadModelMode::Normal,
+            model_context_window_tokens: None,
             turn_event_sink: false,
             durable_milestone_event_store: false,
             // General integration tests stay hermetic across production default

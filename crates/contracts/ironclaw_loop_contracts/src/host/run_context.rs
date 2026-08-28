@@ -245,6 +245,11 @@ pub struct LoopRunContext {
     pub resolved_run_profile: ResolvedRunProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
+    /// Provider-reported context window for the selected model. Hosts refresh
+    /// this on every run build; older persisted contexts fall back to the
+    /// configured context limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_context_window_tokens: Option<u64>,
     pub loop_driver_id: LoopDriverId,
     pub loop_driver_version: RunProfileVersion,
     pub checkpoint_schema_id: CheckpointSchemaId,
@@ -279,6 +284,7 @@ impl LoopRunContext {
             run_id,
             resolved_run_profile,
             resolved_model_route: None,
+            model_context_window_tokens: None,
             loop_driver_id,
             loop_driver_version,
             checkpoint_schema_id,
@@ -303,6 +309,11 @@ impl LoopRunContext {
 
     pub fn with_accepted_message_ref(mut self, accepted_message_ref: AcceptedMessageRef) -> Self {
         self.accepted_message_ref = Some(accepted_message_ref);
+        self
+    }
+
+    pub fn with_model_context_window_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.model_context_window_tokens = tokens;
         self
     }
 

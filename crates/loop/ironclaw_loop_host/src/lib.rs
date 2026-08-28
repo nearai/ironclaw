@@ -2021,11 +2021,40 @@ where
 
     async fn resolve_model_messages(
         &self,
-        requested_messages: Vec<LoopModelMessage>,
+        mut requested_messages: Vec<LoopModelMessage>,
     ) -> Result<Vec<HostManagedModelMessage>, AgentLoopHostError> {
-        let context = self
+        let mut context = self
             .load_model_context_window(!requested_messages.is_empty())
             .await?;
+
+        if !requested_messages.is_empty() {
+            let transcript_refs = context
+                .messages
+                .iter()
+                .filter_map(message_ref_from_context)
+                .collect::<HashSet<_>>();
+            let selection = prompt_context_budget::select_prompt_context_messages(
+                std::mem::take(&mut context.messages),
+                self.prompt_context_budget,
+                accepted_task_message_id(&self.run_context),
+            )?;
+            let truncated = selection.truncation.is_some();
+            let selected_messages = selection
+                .into_iter()
+                .map(|(message, _)| message)
+                .collect::<Vec<_>>();
+            if truncated {
+                let retained_refs = selected_messages
+                    .iter()
+                    .filter_map(message_ref_from_context)
+                    .collect::<HashSet<_>>();
+                requested_messages.retain(|message| {
+                    !transcript_refs.contains(&message.content_ref)
+                        || retained_refs.contains(&message.content_ref)
+                });
+            }
+            context.messages = selected_messages;
+        }
 
         if requested_messages.is_empty() {
             let context_messages = prompt_context_budget::select_prompt_context_messages(
@@ -2316,6 +2345,17 @@ pub trait HostManagedModelGateway: Send + Sync {
             return None;
         }
         resolved_model_route.and_then(|route| ProviderModelId::new(route.model_id()).ok())
+    }
+
+    /// Best-effort context window for the concrete provider model selected for
+    /// this run. `None` keeps the configured host limit.
+    async fn model_context_window_tokens(
+        &self,
+        _model_profile_id: &ModelProfileId,
+        _fallback_index: u32,
+        _resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<u64> {
+        None
     }
 
     async fn stream_model(

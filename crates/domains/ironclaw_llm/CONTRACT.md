@@ -198,6 +198,12 @@ The circuit breaker wraps the retry/routing/failover chain (`apply_decorator_cha
 
 **Current wiring:** The failover is set up between primary model and `NEARAI_FALLBACK_MODEL` (a different model name on the same NEAR AI backend), not across different LLM provider types. Cross-provider failover (e.g., NEAR AI → Anthropic) requires manual construction.
 
+Route-specific model metadata follows the same explicit fallback index.
+`model_metadata_for_route` selects the indexed child directly; it never infers
+the route from mutable last-used state. Every provider decorator delegates this
+method unchanged so host-side context budgeting sees the same model that the
+next completion request will dispatch.
+
 ## Retry
 
 `RetryProvider` in `retry.rs` wraps any `LlmProvider` with exponential backoff. Retries on: `RequestFailed`, `RateLimited`, `BadGateway`, `StreamInterrupted`, `SessionRenewalFailed`, plus `Http` / `Io` only with concrete transient evidence. Does **not** retry completed `InvalidResponse` / `EmptyResponse`, `AuthFailed`, `SessionExpired`, `ContextLengthExceeded`, `ModelNotAvailable`, `QuotaExceeded`, or `Json`.
@@ -222,6 +228,7 @@ pub trait LlmProvider: Send + Sync {
     // Optional (have defaults)
     async fn list_models(&self) -> Result<Vec<String>, LlmError> { Ok(vec![]) }
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> { /* name only */ }
+    async fn model_metadata_for_route(&self, fallback_index: u32, requested_model: Option<&str>) -> Result<ModelMetadata, LlmError> { /* selected route */ }
     fn effective_model_name(&self, requested_model: Option<&str>) -> String { /* uses active */ }
     fn active_model_name(&self) -> String { self.model_name().to_string() }
     fn set_model(&self, _model: &str) -> Result<(), LlmError> { /* Err: not supported */ }

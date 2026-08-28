@@ -246,6 +246,17 @@ impl LlmProvider for TokenRefreshingProvider {
         self.inner.model_metadata().await
     }
 
+    async fn model_metadata_for_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelMetadata, LlmError> {
+        self.ensure_fresh_token().await;
+        self.inner
+            .model_metadata_for_route(fallback_index, requested_model)
+            .await
+    }
+
     fn active_model_name(&self) -> String {
         self.inner.model_name().to_string()
     }

@@ -132,7 +132,7 @@ use super::scripted_provider::{
     ErrLlm, ErrLlmKind, FallbackProviderCallProbe, ModelProviderCallProbe, ParkingModelGate,
     RecoverableModelFailureScript, SCRIPTED_FALLBACK_MODEL_NAME, SCRIPTED_MODEL_NAME,
     delayed_trace_llm, parking_trace_llm, recording_llm, recoverable_failure_trace_llm,
-    scripted_fallback_vendor_pair, scripted_trace_llm,
+    scripted_fallback_vendor_pair, scripted_fallback_vendor_pair_after, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -717,6 +717,7 @@ impl RebornIntegrationGroup {
             replies: Vec::new(),
             actor_id: None,
             model_mode: ThreadModelMode::Normal,
+            model_context_window_tokens: None,
             record_model_calls: false,
             model_override: None,
         }
@@ -1601,6 +1602,7 @@ pub struct RebornThreadBuilder<'g> {
     replies: Vec<RebornScriptedReply>,
     actor_id: Option<String>,
     model_mode: ThreadModelMode,
+    model_context_window_tokens: Option<u32>,
     /// Additive raw-provider call recording for this thread.
     record_model_calls: bool,
     /// C-ATTACH seam: overrides `LlmModelProfileRoute.model_override` (the same
@@ -1633,6 +1635,13 @@ pub(crate) enum ThreadModelMode {
     /// Primary vendor failure followed by ordered fallback success through the
     /// production retry/failover/circuit-breaker/decorator chain.
     FallbackAdvance,
+    /// The same fallback path after a deterministic number of primary successes,
+    /// with distinct primary and fallback context windows.
+    FallbackAdvanceAfter {
+        successful_primary_calls: usize,
+        primary_context_window: u32,
+        fallback_context_window: u32,
+    },
     /// This thread's model call always fails with a fixed non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
@@ -1656,6 +1665,11 @@ impl<'g> RebornThreadBuilder<'g> {
 
     pub(crate) fn model_mode(mut self, mode: ThreadModelMode) -> Self {
         self.model_mode = mode;
+        self
+    }
+
+    pub(crate) fn model_context_window_tokens(mut self, tokens: Option<u32>) -> Self {
+        self.model_context_window_tokens = tokens;
         self
     }
 
@@ -1776,7 +1790,13 @@ impl<'g> RebornThreadBuilder<'g> {
         // wraps it in a parking provider at the SAME vendor-SDK seam (decorator
         // chain still runs on top), so captured requests stay inspectable either
         // way.
-        let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
+        let scripted_llm: Arc<TraceLlm> =
+            Arc::new(scripted_trace_llm(self.replies).with_context_length(
+                self.model_context_window_tokens.unwrap_or(
+                    ironclaw_loop_contracts::PromptContextTokenBudget::DEFAULT_CONTEXT_LIMIT_TOKENS
+                        as u32,
+                ),
+            ));
         // C-ERRORS: `Failing` swaps in `ErrLlm` at the same vendor-SDK seam;
         // `Parked` swaps in the parking wrapper. `ThreadModelMode` keeps all
         // provider modes mutually exclusive by construction — no priority
@@ -1807,6 +1827,24 @@ impl<'g> RebornThreadBuilder<'g> {
             ThreadModelMode::FallbackAdvance => {
                 let (primary, fallback, probe) =
                     scripted_fallback_vendor_pair(scripted_llm.clone());
+                (
+                    Arc::new(primary),
+                    None,
+                    Some(Arc::new(fallback)),
+                    Some(probe),
+                )
+            }
+            ThreadModelMode::FallbackAdvanceAfter {
+                successful_primary_calls,
+                primary_context_window,
+                fallback_context_window,
+            } => {
+                let (primary, fallback, probe) = scripted_fallback_vendor_pair_after(
+                    scripted_llm.clone(),
+                    successful_primary_calls,
+                    primary_context_window,
+                    fallback_context_window,
+                );
                 (
                     Arc::new(primary),
                     None,

@@ -103,6 +103,60 @@ async fn provider_outage_advances_real_fallback_chain_and_persists_reply() {
 }
 
 #[tokio::test]
+async fn fallback_request_uses_its_own_smaller_cached_context_window() {
+    const SEED_TURNS: usize = 41;
+    const PRIMARY_WINDOW_TOKENS: u32 = 128_000;
+    const FALLBACK_WINDOW_TOKENS: u32 = 40_000;
+    const OLDEST_MARKER: &str = "fallback-window-oldest-marker";
+    const RETAINED_MARKER: &str = "fallback-window-retained-marker";
+    const SUFFIX_MARKER: &str = "fallback-window-current-marker";
+    let payload = |marker: &str| format!("{marker}:{}", "x".repeat(4_000));
+    let mut script = (0..SEED_TURNS)
+        .map(|index| RebornScriptedReply::text(format!("fallback seed {index} complete")))
+        .collect::<Vec<_>>();
+    script.push(RebornScriptedReply::text(
+        "smaller fallback window respected",
+    ));
+    let harness = RebornIntegrationHarness::test_default()
+        .advance_fallback_after_successes(SEED_TURNS, PRIMARY_WINDOW_TOKENS, FALLBACK_WINDOW_TOKENS)
+        .script(script)
+        .build()
+        .await
+        .expect("harness builds");
+
+    for index in 0..SEED_TURNS {
+        let marker = match index {
+            0 => OLDEST_MARKER.to_string(),
+            30 => RETAINED_MARKER.to_string(),
+            _ => format!("fallback-window-seed-{index}"),
+        };
+        harness
+            .submit_turn(&payload(&marker))
+            .await
+            .expect("primary seed turn completes");
+    }
+    harness
+        .submit_turn(&payload(SUFFIX_MARKER))
+        .await
+        .expect("fallback turn completes");
+
+    harness
+        .assert_last_model_message_content_not_contains(OLDEST_MARKER)
+        .await
+        .expect("fallback request drops history outside its smaller window");
+    for marker in [RETAINED_MARKER, SUFFIX_MARKER] {
+        harness
+            .assert_last_model_message_content_contains(marker)
+            .await
+            .expect("fallback request keeps its newest cumulative suffix");
+    }
+    harness
+        .assert_fallback_vendor_and_metadata_calls(SEED_TURNS + 1, 1, 1, 1)
+        .await
+        .expect("route metadata is cached while every request uses its selected window");
+}
+
+#[tokio::test]
 async fn content_filtered_completion_recovers_with_model_visible_observation() {
     let harness = RebornIntegrationHarness::test_default()
         .content_filter_model_once()
@@ -269,6 +323,63 @@ async fn cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_histor
 }
 
 #[tokio::test]
+async fn model_window_threshold_compacts_once_and_projects_barrier_tail_and_suffix() {
+    const MODEL_WINDOW_TOKENS: u32 = 40_000;
+    const SEED_TURNS: usize = 23;
+    const OLDEST_MARKER: &str = "natural-threshold-oldest-marker";
+    const RETAINED_MARKER: &str = "natural-threshold-retained-tail-marker";
+    const SUFFIX_MARKER: &str = "natural-threshold-live-suffix-marker";
+    const SUMMARY_MARKER: &str = "natural-threshold-cumulative-barrier";
+    let payload = |marker: &str| format!("{marker}:{}", "x".repeat(4_000));
+    let mut script = (0..SEED_TURNS)
+        .map(|index| RebornScriptedReply::text(format!("seed turn {index} complete")))
+        .collect::<Vec<_>>();
+    script.push(RebornScriptedReply::text(SUMMARY_MARKER));
+    script.push(RebornScriptedReply::text("natural threshold turn complete"));
+    let harness = RebornIntegrationHarness::test_default()
+        .with_model_context_window_for_test(MODEL_WINDOW_TOKENS)
+        .script(script)
+        .build()
+        .await
+        .expect("harness builds");
+
+    for index in 0..SEED_TURNS {
+        let marker = match index {
+            0 => OLDEST_MARKER.to_string(),
+            10 => RETAINED_MARKER.to_string(),
+            _ => format!("natural-threshold-seed-{index}"),
+        };
+        harness
+            .submit_turn(&payload(&marker))
+            .await
+            .expect("seed whole turn completes below the threshold");
+    }
+    harness
+        .submit_turn(&payload(SUFFIX_MARKER))
+        .await
+        .expect("threshold-crossing whole turn compacts and completes");
+
+    harness
+        .assert_summary_artifact_count(1)
+        .await
+        .expect("the natural threshold produces exactly one compaction");
+    for marker in [SUMMARY_MARKER, RETAINED_MARKER, SUFFIX_MARKER] {
+        harness
+            .assert_last_model_message_content_contains(marker)
+            .await
+            .expect("the post-compaction request contains barrier, tail, and suffix");
+    }
+    harness
+        .assert_last_model_message_content_not_contains(OLDEST_MARKER)
+        .await
+        .expect("the post-compaction request excludes covered raw history");
+    harness
+        .assert_reply_contains("natural threshold turn complete")
+        .await
+        .expect("the whole turn completes after compaction");
+}
+
+#[tokio::test]
 async fn context_overflow_compacts_once_and_resumes() {
     // Seed one oversized user message so forced compaction exercises the real
     // compactor instead of taking its safe "nothing eligible" skip path.
@@ -278,18 +389,21 @@ async fn context_overflow_compacts_once_and_resumes() {
         "first setup turn credentials {input_secret} and {second_input_secret} {}",
         "history ".repeat(5_000)
     );
+    let second_setup_turn = "second setup turn ".repeat(2_500);
     let oversized_setup_turn = format!("third setup turn {}", "history ".repeat(5_000));
+    let fourth_setup_turn = "fourth setup turn ".repeat(2_500);
     let output_secret = "OUTPUT_PRIVATE_KEY_MATERIAL";
     let compacted_summary = format!(
         "compacted recovery history\n-----BEGIN ENCRYPTED PRIVATE KEY-----\n{output_secret}\n-----END ENCRYPTED PRIVATE KEY-----\nretained"
     );
     let harness = RebornIntegrationHarness::test_default()
         .with_durable_milestone_event_store_for_test()
-        .context_overflow_model_after(3, 1)
+        .context_overflow_model_after(4, 1)
         .script([
             RebornScriptedReply::text("first setup reply"),
             RebornScriptedReply::text("second setup reply"),
             RebornScriptedReply::text("third setup reply"),
+            RebornScriptedReply::text("fourth setup reply"),
             RebornScriptedReply::text(compacted_summary),
             RebornScriptedReply::text("recovered after context overflow"),
         ])
@@ -301,13 +415,17 @@ async fn context_overflow_compacts_once_and_resumes() {
         .await
         .expect("first setup turn establishes compactable history");
     harness
-        .submit_turn("second setup turn")
+        .submit_turn(&second_setup_turn)
         .await
         .expect("second setup turn establishes compactable history");
     harness
         .submit_turn(&oversized_setup_turn)
         .await
         .expect("third setup turn establishes compactable history");
+    harness
+        .submit_turn(&fourth_setup_turn)
+        .await
+        .expect("fourth setup turn leaves a compactable prefix before the retained tail");
     let before_recovery_milestones = harness
         .milestone_len()
         .await
@@ -359,9 +477,9 @@ async fn context_overflow_compacts_once_and_resumes() {
         .await
         .expect("input and output redactions produce one typed aggregate milestone");
     harness
-        .assert_compaction_input_truncated_once_since(before_recovery_milestones, 1)
+        .assert_compaction_input_truncated_once_since(before_recovery_milestones, 2)
         .await
-        .expect("oversized durable message produces one typed truncation milestone");
+        .expect("oversized durable messages produce one typed truncation milestone");
     harness
         .assert_summary_artifacts_lack(input_secret)
         .await
@@ -388,7 +506,7 @@ async fn context_overflow_compacts_once_and_resumes() {
         .await
         .expect("the durable compaction summary contains only redaction markers");
     harness
-        .assert_interactive_model_provider_call_count(5)
+        .assert_interactive_model_provider_call_count(6)
         .await
         .expect("setup, one overflow, and one resumed request use the bounded budget");
     harness
@@ -417,11 +535,12 @@ async fn second_context_overflow_fails_after_one_compaction() {
     let harness = RebornIntegrationHarness::test_default()
         .with_turn_event_sink()
         .with_durable_milestone_event_store_for_test()
-        .context_overflow_model_after(3, 2)
+        .context_overflow_model_after(4, 2)
         .script([
             RebornScriptedReply::text("first setup reply"),
             RebornScriptedReply::text("second setup reply"),
             RebornScriptedReply::text("third setup reply"),
+            RebornScriptedReply::text("fourth setup reply"),
             RebornScriptedReply::text("single overflow compaction summary"),
         ])
         .build()
@@ -432,13 +551,17 @@ async fn second_context_overflow_fails_after_one_compaction() {
         .await
         .expect("first setup turn");
     harness
-        .submit_turn("second setup turn")
+        .submit_turn(&"second setup turn ".repeat(2_500))
         .await
         .expect("second setup turn");
     harness
         .submit_turn(&format!("third setup turn {}", "history ".repeat(5_000)))
         .await
         .expect("third setup turn");
+    harness
+        .submit_turn(&"fourth setup turn ".repeat(2_500))
+        .await
+        .expect("fourth setup turn");
 
     let run_id = harness
         .submit_turn_async("fail after one overflow recovery")
@@ -454,7 +577,7 @@ async fn second_context_overflow_fails_after_one_compaction() {
         .await
         .expect("exactly one recovery path reaches durable compaction");
     harness
-        .assert_interactive_model_provider_call_count(5)
+        .assert_interactive_model_provider_call_count(6)
         .await
         .expect("setup plus two overflow attempts are bounded");
     harness

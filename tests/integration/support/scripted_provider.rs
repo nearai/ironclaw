@@ -198,6 +198,8 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 struct FallbackProviderCallRecords {
     primary_calls: usize,
     fallback_calls: usize,
+    primary_metadata_calls: usize,
+    fallback_metadata_calls: usize,
 }
 
 #[derive(Clone, Default)]
@@ -212,6 +214,14 @@ impl FallbackProviderCallProbe {
         lock(&self.0).fallback_calls += 1;
     }
 
+    fn record_primary_metadata(&self) {
+        lock(&self.0).primary_metadata_calls += 1;
+    }
+
+    fn record_fallback_metadata(&self) {
+        lock(&self.0).fallback_metadata_calls += 1;
+    }
+
     pub fn primary_calls(&self) -> usize {
         lock(&self.0).primary_calls
     }
@@ -219,14 +229,26 @@ impl FallbackProviderCallProbe {
     pub fn fallback_calls(&self) -> usize {
         lock(&self.0).fallback_calls
     }
+
+    pub fn primary_metadata_calls(&self) -> usize {
+        lock(&self.0).primary_metadata_calls
+    }
+
+    pub fn fallback_metadata_calls(&self) -> usize {
+        lock(&self.0).fallback_metadata_calls
+    }
 }
 
 pub struct UnavailablePrimaryLlm {
+    inner: Arc<TraceLlm>,
+    successful_calls_remaining: AtomicUsize,
+    context_length: u32,
     calls: FallbackProviderCallProbe,
 }
 
 pub struct SuccessfulFallbackLlm {
     inner: Arc<TraceLlm>,
+    context_length: u32,
     calls: FallbackProviderCallProbe,
 }
 
@@ -237,13 +259,30 @@ pub fn scripted_fallback_vendor_pair(
     SuccessfulFallbackLlm,
     FallbackProviderCallProbe,
 ) {
+    scripted_fallback_vendor_pair_after(fallback, 0, 128_000, 128_000)
+}
+
+pub fn scripted_fallback_vendor_pair_after(
+    provider: Arc<TraceLlm>,
+    successful_primary_calls: usize,
+    primary_context_length: u32,
+    fallback_context_length: u32,
+) -> (
+    UnavailablePrimaryLlm,
+    SuccessfulFallbackLlm,
+    FallbackProviderCallProbe,
+) {
     let calls = FallbackProviderCallProbe::default();
     (
         UnavailablePrimaryLlm {
+            inner: Arc::clone(&provider),
+            successful_calls_remaining: AtomicUsize::new(successful_primary_calls),
+            context_length: primary_context_length,
             calls: calls.clone(),
         },
         SuccessfulFallbackLlm {
-            inner: fallback,
+            inner: provider,
+            context_length: fallback_context_length,
             calls: calls.clone(),
         },
         calls,
@@ -258,6 +297,16 @@ fn scripted_primary_unavailable() -> LlmError {
     }
 }
 
+impl UnavailablePrimaryLlm {
+    fn should_succeed(&self) -> bool {
+        self.successful_calls_remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
 #[async_trait]
 impl LlmProvider for UnavailablePrimaryLlm {
     fn model_name(&self) -> &str {
@@ -268,17 +317,31 @@ impl LlmProvider for UnavailablePrimaryLlm {
         (Decimal::ZERO, Decimal::ZERO)
     }
 
-    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.calls.record_primary();
+        if self.should_succeed() {
+            return self.inner.complete(request).await;
+        }
         Err(scripted_primary_unavailable())
     }
 
     async fn complete_with_tools(
         &self,
-        _request: ToolCompletionRequest,
+        request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.calls.record_primary();
+        if self.should_succeed() {
+            return self.inner.complete_with_tools(request).await;
+        }
         Err(scripted_primary_unavailable())
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.calls.record_primary_metadata();
+        Ok(ModelMetadata {
+            id: SCRIPTED_MODEL_NAME.to_string(),
+            context_length: Some(self.context_length),
+        })
     }
 }
 
@@ -334,7 +397,11 @@ impl LlmProvider for SuccessfulFallbackLlm {
     }
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        self.inner.model_metadata().await
+        self.calls.record_fallback_metadata();
+        Ok(ModelMetadata {
+            id: SCRIPTED_FALLBACK_MODEL_NAME.to_string(),
+            context_length: Some(self.context_length),
+        })
     }
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {

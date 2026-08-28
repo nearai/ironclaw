@@ -13,7 +13,7 @@ pub struct PromptContextTokenBudget {
 
 impl PromptContextTokenBudget {
     pub const DEFAULT_CONTEXT_LIMIT_TOKENS: u64 = 128_000;
-    pub const DEFAULT_RESERVE_TOKENS: u64 = 20_000;
+    pub const DEFAULT_RESERVE_TOKENS: u64 = 16_000;
     pub const DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS: u64 = 0;
 
     pub const fn new(
@@ -28,9 +28,24 @@ impl PromptContextTokenBudget {
         }
     }
 
+    pub const fn with_context_limit_tokens(self, context_limit_tokens: u64) -> Self {
+        Self {
+            context_limit_tokens,
+            ..self
+        }
+    }
+
     pub fn visible_transcript_tokens(self) -> u64 {
         self.context_limit_tokens
             .saturating_sub(self.reserve_tokens.max(self.main_loop_max_output_tokens))
+    }
+
+    /// Maximum transcript admitted while building the checkpoint candidate.
+    /// The reserve is the proactive compaction trigger; the model output bound
+    /// remains a hard admission constraint.
+    pub fn admitted_transcript_tokens(self) -> u64 {
+        self.context_limit_tokens
+            .saturating_sub(self.main_loop_max_output_tokens)
     }
 }
 
@@ -67,5 +82,10 @@ mod tests {
         let budget = PromptContextTokenBudget::new(100, 30, 10);
 
         assert_eq!(budget.visible_transcript_tokens(), 70);
+    }
+
+    #[test]
+    fn default_reserves_sixteen_thousand_tokens() {
+        assert_eq!(PromptContextTokenBudget::default().reserve_tokens, 16_000);
     }
 }

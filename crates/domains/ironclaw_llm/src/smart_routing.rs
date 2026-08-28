@@ -1069,6 +1069,16 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.model_metadata().await
     }
 
+    async fn model_metadata_for_route(
+        &self,
+        fallback_index: u32,
+        requested_model: Option<&str>,
+    ) -> Result<ModelMetadata, LlmError> {
+        self.primary
+            .model_metadata_for_route(fallback_index, requested_model)
+            .await
+    }
+
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
         self.primary.effective_model_name(requested_model)
     }
