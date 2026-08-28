@@ -139,8 +139,8 @@ impl RunOutcomeProcessCommitObserver {
         .map_err(|error| format!("build resource-block notification id failed: {error}"))?;
         self.inbox
             .publish(PublishNotificationRequest {
-                id: notification_id,
-                recipient,
+                id: notification_id.clone(),
+                recipient: recipient.clone(),
                 kind: NotificationKind::RunBlocked,
                 severity: NotificationSeverity::Warning,
                 source: NotificationSource {
@@ -154,6 +154,14 @@ impl RunOutcomeProcessCommitObserver {
             })
             .await
             .map_err(|error| format!("publish resource-block notification failed: {error}"))?;
+        self.inbox
+            .reopen(NotificationMutationRequest {
+                recipient,
+                notification_id,
+                occurred_at,
+            })
+            .await
+            .map_err(|error| format!("reopen resource-block notification failed: {error}"))?;
         Ok(())
     }
 
@@ -695,6 +703,13 @@ mod tests {
                 });
             }
             self.inner.resolve(request).await
+        }
+
+        async fn reopen(
+            &self,
+            request: NotificationMutationRequest,
+        ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+            self.inner.reopen(request).await
         }
 
         async fn archive(
@@ -1310,6 +1325,78 @@ mod tests {
                 .iter()
                 .all(|notification| notification.resolved_at.is_some()),
             "no replacement gate may remain actionable after recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_backfill_reopens_a_current_gate_resolved_by_a_stale_iteration() {
+        const HISTORICAL_GATE: &str = "gate:budget-00000000-0000-0000-0000-000000000007";
+        const STALE_GATE_B: &str = "gate:budget-00000000-0000-0000-0000-000000000008";
+        const CURRENT_GATE_D: &str = "gate:budget-00000000-0000-0000-0000-000000000009";
+        let notification_inbox = inbox();
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let run_id = TurnRunId::new();
+        let historical = resource_block_commit(run_id, "web_ui", HISTORICAL_GATE);
+        let stale_b = resource_block_commit(run_id, "web_ui", STALE_GATE_B);
+        let current_d = resource_block_commit(run_id, "web_ui", CURRENT_GATE_D);
+        let primary_observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+        );
+        primary_observer
+            .observe_process_commit(current_d.clone())
+            .await
+            .expect("primary observer publishes the current gate first");
+
+        let source = Arc::new(CurrentProcessJournalSource::new(stale_b.state.clone()));
+        source.set_sequence([stale_b.state, current_d.state.clone(), current_d.state]);
+        let backfill_observer = ResourceBlockBackfillProcessCommitObserver::new(
+            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>,
+            threads as Arc<dyn SessionThreadService>,
+            source as Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+        );
+        backfill_observer
+            .observe_process_commit(historical)
+            .await
+            .expect("stale backfill converges on the current gate");
+
+        let reconciled = notification_inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list reconciled replacement gates");
+        let current = reconciled
+            .notifications
+            .iter()
+            .find(|notification| {
+                notification
+                    .source
+                    .lifecycle_ref
+                    .as_ref()
+                    .is_some_and(|lifecycle_ref| lifecycle_ref.as_str() == CURRENT_GATE_D)
+            })
+            .expect("current replacement gate notification");
+        assert!(
+            current.resolved_at.is_none(),
+            "the authoritative current gate must be actionable after stale reconciliation"
+        );
+        assert!(
+            reconciled.notifications.iter().any(|notification| {
+                notification
+                    .source
+                    .lifecycle_ref
+                    .as_ref()
+                    .is_some_and(|lifecycle_ref| lifecycle_ref.as_str() == STALE_GATE_B)
+                    && notification.resolved_at.is_some()
+            }),
+            "the stale replacement gate must remain resolved"
         );
     }
 

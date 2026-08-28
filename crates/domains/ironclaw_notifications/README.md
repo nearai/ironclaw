@@ -32,11 +32,14 @@ originating workflow, while failures stay observable through sanitized logs or
 the owning durable observer's retry mechanism.
 
 Actionable records use one id for one active lifecycle and resolve that record
-after verified recovery. Producers must not publish retry progress, transient
-polling states, subagent noise, prompts, tool payloads, credentials, backend
-diagnostics, or any other unbounded content. New notification kinds, source
-fields, actions, API shapes, and WebUI behavior are separate contract changes;
-producer onboarding alone must reuse the existing grammar.
+after verified recovery. Idempotent publication never reopens a resolved
+record; only authoritative workflow reconciliation may explicitly reopen the
+same actionable lifecycle, and doing so preserves its read and archive state.
+Producers must not publish retry progress, transient polling states, subagent
+noise, prompts, tool payloads, credentials, backend diagnostics, or any other
+unbounded content. New notification kinds, source fields, actions, API shapes,
+and WebUI behavior are separate contract changes; producer onboarding alone
+must reuse the existing grammar.
 
 ## Validation
 

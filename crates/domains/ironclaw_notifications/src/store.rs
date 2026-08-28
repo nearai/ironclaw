@@ -316,6 +316,26 @@ where
         .await
     }
 
+    async fn reopen(
+        &self,
+        request: NotificationMutationRequest,
+    ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+        mutate_notification(self, request, |record, _occurred_at| {
+            if !matches!(
+                record.kind,
+                crate::NotificationKind::ApprovalRequired
+                    | crate::NotificationKind::AuthenticationRequired
+                    | crate::NotificationKind::RunBlocked
+            ) || record.resolved_at.is_none()
+            {
+                return false;
+            }
+            record.resolved_at = None;
+            true
+        })
+        .await
+    }
+
     async fn archive(
         &self,
         request: NotificationMutationRequest,
