@@ -846,7 +846,10 @@ fn map_filesystem_error(error: FilesystemError) -> NotificationInboxError {
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
     use ironclaw_host_api::turn::TurnRunId;
     use serde::{Deserialize, Serialize};
 
@@ -1053,28 +1056,71 @@ mod tests {
         assert_eq!(record.action, NotificationAction::OpenThread { thread_id });
     }
 
-    #[test]
-    fn new_writes_cannot_claim_the_reserved_compatibility_thread() {
-        for compatibility_id in [
+    #[tokio::test]
+    async fn publish_rejects_reserved_compatibility_threads_without_persisting() {
+        let recipient = NotificationRecipient {
+            tenant_id: TenantId::new("reserved-tenant").expect("tenant"),
+            user_id: UserId::new("reserved-user").expect("user"),
+        };
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("alias"),
+            VirtualPath::new("/engine/tenants/reserved/users/reserved/notifications")
+                .expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            mounts,
+        ));
+        let store = NotificationInboxStore::new(filesystem, NOTIFICATION_INBOX_MAX_RECORDS);
+
+        for (index, compatibility_id) in [
             LEGACY_NO_THREAD_COMPAT_ID,
             LEGACY_NO_THREAD_ARCHIVED_COMPAT_ID,
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let thread_id = ThreadId::new(compatibility_id).expect("thread id");
-            let source = NotificationSource {
-                thread_id: Some(thread_id.clone()),
-                turn_run_id: None,
-                lifecycle_ref: None,
+            let request = PublishNotificationRequest {
+                id: NotificationId::new(format!("reserved-compatibility-{index}"))
+                    .expect("notification id"),
+                recipient: recipient.clone(),
+                kind: NotificationKind::RunFailed,
+                severity: NotificationSeverity::Error,
+                source: NotificationSource {
+                    thread_id: Some(thread_id.clone()),
+                    turn_run_id: None,
+                    lifecycle_ref: None,
+                },
+                action: NotificationAction::OpenThread { thread_id },
+                initial_state: crate::NotificationInitialState::Resolved,
+                occurred_at: Utc
+                    .timestamp_opt(1_700_000_100 + index as i64, 0)
+                    .single()
+                    .expect("occurred at"),
             };
-            let action = NotificationAction::OpenThread { thread_id };
 
-            validate_notification_action(&source, &action)
-                .expect("the shape remains valid when reopening historical data");
-            let error = validate_new_notification_action(&source, &action)
-                .expect_err("new producers cannot claim a compatibility identity");
+            let error = store
+                .publish(request)
+                .await
+                .expect_err("publish must reject a reserved compatibility identity");
             assert!(matches!(
                 error,
                 NotificationInboxError::InvalidRequest { .. }
             ));
         }
+
+        let page = store
+            .list(ListNotificationsRequest {
+                recipient,
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list after rejected publishes");
+        assert!(page.notifications.is_empty());
     }
 }
