@@ -7,46 +7,13 @@
 #   - reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
 #   - reborn-coverage-ratchet.sh        (coverage-floor ratchet gate)
 #
-# Mirrors test-classify-test-scope.sh: self-contained, locates the
-# scripts-under-test relative to this file's own directory, builds its own
-# fixtures in a mktemp dir, and reports PASS/FAIL per case. Unlike that
-# precedent (which exits on the first failure), this suite runs every case
-# and prints a final summary, exiting non-zero only if something failed —
-# with five scripts and 50 cases (M/A/B/C/D/R sections), seeing the full
-# picture in one run beats stopping at the first mismatch.
-#
-# reborn-coverage-summary.sh and reborn-coverage-ratchet.sh share one lcov-
-# parsing + exemption-filtering + by-crate-aggregation implementation
-# (scripts/ci/lib/reborn_coverage_lcov.py) — the M/A/B/C sections below are
-# this module's regression proof (exercised transitively through both
-# consuming scripts), not a separate lib-level test file.
-#
-# The R section (reborn-coverage-ratchet.sh cases) lives in the sibling
-# test-reborn-coverage-ratchet-cases.sh, `source`d near the end of this file —
-# split out to keep this file under 1000 lines once a fifth script's cases
-# joined the suite. That file is not standalone; it shares this script's
-# helpers, fixtures, and PASS_COUNT/FAIL_COUNT counters.
-#
-# reborn-coverage-summary.sh and reborn-coverage-comment.sh consume a merged,
-# crate-filtered lcov tracefile (scripts/ci/reborn-coverage-merge-lcov.sh) plus
-# the exemptions manifest (tests/integration/coverage-exemptions.toml schema),
-# not a cargo-llvm-cov JSON export — the coverage-report job in
-# .github/workflows/reborn-tests.yml downloads 5 per-lane lcov artifacts,
-# merges+filters them, then renders. Fixtures below build lcov tracefiles and
-# exemptions TOML by hand rather than shelling out to cargo-llvm-cov.
-#
-# reborn-coverage-comment.sh shells out to `gh api`. It is exercised here
-# against a fake `gh` (a fixture script placed first on PATH) that emulates
-# `gh api --paginate <path> --jq '<filter>'` by running the given jq filter
-# over a canned comments JSON array, and records the verb/path/body of any
-# mutating call (-X POST / -X PATCH) to a log file this suite inspects.
-#
-# reborn-coverage-int-tier-tests.sh derives its repo root from its own path
-# (`$(dirname BASH_SOURCE)/../..`) and `cd`s there, so it cannot simply be
-# pointed at a fixture tree via an argument. Each case copies the real
-# script into a temp tree's scripts/ci/ and builds a tests/integration/
-# subtree next to it, so the copy's own repo-root resolution lands on the
-# temp tree.
+# The suite is self-contained: it builds temporary fixture repositories, runs
+# every case, and reports all failures at the end. M/A/B/C exercise the shared
+# lcov implementation through its real shell callers. D exercises the shared
+# integration inventory through the compatibility shell boundary. R lives in
+# the sourced `test-reborn-coverage-ratchet-cases.sh` sibling and shares this
+# file's fixtures and counters. Coverage comments use a fake `gh`; coverage
+# inputs are hand-built LCOV/TOML fixtures rather than compiler output.
 
 set -euo pipefail
 
@@ -55,7 +22,10 @@ merge_sh="${script_dir}/reborn-coverage-merge-lcov.sh"
 summary_sh="${script_dir}/reborn-coverage-summary.sh"
 comment_sh="${script_dir}/reborn-coverage-comment.sh"
 int_tier_sh="${script_dir}/reborn-coverage-int-tier-tests.sh"
+int_tier_inventory_py="${script_dir}/lib/integration_test_inventory.py"
 ratchet_sh="${script_dir}/reborn-coverage-ratchet.sh"
+
+python3 "${script_dir}/test_integration_test_inventory.py"
 
 tmp_root="$(mktemp -d)"
 trap 'rm -rf "${tmp_root}"' EXIT
@@ -1181,8 +1151,9 @@ fi
 setup_int_tier_case() {
   local case_dir="$1"
   shift
-  mkdir -p "${case_dir}/scripts/ci" "${case_dir}/tests/integration"
+  mkdir -p "${case_dir}/scripts/ci/lib" "${case_dir}/tests/integration"
   cp "${int_tier_sh}" "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
+  cp "${int_tier_inventory_py}" "${case_dir}/scripts/ci/lib/integration_test_inventory.py"
   chmod +x "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
   : > "${case_dir}/Cargo.toml"
   local candidate
@@ -1296,6 +1267,26 @@ capture "${d6}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D6: domain-folder bin exits 0" 0 "${CAP_RC}"
 assert_eq "D6: registered domain-folder bins (any key order or spacing) are selected; unregistered sibling is not" \
   "$(printf -- '--test\nreborn_integration_compact_probe\n--test\nreborn_integration_flat\n--test\nreborn_integration_oauth_connect\n--test\nreborn_integration_pathfirst_probe')" \
+  "${CAP_OUT}"
+
+# D7: preserve the current selector's permissive record filtering and
+# sorted-unique name projection. Duplicate paths are a planner concern, while
+# this compatibility entry point has always emitted every unique valid name.
+d7="${tmp_root}/d7"
+setup_int_tier_case "${d7}"
+cat >>"${d7}/Cargo.toml" <<'EOF'
+test = [
+  { name = "reborn_integration_before", path = "tests/integration/duplicate.rs" },
+  { name = 7, path = "tests/integration/ignored_name.rs" },
+  { name = "ignored_path", path = 7 },
+  { name = "reborn_integration_after", path = "tests/integration/duplicate.rs" },
+  { name = "reborn_integration_after", path = "tests/integration/second.rs" },
+]
+EOF
+capture "${d7}/scripts/ci/reborn-coverage-int-tier-tests.sh"
+assert_exit_code "D7: malformed and duplicate registrations preserve exit behavior" 0 "${CAP_RC}"
+assert_eq "D7: malformed records are filtered and valid names are sorted+deduped" \
+  "$(printf -- '--test\nreborn_integration_after\n--test\nreborn_integration_before')" \
   "${CAP_OUT}"
 
 # ---------------------------------------------------------------------------

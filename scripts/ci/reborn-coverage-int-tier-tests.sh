@@ -32,42 +32,4 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "${repo_root}"
-
-# Plain string + while-read (no `mapfile`): macOS dev machines ship bash 3.2,
-# and the guardrail must be runnable where it is written, not only on CI.
-#
-# The manifest is parsed with Python's stdlib `tomllib` (python3 is already a
-# hard dependency of this lane's sibling scripts, e.g.
-# scripts/ci/lib/reborn_coverage_lcov.py) so the selector accepts exactly what
-# Cargo accepts — key order, spacing, and trailing comments can never drop a
-# registration the way a line-regex parser could (pinned by harness case D6's
-# reversed-order and compact stanzas).
-names="$(
-  python3 - <<'PY'
-import tomllib
-
-with open("Cargo.toml", "rb") as manifest:
-    data = tomllib.load(manifest)
-
-names = {
-    entry["name"]
-    for entry in data.get("test", [])
-    if isinstance(entry, dict)
-    and isinstance(entry.get("name"), str)
-    and isinstance(entry.get("path"), str)
-    and entry["path"].startswith("tests/integration/")
-}
-for name in sorted(names):
-    print(name)
-PY
-)"
-
-if [ -z "${names}" ]; then
-  echo "No Reborn integration-tier test binaries discovered" >&2
-  exit 1
-fi
-
-printf '%s\n' "${names}" | while IFS= read -r name; do
-  printf -- '--test\n%s\n' "${name}"
-done
+exec python3 "${repo_root}/scripts/ci/lib/integration_test_inventory.py" "${repo_root}"

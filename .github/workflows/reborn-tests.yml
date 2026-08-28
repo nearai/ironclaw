@@ -88,9 +88,8 @@ jobs:
       crate_buckets: ${{ steps.plan.outputs.crate_buckets }}
       run_root_tests: ${{ steps.plan.outputs.run_root_tests }}
       root_partitions: ${{ steps.plan.outputs.root_partitions }}
-      run_group_tests: ${{ steps.plan.outputs.run_group_tests }}
       run_integration_tests: ${{ steps.plan.outputs.run_integration_tests }}
-      integration_lanes: ${{ steps.plan.outputs.integration_lanes }}
+      integration_batches: ${{ steps.plan.outputs.integration_batches }}
       run_coverage: ${{ steps.plan.outputs.run_coverage }}
       run_qa_replay: ${{ steps.plan.outputs.run_qa_replay }}
       run_sandbox_docker: ${{ steps.plan.outputs.run_sandbox_docker }}
@@ -156,7 +155,6 @@ jobs:
               ([.crate_buckets[].packages[]] | sort) == ($canonical | sort)
               and .root_partitions == [0, 1, 2, 3]
               and .integration_lanes == [0, 1, 2, 3, "groups"]
-              and .run_group_tests == true
               and .run_qa_replay == true
               and .run_sandbox_docker == true
               and .coverage_mode == "full"
@@ -181,9 +179,17 @@ jobs:
           echo "crate_buckets=$(jq -c '.crate_buckets' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "run_root_tests=$(jq -r '.root_partitions | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "root_partitions=$(jq -c '.root_partitions' <<< "${plan}")" >> "$GITHUB_OUTPUT"
-          echo "run_group_tests=$(jq -r '.run_group_tests' <<< "${plan}")" >> "$GITHUB_OUTPUT"
           echo "run_integration_tests=$(jq -r '.integration_lanes | length > 0' <<< "${plan}")" >> "$GITHUB_OUTPUT"
-          echo "integration_lanes=$(jq -c '.integration_lanes' <<< "${plan}")" >> "$GITHUB_OUTPUT"
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            integration_batches="$(
+              jq -c '[.integration_lanes[] | {id: tostring, lanes: [.]}]' <<< "${plan}"
+            )"
+          else
+            integration_batches="$(
+              jq -c '[{id: "selected", lanes: .integration_lanes}]' <<< "${plan}"
+            )"
+          fi
+          echo "integration_batches=${integration_batches}" >> "$GITHUB_OUTPUT"
           # Owner decision 2026-08-04 (Ben + Firat): coverage collection,
           # the report job, the floors, and the changed-line gate all run on
           # pushes to main ONLY. PR and merge-queue lanes run plain
@@ -337,7 +343,7 @@ jobs:
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         run: corepack enable pnpm
 
-      - name: Install WebUI frontend dependencies
+      - name: Install WebUI frontend dependencies for coverage
         if: ${{ steps.bucket-settings.outputs.needs_webui_node == 'true' }}
         run: |
           set -euo pipefail
@@ -529,80 +535,6 @@ jobs:
           command
           scripts/ci/run-reborn-root-partition.sh
 
-  reborn-group-tests:
-    name: Reborn group tests
-    needs: changes
-    if: needs.changes.outputs.run_group_tests == 'true'
-    runs-on: ubuntu-latest
-    # Group tests run sequentially in ONE job (build once, reuse artifacts), so
-    # the budget must cover N suites at REBORN_GROUP_TEST_TIMEOUT each plus setup
-    # — otherwise GitHub hard-kills the job before a hung suite reaches its own
-    # per-test timeout and reports which one hung. 3 suites x 28m + setup < 110m.
-    # If group suites grow past ~4, migrate to a package-matrix-style discovery
-    # job (one suite per matrix runner) instead of bumping this number.
-    timeout-minutes: 110
-    env:
-      ANTHROPIC_API_KEY: ""
-      LLM_BACKEND: ""
-      LLM_USE_CODEX_AUTH: "false"
-      OLLAMA_BASE_URL: ""
-      OPENAI_API_KEY: ""
-      REBORN_GROUP_TEST_TIMEOUT: 28m
-      CARGO_INCREMENTAL: "0"
-      # Group suites build a full Reborn runtime per scenario on the libtest
-      # test-thread stack, so their combined debug async frames sit within a
-      # few percent of whatever stack they are given (reborn_group_triggers'
-      # triggered_gate_group overflowed the 8 MiB libtest default on an
-      # unrelated layout shift). Same pathology and value as the root-tests
-      # job above and the documented RUST_MIN_STACK in
-      # reborn_qa_recorded_behavior.rs.
-      RUST_MIN_STACK: "67108864"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-
-      - name: Free disk space
-        if: needs.changes.outputs.run_coverage == 'true'
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
-          docker system prune -af || true
-          df -h /
-
-      - name: Install Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          mold: true
-
-      - name: Restore Rust cache
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          # REUSE the root partitions' cache key: the group `[[test]]` binaries
-          # are part of the same root package build as the reborn_*.rs root tests,
-          # so they hit the already-warm target rather than a cold cache. Minting a
-          # new key would add another ~1 GB entry to the ~10 GB repo cache LRU and
-          # evict the root/crate states instead of sharing them.
-          shared-key: reborn-tests-root
-          # Keep saves to protected-branch and merge_group runs so the ~10 GB
-          # repo cache LRU is seeded by shared states, not arbitrary PR branches.
-          save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
-
-      - name: Setup OVH sccache cache
-        uses: ./.github/actions/setup-sccache-dist
-        with:
-          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
-          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
-          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
-          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
-          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
-          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-
-      - name: Run Reborn group tests
-        run: scripts/ci/run-hermetic-deterministic-suite.sh groups
-
   sandbox-docker-tests:
     name: Reborn user-sandbox Docker tests
     needs: changes
@@ -652,19 +584,13 @@ jobs:
         run: cargo test -p ironclaw_integration_tests --test reborn_integration_sandbox_shell_turn -- --nocapture
 
   reborn-integration-coverage:
-    name: Reborn integration tests (${{ matrix.lane }})
+    name: IronClaw integration tests (${{ matrix.batch.id }})
     needs: changes
     if: needs.changes.outputs.run_integration_tests == 'true'
     runs-on: ubuntu-latest
-    # Full merge/main plans instrument every flat, generated, and group suite.
-    # Selected pull-request plans run only the directly affected lanes without
-    # instrumentation for fast pass/fail feedback; exhaustive coverage remains
-    # a merge-queue requirement.
-    # Generous backstop: a cold-cache instrumented build of the Reborn closure
-    # is heavier than a plain build (see the retired reborn-coverage.yml's
-    # 180m budget for the same closure, run as a single job); each of these 5
-    # lanes only carries a slice of the 34 int-tier suites, so 120m is ample.
-    timeout-minutes: 120
+    # Push runs one instrumented lane per job (120m); non-push events combine
+    # lanes, so 300m covers their summed lane budgets and shared setup.
+    timeout-minutes: ${{ github.event_name == 'push' && 120 || 300 }}
     env:
       ANTHROPIC_API_KEY: ""
       LLM_BACKEND: ""
@@ -681,9 +607,8 @@ jobs:
       RUST_MIN_STACK: "8388608"
     strategy:
       fail-fast: false
-      max-parallel: ${{ github.event_name == 'pull_request' && 1 || 5 }}
       matrix:
-        lane: ${{ fromJSON(needs.changes.outputs.integration_lanes) }}
+        batch: ${{ fromJSON(needs.changes.outputs.integration_batches) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -717,6 +642,12 @@ jobs:
           # $GITHUB_ENV write — silently dropping the mold linker flags.
           extra_rustflags: "-Zcrate-attr=feature(array_windows,debug_closure_helpers,slice_as_array)"
 
+      - name: Install cargo-nextest
+        if: needs.changes.outputs.run_coverage != 'true'
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest@0.9.143
+
       - name: Enable pnpm for setup-node cache
         run: corepack enable pnpm
 
@@ -742,7 +673,7 @@ jobs:
       - name: Enable pnpm
         run: corepack enable pnpm
 
-      - name: Install WebUI frontend dependencies for coverage
+      - name: Install WebUI frontend dependencies
         run: |
           set -euo pipefail
           webui_dir="$(bash scripts/ci/crate-dir.sh ironclaw_webui)"
@@ -763,25 +694,15 @@ jobs:
           # repo cache LRU is seeded by shared states, not arbitrary PR branches.
           save-if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'merge_group' }}
 
-      - name: Setup OVH sccache cache
-        uses: ./.github/actions/setup-sccache-dist
-        with:
-          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
-          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
-          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
-          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
-          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
-          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-
       - name: Install cargo-llvm-cov
         if: needs.changes.outputs.run_coverage == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
-      - name: Run this lane's Reborn integration-tier suites
+      - name: Run this IronClaw integration batch
         env:
-          REBORN_COV_LANE_MODE: ${{ matrix.lane == 'groups' && 'group' || 'flat-partition' }}
+          REBORN_COV_BATCH_ID: ${{ matrix.batch.id }}
+          REBORN_COV_LANES_JSON: ${{ toJSON(matrix.batch.lanes) }}
           REBORN_COV_LANE_PARTITIONS: 4
-          REBORN_COV_LANE_INDEX: ${{ matrix.lane }}
           REBORN_COV_LANE_TEST_TIMEOUT: 45m
           REBORN_COV_COLLECT: ${{ needs.changes.outputs.run_coverage }}
         run: |
@@ -793,14 +714,14 @@ jobs:
           scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
           IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1 \
             scripts/ci/run-hermetic-deterministic-suite.sh command \
-            scripts/ci/reborn-coverage-lane-run.sh part-${{ matrix.lane }}.lcov
+            scripts/ci/reborn-coverage-lane-run.sh "part-${REBORN_COV_BATCH_ID}.lcov"
 
       - name: Upload lane lcov artifact
         if: needs.changes.outputs.run_coverage == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: reborn-integration-cov-part-${{ matrix.lane }}
-          path: part-${{ matrix.lane }}.lcov
+          name: reborn-integration-cov-part-${{ matrix.batch.id }}
+          path: part-${{ matrix.batch.id }}.lcov
           if-no-files-found: error
 
   coverage-report:
@@ -1114,7 +1035,6 @@ jobs:
       - changes
       - crate-tests
       - root-reborn-parity-tests
-      - reborn-group-tests
       - reborn-integration-coverage
       - coverage-report
       - critical-mutation
@@ -1150,7 +1070,6 @@ jobs:
           for flag in \
             "${{ needs.changes.outputs.run_crate_tests }}" \
             "${{ needs.changes.outputs.run_root_tests }}" \
-            "${{ needs.changes.outputs.run_group_tests }}" \
             "${{ needs.changes.outputs.run_integration_tests }}" \
             "${{ needs.changes.outputs.run_coverage }}" \
             "${{ needs.changes.outputs.run_qa_replay }}" \
@@ -1165,7 +1084,6 @@ jobs:
             for flag in \
               "${{ needs.changes.outputs.run_crate_tests }}" \
               "${{ needs.changes.outputs.run_root_tests }}" \
-              "${{ needs.changes.outputs.run_group_tests }}" \
               "${{ needs.changes.outputs.run_integration_tests }}" \
               "${{ needs.changes.outputs.run_qa_replay }}" \
               "${{ needs.changes.outputs.run_sandbox_docker }}"; do
@@ -1208,9 +1126,6 @@ jobs:
           check_planned_job "root-reborn-parity-tests" \
             "${{ needs.root-reborn-parity-tests.result }}" \
             "${{ needs.changes.outputs.run_root_tests }}"
-          check_planned_job "reborn-group-tests" \
-            "${{ needs.reborn-group-tests.result }}" \
-            "${{ needs.changes.outputs.run_group_tests }}"
           check_planned_job "reborn-integration-coverage" \
             "${{ needs.reborn-integration-coverage.result }}" \
             "${{ needs.changes.outputs.run_integration_tests }}"

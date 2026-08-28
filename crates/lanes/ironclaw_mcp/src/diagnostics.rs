@@ -96,6 +96,8 @@ pub(crate) enum McpResponseErrorCause {
     NoPayload,
     /// Discovered `tools/list` result was malformed (shape/limits violation).
     InvalidToolList(McpInvalidToolListCause),
+    /// A successful `tools/call` result violated the MCP content contract.
+    InvalidToolResult,
 }
 
 /// Stable provider-rejection codes carried separately from the lane's private
@@ -176,6 +178,7 @@ impl McpResponseErrorCause {
             Self::InvalidToolList(cause) => {
                 format!("mcp_invalid_tool_list: {}", cause.stable_token())
             }
+            Self::InvalidToolResult => "mcp_invalid_tool_result".to_string(),
         }
     }
 }

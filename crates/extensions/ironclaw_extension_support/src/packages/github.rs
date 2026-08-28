@@ -73,6 +73,7 @@ fn assets() -> Vec<super::PackageAsset> {
         github_schema_asset!("fork_repo.input.v1.json"),
         github_schema_asset!("get_combined_status.input.v1.json"),
         github_schema_asset!("get_file_content.input.v1.json"),
+        github_schema_asset!("get_file_content.output.v1.json"),
         github_schema_asset!("get_issue.input.v1.json"),
         github_schema_asset!("get_job_logs.input.v1.json"),
         github_schema_asset!("get_issue.output.v1.json"),
@@ -161,4 +162,26 @@ fn assets() -> Vec<super::PackageAsset> {
         github_prompt_asset!("update_pull_request.md"),
         bytes_asset("wasm/github_tool.wasm", WASM),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundle_carries_normalized_file_content_contract() {
+        let bundle = bundle();
+        assert!(bundle.manifest_toml.contains("version = \"0.3.0\""));
+        assert!(
+            bundle
+                .manifest_toml
+                .contains("output_schema_ref = \"schemas/github/get_file_content.output.v1.json\"")
+        );
+        assert!(
+            bundle
+                .assets
+                .iter()
+                .any(|asset| { asset.path == "schemas/github/get_file_content.output.v1.json" })
+        );
+    }
 }

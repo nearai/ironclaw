@@ -48,6 +48,12 @@ use crate::jsonrpc::{
     validate_tools_call_credential_injections,
 };
 
+/// A defensive fan-out ceiling for one MCP `CallToolResult.content` array.
+/// The mediated response-body limit bounds bytes before parsing; this second
+/// bound prevents a tiny-block array from expanding during projection.
+const MAX_MCP_CONTENT_BLOCKS: usize = 1_024;
+const MAX_MCP_CONTENT_TYPE_BYTES: usize = 128;
+
 #[derive(Debug, Clone)]
 pub struct McpHostHttpClient<H, P> {
     http: H,
@@ -495,6 +501,20 @@ where
             })?;
         usage.output_bytes = usage.output_bytes.max(output_bytes);
 
+        // Tool-declared rejection keeps the existing diagnostic/accounting
+        // path. Successful output is projected at the MCP protocol boundary
+        // before the generic durable writer ever sees it.
+        let output = if provider_rejection.is_some() {
+            output
+        } else if let Some(projected) = project_call_tool_result(&output) {
+            projected
+        } else {
+            return Err(McpClientError::InvalidToolResult {
+                reason: response_error(McpResponseErrorCause::InvalidToolResult),
+                usage,
+            });
+        };
+
         Ok(McpClientOutput {
             output,
             usage,
@@ -644,6 +664,13 @@ fn mcp_client_error_with_prior_usage(
                 usage: prior_usage,
             }
         }
+        McpClientError::InvalidToolResult { reason, usage } => {
+            accumulate_usage(&mut prior_usage, usage);
+            McpClientError::InvalidToolResult {
+                reason,
+                usage: prior_usage,
+            }
+        }
         other => other,
     }
 }
@@ -668,6 +695,166 @@ fn call_tool_rejection_message(result: &Value) -> Option<String> {
     } else {
         Some(text)
     }
+}
+
+/// Project an MCP `CallToolResult` into model-facing open JSON.
+///
+/// This is the protocol lane's output security boundary: it understands MCP
+/// content discriminators, not capability ids or vendor fields. Semantic JSON
+/// and text/resource metadata survive; inline binary and arbitrary future
+/// block payloads do not.
+fn project_call_tool_result(result: &Value) -> Option<Value> {
+    let source = result.as_object()?;
+    let content = source.get("content")?.as_array()?;
+    if content.len() > MAX_MCP_CONTENT_BLOCKS {
+        return None;
+    }
+    if source
+        .get("structuredContent")
+        .is_some_and(|value| !value.is_object())
+        || source
+            .get("isError")
+            .is_some_and(|value| !value.is_boolean())
+    {
+        return None;
+    }
+
+    let mut projected = serde_json::Map::new();
+    projected.insert(
+        "content".to_string(),
+        Value::Array(
+            content
+                .iter()
+                .map(project_content_block)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+    );
+    if let Some(structured) = source.get("structuredContent") {
+        projected.insert("structuredContent".to_string(), structured.clone());
+    }
+    if let Some(is_error) = source.get("isError") {
+        projected.insert("isError".to_string(), is_error.clone());
+    }
+    Some(Value::Object(projected))
+}
+
+fn project_content_block(block: &Value) -> Option<Value> {
+    let source = block.as_object()?;
+    let block_type = source.get("type").and_then(Value::as_str)?;
+    let mut projected = serde_json::Map::new();
+    match block_type {
+        "text" => {
+            let text = source.get("text").and_then(Value::as_str)?;
+            projected.insert("type".to_string(), Value::String("text".to_string()));
+            projected.insert("text".to_string(), Value::String(text.to_string()));
+        }
+        kind @ ("image" | "audio") => {
+            let mime_type = source.get("mimeType").and_then(Value::as_str)?;
+            source.get("data").and_then(Value::as_str)?;
+            projected.insert("type".to_string(), Value::String(kind.to_string()));
+            projected.insert("mimeType".to_string(), Value::String(mime_type.to_string()));
+            projected.insert(
+                "encoding".to_string(),
+                Value::String("binary_unsupported".to_string()),
+            );
+        }
+        "resource_link" => {
+            let (Some(name), Some(uri)) = (
+                source.get("name").and_then(Value::as_str),
+                source.get("uri").and_then(Value::as_str),
+            ) else {
+                return None;
+            };
+            projected.insert(
+                "type".to_string(),
+                Value::String("resource_link".to_string()),
+            );
+            projected.insert("name".to_string(), Value::String(name.to_string()));
+            projected.insert("uri".to_string(), Value::String(uri.to_string()));
+            if !copy_optional_string_fields(
+                source,
+                &mut projected,
+                &["title", "description", "mimeType"],
+            ) {
+                return None;
+            }
+            if let Some(size) = source.get("size") {
+                let size = size.as_u64()?;
+                projected.insert("size".to_string(), Value::from(size));
+            }
+        }
+        "resource" => {
+            let resource = source.get("resource").and_then(Value::as_object)?;
+            let uri = resource.get("uri").and_then(Value::as_str)?;
+            let mut projected_resource = serde_json::Map::new();
+            projected_resource.insert("uri".to_string(), Value::String(uri.to_string()));
+            if !copy_optional_string_fields(resource, &mut projected_resource, &["mimeType"]) {
+                return None;
+            }
+            match (
+                resource.get("text").and_then(Value::as_str),
+                resource.get("blob").and_then(Value::as_str),
+            ) {
+                (Some(text), None) => {
+                    projected_resource.insert("text".to_string(), Value::String(text.to_string()));
+                }
+                (None, Some(_)) => {
+                    projected_resource.insert(
+                        "encoding".to_string(),
+                        Value::String("binary_unsupported".to_string()),
+                    );
+                }
+                _ => return None,
+            }
+            projected.insert("type".to_string(), Value::String("resource".to_string()));
+            projected.insert("resource".to_string(), Value::Object(projected_resource));
+        }
+        other => {
+            projected.insert("type".to_string(), Value::String("unsupported".to_string()));
+            let mut normalized: String = other
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        ' '
+                    } else {
+                        character
+                    }
+                })
+                .collect();
+            if normalized.len() > MAX_MCP_CONTENT_TYPE_BYTES {
+                const ELLIPSIS: &str = "...";
+                let mut end = MAX_MCP_CONTENT_TYPE_BYTES - ELLIPSIS.len();
+                while end > 0 && !normalized.is_char_boundary(end) {
+                    end -= 1;
+                }
+                normalized.truncate(end);
+                normalized.push_str(ELLIPSIS);
+            }
+            projected.insert("original_type".to_string(), Value::String(normalized));
+            projected.insert(
+                "status".to_string(),
+                Value::String("unsupported_content_type".to_string()),
+            );
+        }
+    }
+    Some(Value::Object(projected))
+}
+
+fn copy_optional_string_fields(
+    source: &serde_json::Map<String, Value>,
+    projected: &mut serde_json::Map<String, Value>,
+    fields: &[&str],
+) -> bool {
+    for field in fields {
+        match source.get(*field) {
+            None => {}
+            Some(value) if value.is_string() => {
+                projected.insert((*field).to_string(), value.clone());
+            }
+            Some(_) => return false,
+        }
+    }
+    true
 }
 
 fn json_rpc_provider_diagnostic(code: Option<i64>, message: Option<String>) -> ProviderDiagnostic {
