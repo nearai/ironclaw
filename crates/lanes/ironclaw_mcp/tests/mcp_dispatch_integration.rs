@@ -99,6 +99,37 @@ async fn mcp_lane_invalid_tool_catalog_remains_typed_and_releases_reservation() 
 }
 
 #[tokio::test]
+async fn mcp_lane_invalid_tool_result_remains_typed_and_reconciles_attempt() {
+    let client = RecordingMcpClient::new(Err(McpClientError::InvalidToolResult {
+        reason: "mcp_invalid_tool_result".to_string(),
+        usage: ResourceUsage::default()
+            .set_network_egress_bytes(37)
+            .set_output_bytes(19),
+    }));
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let (governor, account) = mcp_governor();
+
+    let error = runtime
+        .execute_extension_json(
+            &GovernorRuntimeBudget::new(&governor),
+            mcp_request(json!({"query":"fail"})),
+        )
+        .await
+        .unwrap_err();
+
+    let McpError::InvalidToolResult(evidence) = error else {
+        panic!("invalid tool output must remain a typed output-contract failure");
+    };
+    assert_eq!(evidence.reason, "mcp_invalid_tool_result");
+    assert_eq!(evidence.receipt.status, ReservationStatus::Reconciled);
+    assert_eq!(evidence.usage.network_egress_bytes, 37);
+    assert_eq!(evidence.usage.output_bytes, 19);
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account).network_egress_bytes, 37);
+    assert_eq!(governor.usage_for(&account).output_bytes, 19);
+}
+
+#[tokio::test]
 async fn mcp_lane_auth_failure_returns_context_and_accounts_the_provider_attempt() {
     let client = RecordingMcpClient::new(Err(McpClientError::AuthRequired {
         usage: ResourceUsage::default().set_network_egress_bytes(37),

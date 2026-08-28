@@ -400,7 +400,7 @@ async fn concrete_mcp_http_client_rejects_malformed_success_result() {
         .expect_err("malformed successful CallToolResult must not reach durable output");
 
     assert_eq!(error.stable_reason(), "mcp_invalid_tool_result");
-    let McpClientError::ProviderRejected { usage, .. } = error else {
+    let McpClientError::InvalidToolResult { usage, .. } = error else {
         panic!("invalid CallToolResult must retain provider-attempt usage");
     };
     assert!(usage.output_bytes > 0);

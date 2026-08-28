@@ -509,14 +509,8 @@ where
         } else if let Some(projected) = project_call_tool_result(&output) {
             projected
         } else {
-            return Err(McpClientError::ProviderRejected {
-                diagnostic: Box::new(ProviderDiagnostic {
-                    code: Some(provider_error_code(
-                        McpProviderRejectionCause::InvalidToolResult,
-                    )),
-                    message: None,
-                    retry_after: None,
-                }),
+            return Err(McpClientError::InvalidToolResult {
+                reason: response_error(McpResponseErrorCause::InvalidToolResult),
                 usage,
             });
         };
@@ -667,6 +661,13 @@ fn mcp_client_error_with_prior_usage(
             accumulate_usage(&mut prior_usage, usage);
             McpClientError::ProviderRejected {
                 diagnostic,
+                usage: prior_usage,
+            }
+        }
+        McpClientError::InvalidToolResult { reason, usage } => {
+            accumulate_usage(&mut prior_usage, usage);
+            McpClientError::InvalidToolResult {
+                reason,
                 usage: prior_usage,
             }
         }
