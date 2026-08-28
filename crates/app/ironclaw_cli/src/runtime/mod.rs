@@ -811,7 +811,8 @@ pub(crate) fn build_services_input_with_options(
     })
 }
 
-const SANDBOX_WORKSPACES_SUBDIR: &str = "sandbox-workspaces";
+const HOSTED_WORKSPACES_SUBDIR: &str = "workspaces";
+const SANDBOX_LOOP_WORKER_ENV: &str = "IRONCLAW_REBORN_SANDBOX_LOOP_WORKER";
 const RAILWAY_SANDBOX_PROJECT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_PROJECT_ID";
 const RAILWAY_SANDBOX_ENVIRONMENT_ENV: &str = "IRONCLAW_REBORN_RAILWAY_ENVIRONMENT_ID";
 const RAILWAY_SANDBOX_CLI_PATH_ENV: &str = "IRONCLAW_REBORN_RAILWAY_CLI_PATH";
@@ -891,6 +892,20 @@ fn sandbox_env_value(name: &'static str) -> Result<Option<String>, SandboxProces
     }
 }
 
+fn sandbox_loop_worker_enabled() -> anyhow::Result<bool> {
+    match std::env::var(SANDBOX_LOOP_WORKER_ENV) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" => Ok(true),
+            "0" | "false" => Ok(false),
+            _ => anyhow::bail!("{SANDBOX_LOOP_WORKER_ENV} must be one of 1, true, 0, false"),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{SANDBOX_LOOP_WORKER_ENV} must contain valid UTF-8")
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum SandboxProcessBootError {
     #[error(
@@ -914,10 +929,16 @@ fn build_sandboxed_local_runtime_services_input(
 ) -> anyhow::Result<RebornHostBindings> {
     let process_binding = match profile {
         RebornProfile::HostedSingleTenantVolumeSandboxed => {
-            let workspace_root =
-                local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
+            let workspace_root = runtime_workspace_root(config, profile)?;
+            let legacy_workspace_root =
+                local_runtime_storage_root(config, profile).join("sandbox-workspaces");
+            let enable_loop_worker = sandbox_loop_worker_enabled()?;
             block_on_cli(
-                ironclaw_composition::build_local_docker_user_sandbox_binding(workspace_root),
+                ironclaw_composition::build_local_docker_user_sandbox_binding(
+                    workspace_root,
+                    Some(legacy_workspace_root),
+                    enable_loop_worker,
+                ),
             )
             .map_err(|error| SandboxProcessBootError::DockerUnreachable {
                 profile,
@@ -941,7 +962,7 @@ fn build_standalone_local_runtime_services_input(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RebornHostBindings> {
     let local_runtime_root = local_runtime_storage_root(config, profile);
-    let workspace_root = local_runtime_workspace_root(profile)?;
+    let workspace_root = runtime_workspace_root(config, profile)?;
     let mut services_input = local_runtime_build_input_with_options(
         composition_profile(profile),
         owner_id,
@@ -969,7 +990,7 @@ fn build_hosted_single_tenant_services_input(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_config::RebornConfigFile>,
 ) -> anyhow::Result<RebornHostBindings> {
-    let workspace_root = local_runtime_workspace_root(profile)?;
+    let workspace_root = runtime_workspace_root(config, profile)?;
     let runtime_policy = hosted_single_tenant_runtime_policy()
         .context("failed to resolve hosted single-tenant runtime policy")?;
     Ok(
@@ -1342,16 +1363,6 @@ fn optional_path_env(name: &str) -> anyhow::Result<Option<PathBuf>> {
     }
 }
 
-fn local_runtime_workspace_root(profile: RebornProfile) -> anyhow::Result<PathBuf> {
-    optional_path_env("IRONCLAW_REBORN_WORKSPACE_ROOT")?
-        .map(Ok)
-        .unwrap_or_else(|| {
-            std::env::current_dir().with_context(|| {
-                format!("failed to resolve current directory for {profile} workspace")
-            })
-        })
-}
-
 pub(crate) fn local_runtime_storage_root(
     config: &RebornBootConfig,
     profile: RebornProfile,
@@ -1360,6 +1371,31 @@ pub(crate) fn local_runtime_storage_root(
         .home()
         .path()
         .join(profile.local_runtime_storage_subdir())
+}
+
+fn runtime_workspace_root(
+    config: &RebornBootConfig,
+    profile: RebornProfile,
+) -> anyhow::Result<PathBuf> {
+    if let Some(workspace_root) = optional_path_env("IRONCLAW_REBORN_WORKSPACE_ROOT")? {
+        return Ok(workspace_root);
+    }
+    match profile {
+        RebornProfile::Standalone | RebornProfile::StandaloneUnrestricted => {
+            std::env::current_dir().with_context(|| {
+                format!("failed to resolve current directory for {profile} workspace")
+            })
+        }
+        RebornProfile::HostedSingleTenant
+        | RebornProfile::HostedSingleTenantVolume
+        | RebornProfile::HostedSingleTenantVolumeSandboxed
+        | RebornProfile::HostedSingleTenantVolumeSandboxedRailway => {
+            Ok(config.home().path().join(HOSTED_WORKSPACES_SUBDIR))
+        }
+        RebornProfile::Production | RebornProfile::MigrationDryRun => {
+            anyhow::bail!("profile={profile} does not use the local runtime workspace")
+        }
+    }
 }
 
 pub(crate) async fn initialize_local_runtime_storage_root(
@@ -1749,12 +1785,13 @@ mod tests {
     use super::test_env::EnvGuard;
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
-        RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
-        build_runtime_input_with_options, initialize_local_runtime_storage_root,
-        local_runtime_workspace_root, no_assistant_text_message, protect_reborn_log_filter,
-        resolve_google_oauth_config, resolve_google_oauth_config_state,
+        RuntimeInputOptions, SANDBOX_LOOP_WORKER_ENV, apply_credential_refresh_override,
+        block_on_cli, build_runtime_input, build_runtime_input_with_options,
+        initialize_local_runtime_storage_root, no_assistant_text_message,
+        protect_reborn_log_filter, resolve_google_oauth_config, resolve_google_oauth_config_state,
         resolve_google_oauth_config_state_merged,
         resolve_google_oauth_config_state_with_store_loader, runner_settings,
+        runtime_workspace_root, sandbox_loop_worker_enabled,
         with_binary_host_extension_bindings_from_bundles,
     };
     use ironclaw_config::GoogleSection;
@@ -2747,7 +2784,7 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn local_sandbox_profile_selects_docker_process_binding_when_required() {
+    fn local_sandbox_profile_builds_with_loop_worker_switch_off_and_on() {
         if std::env::var_os("IRONCLAW_REQUIRE_DOCKER_TESTS").is_none() {
             eprintln!(
                 "skipping Docker-backed sandbox profile test; set IRONCLAW_REQUIRE_DOCKER_TESTS=1 to require it"
@@ -2758,26 +2795,31 @@ regex_activation_enabled = false
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
-        let temp = tempfile::tempdir().expect("tempdir");
-        let reborn_home = temp.path().join("reborn-home");
-        std::fs::create_dir_all(&reborn_home).expect("mkdir");
-        let config = RebornBootConfig::resolve_from_env_parts(
-            Some(reborn_home.into_os_string()),
-            None,
-            None,
-            Some("hosted-single-tenant-volume-sandboxed".into()),
-        )
-        .expect("boot config");
+        for value in ["false", "true"] {
+            let flag = EnvGuard::set(SANDBOX_LOOP_WORKER_ENV, value);
+            let temp = tempfile::tempdir().expect("tempdir");
+            let reborn_home = temp.path().join("reborn-home");
+            std::fs::create_dir_all(&reborn_home).expect("mkdir");
+            let config = RebornBootConfig::resolve_from_env_parts(
+                Some(reborn_home.into_os_string()),
+                None,
+                None,
+                Some("hosted-single-tenant-volume-sandboxed".into()),
+            )
+            .expect("boot config");
 
-        let runtime_input =
-            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
-        let services = runtime_input.services.expect("services input");
-        let policy = services.runtime_policy().expect("runtime policy");
-        assert_eq!(
-            services.profile(),
-            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
-        );
-        assert_eq!(policy.process_backend.as_str(), "user_sandbox");
+            let runtime_input =
+                build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+            let services = runtime_input.services.expect("services input");
+            let policy = services.runtime_policy().expect("runtime policy");
+            assert_eq!(
+                services.profile(),
+                RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
+            );
+            assert_eq!(policy.process_backend.as_str(), "user_sandbox");
+            drop(services);
+            drop(flag);
+        }
     }
 
     #[test]
@@ -2913,6 +2955,27 @@ regex_activation_enabled = false
         (temp, config)
     }
 
+    #[test]
+    fn hosted_profiles_share_one_transport_neutral_workspace_root() {
+        let _lock = lock_runtime_env();
+        let _workspace_root = EnvGuard::clear("IRONCLAW_REBORN_WORKSPACE_ROOT");
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
+        let expected = config.home().path().join("workspaces");
+
+        for profile in [
+            ironclaw_config::RebornProfile::HostedSingleTenant,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolume,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxed,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxedRailway,
+        ] {
+            assert_eq!(
+                runtime_workspace_root(&config, profile).expect("workspace root"),
+                expected,
+                "profile {profile} must not change workspace identity"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn local_profiles_initialize_their_runtime_storage_roots() {
         for profile in [
@@ -2957,7 +3020,35 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn local_runtime_workspace_root_uses_explicit_env_override() {
+    fn sandbox_loop_worker_is_default_off_and_explicitly_enabled() {
+        let _lock = lock_runtime_env();
+        let unset = EnvGuard::clear(SANDBOX_LOOP_WORKER_ENV);
+        assert!(!sandbox_loop_worker_enabled().expect("unset defaults off"));
+        drop(unset);
+
+        for value in ["1", "true", "TRUE"] {
+            let enabled = EnvGuard::set(SANDBOX_LOOP_WORKER_ENV, value);
+            assert!(sandbox_loop_worker_enabled().expect("explicit enable"));
+            drop(enabled);
+        }
+        for value in ["0", "false", "FALSE"] {
+            let disabled = EnvGuard::set(SANDBOX_LOOP_WORKER_ENV, value);
+            assert!(!sandbox_loop_worker_enabled().expect("explicit disable"));
+            drop(disabled);
+        }
+    }
+
+    #[test]
+    fn sandbox_loop_worker_rejects_invalid_switch_value() {
+        let _lock = lock_runtime_env();
+        let _enabled = EnvGuard::set(SANDBOX_LOOP_WORKER_ENV, "maybe");
+
+        let error = sandbox_loop_worker_enabled().expect_err("invalid switch must fail");
+        assert!(error.to_string().contains(SANDBOX_LOOP_WORKER_ENV));
+    }
+
+    #[test]
+    fn runtime_workspace_root_uses_explicit_env_override() {
         // A reviewer noted IRONCLAW_REBORN_WORKSPACE_ROOT feeds two production
         // builders with no test anywhere; this pins the override path.
         let _lock = lock_runtime_env();
@@ -2966,19 +3057,24 @@ regex_activation_enabled = false
             "IRONCLAW_REBORN_WORKSPACE_ROOT",
             explicit.to_str().expect("test path must be valid utf8"),
         );
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
 
-        let root = local_runtime_workspace_root(ironclaw_config::RebornProfile::Standalone)
-            .expect("explicit workspace root must resolve");
+        let root = runtime_workspace_root(
+            &config,
+            ironclaw_config::RebornProfile::HostedSingleTenantVolumeSandboxed,
+        )
+        .expect("explicit workspace root must resolve");
 
         assert_eq!(root, explicit);
     }
 
     #[test]
-    fn local_runtime_workspace_root_falls_back_to_current_dir_when_unset() {
+    fn runtime_workspace_root_falls_back_to_current_dir_for_local_dev() {
         let _lock = lock_runtime_env();
         let _workspace_root = EnvGuard::clear("IRONCLAW_REBORN_WORKSPACE_ROOT");
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
 
-        let root = local_runtime_workspace_root(ironclaw_config::RebornProfile::Standalone)
+        let root = runtime_workspace_root(&config, ironclaw_config::RebornProfile::Standalone)
             .expect("unset workspace root must fall back to the current directory");
 
         assert_eq!(
@@ -2988,11 +3084,12 @@ regex_activation_enabled = false
     }
 
     #[test]
-    fn local_runtime_workspace_root_rejects_explicitly_empty_value() {
+    fn runtime_workspace_root_rejects_explicitly_empty_value() {
         let _lock = lock_runtime_env();
         let _workspace_root = EnvGuard::set("IRONCLAW_REBORN_WORKSPACE_ROOT", "");
+        let (_temp, config) = boot_config_with_config_toml("local-dev", "");
 
-        let error = local_runtime_workspace_root(ironclaw_config::RebornProfile::Standalone)
+        let error = runtime_workspace_root(&config, ironclaw_config::RebornProfile::Standalone)
             .expect_err(
                 "an explicitly empty workspace root must fail loudly, not silently fall back",
             );

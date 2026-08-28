@@ -384,6 +384,7 @@ impl ProductLiveAgentLoopHarness {
             Arc::clone(&await_edge_store),
         ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+            sandbox_loop_worker_transport: None,
             attachment_read_port: None,
             prompt_diagnostic_sink: None,
             reply_attachment_intent_port: None,

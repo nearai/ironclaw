@@ -1,9 +1,9 @@
 //! The opaque, host-owned loop checkpoint payload.
 //!
 //! The payload bytes are loop-private resume state: never public turn status,
-//! event, milestone, or transcript content, and never serialized into a wire
-//! DTO. The durable store that holds them is turn-kernel authority and stays
-//! in `ironclaw_turns`; only the payload newtype and its ceiling are contract.
+//! event, milestone, transcript content, or a durable/public wire DTO. A
+//! same-build sandboxed canonical-loop worker may carry the opaque bytes over
+//! its private bounded process pipe; the host remains the durable authority.
 
 use std::fmt;
 
@@ -16,10 +16,10 @@ use std::fmt;
 /// (`checkpoint_state::tests::checkpoint_payload_ceiling_matches_process_journal`).
 pub const MAX_CHECKPOINT_STATE_PAYLOAD_BYTES: usize = 64 * 1024;
 
-/// Internal loop checkpoint payload bytes.
-///
 /// This value is intentionally not serializable. It is host-owned resume state,
-/// not public turn status, event, milestone, or transcript content.
+/// not public turn status, event, milestone, or transcript content. The private
+/// same-build loop-worker adapter copies only its bounded bytes into an
+/// implementation-local frame and reconstructs this validating newtype.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RedactedCheckpointPayload {
     bytes: Vec<u8>,

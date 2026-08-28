@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use super::{
+use crate::sandbox_process::{
     ca::SandboxCertificateAuthority, registry, user_key::RebornSandboxUserKey, worker_spec,
 };
 use bollard::{
@@ -1905,7 +1905,6 @@ fn apply_material_mode(file: &std::fs::File, mode: u32) -> Result<(), RuntimePro
 fn apply_material_mode(_file: &std::fs::File, _mode: u32) -> Result<(), RuntimeProcessError> {
     Ok(())
 }
-
 async fn write_atomic_material_file_with_mode<C>(
     path: PathBuf,
     contents: C,

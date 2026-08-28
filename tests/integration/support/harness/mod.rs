@@ -297,6 +297,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     root: Arc<tempfile::TempDir>,
     workspace_root: PathBuf,
     mounts: MountView,
+    workspace_scoped_per_caller: bool,
     capability_mount_overrides: Vec<(CapabilityId, MountView)>,
     capability_ids: Vec<CapabilityId>,
     runtime_kind: RuntimeKind,
@@ -320,6 +321,8 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// `RecordingProcessPort`; `None` when the live `HostProcessPort` was
     /// used (`.with_live_shell()` path).
     process_port: Option<Arc<super::process::RecordingProcessPort>>,
+    sandbox_loop_worker_transport:
+        Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>>,
     /// Raw local-dev memory filesystem backing the user-profile source
     /// (E-PROFILE seam). `Some` only for `new_with_options`-built harnesses (which
     /// flow through `RebornServices`); `None` for the lower-level constructors and
@@ -804,7 +807,11 @@ impl HostRuntimeCapabilityHarness {
             tempfile::tempdir()?
         });
         let storage_root = root.path().join("local-dev");
-        let workspace_root = storage_root.join("workspace");
+        let workspace_root = if sandboxed_shell {
+            root.path().join("workspaces")
+        } else {
+            storage_root.join("workspace")
+        };
         std::fs::create_dir_all(&workspace_root)?;
         for fixture in &system_skill_fixtures {
             write_system_skill_fixture(
@@ -840,6 +847,7 @@ impl HostRuntimeCapabilityHarness {
                 &storage_root.join("system/extensions").join(extension_id),
             )?;
         }
+        let mut sandbox_loop_worker_transport = None;
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
             policy.resolved_profile == ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo
         }) {
@@ -856,14 +864,18 @@ impl HostRuntimeCapabilityHarness {
             .with_local_runtime_confirmed_host_home_root(host_home_root)
         } else if sandboxed_shell {
             let user_sandbox = ironclaw_composition::build_local_docker_user_sandbox_binding(
-                storage_root.join("sandbox-workspaces"),
+                workspace_root.clone(),
+                None,
+                true,
             )
             .await?;
+            sandbox_loop_worker_transport = user_sandbox.loop_worker_transport();
             ironclaw_composition::local_filesystem_build_input_with_profile(
                 ironclaw_composition::RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
                 service_label,
                 storage_root,
             )
+            .with_local_runtime_workspace_root(workspace_root.clone())
             .with_runtime_process_binding(user_sandbox)
         } else {
             ironclaw_composition::local_filesystem_build_input(service_label, storage_root)
@@ -1072,6 +1084,7 @@ impl HostRuntimeCapabilityHarness {
             root,
             workspace_root,
             mounts,
+            workspace_scoped_per_caller,
             capability_mount_overrides: Vec::new(),
             capability_ids,
             runtime_kind: RuntimeKind::FirstParty,
@@ -1087,6 +1100,7 @@ impl HostRuntimeCapabilityHarness {
             network_egress: recording_network_egress,
             real_egress_transport: None,
             process_port: None,
+            sandbox_loop_worker_transport,
             profile_filesystem,
             project_service,
             skill_activation_source,
@@ -1313,6 +1327,11 @@ impl HostRuntimeCapabilityHarness {
             .map(|port| port.commands())
             .unwrap_or_default()
     }
+    pub(crate) fn sandbox_loop_worker_transport(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>> {
+        self.sandbox_loop_worker_transport.clone()
+    }
 
     /// Install URL/method/capability-keyed scripted responses into the recording
     /// HTTP egress (§3.6 P1 ergonomics). Errors if this harness wired no
@@ -1435,7 +1454,7 @@ impl HostRuntimeCapabilityHarness {
             }
             other => return Err(format!("unsupported approval action: {other:?}").into()),
         };
-        let approval = self.lease_approval_for(&capability);
+        let approval = self.lease_approval_for(&capability, &scope)?;
         let resolver = ApprovalResolver::new(
             approval_parts.approval_requests.as_ref(),
             approval_parts.capability_leases.as_ref(),
@@ -1850,6 +1869,8 @@ impl HostRuntimeCapabilityHarness {
         // resolved user) is captured once for the lifetime of the returned
         // port, matching the per-run construction this method already had.
         let dispatch_user = self.dispatch_user_for_run(run_context);
+        let workspace_mounts =
+            self.workspace_mounts_for_scope(&run_context.scope.tenant_id, &dispatch_user)?;
         // ONE shared io, both roles: production assigns a single
         // `StagedCapabilityIo` to both `input_resolver` and `result_writer`
         // so input-ref/result-ref correlation by `call_id` works.
@@ -2028,7 +2049,7 @@ impl HostRuntimeCapabilityHarness {
                     .iter()
                     .find(|(override_capability, _mounts)| override_capability == capability)
                     .map(|(_capability, mounts)| mounts.clone())
-                    .unwrap_or_else(|| self.mounts.clone());
+                    .unwrap_or_else(|| workspace_mounts.clone());
                 CapabilityGrant {
                     id: CapabilityGrantId::new(),
                     capability: capability.clone(),
@@ -2062,7 +2083,7 @@ impl HostRuntimeCapabilityHarness {
             // memory/skill capability families down to an empty view via
             // `build_inner`'s per-domain `with_capability_execution_mount`
             // special-cases, silently blinding `builtin.memory_*`.
-            workspace_mounts: self.mounts.clone(),
+            workspace_mounts,
             skill_mounts: self.mounts.clone(),
             memory_mounts: self.mounts.clone(),
             system_extensions_lifecycle_mounts: self.mounts.clone(),
@@ -2190,14 +2211,53 @@ impl HostRuntimeCapabilityHarness {
         }
     }
 
-    fn lease_approval_for(&self, capability_id: &CapabilityId) -> LeaseApproval {
-        let mounts = self
+    fn workspace_mounts_for_scope(
+        &self,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+    ) -> Result<MountView, AgentLoopHostError> {
+        if !self.workspace_scoped_per_caller {
+            return Ok(self.mounts.clone());
+        }
+        let permissions = self
+            .mounts
+            .mounts
+            .iter()
+            .find(|mount| mount.alias.as_str() == "/workspace")
+            .map(|mount| mount.permissions.clone())
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "per-caller workspace harness requires a /workspace mount",
+                )
+            })?;
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workspace").map_err(host_runtime_harness_error)?,
+            VirtualPath::new(format!(
+                "/projects/workspace/tenants/{}/users/{}",
+                tenant_id.as_str(),
+                user_id.as_str()
+            ))
+            .map_err(host_runtime_harness_error)?,
+            permissions,
+        )])
+        .map_err(host_runtime_harness_error)
+    }
+
+    fn lease_approval_for(
+        &self,
+        capability_id: &CapabilityId,
+        scope: &ResourceScope,
+    ) -> Result<LeaseApproval, AgentLoopHostError> {
+        let mounts = match self
             .capability_mount_overrides
             .iter()
             .find(|(override_capability, _)| override_capability == capability_id)
-            .map(|(_, mounts)| mounts.clone())
-            .unwrap_or_else(|| self.mounts.clone());
-        LeaseApproval {
+        {
+            Some((_, mounts)) => mounts.clone(),
+            None => self.workspace_mounts_for_scope(&scope.tenant_id, &scope.user_id)?,
+        };
+        Ok(LeaseApproval {
             issued_by: Principal::HostRuntime,
             constraints: GrantConstraints {
                 allowed_effects: self.effect_kinds.clone(),
@@ -2208,7 +2268,7 @@ impl HostRuntimeCapabilityHarness {
                 expires_at: None,
                 max_invocations: Some(1),
             },
-        }
+        })
     }
 
     /// Builds the composition-facing `additional_provider_trust` map this

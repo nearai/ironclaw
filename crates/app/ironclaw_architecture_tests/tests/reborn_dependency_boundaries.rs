@@ -926,12 +926,16 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // sandbox crates. Count re-captured from this test; the stored ceiling
         // excludes the standing 150-line working tolerance.
         // 20_948 -> 21_311 (2026-08-27, #7891 rebased onto #7810): the closed
-        // JSON result-page
-        // wire DTO and its model-preview validation boundary. Record parsing,
-        // shallow paging, redaction, and continuation behavior remain in
-        // `ironclaw_threads`; host API only names the provider-neutral controls
-        // and refuses replay of an unredacted page. Count read from this gate.
-        ("ironclaw_host_api", 21_311),
+        // JSON result-page wire DTO and its model-preview validation boundary.
+        // Record parsing, shallow paging, redaction, and continuation behavior
+        // remain in `ironclaw_threads`; host API only names the provider-neutral
+        // controls and refuses replay of an unredacted page.
+        // 21_311 -> 21_428 (2026-08-27, #7903 spike): the neutral process
+        // boundary gains a bounded full-duplex loop-worker session port and its
+        // host-authored start request. Docker/Bollard and loop protocol shapes
+        // remain outside this crate; host API owns only the placement-neutral
+        // kernel-to-lane contract. Count read from this gate.
+        ("ironclaw_host_api", 21_428),
         // 14_479 -> 13_949 (2026-08-07, #7157): downward re-capture after the
         // delivery-heuristic vocabulary (stored trigger delivery targets and
         // their run-profile plumbing) left this crate with the two-lane

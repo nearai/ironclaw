@@ -28,6 +28,10 @@ and the loop tier's system-prompt content assets.
 - Driver-host port adapters (`driver_host_port_adapters.rs`):
   `HostManagedLoopCheckpointPort`, `HostManagedLoopProgressPort`,
   `NoExtraLoopInputPort`.
+- Same-build sandbox loop-host bridge (`remote_host.rs`): bounded private
+  process frames that forward the canonical loop's existing host ports without
+  moving kernel authority or making raw context/checkpoint bytes public wire
+  contracts.
 - Progressive tool disclosure (`tool_disclosure*.rs`): catalog/selector, the
   deferring `LoopCapabilityPort` decorator, the `REBORN_TOOL_DISCLOSURE`
   switch.

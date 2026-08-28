@@ -34,6 +34,7 @@ mod connect;
 mod container_identity;
 mod credential_firewall;
 mod key_codec;
+mod loop_worker;
 mod managed_egress;
 mod mounts;
 mod network_allowlist;
@@ -53,6 +54,7 @@ mod registry;
 mod user_key;
 
 use mounts::RebornSandboxMountSources;
+use registry::SandboxActivityGuard;
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
@@ -101,6 +103,7 @@ const DEFAULT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_CPU_SHARES: u32 = 1024;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize;
 const CONTAINER_WORKSPACE_ROOT: &str = "/workspace";
+const SANDBOX_RUNTIME_STATE_SUBDIR: &str = ".ironclaw-sandbox-runtime";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContainerWorkdir(String);
@@ -129,6 +132,8 @@ impl ContainerWorkdir {
 #[derive(Debug, Clone)]
 pub struct RebornSandboxConfig {
     workspace_root: PathBuf,
+    runtime_state_root: PathBuf,
+    legacy_workspace_roots: Vec<PathBuf>,
     mount_sources: RebornSandboxMountSources,
     image: String,
     default_timeout: Duration,
@@ -145,8 +150,12 @@ pub struct RebornSandboxConfig {
 
 impl RebornSandboxConfig {
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+        let workspace_root = workspace_root.into();
+        let runtime_state_root = workspace_root.join(SANDBOX_RUNTIME_STATE_SUBDIR);
         Self {
-            workspace_root: workspace_root.into(),
+            workspace_root,
+            runtime_state_root,
+            legacy_workspace_roots: Vec::new(),
             mount_sources: RebornSandboxMountSources::default(),
             image: std::env::var("IRONCLAW_REBORN_SANDBOX_IMAGE")
                 .or_else(|_| std::env::var("IRONCLAW_SANDBOX_IMAGE"))
@@ -164,6 +173,10 @@ impl RebornSandboxConfig {
         }
     }
 
+    pub fn with_legacy_workspace_root(mut self, root: PathBuf) -> Self {
+        self.legacy_workspace_roots.push(root);
+        self
+    }
     pub fn with_image(mut self, image: impl Into<String>) -> Self {
         self.image = image.into();
         self
@@ -196,7 +209,7 @@ impl RebornSandboxConfig {
         })?;
         self.managed_egress = Some(ManagedEgressConfig::from_policy(
             policy,
-            self.workspace_root.join(".managed-egress"),
+            self.runtime_state_root.join("managed-egress"),
         )?);
         Ok(self)
     }
@@ -330,15 +343,15 @@ struct LocalDockerOwnerLock {
 }
 
 impl LocalDockerOwnerLock {
-    async fn acquire(workspace_root: &Path) -> Result<Arc<Self>, RuntimeProcessError> {
-        tokio::fs::create_dir_all(workspace_root)
+    async fn acquire(runtime_state_root: &Path) -> Result<Arc<Self>, RuntimeProcessError> {
+        tokio::fs::create_dir_all(runtime_state_root)
             .await
             .map_err(|error| {
                 RuntimeProcessError::ExecutionFailed(format!(
-                    "sandbox workspace root could not be initialized: {error}"
+                    "sandbox runtime state root could not be initialized: {error}"
                 ))
             })?;
-        let lock_path = workspace_root.join(".ironclaw-sandbox-owner.lock");
+        let lock_path = runtime_state_root.join(".ironclaw-sandbox-owner.lock");
         let file = tokio::task::spawn_blocking(move || {
             let file = std::fs::OpenOptions::new()
                 .create(true)
@@ -348,18 +361,18 @@ impl LocalDockerOwnerLock {
                 .open(lock_path)
                 .map_err(|error| {
                     RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox workspace ownership could not be opened: {error}"
+                        "sandbox runtime ownership could not be opened: {error}"
                     ))
                 })?;
             file.try_lock_exclusive().map_err(|error| {
                 if error.kind() == std::io::ErrorKind::WouldBlock {
                     RuntimeProcessError::ExecutionFailed(
-                        "sandbox Docker workspace is already owned by another IronClaw process"
+                        "sandbox Docker runtime is already owned by another IronClaw process"
                             .to_string(),
                     )
                 } else {
                     RuntimeProcessError::ExecutionFailed(format!(
-                        "sandbox workspace ownership could not be acquired: {error}"
+                        "sandbox runtime ownership could not be acquired: {error}"
                     ))
                 }
             })?;
@@ -368,7 +381,7 @@ impl LocalDockerOwnerLock {
         .await
         .map_err(|error| {
             RuntimeProcessError::ExecutionFailed(format!(
-                "sandbox workspace ownership task failed: {error}"
+                "sandbox runtime ownership task failed: {error}"
             ))
         })??;
         Ok(Arc::new(Self { _file: file }))
@@ -530,6 +543,7 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
             .debug_struct("RebornScopedSandboxCommandTransport")
             .field("workspace_root", &self.config.workspace_root)
             .field("image", &self.config.image)
+            .field("runtime_state_root", &self.config.runtime_state_root)
             .field("network_broker", &self.config.network_broker)
             .field("secret_broker", &self.config.secret_broker)
             .field("managed_egress", &self.managed_egress)
@@ -540,7 +554,7 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
 
 impl RebornScopedSandboxCommandTransport {
     pub async fn connect(config: RebornSandboxConfig) -> Result<Self, RuntimeProcessError> {
-        let owner_lock = LocalDockerOwnerLock::acquire(&config.workspace_root).await?;
+        let owner_lock = LocalDockerOwnerLock::acquire(&config.runtime_state_root).await?;
         let docker = connect_docker().await?;
         let managed_egress = match config.managed_egress.clone() {
             Some(managed) => Some(ManagedEgressRuntime::connect(&docker, managed).await?),
@@ -580,12 +594,38 @@ impl RebornScopedSandboxCommandTransport {
     // the kernel wraps the transport (`UserSandboxProcessPort::new`), which
     // is the direction the port inversion requires.
 
+    async fn begin_user_workspace(
+        &self,
+        scope: &ResourceScope,
+        key: &RebornSandboxUserKey,
+    ) -> Result<
+        (
+            PathBuf,
+            SandboxActivityGuard,
+            tokio::sync::OwnedMutexGuard<()>,
+        ),
+        RuntimeProcessError,
+    > {
+        let activity = self.activity.begin(key)?;
+        let gate = self.activity.gate(key).ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "sandbox user container lifecycle gate disappeared".to_string(),
+            )
+        })?;
+        let lifecycle =
+            acquire_user_lifecycle_gate(gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
+        let workspace = self.prepare_workspace(scope).await?;
+        Ok((workspace, activity, lifecycle))
+    }
+
     async fn prepare_workspace(
         &self,
         scope: &ResourceScope,
     ) -> Result<PathBuf, RuntimeProcessError> {
         let key = RebornSandboxUserKey::from_scope(scope);
         let workspace = key.workspace_path(&self.config.workspace_root);
+        Self::migrate_legacy_workspace(&key, &self.config.legacy_workspace_roots, &workspace)
+            .await?;
         tokio::fs::create_dir_all(&workspace)
             .await
             .map_err(|error| {
@@ -612,6 +652,71 @@ impl RebornScopedSandboxCommandTransport {
                 "sandbox workspace could not be resolved: {error}"
             ))
         })
+    }
+
+    async fn migrate_legacy_workspace(
+        key: &RebornSandboxUserKey,
+        legacy_roots: &[PathBuf],
+        workspace: &Path,
+    ) -> Result<(), RuntimeProcessError> {
+        let mut existing = Vec::new();
+        for root in legacy_roots {
+            let candidate = key.legacy_workspace_path(root);
+            match tokio::fs::symlink_metadata(&candidate).await {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return Err(RuntimeProcessError::ExecutionFailed(
+                        "legacy sandbox workspace is not a safe directory".to_string(),
+                    ));
+                }
+                Ok(_) => existing.push(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(RuntimeProcessError::ExecutionFailed(format!(
+                        "legacy sandbox workspace could not be inspected: {error}"
+                    )));
+                }
+            }
+        }
+        if existing.is_empty() {
+            return Ok(());
+        }
+        match tokio::fs::symlink_metadata(workspace).await {
+            Ok(_) => {
+                return Err(RuntimeProcessError::ExecutionFailed(
+                    "legacy and canonical sandbox workspaces both exist; manual reconciliation is required"
+                        .to_string(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RuntimeProcessError::ExecutionFailed(format!(
+                    "canonical sandbox workspace could not be inspected: {error}"
+                )));
+            }
+        }
+        if existing.len() > 1 {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "multiple legacy sandbox workspaces exist; manual reconciliation is required"
+                    .to_string(),
+            ));
+        }
+        let parent = workspace.parent().ok_or_else(|| {
+            RuntimeProcessError::ExecutionFailed(
+                "canonical sandbox workspace has no parent directory".to_string(),
+            )
+        })?;
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "canonical sandbox workspace parent could not be initialized: {error}"
+            ))
+        })?;
+        tokio::fs::rename(&existing[0], workspace)
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "legacy sandbox workspace migration failed: {error}"
+                ))
+            })
     }
 
     fn resolve_container_workdir(
@@ -748,7 +853,8 @@ impl RebornScopedSandboxCommandTransport {
         }
         user_container::exec_helper_timeout_secs(timeout)?;
         validate_credential_env(&request.extra_env, &credentials)?;
-        let workspace = self.prepare_workspace(&request.scope).await?;
+        let (workspace, activity, user_lifecycle) =
+            self.begin_user_workspace(&request.scope, &user_key).await?;
         let container_user = self
             .config
             .container_identity
@@ -764,15 +870,7 @@ impl RebornScopedSandboxCommandTransport {
             .collect::<Vec<_>>();
         self.config.append_broker_binds(&mut binds)?;
         binds.sort();
-        let activity = self.activity.begin(&user_key)?;
-        let gate = self.activity.gate(&user_key).ok_or_else(|| {
-            RuntimeProcessError::ExecutionFailed(
-                "sandbox user container lifecycle gate disappeared".to_string(),
-            )
-        })?;
         let resolved_image = self.resolve_worker_image().await?;
-        let user_lifecycle =
-            acquire_user_lifecycle_gate(gate, USER_LIFECYCLE_GATE_ACQUIRE_TIMEOUT).await?;
         let mut credential_cleanup =
             CredentialCleanupGuard::new(self.docker.clone(), user_lifecycle);
         let bundle = match self.managed_egress.as_ref() {
@@ -1122,6 +1220,7 @@ mod tests {
     use ironclaw_common::env_helpers::{lock_env, remove_runtime_env, set_runtime_env};
     use ironclaw_host_api::{
         action::{NetworkPolicy, NetworkTargetPattern},
+        ids::UserId,
         mount::{MountGrant, MountPermissions, MountView},
         path::{MountAlias, VirtualPath},
     };
@@ -1302,6 +1401,136 @@ mod tests {
         assert_eq!(config.container_network_mode(), Some("none".to_string()));
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=disabled".to_string()));
         assert!(env.contains(&"IRONCLAW_REBORN_SECRET_MODE=disabled".to_string()));
+    }
+
+    #[test]
+    fn sandbox_runtime_state_is_not_a_user_workspace_subtree() {
+        let config = RebornSandboxConfig::new("/tmp/reborn-workspaces");
+
+        assert_eq!(
+            config.workspace_root,
+            PathBuf::from("/tmp/reborn-workspaces")
+        );
+        assert_eq!(
+            config.runtime_state_root,
+            PathBuf::from("/tmp/reborn-workspaces/.ironclaw-sandbox-runtime")
+        );
+        assert!(
+            !config
+                .runtime_state_root
+                .starts_with(config.workspace_root.join("tenants"))
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_workspace_is_moved_once_without_copying_user_data() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let legacy_root = temp.path().join("legacy");
+        let canonical_root = temp.path().join("workspaces");
+        let scope = ResourceScope::local_default(
+            UserId::new("user").expect("user"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("scope");
+        let key = RebornSandboxUserKey::from_scope(&scope);
+        let legacy = key.legacy_workspace_path(&legacy_root);
+        std::fs::create_dir_all(&legacy).expect("legacy workspace");
+        std::fs::write(legacy.join("proof.txt"), "preserved").expect("legacy file");
+        let transport = test_support::transport(
+            inert_docker_client(),
+            RebornSandboxConfig::new(canonical_root.clone())
+                .with_legacy_workspace_root(legacy_root),
+        );
+
+        let (canonical, activity, lifecycle) = transport
+            .begin_user_workspace(&scope, &key)
+            .await
+            .expect("legacy workspace migrates through caller");
+        drop(lifecycle);
+        drop(activity);
+
+        assert_eq!(
+            std::fs::read_to_string(canonical.join("proof.txt")).expect("migrated file"),
+            "preserved"
+        );
+        assert!(!legacy.exists());
+    }
+
+    #[tokio::test]
+    async fn legacy_workspace_conflict_fails_without_modifying_either_tree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let legacy_root = temp.path().join("legacy");
+        let canonical_root = temp.path().join("workspaces");
+        let scope = ResourceScope::local_default(
+            UserId::new("user").expect("user"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("scope");
+        let key = RebornSandboxUserKey::from_scope(&scope);
+        let legacy = key.legacy_workspace_path(&legacy_root);
+        let canonical = key.workspace_path(&canonical_root);
+        std::fs::create_dir_all(&legacy).expect("legacy workspace");
+        std::fs::create_dir_all(&canonical).expect("canonical workspace");
+        std::fs::write(legacy.join("legacy.txt"), "legacy").expect("legacy file");
+        std::fs::write(canonical.join("canonical.txt"), "canonical").expect("canonical file");
+        let transport = test_support::transport(
+            inert_docker_client(),
+            RebornSandboxConfig::new(canonical_root).with_legacy_workspace_root(legacy_root),
+        );
+
+        let error = match transport.begin_user_workspace(&scope, &key).await {
+            Err(error) => error,
+            Ok(_) => panic!("conflicting workspace trees must fail closed"),
+        };
+
+        assert!(error.to_string().contains("manual reconciliation"));
+        assert!(legacy.join("legacy.txt").is_file());
+        assert!(canonical.join("canonical.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_workspace_calls_serialize_legacy_migration() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let legacy_root = temp.path().join("legacy");
+        let canonical_root = temp.path().join("workspaces");
+        let first_scope = ResourceScope::local_default(
+            UserId::new("user").expect("user"),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("scope");
+        let second_scope = ResourceScope::local_default(
+            first_scope.user_id.clone(),
+            ironclaw_host_api::ids::InvocationId::new(),
+        )
+        .expect("scope");
+        let key = RebornSandboxUserKey::from_scope(&first_scope);
+        let legacy = key.legacy_workspace_path(&legacy_root);
+        std::fs::create_dir_all(&legacy).expect("legacy workspace");
+        std::fs::write(legacy.join("proof.txt"), "preserved").expect("legacy file");
+        let transport = Arc::new(test_support::transport(
+            inert_docker_client(),
+            RebornSandboxConfig::new(canonical_root).with_legacy_workspace_root(legacy_root),
+        ));
+        let prepare = |scope: ResourceScope| {
+            let transport = Arc::clone(&transport);
+            async move {
+                let key = RebornSandboxUserKey::from_scope(&scope);
+                let (workspace, activity, lifecycle) =
+                    transport.begin_user_workspace(&scope, &key).await?;
+                drop(lifecycle);
+                drop(activity);
+                Ok::<_, RuntimeProcessError>(workspace)
+            }
+        };
+
+        let (first, second) = tokio::join!(prepare(first_scope), prepare(second_scope));
+        let first = first.expect("first workspace");
+        let second = second.expect("second workspace");
+        assert_eq!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(first.join("proof.txt")).expect("migrated file"),
+            "preserved"
+        );
     }
 
     #[test]

@@ -1,3 +1,24 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1.96-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS loop_worker_builder
+
+WORKDIR /app
+COPY .cargo/config.toml .cargo/config.toml
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY tools/ironclaw_stress/ tools/ironclaw_stress/
+COPY skills/ skills/
+COPY migrations/ migrations/
+COPY tests/ tests/
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    mkdir -p src \
+    && printf 'fn main() {}\n' > src/main.rs \
+    && cargo build --release \
+        --package ironclaw_turn_runner \
+        --bin ironclaw-loop-worker \
+    && cp target/release/ironclaw-loop-worker /ironclaw-loop-worker
+
 # Phase 2 worker for the persistent local-Docker user sandbox.
 # Keep the base digest aligned with RailwayPreviewSandboxConfig's default.
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
@@ -21,6 +42,9 @@ RUN groupadd --gid 1000 sandbox \
 COPY --chmod=0755 docker/sandbox/ironclaw-exec \
     docker/sandbox/ironclaw-sandbox-idle \
     /usr/local/bin/
+COPY --from=loop_worker_builder --chmod=0755 \
+    /ironclaw-loop-worker \
+    /usr/local/bin/ironclaw-loop-worker
 ENV HOME=/home/sandbox \
     GH_CONFIG_DIR=/workspace/.config/gh
 WORKDIR /workspace

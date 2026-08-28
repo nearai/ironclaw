@@ -3136,6 +3136,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 reason: "RebornRuntimeInput.services must include a resolved runtime policy"
                     .to_string(),
             })?;
+    let sandbox_loop_worker_transport = services_input
+        .runtime_process_binding
+        .loop_worker_transport();
 
     let validated_identity = validate_runtime_identity(identity)?;
     services_input = services_input.with_local_runtime_identity(
@@ -4011,6 +4014,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         )),
         subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence,
+        sandbox_loop_worker_transport,
         config: DefaultPlannedRuntimeConfig {
             heartbeat_interval: runner.heartbeat_interval,
             poll_interval: runner.poll_interval,

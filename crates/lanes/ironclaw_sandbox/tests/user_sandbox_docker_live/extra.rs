@@ -380,7 +380,8 @@ async fn proxy_config_failure_rolls_back_partially_provisioned_networks() {
     let material_root = temp
         .path()
         .join("sandbox-workspaces")
-        .join(".managed-egress");
+        .join(".ironclaw-sandbox-runtime")
+        .join("managed-egress");
     let proxy_material = std::fs::read_dir(&material_root)
         .expect("managed-egress material root exists")
         .next()
@@ -566,7 +567,8 @@ async fn idle_stop_suspends_egress_and_preserves_the_private_network() {
     let audit_dir = temp
         .path()
         .join("sandbox-workspaces")
-        .join(".managed-egress")
+        .join(".ironclaw-sandbox-runtime")
+        .join("managed-egress")
         .join("audit");
     let preserved_audit = std::fs::read_dir(&audit_dir)
         .expect("suspension preserves a proxy audit root")

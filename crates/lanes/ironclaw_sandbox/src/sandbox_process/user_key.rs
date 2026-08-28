@@ -18,6 +18,8 @@ pub(crate) const USER_CONTAINER_DIGEST_HEX_LEN: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RebornSandboxUserKey {
+    tenant_id: TenantId,
+    user_id: UserId,
     digest: String,
 }
 
@@ -38,11 +40,24 @@ impl RebornSandboxUserKey {
             ("user", user_id.as_str().to_string()),
         ]);
         Self {
+            tenant_id: tenant_id.clone(),
+            user_id: user_id.clone(),
             digest: digest_hex(&raw),
         }
     }
 
+    /// Resolve the same per-caller subtree used by the host's scoped
+    /// `/workspace` mount so file tools and sandbox processes share bytes.
     pub fn workspace_path(&self, root: &Path) -> PathBuf {
+        root.join("tenants")
+            .join(self.tenant_id.as_str())
+            .join("users")
+            .join(self.user_id.as_str())
+    }
+
+    /// Pre-#7903 local-Docker workspace location. Used only by the one-time
+    /// forward migration into the canonical tenant/user layout.
+    pub(crate) fn legacy_workspace_path(&self, root: &Path) -> PathBuf {
         root.join("users").join(&self.digest)
     }
 
@@ -98,6 +113,20 @@ mod tests {
         assert_eq!(a.container_name(), b.container_name());
         assert_eq!(a.proxy_name(), b.proxy_name());
         assert_eq!(a.network_name(), b.network_name());
+    }
+
+    #[test]
+    fn workspace_path_matches_the_scoped_filesystem_layout() {
+        let root = Path::new("/tmp/reborn-sandbox");
+        let key = RebornSandboxUserKey::from_scope(&scope("tenant", "user", None, None));
+
+        assert_eq!(
+            key.workspace_path(root),
+            root.join("tenants")
+                .join("tenant")
+                .join("users")
+                .join("user")
+        );
     }
 
     #[test]

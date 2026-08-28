@@ -303,7 +303,7 @@ pub trait LoopCancellationPort: Send + Sync {
     async fn cancellation_requested(&self) -> LoopCancellationSignal;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopCancellationSignal {
     pub reason_kind: LoopCancelReasonKind,
     pub requested_at: DateTime<Utc>,

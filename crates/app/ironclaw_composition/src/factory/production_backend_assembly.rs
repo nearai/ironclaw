@@ -717,7 +717,9 @@ pub(super) async fn build_backend_production(
     };
     let user_sandbox_process_port = match &production_wiring.runtime_process_binding {
         RebornRuntimeProcessBinding::None => None,
-        RebornRuntimeProcessBinding::UserSandbox { process_port } => Some(Arc::clone(process_port)),
+        RebornRuntimeProcessBinding::UserSandbox { process_port, .. } => {
+            Some(Arc::clone(process_port))
+        }
     };
     let services = apply_production_runtime_process_binding(
         services,

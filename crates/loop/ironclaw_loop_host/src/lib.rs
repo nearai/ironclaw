@@ -43,6 +43,7 @@ mod model_gateway_error_mapping;
 mod model_routes;
 mod model_visible_scrub;
 mod prompt_context_budget;
+mod remote_host;
 mod result_read;
 mod skill_activation;
 mod skill_bundle_context_source;
@@ -127,6 +128,11 @@ pub use model_routes::{
     ResolvedModelRouteSnapshot, StaticModelRouteResolver,
 };
 pub use model_visible_scrub::scrub_model_visible_detail;
+pub use remote_host::{
+    LOOP_WORKER_MAX_FRAME_BYTES, LOOP_WORKER_WIRE_VERSION, LoopWorkerBootstrap, LoopWorkerFailure,
+    LoopWorkerInvocation, LoopWorkerOutcome, LoopWorkerSettings, RemoteAgentLoopDriverHost,
+    read_worker_bootstrap, remote_host_from_stdio, serve_loop_worker,
+};
 pub use result_read::{RESULT_READ_CAPABILITY_ID, result_read_capability};
 #[cfg(feature = "test-support")]
 pub use result_read::{RESULT_READ_CAPABILITY_ID_FOR_TEST, wrap_result_read_capability_for_test};

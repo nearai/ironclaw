@@ -93,6 +93,46 @@ pub struct CommandExecutionOutput {
     pub sandboxed: bool,
     pub duration: Duration,
 }
+/// Maximum payload bytes in one loop-worker protocol frame.
+pub const MAX_SANDBOX_LOOP_WORKER_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Host-authored request to start the canonical loop worker inside an existing
+/// user sandbox. The command is trusted deployment configuration, never model
+/// input; loop protocol bytes travel only through the returned session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxLoopWorkerStartRequest {
+    pub scope: ResourceScope,
+    pub executable: String,
+    pub args: Vec<String>,
+    pub workdir: Option<String>,
+}
+
+/// One bounded full-duplex loop-worker process session.
+///
+/// The transport owns framing-independent bytes only. Loop host adapters own
+/// the private wire protocol, and dropping a session must terminate the worker
+/// process and release its active-container pin.
+#[async_trait]
+pub trait SandboxLoopWorkerSession: Send {
+    async fn send(&mut self, frame: Vec<u8>) -> Result<(), RuntimeProcessError>;
+
+    /// Return the next complete transport frame, or `None` after worker exit.
+    async fn receive(&mut self) -> Result<Option<Vec<u8>>, RuntimeProcessError>;
+
+    async fn terminate(&mut self) -> Result<(), RuntimeProcessError>;
+}
+
+/// Starts a canonical loop worker in the selected user's sandbox.
+///
+/// This separate port keeps the ordinary command transport single-shot and
+/// prevents loop placement from leaking Docker details into the loop tier.
+#[async_trait]
+pub trait SandboxLoopWorkerTransport: Send + Sync {
+    async fn start_loop_worker(
+        &self,
+        request: SandboxLoopWorkerStartRequest,
+    ) -> Result<Box<dyn SandboxLoopWorkerSession>, RuntimeProcessError>;
+}
 /// One invocation-scoped credential binding handed only to the sandbox
 /// transport. `credential_key` addresses this value inside the proxy's JSON
 /// bundle. The command receives `placeholder`; only the proxy-side transport
@@ -193,6 +233,12 @@ pub fn shell_credential_contexts(
     Ok(contexts)
 }
 
+/// Whether `name` is safe for an invocation-scoped credential placeholder in
+/// the sandbox environment.
+///
+/// This is the shared host↔lane contract. Rejecting dangerous shell/loader
+/// variables before one-shot material is consumed keeps host validation and
+/// sandbox admission byte-for-byte aligned.
 pub fn is_valid_sandbox_credential_env_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with(|ch: char| ch.is_ascii_digit())
@@ -326,7 +372,15 @@ mod tests {
         for valid in ["GH_TOKEN", "ATLAS_API_KEY", "_PRIVATE"] {
             assert!(is_valid_sandbox_credential_env_name(valid), "{valid}");
         }
-        for invalid in ["", "lowercase", "9TOKEN", "BASH_ENV", "LD_PRELOAD", "PATH"] {
+        for invalid in [
+            "",
+            "lowercase",
+            "9TOKEN",
+            "BASH_ENV",
+            "LD_PRELOAD",
+            "PATH",
+            "TOKEN-NAME",
+        ] {
             assert!(!is_valid_sandbox_credential_env_name(invalid), "{invalid}");
         }
     }

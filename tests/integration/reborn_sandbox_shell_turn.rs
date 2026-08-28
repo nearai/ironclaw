@@ -19,12 +19,17 @@ use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 use user_sandbox_live::{
     CONTAINER_DIGEST_HEX_LEN, CONTAINER_PREFIX, ContainerIdentity, DockerCleanup, LABEL_TENANT,
-    LABEL_USER,
+    LABEL_USER, containers_for_identity,
 };
 
 const CONTAINER_MARKER: &str = "SANDBOX_SHELL_IN_CONTAINER";
 const EPHEMERAL_MARKER: &str = "SANDBOX_CONTAINER_STATE_PERSISTED";
 const PERSISTENCE_MARKER: &str = "SANDBOX_WORKSPACE_PERSISTED";
+const LOOP_WORKER_MARKER: &str = "CANONICAL_LOOP_WORKER_ACTIVE";
+const FILE_TOOL_TO_SHELL_MARKER: &str = "FILE_TOOL_TO_SHELL_VISIBLE";
+const FILE_TOOL_TO_SHELL_PATCHED: &str = "FILE_TOOL_TO_SHELL_PATCHED";
+const SHELL_TO_FILE_TOOL_MARKER: &str = "SHELL_TO_FILE_TOOL_VISIBLE";
+const TRIGGER_IDLE_USER_MARKER: &str = "TRIGGER_STARTED_IDLE_USER_LOOP";
 
 #[test]
 fn sandbox_shell_turn_executes_in_a_real_container() {
@@ -47,15 +52,36 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
         .with_sandbox_shell_tools()
         .script([
             RebornScriptedReply::tool_call(
+                "builtin.write_file",
+                json!({
+                    "path": "/workspace/coding-probe.txt",
+                    "content": FILE_TOOL_TO_SHELL_MARKER,
+                }),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.apply_patch",
+                json!({
+                    "path": "/workspace/coding-probe.txt",
+                    "old_string": FILE_TOOL_TO_SHELL_MARKER,
+                    "new_string": FILE_TOOL_TO_SHELL_PATCHED,
+                }),
+            ),
+            RebornScriptedReply::tool_call(
                 "builtin.shell",
                 json!({
                     "command": format!(
-                        "test -f /.dockerenv && printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt && printf '{EPHEMERAL_MARKER}' > /tmp/container-marker.txt && cat /workspace/persistence-marker.txt /tmp/container-marker.txt && uid=$(id -u) && test \"$uid\" -ne 0 && echo NON_ROOT_UID_OK && echo {CONTAINER_MARKER}"
+                        "set -eu; test -f /.dockerenv; test \"$(cat /workspace/coding-probe.txt)\" = '{FILE_TOOL_TO_SHELL_PATCHED}'; echo {FILE_TOOL_TO_SHELL_MARKER}; printf '{SHELL_TO_FILE_TOOL_MARKER}' > /workspace/shell-created.txt; found=0; for exe in /proc/[0-9]*/exe; do target=$(readlink \"$exe\" 2>/dev/null || true); if [ \"$target\" = '/usr/local/bin/ironclaw-loop-worker' ]; then found=1; break; fi; done; test \"$found\" -eq 1; echo {LOOP_WORKER_MARKER}; printf '{PERSISTENCE_MARKER}' > /workspace/persistence-marker.txt; printf '{EPHEMERAL_MARKER}' > /tmp/container-marker.txt; cat /workspace/persistence-marker.txt /tmp/container-marker.txt; uid=$(id -u); test \"$uid\" -ne 0; echo NON_ROOT_UID_OK; echo {CONTAINER_MARKER}"
                     ),
                     "credential_contexts": [],
                 }),
             ),
-            RebornScriptedReply::text("ran in the sandbox"),
+            RebornScriptedReply::tool_call(
+                "builtin.read_file",
+                json!({
+                    "path": "/workspace/shell-created.txt",
+                }),
+            ),
+            RebornScriptedReply::text("ran coding tools in the sandbox"),
         ])
         .build()
         .await
@@ -67,6 +93,49 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             user: expected_user.clone(),
         };
         cleanup.track_identity(identity.clone());
+        assert!(
+            containers_for_identity(&expected_tenant, &expected_user).is_empty(),
+            "idle trigger owner must not have a sandbox before the fire"
+        );
+        let triggered = harness
+            .submit_triggered_turn_scripted(
+                "run the scheduled sandbox check",
+                [
+                    RebornScriptedReply::tool_call(
+                        "builtin.shell",
+                        json!({
+                            "command": format!(
+                                "set -eu; test -f /.dockerenv; found=0; for exe in /proc/[0-9]*/exe; do target=$(readlink \"$exe\" 2>/dev/null || true); if [ \"$target\" = '/usr/local/bin/ironclaw-loop-worker' ]; then found=1; break; fi; done; test \"$found\" -eq 1; echo {LOOP_WORKER_MARKER}; echo {TRIGGER_IDLE_USER_MARKER}"
+                            ),
+                            "credential_contexts": [],
+                        }),
+                    ),
+                    RebornScriptedReply::text("scheduled sandbox check complete"),
+                ],
+            )
+            .await
+            .expect("triggered turn accepted");
+        harness
+            .wait_for_status_in_scope(
+                &triggered.turn_scope,
+                triggered.run_id,
+                ironclaw_turns::TurnStatus::Completed,
+            )
+            .await
+            .expect("triggered sandbox run completes");
+        assert!(cleanup.capture_identity(&identity).running);
+        harness
+            .assert_tool_result_contains(TRIGGER_IDLE_USER_MARKER)
+            .await
+            .expect("trigger fire started the idle user's sandbox loop");
+        harness
+            .thread_harness
+            .assert_final_reply(
+                triggered.turn_scope.thread_id,
+                "scheduled sandbox check complete",
+            )
+            .await
+            .expect("triggered final reply persists in the trigger thread");
 
         harness
             .submit_turn("run a sandboxed shell command")
@@ -94,14 +163,46 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             .assert_model_tools_contains("builtin__shell")
             .await
             .expect("shell is model-visible");
+        for capability in [
+            "builtin__write_file",
+            "builtin__apply_patch",
+            "builtin__read_file",
+        ] {
+            harness
+                .assert_model_tools_contains(capability)
+                .await
+                .expect("coding tool is model-visible");
+        }
         harness
             .assert_tool_invoked("builtin.shell")
             .await
             .expect("shell dispatches");
+        for capability in [
+            "builtin.write_file",
+            "builtin.apply_patch",
+            "builtin.read_file",
+        ] {
+            harness
+                .assert_tool_invoked(capability)
+                .await
+                .expect("coding tool dispatches");
+        }
         harness
             .assert_tool_result_contains(CONTAINER_MARKER)
             .await
             .expect("command ran in Docker");
+        harness
+            .assert_tool_result_contains(LOOP_WORKER_MARKER)
+            .await
+            .expect("canonical loop worker was active in the same user container");
+        harness
+            .assert_tool_result_contains(FILE_TOOL_TO_SHELL_MARKER)
+            .await
+            .expect("sandbox shell reads the file-tool workspace");
+        harness
+            .assert_tool_result_contains(SHELL_TO_FILE_TOOL_MARKER)
+            .await
+            .expect("file tools read the sandbox shell workspace");
         harness
             .assert_tool_result_contains("NON_ROOT_UID_OK")
             .await
@@ -115,7 +216,7 @@ fn sandbox_shell_turn_executes_in_a_real_container() {
             .await
             .expect("sandbox temporary path is writable");
         harness
-            .assert_reply_contains("ran in the sandbox")
+            .assert_reply_contains("ran coding tools in the sandbox")
             .await
             .expect("turn finalized");
     });

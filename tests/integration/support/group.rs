@@ -379,6 +379,16 @@ impl GroupCapability {
             Self::HostRuntime(arc) => HarnessCapabilityMode::HostRuntime(Arc::clone(arc)),
         }
     }
+    pub(crate) fn sandbox_loop_worker_transport(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>> {
+        match self {
+            Self::HostRuntime(harness) => harness.sandbox_loop_worker_transport(),
+            Self::Recording | Self::RecordingNoProgress | Self::RecordingRecoverablePortError => {
+                None
+            }
+        }
+    }
 
     /// The durable gate-record store this backend's capability port persists
     /// `GateRecord::Auth` into (§5.2.9) — the SAME `Arc` the turn executor must
@@ -1331,6 +1341,7 @@ impl RebornIntegrationGroupBuilder {
             )),
             subagent_spawn_limits: SubagentSpawnLimits::default(),
             loop_exit_evidence,
+            sandbox_loop_worker_transport: capability.sandbox_loop_worker_transport(),
             config: DefaultPlannedRuntimeConfig {
                 poll_interval: Duration::from_millis(10),
                 lease_recovery_interval: self

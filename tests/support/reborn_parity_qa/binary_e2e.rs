@@ -876,6 +876,7 @@ impl RebornBinaryE2EHarness {
             accept_harness_blocked_evidence,
         });
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
+            sandbox_loop_worker_transport: None,
             process_system,
             thread_service: thread_harness.service.clone()
                 as Arc<dyn ironclaw_threads::SessionThreadService>,

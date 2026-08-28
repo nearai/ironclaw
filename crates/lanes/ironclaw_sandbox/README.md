@@ -30,6 +30,11 @@ the point of the crate.
   vocabulary this lane implements and the kernel consumes), bounded shell
   command dispatch, invocation cancellation, `RebornSandboxConfig`, and the
   broker/firewall/CA/identity types (`sandbox_process`).
+- Canonical-loop worker sessions: a bounded full-duplex Docker Exec in the
+  existing per-user container. The session retains active-exec accounting but
+  releases the lifecycle mutex after startup, allowing the host-authorized
+  `builtin.shell` path to perform nested Docker Exec without permitting idle
+  stop or posture recycle during the turn.
 - Script lane: `ScriptRuntime`, `ScriptExecutor`/`ScriptBackend`,
   `DockerScriptBackend`, `ScriptRuntimeHttpAdapter`, normalized
   request/result/error types (`script`).

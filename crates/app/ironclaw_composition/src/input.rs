@@ -106,13 +106,29 @@ pub(crate) struct OAuthDcrCallbackConfig {
     pub(crate) callback_origin: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub enum RebornRuntimeProcessBinding {
     #[default]
     None,
     UserSandbox {
         process_port: Arc<UserSandboxProcessPort>,
+        loop_worker_transport:
+            Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>>,
     },
+}
+impl std::fmt::Debug for RebornRuntimeProcessBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => formatter.write_str("None"),
+            Self::UserSandbox {
+                loop_worker_transport,
+                ..
+            } => formatter
+                .debug_struct("UserSandbox")
+                .field("loop_worker_transport", &loop_worker_transport.is_some())
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +157,32 @@ impl RebornRuntimeProcessBinding {
     }
 
     pub fn user_sandbox(process_port: Arc<UserSandboxProcessPort>) -> Self {
-        Self::UserSandbox { process_port }
+        Self::UserSandbox {
+            process_port,
+            loop_worker_transport: None,
+        }
+    }
+
+    pub fn user_sandbox_with_loop_worker(
+        process_port: Arc<UserSandboxProcessPort>,
+        loop_worker_transport: Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>,
+    ) -> Self {
+        Self::UserSandbox {
+            process_port,
+            loop_worker_transport: Some(loop_worker_transport),
+        }
+    }
+
+    pub fn loop_worker_transport(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_host_api::process::SandboxLoopWorkerTransport>> {
+        match self {
+            Self::UserSandbox {
+                loop_worker_transport,
+                ..
+            } => loop_worker_transport.clone(),
+            Self::None => None,
+        }
     }
 
     pub(crate) fn validate_for_production_policy(

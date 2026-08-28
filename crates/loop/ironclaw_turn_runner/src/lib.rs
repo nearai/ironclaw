@@ -43,6 +43,7 @@ pub mod planned_driver;
 pub mod planned_driver_factory;
 pub mod production_readiness;
 pub mod runtime;
+pub mod sandboxed_planned_driver;
 pub mod steering_reconcile;
 pub(crate) mod structured_finalization;
 pub mod subagent;

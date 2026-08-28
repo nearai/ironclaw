@@ -292,7 +292,12 @@ observed_date = "2026-08-08"
 # `bash scripts/ci/check-composition-budget.sh --print` on the merged tree
 # measures 42732. No new composition code in this merge commit; the mirrored
 # COMPOSITION_ABSOLUTE_SRC_LOC moves to the same figure in this commit.
-loc_ceiling = 42732
+# Re-measured 42732 -> 42946 on 2026-08-27 after merging current main into
+# #7903. Main's result-preview assembly and #7903's optional loop-worker
+# process-binding selection are both service-graph wiring; behavior remains in
+# the owning threads, loop-host, turn-runner, and sandbox crates. Measured on
+# the merged tree with this gate, not padded.
+loc_ceiling = 42946
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -303,8 +308,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 42732
-loc_observed_date = "2026-08-26"
+loc_observed = 42946
+loc_observed_date = "2026-08-27"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

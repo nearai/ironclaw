@@ -23,6 +23,7 @@ use ironclaw_turn_runner::runtime::DefaultPlannedRuntimeParts;
 /// optional wiring seam is populated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefaultPlannedRuntimePartsShape {
+    pub sandbox_loop_worker_transport: bool,
     pub model_route_resolver: bool,
     pub cancellation_factory: bool,
     pub skill_context_source: bool,
@@ -75,6 +76,7 @@ where
         subagent_spawn_input_codec: _,
         subagent_spawn_limits: _,
         loop_exit_evidence: _,
+        sandbox_loop_worker_transport,
         config: _,
         model_route_resolver,
         cancellation_factory,
@@ -100,6 +102,7 @@ where
         scheduler_wake_wiring,
     } = parts;
     DefaultPlannedRuntimePartsShape {
+        sandbox_loop_worker_transport: sandbox_loop_worker_transport.is_some(),
         model_route_resolver: model_route_resolver.is_some(),
         cancellation_factory: cancellation_factory.is_some(),
         skill_context_source: skill_context_source.is_some(),

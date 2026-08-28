@@ -26,6 +26,10 @@ before anything durable commits. It never decides durability itself.
   `ironclaw_agent_loop`) and `text_loop_driver.rs` (smallest supported
   behavior). Fallback between them is an explicit profile/readiness decision,
   never silent.
+- `sandboxed_planned_driver.rs` — #7903 experimental placement of the same
+  default `CanonicalAgentLoopExecutor` in the persistent user sandbox. The
+  runner, scoped host, and `LoopExitApplier` remain host-side; absent the
+  test-support transport, production keeps the in-process `PlannedDriver`.
 - `loop_driver_host.rs` / `runtime.rs` — the loop-host factory that composes a
   claimed run's port set and the capability-port decorator chain (the
   *ordering* lives here by charter).

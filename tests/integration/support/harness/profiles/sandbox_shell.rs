@@ -8,6 +8,9 @@ use ironclaw_host_api::{
     mount::MountPermissions,
 };
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
+use ironclaw_host_runtime::{
+    APPLY_PATCH_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+};
 
 pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     let runtime_policy =
@@ -20,15 +23,23 @@ pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapability
     )
     .with_local_runtime_identity(tenant_id, AgentId::new("sandbox-shell-agent")?)
     .with_sandboxed_shell()
+    .with_workspace_scoped_per_caller()
     .with_durable_capability_io();
 
     ToolsProfile {
-        capability_ids: vec![CapabilityId::new(SHELL_CAPABILITY_ID)?],
+        capability_ids: vec![
+            CapabilityId::new(SHELL_CAPABILITY_ID)?,
+            CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
+            CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+            CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+        ],
         effect_kinds: vec![
             EffectKind::DispatchCapability,
             EffectKind::ExecuteCode,
             EffectKind::SpawnProcess,
             EffectKind::Network,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
         ],
         options,
         auto_approve_default: Some(true),
@@ -36,4 +47,5 @@ pub(crate) async fn sandbox_shell_tools() -> HarnessResult<HostRuntimeCapability
     }
     .build()
     .await
+    .map(HostRuntimeCapabilityHarness::with_run_owner_scoped_capability_dispatch)
 }

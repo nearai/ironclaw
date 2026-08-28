@@ -62,9 +62,10 @@ use reborn_support::reply::RebornScriptedReply;
 /// below for the exact code path.
 const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
     DefaultPlannedRuntimePartsShape {
-        model_route_resolver: false,        // :3406 hardcoded None
-        cancellation_factory: false,        // :3407 hardcoded None
-        skill_context_source: true,         // :2917-2929 standalone_filesystem_skill_context_source
+        sandbox_loop_worker_transport: false, // #7903 spike remains test/profile opt-in
+        model_route_resolver: false,          // :3406 hardcoded None
+        cancellation_factory: false,          // :3407 hardcoded None
+        skill_context_source: true, // :2917-2929 standalone_filesystem_skill_context_source
         attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
         prompt_diagnostic_sink: true, // process-local bounded inspector store
         reply_attachment_intent_port: true, // shared production outbound-state store
@@ -156,6 +157,9 @@ fn mask(
     from: DefaultPlannedRuntimePartsShape,
 ) -> DefaultPlannedRuntimePartsShape {
     match field {
+        "sandbox_loop_worker_transport" => {
+            shape.sandbox_loop_worker_transport = from.sandbox_loop_worker_transport
+        }
         "model_route_resolver" => shape.model_route_resolver = from.model_route_resolver,
         "cancellation_factory" => shape.cancellation_factory = from.cancellation_factory,
         "skill_context_source" => shape.skill_context_source = from.skill_context_source,
