@@ -35,6 +35,6 @@ fi
 for test_name in "${test_names[@]}"; do
   echo "::group::cargo test --test ${test_name}"
   timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test -p ironclaw_integration_tests --test "${test_name}" -- --nocapture
+    cargo test -p ironclaw_integration_tests --test "${test_name}" --ignore-rust-version -- --nocapture
   echo "::endgroup::"
 done

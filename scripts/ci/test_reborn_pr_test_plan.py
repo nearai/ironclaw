@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -1005,8 +1006,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("reborn_(integration_|generated_)", lane_runner)
         self.assertIn(
-            'cargo test -p ironclaw_integration_tests "${test_args[@]}" '
-            "\\\n      --ignore-rust-version",
+            'cargo nextest run --profile ci -p ironclaw_integration_tests "${flat_test_args[@]}"',
             lane_runner,
         )
 
@@ -1015,10 +1015,16 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ROOT / "scripts/ci/reborn-coverage-lane-run.sh"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'cargo test -p ironclaw_integration_tests "${test_args[@]}" '
-            "\\\n      --ignore-rust-version -- --nocapture",
+            'cargo test -p ironclaw_integration_tests "${flat_test_args[@]}" '
+            "\\\n          --no-fail-fast --ignore-rust-version -- --nocapture",
             lane_runner,
         )
+        local_ratchet = (
+            ROOT / "scripts/ci/reborn-local-coverage-ratchet.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn('REBORN_COV_LANES_JSON="[${lane_json}]"', local_ratchet)
+        self.assertNotIn("REBORN_COV_LANE_MODE", local_ratchet)
+        self.assertNotIn("REBORN_COV_LANE_INDEX", local_ratchet)
 
     def test_unmapped_crate_path_widens_instead_of_refusing(self) -> None:
         """A crate path with no owning package widens to the exhaustive plan.
@@ -1115,7 +1121,6 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 ],
                 "root_partitions": [0, 1, 2, 3],
                 "integration_lanes": [0, 1, 2, 3, "groups"],
-                "run_group_tests": True,
                 "run_qa_replay": True,
                 "run_sandbox_docker": True,
                 "coverage_mode": "full",
@@ -1158,7 +1163,6 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 ],
                 "root_partitions": [0, 1, 2, 3],
                 "integration_lanes": [0, 1, 2, 3, "groups"],
-                "run_group_tests": True,
                 "run_qa_replay": True,
                 "run_sandbox_docker": True,
                 "coverage_mode": "full",
@@ -2207,7 +2211,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
                 self.assertEqual(
                     plan["integration_lanes"], [0, 1, 2, 3, "groups"]
                 )
-                self.assertTrue(plan["run_group_tests"])
+                self.assertNotIn("run_group_tests", plan)
 
 
     def test_owned_integration_support_selects_its_exact_lane(self) -> None:
@@ -2370,8 +2374,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertIn('--base-sha "$BASE_SHA"', workflow)
         self.assertIn("needs.changes.outputs.crate_buckets", workflow)
         self.assertIn("needs.changes.outputs.root_partitions", workflow)
-        self.assertIn("needs.changes.outputs.integration_lanes", workflow)
+        self.assertIn("needs.changes.outputs.integration_batches", workflow)
         self.assertIn("needs.changes.outputs.run_sandbox_docker", workflow)
+        self.assertNotIn("run_group_tests", workflow)
+        self.assertNotIn("  reborn-group-tests:", workflow)
         self.assertIn(
             "cargo test -p ironclaw_sandbox --test user_sandbox_docker_live "
             "-- --nocapture --test-threads=1",
@@ -2397,9 +2403,26 @@ class RebornPrTestPlanTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
+            "batch: ${{ fromJSON(needs.changes.outputs.integration_batches) }}",
+            workflow,
+        )
+        self.assertIn(
+            "[.integration_lanes[] | {id: tostring, lanes: [.]}]", workflow
+        )
+        self.assertIn('[{id: "selected", lanes: .integration_lanes}]', workflow)
+        self.assertNotIn(
             "max-parallel: ${{ github.event_name == 'pull_request' && 1 || 5 }}",
             workflow,
         )
+        integration_job = workflow.split("  reborn-integration-coverage:", 1)[1].split(
+            "  coverage-report:", 1
+        )[0]
+        self.assertIn(
+            "timeout-minutes: ${{ github.event_name == 'push' && 120 || 300 }}",
+            integration_job,
+        )
+        self.assertIn("cargo-nextest@0.9.143", integration_job)
+        self.assertNotIn("setup-sccache-dist", integration_job)
         self.assertIn("github.event.merge_group.base_sha", workflow)
         self.assertIn(
             "ran with result '${result}' despite planned=false",
@@ -2426,6 +2449,9 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "python3 scripts/ci/changed_workspace_packages.py",
             code_style,
         )
+        self.assertIn(
+            "scripts/ci/test-ironclaw-integration-batch-runner.sh", code_style
+        )
         self.assertIn('--event "${{ github.event_name }}"', code_style)
         self.assertIn("clippy_scope:", code_style)
         self.assertIn("needs.changes.outputs.clippy_scope == 'selected'", code_style)
@@ -2442,6 +2468,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
             '                "${{ needs.changes.outputs.clippy_scope }}" != "full" ]]; then',
             code_style,
         )
+
         self.assertIn('if [[ "${clippy_scope}" == "full" ]] ||', code_style)
         self.assertIn(
             "if: needs.changes.outputs.clippy_scope == 'full' && "
@@ -2467,6 +2494,56 @@ class RebornPrTestPlanTests(unittest.TestCase):
             '"${incremental_env[@]}" cargo test \\\n'
             '                    -p "${package}" "--${kind}" "${name}"',
             workflow,
+        )
+
+    def test_integration_batch_shape_matches_event(self) -> None:
+        workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        batch_block = workflow.split(
+            '          if [[ "${{ github.event_name }}" == "push" ]]; then', 1
+        )[1].split(
+            '          echo "integration_batches=${integration_batches}"', 1
+        )[0]
+        expressions = re.findall(
+            r"jq -c '([^']+)' <<< \"\$\{plan\}\"",
+            batch_block,
+        )
+        self.assertEqual(
+            len(expressions),
+            2,
+            "the workflow event branch must define push and non-push batches",
+        )
+        plan = json.dumps({"integration_lanes": [0, 1, 2, 3, "groups"]})
+
+        def evaluate(expression: str) -> list[dict[str, object]]:
+            completed = subprocess.run(
+                ["jq", "-c", expression],
+                input=plan,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return json.loads(completed.stdout)
+
+        self.assertEqual(
+            evaluate(expressions[0]),
+            [
+                {"id": "0", "lanes": [0]},
+                {"id": "1", "lanes": [1]},
+                {"id": "2", "lanes": [2]},
+                {"id": "3", "lanes": [3]},
+                {"id": "groups", "lanes": ["groups"]},
+            ],
+        )
+        self.assertEqual(
+            evaluate(expressions[1]),
+            [
+                {
+                    "id": "selected",
+                    "lanes": [0, 1, 2, 3, "groups"],
+                }
+            ],
         )
 
     def test_scope_checkouts_keep_pr_ancestry_and_bound_merge_group_fetches(

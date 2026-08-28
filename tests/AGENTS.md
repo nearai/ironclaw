@@ -271,7 +271,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Inspect a >100 KiB nested JSON capability result through bounded first-look, node/scalar, collection, credential-redaction, invalid-selection, and exact legacy-byte views | `tool_call.rs::{result_read_large_nested_result_first_look_is_bounded_and_parseable,result_read_selects_nested_json_node_and_scalar,result_read_pages_nested_json_collection,result_read_redacts_credential_json_within_requested_budget,invalid_json_result_selections_remain_model_correctable,result_read_preserves_exact_legacy_byte_reads}` |
 | Shell commands dispatch through the real path without spawning an OS process | `process_port.rs` |
 | A sandbox-profile shell turn executes as an unprivileged user in one reusable per-user Docker container, preserving workspace and container-local state across shell calls and sharing that container across the user's threads | `reborn_sandbox_shell_turn.rs` |
-| MCP tools work over a real loopback HTTP MCP server | `mcp.rs` |
+| MCP tools work over a real loopback HTTP server, and mixed text/structured/resource results are normalized before durable storage without retaining inline media/blob base64 | `mcp.rs` |
 | User-registered and bundled hosted MCP servers register, authenticate, project active, restore, and invoke | `hosted_mcp_registration.rs` |
 | Web search/fetch runs the real Exa MCP handshake | `web_access.rs` |
 | Outbound HTTP crosses the real security pipeline (network policy + leak scan) | `real_egress_pipeline.rs` |
