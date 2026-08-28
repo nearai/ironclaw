@@ -42,7 +42,11 @@ Actions are typed metadata, not arbitrary URLs. `open_thread` is valid only
 when its thread matches the record source. A separately reviewed contract
 change may represent terminal facts created before a canonical thread exists
 as non-actionable, but its persisted form must remain readable and mutable by
-the schema-v1 rollback reader.
+the schema-v1 rollback reader. Its legacy projection is archived so the
+rollback ProductSurface never exposes the compatibility placeholder as a dead
+thread link; the additive lifecycle metadata restores the real visibility for
+the current reader. A rollback writer may safely make the record remain hidden,
+but must never turn it into an actionable link.
 
 ## Validation
 

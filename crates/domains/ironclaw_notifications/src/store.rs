@@ -25,9 +25,10 @@ const NOTIFICATION_INBOX_PATH: &str = "/notifications/inbox.json";
 const NOTIFICATION_INBOX_SCHEMA_VERSION: u8 = 1;
 /// Required only in the legacy schema-v1 fields of a non-thread-backed record.
 /// New readers recover the absent thread from the additive compatibility
-/// metadata; rollback readers see a valid, non-route placeholder and can keep
-/// listing and mutating the snapshot. The decoder also recognizes the
-/// placeholder after a rollback writer drops unknown additive fields.
+/// metadata. Rollback readers see a valid, non-route placeholder plus an
+/// archived lifecycle, so their default ProductSurface hides the unusable
+/// action while retaining and mutating the snapshot. The decoder also
+/// recognizes the placeholder after a rollback writer drops additive fields.
 const LEGACY_NO_THREAD_COMPAT_ID: &str = "ironclaw-notification-no-thread-v1";
 const TENANT_ID_INDEX_KEY: &str = "tenant_id";
 const NOTIFICATION_CURSOR_MAX_BYTES: usize = (20 + 1 + crate::types::NOTIFICATION_ID_MAX_BYTES) * 2;
@@ -40,7 +41,7 @@ struct NotificationInboxSnapshot {
 }
 
 /// On-disk schema-v1 representation. The top-level shape remains closed; each
-/// record stays open to the two additive compatibility fields because the
+/// record stays open to additive compatibility fields because the
 /// pre-change `NotificationRecord` reader ignored unknown fields as well.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +63,8 @@ struct PersistedNotificationRecordV1 {
     source_v2: Option<PersistedNotificationSourceV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     action_v2: Option<NotificationAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lifecycle_v2: Option<PersistedNotificationLifecycleV2>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     read_at: Option<DateTime<Utc>>,
@@ -79,6 +82,15 @@ struct PersistedNotificationSourceV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedNotificationSourceV2 {
     thread_id: Option<ThreadId>,
+}
+
+/// Lifecycle fields whose legacy representation must deliberately differ from
+/// the head representation. Non-actionable records are archived for rollback
+/// readers so their placeholder `OpenThread` action never reaches the old
+/// ProductSurface, while head readers restore the real archive state here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedNotificationLifecycleV2 {
+    archived_at: Option<DateTime<Utc>>,
 }
 
 pub struct NotificationInboxStore<F>
@@ -578,6 +590,7 @@ fn notification_record_to_persisted_v1(
         .thread_id
         .is_none()
         .then_some(PersistedNotificationSourceV2 { thread_id: None });
+    let non_actionable = matches!(&record.action, NotificationAction::None);
     let (action, action_v2) = match &record.action {
         NotificationAction::None => (
             NotificationAction::OpenThread {
@@ -605,11 +618,18 @@ fn notification_record_to_persisted_v1(
         action,
         source_v2,
         action_v2,
+        lifecycle_v2: non_actionable.then_some(PersistedNotificationLifecycleV2 {
+            archived_at: record.archived_at,
+        }),
         created_at: record.created_at,
         updated_at: record.updated_at,
         read_at: record.read_at,
         resolved_at: record.resolved_at,
-        archived_at: record.archived_at,
+        archived_at: if non_actionable {
+            record.archived_at.or(Some(record.updated_at))
+        } else {
+            record.archived_at
+        },
     })
 }
 
@@ -632,6 +652,9 @@ fn notification_record_from_persisted_v1(
         None if compatibility_placeholder => NotificationAction::None,
         None => record.action,
     };
+    let archived_at = record
+        .lifecycle_v2
+        .map_or(record.archived_at, |lifecycle| lifecycle.archived_at);
     NotificationRecord {
         id: record.id,
         recipient: record.recipient,
@@ -647,7 +670,7 @@ fn notification_record_from_persisted_v1(
         updated_at: record.updated_at,
         read_at: record.read_at,
         resolved_at: record.resolved_at,
-        archived_at: record.archived_at,
+        archived_at,
     }
 }
 
@@ -848,7 +871,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v1_rollback_reader_can_decode_and_mutate_non_actionable_head_write() {
+    fn schema_v1_rollback_hides_non_actionable_head_write_instead_of_presenting_dead_link() {
         let recipient = NotificationRecipient {
             tenant_id: TenantId::new("rollback-tenant").expect("tenant"),
             user_id: UserId::new("rollback-user").expect("user"),
@@ -882,8 +905,28 @@ mod tests {
         };
 
         let head_entry = encode_snapshot(&snapshot).expect("head writer encodes snapshot");
+        let head_visible =
+            decode_snapshot(&head_entry.body).expect("head reader decodes head write");
+        assert!(head_visible.notifications[0].archived_at.is_none());
+        assert_eq!(
+            head_visible.notifications[0].action,
+            NotificationAction::None,
+        );
         let mut legacy: LegacyNotificationInboxSnapshotV1 =
             serde_json::from_slice(&head_entry.body).expect("base reader decodes head write");
+        assert!(
+            legacy.notifications[0].archived_at.is_some(),
+            "the base reader must hide a non-actionable record from its default ProductSurface list",
+        );
+        let base_product_surface_notifications = legacy
+            .notifications
+            .iter()
+            .filter(|record| record.archived_at.is_none())
+            .collect::<Vec<_>>();
+        assert!(
+            base_product_surface_notifications.is_empty(),
+            "a rollback WebUI must not receive an OpenThread action for the compatibility identity",
+        );
         assert_eq!(
             legacy.notifications[0].source.thread_id.as_str(),
             LEGACY_NO_THREAD_COMPAT_ID,
@@ -909,6 +952,10 @@ mod tests {
         assert_eq!(reopened.notifications[0].read_at, Some(read_at));
         assert_eq!(reopened.notifications[0].action, NotificationAction::None);
         assert!(reopened.notifications[0].source.thread_id.is_none());
+        assert!(
+            reopened.notifications[0].archived_at.is_some(),
+            "a rollback mutation may hide the record but must never revive a dead thread action",
+        );
     }
 
     #[test]
