@@ -961,6 +961,7 @@ def build_plan(
         )
 
     for path in sorted(paths):
+        path_parts = PurePosixPath(path).parts
         if path == "Cargo.lock":
             if lockfile_manifest_owned:
                 reasons.append(
@@ -1128,6 +1129,14 @@ def build_plan(
         if any(path.startswith(prefix) for prefix in group_integration_prefixes):
             integration_lanes.add("groups")
             reasons.append(f"integration group scenario changed: {path}")
+            continue
+        if (
+            len(path_parts) >= 4
+            and path_parts[:2] == ("tests", "integration")
+            and path_parts[2].startswith("group_")
+        ):
+            integration_lanes.add("groups")
+            reasons.append(f"unregistered integration group path changed: {path}")
             continue
         if path in INTEGRATION_SUPPORT_OWNERS:
             owner = INTEGRATION_SUPPORT_OWNERS[path]

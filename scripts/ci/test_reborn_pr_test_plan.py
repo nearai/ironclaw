@@ -2171,6 +2171,15 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "selected")
         self.assertEqual(plan["integration_lanes"], ["groups"])
 
+    def test_unregistered_group_entrypoint_selects_validation_lane(self) -> None:
+        for path in (
+            "tests/integration/group_future/main.rs",
+            "tests/integration/group_/main.rs",
+        ):
+            with self.subTest(path=path):
+                plan = self.plan("pull_request", [path])
+                self.assertEqual(plan["integration_lanes"], ["groups"])
+
     def test_shared_test_support_uses_representative_pr_lanes(self) -> None:
         root_plan = self.plan(
             "pull_request", ["tests/support/reborn_parity_qa/assertions.rs"]

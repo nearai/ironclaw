@@ -10,16 +10,19 @@ set -euo pipefail
 # flag is required to exercise the libsql-backed shared store.
 
 test_timeout="${REBORN_GROUP_TEST_TIMEOUT:-28m}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ponytail: S2B makes this runner consume inventory-selected names and deletes
+# the independent find/sed projection retained by this behavior-only slice.
+python3 "${script_dir}/lib/integration_test_inventory.py" \
+  --validate-group-topology "${PWD}"
 
 # The directory basename is `group_<x>`; the `[[test]]` `name` field is
 # `reborn_group_<x>` (see Cargo.toml) — the two differ by the `reborn_` prefix,
 # so rewrite it explicitly rather than assuming dir basename == test name (e.g.
-# tests/integration/group_memory -> reborn_group_memory). The `sh -c` predicate
-# skips a half-scaffolded group dir (no main.rs yet) — returning false from
-# `-exec` just filters that dir, it does NOT make `find` exit non-zero, so no
-# `|| true` is needed; genuine `find` failures stay visible under `set -e`.
-# `sh -c` (not a bare `{}/main.rs`) avoids POSIX implementation-defined `{}`
-# substring substitution so discovery is portable across GNU/BSD find.
+# tests/integration/group_memory -> reborn_group_memory). Topology validation
+# rejects incomplete and unregistered groups before this portable GNU/BSD find
+# produces the existing sorted execution order.
 mapfile -t test_names < <(
   find tests/integration -mindepth 1 -maxdepth 1 -type d -name 'group_*' \
     -exec sh -c 'test -f "$1/main.rs"' _ {} ';' -print \

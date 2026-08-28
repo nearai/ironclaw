@@ -46,10 +46,25 @@ if PATH="${missing_nextest_path}" command -v cargo-nextest >/dev/null 2>&1; then
 fi
 
 status=0
-mkdir -p "${sandbox}/group-only"
+mkdir -p "${sandbox}/group-only/lib"
 cp "${under_test}" "${sandbox}/group-only/reborn-coverage-lane-run.sh"
+cat >"${sandbox}/group-only/lib/integration_test_inventory.py" <<'STUB'
+import os
+import sys
+
+with open(os.environ["INTEGRATION_BATCH_LOG"], "a", encoding="utf-8") as log:
+    log.write("topology-check\n")
+if sys.argv[1:] != ["--validate-group-topology", os.getcwd()]:
+    sys.exit(24)
+if os.environ.get("FAIL_GROUP_TOPOLOGY") == "true":
+    sys.exit(23)
+STUB
 cat >"${sandbox}/group-only/reborn-coverage-int-tier-tests.sh" <<'STUB'
 #!/usr/bin/env bash
+if [[ "${VALID_GROUP_COVERAGE:-false}" == "true" ]]; then
+  printf '%s\n' --test reborn_group_valid
+  exit 0
+fi
 echo "FAIL: groups-only pass/fail batch rediscovered the coverage inventory" >&2
 exit 19
 STUB
@@ -57,7 +72,7 @@ cat >"${sandbox}/group-only/run-reborn-group-tests.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' group-run >>"${INTEGRATION_BATCH_LOG}"
 STUB
-chmod +x "${sandbox}/group-only/"*.sh
+chmod +x "${sandbox}/group-only/"*.sh "${sandbox}/group-only/lib/"*.py
 
 if ! (
   PATH="${sandbox}/bin:/usr/bin:/bin" \
@@ -69,8 +84,38 @@ if ! (
 ); then
   echo "FAIL: groups-only pass/fail batch did not delegate directly to the canonical group runner" >&2
   status=1
-elif [[ "$(cat "${sandbox}/group-only.log")" != "group-run" ]]; then
+elif [[ "$(cat "${sandbox}/group-only.log")" != $'topology-check\ngroup-run' ]]; then
   echo "FAIL: groups-only pass/fail batch did not invoke the canonical group runner exactly once" >&2
+  status=1
+fi
+
+coverage_status=0
+FAIL_GROUP_TOPOLOGY=true \
+  PATH="${sandbox}/bin:/usr/bin:/bin" \
+  INTEGRATION_BATCH_LOG="${sandbox}/group-coverage.log" \
+  REBORN_COV_COLLECT=true \
+  REBORN_COV_LANES_JSON='["groups"]' \
+  REBORN_COV_LANE_PARTITIONS=4 \
+  bash "${sandbox}/group-only/reborn-coverage-lane-run.sh" \
+    "${sandbox}/unused-group-coverage.lcov" || coverage_status=$?
+if [[ "${coverage_status}" -ne 23 ]] ||
+   [[ "$(cat "${sandbox}/group-coverage.log" 2>/dev/null || true)" != "topology-check" ]]; then
+  echo "FAIL: coverage groups lane did not stop at topology validation" >&2
+  status=1
+fi
+
+if ! VALID_GROUP_COVERAGE=true \
+  PATH="${sandbox}/bin:/usr/bin:/bin" \
+  INTEGRATION_BATCH_LOG="${sandbox}/valid-group-coverage.log" \
+  REBORN_COV_COLLECT=true \
+  REBORN_COV_LANES_JSON='["groups"]' \
+  REBORN_COV_LANE_PARTITIONS=4 \
+  bash "${sandbox}/group-only/reborn-coverage-lane-run.sh" \
+    "${sandbox}/valid-group-coverage.lcov"; then
+  echo "FAIL: valid coverage groups lane did not reach llvm-cov" >&2
+  status=1
+elif ! grep -q '^llvm-cov .*--test reborn_group_valid' "${sandbox}/valid-group-coverage.log"; then
+  echo "FAIL: valid coverage groups lane omitted its registered target" >&2
   status=1
 fi
 if (
