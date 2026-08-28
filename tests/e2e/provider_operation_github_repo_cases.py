@@ -198,8 +198,12 @@ async def _get_file_outcome(emulate_url: str, preview: dict) -> None:
     )
     assert isinstance(resource, dict)
     assert _decode_content(resource) == CODE_MARKER, resource
+    output = json.loads(preview["output_preview"])
+    assert output["content"] == CODE_MARKER, preview
+    assert output["encoding"] == "utf-8", preview
     assert (
-        base64.b64decode(preview["output_preview"]).decode() == CODE_MARKER
+        base64.b64encode(CODE_MARKER.encode()).decode()
+        not in preview["output_preview"]
     ), preview
 
 

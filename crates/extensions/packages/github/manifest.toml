@@ -1,7 +1,7 @@
 schema_version = "reborn.extension_manifest.v3"
 id = "github"
 name = "GitHub"
-version = "0.2.8"
+version = "0.3.0"
 description = "GitHub repository, issue, pull request, search, branch, file, release, workflow, fork, and webhook capabilities."
 trust = "first_party_requested"
 
@@ -10,9 +10,11 @@ kind = "wasm"
 module = "wasm/github_tool.wasm"
 
 # GitHub REST endpoints return heterogeneous provider-owned response shapes.
-# Detail tools preserve those raw JSON contracts. High-cardinality pull request
-# list/search tools keep their established top-level shapes but project compact
-# model-facing summaries; their prompt docs name the dedicated detail tools.
+# Detail tools preserve those raw JSON contracts except where the package owns
+# a documented transport encoding: get_file_content decodes GitHub's base64
+# file content before returning it. High-cardinality pull request list/search
+# tools keep their established top-level shapes but project compact model-facing
+# summaries; their prompt docs name the dedicated detail tools.
 
 [[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
@@ -619,6 +621,7 @@ effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/github/get_file_content.input.v1.json"
+output_schema_ref = "schemas/github/get_file_content.output.v1.json"
 prompt_doc_ref = "prompts/github/get_file_content.md"
 
 [[tools.credentials]]
