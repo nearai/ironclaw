@@ -378,6 +378,79 @@ async fn notification_lifecycle_is_scoped_archivable_and_idempotent() {
 }
 
 #[tokio::test]
+async fn explicit_reopen_reactivates_lifecycle_without_weakening_publish_idempotency() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = NotificationInboxStore::new(scoped(backend), NOTIFICATION_INBOX_MAX_RECORDS);
+    let publish_request = request("notification-reopen", 1_700_000_001);
+    let published = store
+        .publish(publish_request.clone())
+        .await
+        .expect("publish notification");
+    let settled_at = Utc.timestamp_opt(1_700_000_010, 0).single().expect("time");
+    let mutation = NotificationMutationRequest {
+        recipient: recipient(),
+        notification_id: published.id.clone(),
+        occurred_at: settled_at,
+    };
+    store
+        .mark_read(mutation.clone())
+        .await
+        .expect("mark notification read");
+    store
+        .resolve(mutation.clone())
+        .await
+        .expect("resolve notification");
+
+    let retry = store
+        .publish(publish_request)
+        .await
+        .expect("ordinary publish retry");
+    assert_eq!(
+        retry.resolved_at,
+        Some(settled_at),
+        "publication retries must not revive settled lifecycle state"
+    );
+
+    let reopened_at = Utc.timestamp_opt(1_700_000_020, 0).single().expect("time");
+    let outcome = store
+        .reopen(NotificationMutationRequest {
+            occurred_at: reopened_at,
+            ..mutation.clone()
+        })
+        .await
+        .expect("reopen notification");
+    assert_eq!(outcome, NotificationMutationOutcome::Applied);
+    assert_eq!(
+        store
+            .reopen(NotificationMutationRequest {
+                occurred_at: reopened_at,
+                ..mutation
+            })
+            .await
+            .expect("idempotent reopen"),
+        NotificationMutationOutcome::AlreadySettled
+    );
+
+    let page = store
+        .list(ListNotificationsRequest {
+            recipient: recipient(),
+            limit: 10,
+            cursor: None,
+            include_archived: true,
+        })
+        .await
+        .expect("list reopened notification");
+    let reopened = &page.notifications[0];
+    assert!(reopened.resolved_at.is_none());
+    assert_eq!(
+        reopened.read_at,
+        Some(settled_at),
+        "reopen changes lifecycle state without rewriting the user's read state"
+    );
+    assert_eq!(reopened.updated_at, reopened_at);
+}
+
+#[tokio::test]
 async fn unwired_notification_store_fails_closed_for_reads_and_writes() {
     let store = NoopNotificationInboxStore;
     let list_error = store

@@ -1027,7 +1027,10 @@ async fn denied_auth_on_parked_gate_cancels_flow_and_resumes_with_denial_disposi
         .await
         .expect("list denied auth notification");
     assert_eq!(notifications.notifications.len(), 1);
-    assert!(notifications.notifications[0].resolved_at.is_some());
+    assert!(
+        notifications.notifications[0].resolved_at.is_none(),
+        "denial does not prove credential recovery, so the auth action remains available"
+    );
 }
 
 #[tokio::test]

@@ -334,7 +334,7 @@ impl DefaultAuthInteractionService {
         run_id: TurnRunId,
     ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
         self.cancel_auth_flow_if_active(&gate).await?;
-        self.resume_auth_gate_and_resolve(request, run_id, Some(GateResumeDisposition::Denied))
+        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
             .await
     }
 
@@ -349,7 +349,7 @@ impl DefaultAuthInteractionService {
         // check, so this is idempotent regardless of current run state.  A
         // fresh key on a finished run still errors via the precondition
         // (correctly StaleAuth).
-        self.resume_auth_gate_and_resolve(request, run_id, Some(GateResumeDisposition::Denied))
+        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
             .await
     }
 
@@ -364,7 +364,7 @@ impl DefaultAuthInteractionService {
                 return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
             }
         }
-        self.resume_auth_gate_and_resolve(request, run_id, Some(GateResumeDisposition::Denied))
+        self.resume_auth_gate(request, run_id, Some(GateResumeDisposition::Denied))
             .await
     }
 }

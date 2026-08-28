@@ -231,6 +231,7 @@ impl ProductAuthTurnGateResumeDispatcher {
             binding_id.push_str(&binding_ref_segment("disposition", disposition.as_str()));
         }
         let idempotency_key = idempotency_key_for_binding(&binding_id)?;
+        let denied = resume_disposition == Some(GateResumeDisposition::Denied);
 
         self.turn_coordinator
             .resume_turn(ResumeTurnRequest {
@@ -245,13 +246,15 @@ impl ProductAuthTurnGateResumeDispatcher {
             .await
             .map_err(map_auth_resume_error)?;
 
-        self.resolve_auth_notification(
-            &state.scope,
-            &event.scope.resource.user_id,
-            run_id,
-            &gate_resolution_ref,
-        )
-        .await?;
+        if !denied {
+            self.resolve_auth_notification(
+                &state.scope,
+                &event.scope.resource.user_id,
+                run_id,
+                &gate_resolution_ref,
+            )
+            .await?;
+        }
 
         Ok(run_id)
     }
@@ -878,18 +881,51 @@ mod tests {
     #[tokio::test]
     async fn canceled_turn_gate_continuation_denies_exact_blocked_auth_gate() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+        let inbox = notification_inbox();
         let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:auth").expect("gate ref");
         coordinator.set_state(run_state_for_actor_owner(
             run_id,
             TurnStatus::BlockedAuth,
-            Some("gate:auth"),
+            Some(gate_ref.as_str()),
             "authenticated-actor",
             "alice",
         ));
+        let notification_id = crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::AuthenticationRequired,
+            Some(gate_ref.as_str()),
+        )
+        .expect("notification id");
+        inbox
+            .publish(PublishNotificationRequest {
+                id: notification_id,
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: ThreadId::new("thread-auth").expect("thread"),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(
+                        LifecycleRef::new(gate_ref.as_str()).expect("lifecycle ref"),
+                    ),
+                },
+                action: NotificationAction::OpenThread {
+                    thread_id: ThreadId::new("thread-auth").expect("thread"),
+                },
+                initial_state: NotificationInitialState::Open,
+                occurred_at: Utc::now(),
+            })
+            .await
+            .expect("seed auth notification");
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone())
+            .with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
         let event = scoped_event(AuthContinuationRef::TurnGateResume {
             turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
-            gate_ref: AuthGateRef::new("gate:auth").unwrap(),
+            gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
         });
 
         dispatcher
@@ -916,6 +952,22 @@ mod tests {
                     "disposition",
                     GateResumeDisposition::Denied.as_str()
                 ))
+        );
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list denied auth notification");
+        assert!(
+            page.notifications[0].resolved_at.is_none(),
+            "a canceled auth continuation is a denial, not verified recovery"
         );
     }
 

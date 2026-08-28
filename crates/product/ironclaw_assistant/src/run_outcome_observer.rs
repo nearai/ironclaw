@@ -141,13 +141,15 @@ impl RunOutcomeProcessCommitObserver {
             Some(gate_ref.as_str()),
         )
         .map_err(|error| format!("build auth notification id failed: {error}"))?;
+        let notification_id_for_reopen = notification_id.clone();
+        let recipient = NotificationRecipient {
+            tenant_id: snapshot.scope.tenant_id.clone(),
+            user_id: owner_user_id,
+        };
         inbox
             .publish(PublishNotificationRequest {
                 id: notification_id,
-                recipient: NotificationRecipient {
-                    tenant_id: snapshot.scope.tenant_id.clone(),
-                    user_id: owner_user_id,
-                },
+                recipient: recipient.clone(),
                 kind: NotificationKind::AuthenticationRequired,
                 severity: NotificationSeverity::Warning,
                 source: NotificationSource {
@@ -161,6 +163,18 @@ impl RunOutcomeProcessCommitObserver {
             })
             .await
             .map_err(|error| format!("publish auth notification failed: {error}"))?;
+        // A verified resume may be followed by the same deterministic gate
+        // becoming current again. Publication must remain a no-op for ordinary
+        // retries, so the authoritative Suspended transition explicitly
+        // re-activates the settled lifecycle record.
+        inbox
+            .reopen(NotificationMutationRequest {
+                recipient,
+                notification_id: notification_id_for_reopen,
+                occurred_at,
+            })
+            .await
+            .map_err(|error| format!("reopen auth notification failed: {error}"))?;
         // The continuation can settle the gate between the pre-publication
         // state read and the Inbox CAS. Re-read after the write and retire the
         // just-published record if recovery won that race.
@@ -1319,6 +1333,72 @@ mod tests {
         assert!(
             recovered_page.notifications[0].resolved_at.is_some(),
             "verified recovery closes the notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_auth_gate_reopens_when_it_blocks_again_after_a_verified_resume() {
+        let inbox = inbox();
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:resume-then-reblock").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let current = Arc::new(CurrentProcessSource::new(suspended.state.clone()));
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        )
+        .with_process_journal_source(Arc::clone(&current)
+            as Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>);
+
+        observer
+            .observe_process_commit(suspended.clone())
+            .await
+            .expect("publish initial auth notification");
+
+        let mut resumed = suspended.clone();
+        resumed.kind = ProcessJournalKind::Resumed;
+        resumed.state.status = ProcessLifecycleStatus::Queued;
+        resumed.state.suspension = None;
+        current.replace(resumed.state.clone());
+        observer
+            .observe_process_commit(resumed)
+            .await
+            .expect("verified resume closes the auth notification");
+
+        current.replace(suspended.state.clone());
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("same gate blocks again");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list re-blocked auth notification");
+        assert_eq!(page.notifications.len(), 1);
+        assert!(
+            page.notifications[0].resolved_at.is_none(),
+            "the same stable gate must become actionable again when it re-blocks"
         );
     }
 
