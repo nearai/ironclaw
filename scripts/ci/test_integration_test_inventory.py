@@ -1,7 +1,4 @@
-#!/usr/bin/env python3
 """Contract tests for the canonical integration-test inventory."""
-
-from __future__ import annotations
 
 import sys
 import tempfile
@@ -11,13 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/ci/lib"))
 
-from integration_test_inventory import (  # noqa: E402
-    INTEGRATION_PARTITION_COUNT,
-    cargo_test_names,
-    inventory_document,
-    planner_test_lanes,
-    validate_inventory_document,
-)
+import integration_test_inventory as inventory  # noqa: E402
 
 
 class IntegrationTestInventoryTests(unittest.TestCase):
@@ -40,15 +31,11 @@ test = [
             )
 
             self.assertEqual(
-                cargo_test_names(root),
-                [
-                    "reborn_group_shared",
-                    "reborn_integration_after",
-                    "reborn_integration_before",
-                ],
+                inventory.cargo_test_names(root),
+                ["reborn_group_shared", "reborn_integration_after", "reborn_integration_before"],
             )
             self.assertEqual(
-                planner_test_lanes(root),
+                inventory.planner_test_lanes(root),
                 {
                     "tests/integration/duplicate.rs": 1,
                     "tests/integration/group_shared/main.rs": "groups",
@@ -56,20 +43,38 @@ test = [
                 },
             )
 
-    def test_document_is_versioned_and_self_validating(self) -> None:
-        document = inventory_document(ROOT)
+            (root / "Cargo.toml").write_text(
+                'test = [{ name = "new_test", path = "tests/integration/new_test.rs" }]\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(inventory.cargo_test_names(root), ["new_test"])
+            for projection in (inventory.planner_test_lanes, inventory.inventory_document):
+                with self.subTest(projection=projection.__name__):
+                    with self.assertRaisesRegex(ValueError, "unsupported.*new_test"):
+                        projection(root)
 
-        self.assertEqual(INTEGRATION_PARTITION_COUNT, 4)
+    def test_document_is_versioned_and_self_validating(self) -> None:
+        document = inventory.inventory_document(ROOT)
+
+        self.assertEqual(inventory.INTEGRATION_PARTITION_COUNT, 4)
         self.assertEqual(document["schema_version"], 1)
         self.assertEqual(
-            document["partition_count"], INTEGRATION_PARTITION_COUNT
+            document["partition_count"], inventory.INTEGRATION_PARTITION_COUNT
         )
-        self.assertEqual(validate_inventory_document(document), document)
+        self.assertEqual(inventory.validate_inventory_document(document), document)
 
-        malformed = dict(document)
-        malformed["partition_count"] = 0
-        with self.assertRaisesRegex(ValueError, "partition_count"):
-            validate_inventory_document(malformed)
+        invalid_fields = (
+            ("schema_version", True),
+            ("schema_version", 1.0),
+            ("partition_count", 0),
+            ("partition_count", 4.0),
+        )
+        for field, value in invalid_fields:
+            malformed = dict(document)
+            malformed[field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(ValueError, field):
+                    inventory.validate_inventory_document(malformed)
 
 
 if __name__ == "__main__":

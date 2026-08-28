@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical Cargo inventory for the integration-test CI topology.
-
-The planner imports the path-to-lane projection. Shell callers temporarily use
-the default cargo-argument output; later migration slices consume the versioned
-JSON document directly and delete the compatibility shell entry point.
-"""
+"""Canonical Cargo inventory for the integration-test CI topology."""
 
 from __future__ import annotations
 
@@ -58,6 +53,12 @@ def planner_test_lanes(
     """Map registered integration paths to their current planner lanes."""
 
     tests = _planner_registrations(repo_root)
+    for name in tests.values():
+        if not (
+            name.startswith(FLAT_NAME_PREFIXES)
+            or name.startswith(GROUP_NAME_PREFIX)
+        ):
+            raise ValueError(f"unsupported integration test name: {name!r}")
     flat_names = sorted(
         name for name in tests.values() if name.startswith(FLAT_NAME_PREFIXES)
     )
@@ -94,23 +95,22 @@ def inventory_document(repo_root: str | pathlib.Path = ROOT) -> dict[str, Any]:
     return validate_inventory_document(document)
 
 
+def _required_integer(document: dict[str, Any], field: str, expected: int) -> int:
+    value = document.get(field)
+    if type(value) is not int or value != expected:
+        raise ValueError(f"integration inventory {field} must be {expected}")
+    return value
+
+
 def validate_inventory_document(document: Any) -> dict[str, Any]:
     """Validate the generated cross-language inventory contract fail-closed."""
 
     if not isinstance(document, dict):
         raise ValueError("integration inventory must be an object")
-    if document.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError(
-            f"integration inventory schema_version must be {SCHEMA_VERSION}"
-        )
-    partition_count = document.get("partition_count")
-    if partition_count != INTEGRATION_PARTITION_COUNT or isinstance(
-        partition_count, bool
-    ):
-        raise ValueError(
-            "integration inventory partition_count must be "
-            f"{INTEGRATION_PARTITION_COUNT}"
-        )
+    _required_integer(document, "schema_version", SCHEMA_VERSION)
+    partition_count = _required_integer(
+        document, "partition_count", INTEGRATION_PARTITION_COUNT
+    )
     tests = document.get("tests")
     if not isinstance(tests, list):
         raise ValueError("integration inventory tests must be an array")
