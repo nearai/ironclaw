@@ -3,6 +3,7 @@ import React, {
   type ComponentPropsWithoutRef,
   type FocusEvent,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
 } from "react";
 import { cn } from "../utils/cn";
@@ -50,6 +51,7 @@ export type SelectMenuAlign = keyof typeof alignClasses;
 export type SelectMenuSize = keyof typeof sizeClasses;
 
 export type SelectMenuOption = {
+  adornment?: ReactNode;
   disabled?: boolean;
   label?: string;
   tone?: SelectMenuTone;
@@ -440,6 +442,7 @@ export function SelectMenu({
         <span className="flex min-w-0 items-center gap-2">
           <ToneDot tone={selectedOption?.tone} />
           <span className="truncate">{selectedLabel}</span>
+          {selectedOption?.adornment}
         </span>
         <Icon
           name="chevron"
@@ -518,6 +521,7 @@ export function SelectMenu({
                   <span className="flex min-w-0 items-center gap-2">
                     <ToneDot tone={option.tone} />
                     <span className="truncate">{optionLabel(option)}</span>
+                    {option.adornment}
                   </span>
                   {isSelected && (
                     <Icon

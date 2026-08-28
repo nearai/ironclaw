@@ -118,6 +118,7 @@ function useProviderManagementActionsStub({
   providers,
   activeProviderId,
   providerToDelete = null,
+  userModelPolicy = null,
 }) {
   return () => ({
     allProviderIds: providers.map((provider) => provider.id),
@@ -140,6 +141,7 @@ function useProviderManagementActionsStub({
       isBusy: false,
       isLoading: false,
       selectedModel: "llama",
+      userModelPolicy,
     },
   });
 }
@@ -149,6 +151,7 @@ function renderProviderManagement({
   activeProviderId = "nearai",
   searchQuery = "",
   providerToDelete = null,
+  userModelPolicy = null,
   t = (key) => key,
 }) {
   const ProviderCard = "ProviderCard";
@@ -158,6 +161,7 @@ function renderProviderManagement({
     Card: "Card",
     ConfirmDialog,
     Icon: "Icon",
+    ModelCapabilityBadges: "ModelCapabilityBadges",
     InlineNotice: "InlineNotice",
     ProviderCard,
     ProviderDialog: "ProviderDialog",
@@ -165,10 +169,16 @@ function renderProviderManagement({
     SettingsSearchEmpty: "SettingsSearchEmpty",
     groupProvidersByStatus,
     html,
+    modelEntryFor: (entries, model) => entries.find((entry) => entry.id === model) ?? null,
+    normalizeModelCatalog: (catalog) => ({
+      models: catalog.models || [],
+      modelEntries: catalog.model_entries || [],
+    }),
     useProviderManagementActions: useProviderManagementActionsStub({
       providers,
       activeProviderId,
       providerToDelete,
+      userModelPolicy,
     }),
     useProviderLogin: () => ({
       codexBusy: false,
@@ -275,6 +285,7 @@ function createProviderCardHarness() {
     Button: "Button",
     Card: "Card",
     Icon: "Icon",
+    ModelCapabilityBadges: "ModelCapabilityBadges",
     React: createReactStateStub(state),
     adapterLabel: (adapter) => adapter,
     html,
@@ -372,6 +383,8 @@ test("ProviderDialog enables search on the fetched model selector", () => {
     ModalFooter: "ModalFooter",
     React: { useMemo: (factory) => factory() },
     SelectMenu,
+    ModelCapabilityBadges: "ModelCapabilityBadges",
+    modelEntryFor: (entries, model) => entries.find((entry) => entry.id === model),
     ADAPTER_OPTIONS: [],
     adapterLabel: (adapter) => adapter,
     html,
@@ -385,6 +398,13 @@ test("ProviderDialog enables search on the fetched model selector", () => {
       },
       apiKey: "",
       models: ["model-a", "model-b"],
+      modelEntries: [
+        {
+          id: "model-b",
+          input_modalities: ["text", "image"],
+          output_modalities: ["text"],
+        },
+      ],
       message: null,
       busy: "",
       isBuiltin: true,
@@ -419,6 +439,8 @@ test("ProviderDialog enables search on the fetched model selector", () => {
 
   assert.equal(modelSelectProps.searchAriaLabel, "llm.searchModels");
   assert.equal(modelSelectProps.searchPlaceholder, "llm.searchModels");
+  const modelB = modelSelectProps.options.find((option) => option.value === "model-b");
+  assert.ok(modelB.adornment, "fetched model options carry capability adornments");
 });
 
 test("ProviderManagement groups filtered providers through the render caller", () => {
@@ -447,6 +469,25 @@ test("ProviderManagement groups filtered providers through the render caller", (
     cardProps.map((props) => props.activeProviderId),
     ["nearai", "nearai", "nearai"]
   );
+});
+
+test("ProviderManagement gives the active provider its persisted model capabilities", () => {
+  const { cardProps } = renderProviderManagement({
+    providers: [builtinProvider("nearai", { default_model: "llama" })],
+    userModelPolicy: {
+      provider_id: "nearai",
+      allowed_models: ["llama"],
+      model_entries: [
+        {
+          id: "llama",
+          input_modalities: ["text", "image"],
+          output_modalities: ["text"],
+        },
+      ],
+    },
+  });
+
+  assert.equal(cardProps[0].modelEntry?.id, "llama");
 });
 
 test("ProviderManagement shows no ACTIVE group on a clean install (#4857)", () => {
@@ -519,6 +560,24 @@ test("ProviderCard disclosure responds to row, keyboard, and chevron controls", 
   rendered = renderOpenAi();
   valuesAfter(rendered, "onClick=").at(-1)();
   assert.equal(harness.state.expanded, true);
+});
+
+test("ProviderCard renders model capabilities when metadata is available", () => {
+  const harness = createProviderCardHarness();
+  const rendered = harness.render({
+    provider: builtinProvider("nearai", { default_model: "vision-model" }),
+    modelEntry: {
+      id: "vision-model",
+      input_modalities: ["text", "image"],
+      output_modalities: ["text"],
+    },
+  });
+
+  assert.equal(
+    findComponentNodes(rendered, "ModelCapabilityBadges").length,
+    2,
+    "capabilities are visible in both the desktop summary and expanded details"
+  );
 });
 
 test("ProviderCard syncs disclosure state when active provider changes", () => {

@@ -11,6 +11,7 @@ import { ProviderLoginStatus } from "./provider-login-status";
 import { useProviderManagementActions } from "../hooks/useProviderManagementActions";
 import { useProviderLogin } from "../hooks/useProviderLogin";
 import { groupProvidersByStatus } from "../lib/llm-providers";
+import { modelEntryFor, normalizeModelCatalog } from "../lib/model-capabilities";
 
 const GROUP_ORDER = [
   { key: "active", labelKey: "llm.groupActive", dotClass: "bg-[var(--v2-positive-text)]" },
@@ -36,6 +37,16 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
   const t = useT();
   const actions = useProviderManagementActions({ settings, gatewayStatus, searchQuery, t });
   const state = actions.providerState;
+  const policyCatalog = normalizeModelCatalog({
+    models:
+      state.userModelPolicy?.provider_id === state.activeProviderId
+        ? state.userModelPolicy.allowed_models
+        : [],
+    model_entries:
+      state.userModelPolicy?.provider_id === state.activeProviderId
+        ? state.userModelPolicy.model_entries
+        : [],
+  });
   // NEAR AI / Codex authenticate via login flows; on success the snapshot
   // refresh re-renders the now-active card in place (no navigation here).
   const login = useProviderLogin();
@@ -122,6 +133,14 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
                             onNearaiWallet={login.startNearaiWallet}
                             onCodexLogin={login.startCodex}
                             loginBusy={loginBusy}
+                            modelEntry={
+                              provider.id === state.activeProviderId
+                                ? modelEntryFor(
+                                    policyCatalog.modelEntries,
+                                    state.selectedModel || provider.default_model
+                                  )
+                                : null
+                            }
                           />
                         )
                       )}

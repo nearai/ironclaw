@@ -264,6 +264,25 @@ test("SelectMenu renders a closed custom trigger with the selected label", () =>
   assert.doesNotMatch(collectTemplateText(rendered), /role="listbox"/);
 });
 
+test("SelectMenu renders a generic option adornment in the trigger and listbox", () => {
+  const harness = createHarness();
+  const props = {
+    options: [
+      { value: "default", label: "Vision model", adornment: "Image input tag" },
+    ],
+  };
+
+  let rendered = harness.render(props);
+  assert.ok(collectScalars(rendered).includes("Image input tag"));
+
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render(props);
+  assert.equal(
+    collectScalars(rendered).filter((value) => value === "Image input tag").length,
+    2
+  );
+});
+
 test("SelectMenu supports a compact reusable size", () => {
   const harness = createHarness();
   let rendered = harness.render({ size: "sm" });

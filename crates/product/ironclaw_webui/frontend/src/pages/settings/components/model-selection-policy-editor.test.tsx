@@ -111,6 +111,7 @@ test("admin can enable selection from the active model and a manually added mode
     assert.deepEqual(requests.setPolicy.mock.calls[0]?.[0], {
       workspace_default: "mock-model",
       allowed_models: ["mock-model", "e2e-selected-model"],
+      model_entries: [],
     });
     assert.deepEqual(
       rendered.queryClient.getQueryData(["user-model-catalog"]),
@@ -121,6 +122,7 @@ test("admin can enable selection from the active model and a manually added mode
         provider_id: "openai_compatible",
         workspace_default: "canonical-model",
         allowed_models: ["canonical-model"],
+        model_entries: [],
       },
     });
     const canonicalModel = rendered.container.querySelector<HTMLInputElement>(
@@ -132,6 +134,68 @@ test("admin can enable selection from the active model and a manually added mode
         ?.textContent ?? "",
       /Model selection enabled/
     );
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+    requests.setPolicy.mockReset();
+  }
+});
+
+test("fetched capabilities render and only allowed entries are saved", async () => {
+  const fetched = {
+    ok: true,
+    models: ["mock-model", "vision-model", "unselected-model"],
+    model_entries: [
+      {
+        id: "mock-model",
+        input_modalities: ["text"],
+        output_modalities: ["text"],
+      },
+      {
+        id: "vision-model",
+        input_modalities: ["text", "image"],
+        output_modalities: ["text", "image"],
+      },
+      {
+        id: "unselected-model",
+        input_modalities: ["text"],
+        output_modalities: ["text"],
+      },
+    ],
+  };
+  requests.setPolicy.mockImplementation(async (request) => ({
+    selection_enabled: true,
+    workspace_default: request.workspace_default,
+    models: request.allowed_models,
+    model_entries: request.model_entries,
+  }));
+  const rendered = await renderEditor(providerState({ listModels: vi.fn().mockResolvedValue(fetched) }));
+  try {
+    const fetchModels = Array.from(
+      rendered.container.querySelectorAll<HTMLButtonElement>("button")
+    ).find((button) => button.textContent === "Fetch models");
+    assert.ok(fetchModels);
+    await act(async () => fetchModels.click());
+
+    assert.match(rendered.container.textContent ?? "", /Image input/);
+    assert.match(rendered.container.textContent ?? "", /Image output/);
+    const vision = rendered.container.querySelector<HTMLInputElement>(
+      '[data-testid="settings-model-policy-model-vision-model"]'
+    );
+    assert.ok(vision);
+    await act(async () => vision.click());
+
+    const save = rendered.container.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-model-policy-save"]'
+    );
+    assert.ok(save);
+    await act(async () => save.click());
+
+    assert.deepEqual(requests.setPolicy.mock.calls[0]?.[0], {
+      workspace_default: "mock-model",
+      allowed_models: ["mock-model", "vision-model"],
+      model_entries: fetched.model_entries.slice(0, 2),
+    });
   } finally {
     act(() => rendered.root.unmount());
     rendered.container.remove();

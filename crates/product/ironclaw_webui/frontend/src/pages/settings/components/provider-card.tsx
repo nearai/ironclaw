@@ -3,6 +3,7 @@ import { Badge } from "../../../design-system/badge";
 import { Card } from "../../../design-system/card";
 import { Icon } from "../../../design-system/icons";
 import React from "react";
+import { ModelCapabilityBadges } from "./model-capability-badges";
 import { useT } from "../../../lib/i18n";
 import {
   adapterLabel,
@@ -26,6 +27,7 @@ export function ProviderCard({
   onNearaiWallet,
   onCodexLogin,
   loginBusy,
+  modelEntry,
 }) {
   const t = useT();
   const isActive = provider.id === activeProviderId;
@@ -52,8 +54,11 @@ export function ProviderCard({
     ? (<span className="font-mono text-[11px] text-[var(--v2-warning-text)]">
         {missingLabel}
       </span>)
-    : (<span className="hidden truncate font-mono text-[11px] text-[var(--v2-text-faint)] sm:inline">
-        {adapterLabel(provider.adapter)} · {model || provider.default_model || t("llm.none")}
+    : (<span className="hidden min-w-0 items-center gap-2 sm:inline-flex">
+        <span className="truncate font-mono text-[11px] text-[var(--v2-text-faint)]">
+          {adapterLabel(provider.adapter)} · {model || provider.default_model || t("llm.none")}
+        </span>
+        <ModelCapabilityBadges entry={modelEntry} />
       </span>);
 
   const isLoginProvider = provider.id === "nearai" || provider.id === "openai_codex";
@@ -212,7 +217,10 @@ export function ProviderCard({
             </div>
             <div>
               <div className="font-mono uppercase text-[10px] text-[var(--v2-text-faint)]">{t("llm.model")}</div>
-              <div className="mt-1 truncate font-mono">{model || t("llm.none")}</div>
+              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
+                <span className="truncate font-mono">{model || t("llm.none")}</span>
+                <ModelCapabilityBadges entry={modelEntry} />
+              </div>
             </div>
           </div>
 
