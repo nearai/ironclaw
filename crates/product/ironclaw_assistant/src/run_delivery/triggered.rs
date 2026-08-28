@@ -1347,7 +1347,7 @@ async fn fan_out_plan(
             )
             .await
             {
-                Ok(delivered) => {
+                Ok(super::notifications::NotificationDeliveryOutcome::Delivered(delivered)) => {
                     out.any_delivered = true;
                     if notification.event_kind == RunNotificationEventKind::AuthRequired {
                         out.messages_to_retract_after_final.extend(
@@ -1357,6 +1357,10 @@ async fn fan_out_plan(
                         );
                     }
                     out.delivered_for_gate_route.extend(delivered);
+                }
+                Ok(super::notifications::NotificationDeliveryOutcome::NoDelivery) => {}
+                Ok(super::notifications::NotificationDeliveryOutcome::Rejected) => {
+                    out.any_denied = true;
                 }
                 Err(failure) => {
                     tracing::warn!(
@@ -1406,7 +1410,7 @@ async fn deliver_notification_to_target(
     context: &TriggeredNotificationContext<'_>,
     notification: &TriggeredNotification,
     target: &NotificationTarget,
-) -> Result<Vec<DeliveredChannelMessage>, TriggeredNotificationFailure> {
+) -> Result<super::notifications::NotificationDeliveryOutcome, TriggeredNotificationFailure> {
     // One caller of the generic §7a facade among any number: the routine
     // driver decides WHEN and WHAT; the facade + adapter own HOW.
     let facade_context = super::notifications::ChannelNotificationContext {
@@ -1429,7 +1433,7 @@ async fn deliver_notification_to_target(
         extension_id: target.extension_id.clone(),
         direct_message: target.direct_message,
     };
-    super::notifications::notify(
+    super::notifications::notify_with_outcome(
         services,
         &facade_context,
         &facade_notification,

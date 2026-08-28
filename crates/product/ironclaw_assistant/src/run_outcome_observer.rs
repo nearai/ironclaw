@@ -398,12 +398,19 @@ impl ProcessJournalCommitObserver for ResourceBlockBackfillProcessCommitObserver
         }) else {
             return Ok(());
         };
+        let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let current = self.current_snapshot(&commit.state).await?;
         if current_resource_gate_ref(&current) != Some(historical_gate_ref.as_str()) {
+            // A previous attempt may have published this historical gate and
+            // then crashed while compensating after a post-write state read.
+            // Reconcile even when replay starts stale so the durable cursor
+            // cannot acknowledge the commit while leaving that record open.
+            self.outcome_observer
+                .reconcile_resource_block(&current, run_id, chrono::Utc::now())
+                .await?;
             return Ok(());
         }
 
-        let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
         self.outcome_observer
             .reconcile_resource_block(&current, run_id, occurred_at)
@@ -549,7 +556,10 @@ fn outcome_notification_id(
 mod tests {
     use std::{
         collections::VecDeque,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use async_trait::async_trait;
@@ -563,9 +573,11 @@ mod tests {
         turn::{TurnGateRef, TurnRunId},
     };
     use ironclaw_notifications::{
-        LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInboxStore,
+        LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
+        NotificationAction, NotificationInboxError, NotificationInboxStore,
         NotificationInboxStorePort, NotificationInitialState, NotificationKind,
-        NotificationRecipient, NotificationSeverity, NotificationSource,
+        NotificationMutationOutcome, NotificationMutationRequest, NotificationPage,
+        NotificationRecipient, NotificationRecord, NotificationSeverity, NotificationSource,
         PublishNotificationRequest,
     };
     use ironclaw_processes::{
@@ -625,6 +637,70 @@ mod tests {
             )),
             ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
         ))
+    }
+
+    struct FailFirstResolveInbox {
+        inner: Arc<dyn NotificationInboxStorePort>,
+        fail_next_resolve: AtomicBool,
+    }
+
+    impl FailFirstResolveInbox {
+        fn new(inner: Arc<dyn NotificationInboxStorePort>) -> Self {
+            Self {
+                inner,
+                fail_next_resolve: AtomicBool::new(true),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl NotificationInboxStorePort for FailFirstResolveInbox {
+        async fn publish(
+            &self,
+            request: PublishNotificationRequest,
+        ) -> Result<NotificationRecord, NotificationInboxError> {
+            self.inner.publish(request).await
+        }
+
+        async fn list(
+            &self,
+            request: ListNotificationsRequest,
+        ) -> Result<NotificationPage, NotificationInboxError> {
+            self.inner.list(request).await
+        }
+
+        async fn mark_read(
+            &self,
+            request: NotificationMutationRequest,
+        ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+            self.inner.mark_read(request).await
+        }
+
+        async fn mark_all_read(
+            &self,
+            request: MarkAllNotificationsReadRequest,
+        ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+            self.inner.mark_all_read(request).await
+        }
+
+        async fn resolve(
+            &self,
+            request: NotificationMutationRequest,
+        ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+            if self.fail_next_resolve.swap(false, Ordering::SeqCst) {
+                return Err(NotificationInboxError::Backend {
+                    reason: "injected post-publish compensation failure".to_string(),
+                });
+            }
+            self.inner.resolve(request).await
+        }
+
+        async fn archive(
+            &self,
+            request: NotificationMutationRequest,
+        ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
+            self.inner.archive(request).await
+        }
     }
 
     fn process_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -1090,6 +1166,77 @@ mod tests {
         assert!(
             raced.notifications[0].resolved_at.is_some(),
             "a block recovered during backfill must not remain actionable"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_backfill_replay_retires_a_stale_gate_after_compensation_failed() {
+        const GATE: &str = "gate:budget-00000000-0000-0000-0000-000000000003";
+        let backing_inbox = inbox();
+        let failing_inbox = Arc::new(FailFirstResolveInbox::new(
+            Arc::clone(&backing_inbox) as Arc<dyn NotificationInboxStorePort>
+        ));
+        let threads = Arc::new(InMemorySessionThreadService::default());
+        let run_id = TurnRunId::new();
+        let blocked = resource_block_commit(run_id, "web_ui", GATE);
+        let recovered = commit(
+            run_id,
+            ProcessLifecycleStatus::Queued,
+            ProcessJournalKind::Resumed,
+            "web_ui",
+        );
+        let source = Arc::new(CurrentProcessJournalSource::new(blocked.state.clone()));
+        source.set_sequence([blocked.state.clone(), recovered.state.clone()]);
+        let first_observer = ResourceBlockBackfillProcessCommitObserver::new(
+            Arc::clone(&failing_inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+            Arc::clone(&source) as Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+        );
+
+        first_observer
+            .observe_process_commit(blocked.clone())
+            .await
+            .expect_err("post-publish compensation is unavailable");
+        let stranded = backing_inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list stranded resource block");
+        assert!(stranded.notifications[0].resolved_at.is_none());
+
+        source.set_current(recovered.state);
+        let restarted_observer = ResourceBlockBackfillProcessCommitObserver::new(
+            failing_inbox as Arc<dyn NotificationInboxStorePort>,
+            threads as Arc<dyn SessionThreadService>,
+            source as Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+        );
+        restarted_observer
+            .observe_process_commit(blocked)
+            .await
+            .expect("stale-on-entry replay reconciles the previously published gate");
+
+        let reconciled = backing_inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list reconciled resource block");
+        assert!(
+            reconciled.notifications[0].resolved_at.is_some(),
+            "replay must retire the stale record even when it did not publish it"
         );
     }
 

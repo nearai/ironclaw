@@ -426,6 +426,7 @@ impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for DenyAllEgr
 
 struct StaticResolver {
     adapter: Arc<RecordingChannelAdapter>,
+    requires_enrollment: bool,
 }
 
 impl ChannelDeliveryResolver for StaticResolver {
@@ -438,7 +439,7 @@ impl ChannelDeliveryResolver for StaticResolver {
             delivery: Some(Arc::clone(&self.adapter) as Arc<dyn ChannelDelivery>),
             egress: Arc::new(DenyAllEgress),
             reply_transport: Some(ironclaw_extension_contracts::channel::ReplyTransport::Message),
-            requires_enrollment: false,
+            requires_enrollment: self.requires_enrollment,
             declared_egress_hosts: Vec::new(),
         })
     }
@@ -1063,6 +1064,7 @@ fn build_harness_with_gate_ports(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            requires_enrollment: false,
         }),
         Arc::new(NoStoredReplyContext),
         Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
@@ -2892,6 +2894,7 @@ fn build_triggered_harness_with_turns(
         initially_active,
         None,
         None,
+        false,
     )
 }
 
@@ -2941,6 +2944,7 @@ fn build_triggered_harness_with_catalog(
         initially_active,
         communication_preferences,
         delivery_targets,
+        false,
     )
 }
 
@@ -2952,6 +2956,7 @@ fn build_triggered_harness_with_turns_catalog(
     initially_active: Vec<TestNotificationTarget>,
     communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
     delivery_targets: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
+    requires_enrollment: bool,
 ) -> TriggeredHarness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -2967,6 +2972,7 @@ fn build_triggered_harness_with_turns_catalog(
         Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            requires_enrollment,
         }),
         Arc::new(NoStoredReplyContext),
         Arc::new(ironclaw_assistant::NoDeliveryRegistrations),
@@ -3566,6 +3572,52 @@ async fn triggered_failed_gate_fanout_still_resolves_the_inbox_after_resume() {
         harness.adapter.texts().len(),
         1,
         "Inbox-only observation must not retry external delivery"
+    );
+}
+
+#[tokio::test]
+async fn triggered_no_delivery_outcome_is_not_recorded_as_external_success() {
+    const GATE: &str = "gate:approval-00000000000000000000000000000024";
+    let turns = Arc::new(ScriptedTurnCoordinator::with_states(vec![scripted_state(
+        TurnStatus::BlockedApproval,
+        Some(GATE),
+    )]));
+    let harness = build_triggered_harness_with_turns_catalog(
+        turns,
+        None,
+        vec![DM_TARGET],
+        vec![DM_TARGET],
+        None,
+        None,
+        true,
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed,
+        "NoDelivery carries no adapter/provider evidence and cannot latch Delivered"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "an enrollment-required channel with no registrations performs no egress"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("list delivery attempts");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::NoTarget,
+        "the caller test must exercise the coordinator's typed NoDelivery outcome"
     );
 }
 
@@ -4718,6 +4770,7 @@ fn notify_user_fixture(
         }),
         None => Arc::new(StaticResolver {
             adapter: Arc::clone(&adapter),
+            requires_enrollment: false,
         }),
     };
     let coordinator = Arc::new(DeliveryCoordinator::new(
