@@ -671,6 +671,17 @@ async fn host_runtime_services_strip_google_drive_download_bytes_when_extraction
                 completed.output
             );
             let content = completed.output["content"].as_str().unwrap_or_default();
+            let encoded_handoff = "iVBORwABAg==";
+            assert!(
+                !content.contains(encoded_handoff),
+                "failed extraction must not copy the exact encoded handoff into content: {content}"
+            );
+            let serialized_output = serde_json::to_string(&completed.output)
+                .expect("completed output must serialize for the model");
+            assert!(
+                !serialized_output.contains(encoded_handoff),
+                "failed extraction must not expose the exact encoded handoff in serialized output: {serialized_output}"
+            );
             assert!(
                 content.starts_with('[') && content.ends_with(']'),
                 "the model needs a clear unsupported/failure marker, got: {content}"

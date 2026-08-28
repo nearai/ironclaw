@@ -8,7 +8,7 @@
 #[allow(dead_code)]
 mod ratchet_support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -49,6 +49,7 @@ const ALLOWED_CLASSIFICATIONS: &[&str] = &[
 struct Candidate {
     path: String,
     indicator: String,
+    occurrences: usize,
 }
 
 #[derive(Debug)]
@@ -75,13 +76,22 @@ fn discover_candidates(root: &Path, source_roots: &[PathBuf]) -> Result<Vec<Cand
                 source_root.display()
             ));
         }
-        for path in production_rust_files(source_root) {
+        let source_files = production_rust_files(source_root);
+        if source_files.is_empty() {
+            return Err(format!(
+                "encoded-output source root contains no production Rust files: {}",
+                source_root.display()
+            ));
+        }
+        for path in source_files {
             let raw = fs::read_to_string(&path)
                 .map_err(|error| format!("read {}: {error}", path.display()))?;
             let source = strip_line_anchored_cfg_test_items(&raw);
             let relative = path
                 .strip_prefix(root)
-                .map_err(|_| format!("{} is outside {}", path.display(), root.display()))?
+                .map_err(|error| {
+                    format!("{} is outside {}: {error}", path.display(), root.display())
+                })?
                 .to_string_lossy()
                 .replace('\\', "/");
             collect_candidate_matches(&source, &relative, &mut candidates);
@@ -95,14 +105,42 @@ fn collect_candidate_matches(
     relative_path: &str,
     candidates: &mut BTreeSet<Candidate>,
 ) {
+    let mut matches = BTreeMap::new();
     for (indicator, needle) in INDICATORS {
-        if source.contains(needle) {
-            candidates.insert(Candidate {
-                path: relative_path.to_string(),
-                indicator: (*indicator).to_string(),
-            });
+        let occurrences = source.matches(needle).count();
+        if occurrences > 0 {
+            *matches.entry(*indicator).or_insert(0) += occurrences;
         }
     }
+    let provider_base64_decodes = count_provider_base64_decodes(source);
+    if provider_base64_decodes > 0 {
+        matches.insert("provider_base64_decode", provider_base64_decodes);
+    }
+    candidates.extend(
+        matches
+            .into_iter()
+            .map(|(indicator, occurrences)| Candidate {
+                path: relative_path.to_string(),
+                indicator: indicator.to_string(),
+                occurrences,
+            }),
+    );
+}
+
+fn count_provider_base64_decodes(source: &str) -> usize {
+    ["BASE64_STANDARD", "general_purpose::STANDARD"]
+        .into_iter()
+        .map(|marker| {
+            source
+                .match_indices(marker)
+                .filter(|(index, _)| {
+                    source[index + marker.len()..]
+                        .trim_start()
+                        .starts_with(".decode")
+                })
+                .count()
+        })
+        .sum()
 }
 
 fn package_inventory_root(root: &Path) -> Result<PathBuf, String> {
@@ -165,7 +203,10 @@ fn collect_output_schemas(directory: &Path, output: &mut Vec<PathBuf>) -> Result
         } else if path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.contains(".output.v") && name.ends_with(".json"))
+            .is_some_and(|name| {
+                name.ends_with(".json")
+                    && (name.contains(".output.v") || name.starts_with("raw_output.v"))
+            })
         {
             output.push(path);
         }
@@ -197,7 +238,7 @@ fn discover_output_schema_candidates(
             .map_err(|error| format!("read output schema {}: {error}", path.display()))?;
         let relative = path
             .strip_prefix(root)
-            .map_err(|_| format!("{} is outside {}", path.display(), root.display()))?
+            .map_err(|error| format!("{} is outside {}: {error}", path.display(), root.display()))?
             .to_string_lossy()
             .replace('\\', "/");
         collect_candidate_matches(&source, &relative, &mut candidates);
@@ -247,6 +288,14 @@ fn parse_ledger(source: &str) -> Vec<ReviewedBoundary> {
                 candidate: Candidate {
                     path: required_string(table, "path", index),
                     indicator: required_string(table, "indicator", index),
+                    occurrences: table
+                        .get("occurrences")
+                        .and_then(toml::Value::as_integer)
+                        .map_or(1, |value| {
+                            usize::try_from(value).unwrap_or_else(|error| {
+                                panic!("boundary[{index}] has invalid `occurrences`: {error}")
+                            })
+                        }),
                 },
                 classification: required_string(table, "classification", index),
                 exposure: required_string(table, "exposure", index),
@@ -257,6 +306,31 @@ fn parse_ledger(source: &str) -> Vec<ReviewedBoundary> {
             }
         })
         .collect()
+}
+
+fn declares_executable_test(source: &str, expected_name: &str) -> Result<bool, String> {
+    fn items_contain_test(items: &[syn::Item], expected_name: &str) -> bool {
+        items.iter().any(|item| match item {
+            syn::Item::Fn(function) => {
+                function.sig.ident == expected_name
+                    && function.attrs.iter().any(|attribute| {
+                        attribute
+                            .path()
+                            .segments
+                            .last()
+                            .is_some_and(|segment| segment.ident == "test")
+                    })
+            }
+            syn::Item::Mod(module) => module
+                .content
+                .as_ref()
+                .is_some_and(|(_, items)| items_contain_test(items, expected_name)),
+            _ => false,
+        })
+    }
+
+    let file = syn::parse_file(source).map_err(|error| format!("parse Rust evidence: {error}"))?;
+    Ok(items_contain_test(&file.items, expected_name))
 }
 
 #[test]
@@ -274,13 +348,22 @@ fn reborn_candidate_scanner_finds_an_encoded_output_indicator() {
         vec![Candidate {
             path: "producer.rs".to_string(),
             indicator: "content_base64".to_string(),
+            occurrences: 1,
         }]
     );
 
-    let schemas = directory.path().join("schemas");
-    fs::create_dir(&schemas).expect("create schema fixture directory");
+    let package = directory.path().join("fixture-package");
+    let schemas = package.join("schemas");
+    fs::create_dir_all(&schemas).expect("create schema fixture directory");
     fs::write(
-        schemas.join("tool.output.v1.json"),
+        package.join("manifest.toml"),
+        r#"[[capabilities]]
+output_schema_ref = "schemas/raw_output.v1.json"
+"#,
+    )
+    .expect("write package manifest fixture");
+    fs::write(
+        schemas.join("raw_output.v1.json"),
         r#"{"properties":{"encoding":{"enum":["binary_unsupported"]}}}"#,
     )
     .expect("write output schema fixture");
@@ -288,8 +371,35 @@ fn reborn_candidate_scanner_finds_an_encoded_output_indicator() {
         discover_output_schema_candidates(directory.path(), directory.path())
             .expect("fixture output-schema scan succeeds"),
         vec![Candidate {
-            path: "schemas/tool.output.v1.json".to_string(),
+            path: "fixture-package/schemas/raw_output.v1.json".to_string(),
             indicator: "binary_unsupported".to_string(),
+            occurrences: 1,
+        }]
+    );
+}
+
+#[test]
+fn reborn_candidate_scanner_counts_each_boundary_and_provider_decode_operation() {
+    let directory = tempfile::tempdir().expect("temporary fixture directory");
+    fs::write(
+        directory.path().join("producer.rs"),
+        r#"
+fn first(encoded: &str) {
+    BASE64_STANDARD
+        .decode(encoded.as_bytes());
+}
+fn second(encoded: &str) { BASE64_STANDARD.decode(encoded.as_bytes()); }
+"#,
+    )
+    .expect("write scanner fixture");
+
+    assert_eq!(
+        discover_candidates(directory.path(), &[directory.path().to_path_buf()])
+            .expect("fixture scan succeeds"),
+        vec![Candidate {
+            path: "producer.rs".to_string(),
+            indicator: "provider_base64_decode".to_string(),
+            occurrences: 2,
         }]
     );
 }
@@ -303,6 +413,39 @@ fn reborn_candidate_scanner_fails_closed_for_a_missing_root() {
         error.contains("does not exist"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn reborn_candidate_scanner_fails_closed_for_an_empty_root() {
+    let directory = tempfile::tempdir().expect("temporary fixture directory");
+    let error = discover_candidates(directory.path(), &[directory.path().to_path_buf()])
+        .expect_err("an empty scan root must fail closed");
+    assert!(
+        error.contains("contains no production Rust files"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn reborn_evidence_requires_an_executable_test_item() {
+    let inert = r##"
+fn helper() {}
+// #[test] fn commented_out() {}
+const TEXT: &str = "#[test] fn string_only() {}";
+"##;
+    assert!(!declares_executable_test(inert, "helper").expect("parse inert fixture"));
+    assert!(!declares_executable_test(inert, "commented_out").expect("parse inert fixture"));
+    assert!(!declares_executable_test(inert, "string_only").expect("parse inert fixture"));
+
+    let executable = r#"
+#[test]
+fn sync_test() {}
+
+#[tokio::test]
+async fn async_test() {}
+"#;
+    assert!(declares_executable_test(executable, "sync_test").expect("parse test fixture"));
+    assert!(declares_executable_test(executable, "async_test").expect("parse test fixture"));
 }
 
 #[test]
@@ -371,10 +514,10 @@ fn reborn_every_encoded_output_candidate_has_a_live_reviewed_boundary() {
         );
         let evidence_source = fs::read_to_string(&evidence)
             .unwrap_or_else(|error| panic!("read evidence {}: {error}", evidence.display()));
-        let test_declaration = format!("fn {}(", boundary.evidence_test);
         assert!(
-            evidence_source.contains(&test_declaration),
-            "stale evidence for {}:{}: {} no longer declares test function {:?}",
+            declares_executable_test(&evidence_source, &boundary.evidence_test)
+                .unwrap_or_else(|error| panic!("parse evidence {}: {error}", evidence.display())),
+            "stale evidence for {}:{}: {} no longer declares executable test {:?}",
             boundary.candidate.path,
             boundary.candidate.indicator,
             boundary.evidence_path,

@@ -15,6 +15,7 @@ rationale = "Encrypted MIME is reported as encrypted and unsupported; ciphertext
 [[boundary]]
 path = "crates/extensions/ironclaw_extension_support/src/gsuite/handlers/gmail_message.rs"
 indicator = "gmail_base64url_decode"
+occurrences = 2
 classification = "producer_owned_decode"
 exposure = "decoded semantic body"
 owner = "gmail.get_message producer"
@@ -25,6 +26,7 @@ rationale = "The Gmail producer owns and decodes Gmail body.data base64url befor
 [[boundary]]
 path = "crates/extensions/ironclaw_extension_support/src/skills.rs"
 indicator = "bytes_base64"
+occurrences = 3
 classification = "input_only"
 exposure = "installer request input"
 owner = "skill package installer"
@@ -55,6 +57,7 @@ rationale = "The output schema advertises the producer's bounded marker rather t
 [[boundary]]
 path = "crates/extensions/packages/google-drive/wasm-src/src/api.rs"
 indicator = "content_base64"
+occurrences = 3
 classification = "host_mediated_decode"
 exposure = "transitional guest-to-host handoff"
 owner = "google-drive.download_file producer"
@@ -65,6 +68,7 @@ rationale = "The WASM guest cannot run host document extractors, so the host con
 [[boundary]]
 path = "crates/extensions/packages/google-drive/wasm-src/src/types.rs"
 indicator = "content_base64"
+occurrences = 2
 classification = "host_mediated_decode"
 exposure = "transitional guest-to-host handoff"
 owner = "google-drive.download_file output contract"
@@ -85,6 +89,7 @@ rationale = "The schema makes encrypted an explicit unreadable state and exposes
 [[boundary]]
 path = "crates/kernel/ironclaw_host_runtime/src/document_output.rs"
 indicator = "content_base64"
+occurrences = 15
 classification = "host_mediated_decode"
 exposure = "removed before runtime completion"
 owner = "host document-output obligation"
@@ -95,6 +100,7 @@ rationale = "The capability-scoped host obligation extracts supported documents 
 [[boundary]]
 path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
 indicator = "body_base64"
+occurrences = 4
 classification = "input_only"
 exposure = "HTTP request input"
 owner = "builtin.http producer"
@@ -105,6 +111,7 @@ rationale = "The field encodes caller-supplied request bytes and is decoded befo
 [[boundary]]
 path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http_output.rs"
 indicator = "body_base64"
+occurrences = 11
 classification = "compatibility_exception"
 exposure = "bounded model-visible compatibility output"
 owner = "builtin.http output producer"
@@ -115,6 +122,7 @@ rationale = "builtin.http retains its existing bounded binary-response contract;
 [[boundary]]
 path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http_output.rs"
 indicator = "response_headers"
+occurrences = 2
 classification = "compatibility_exception"
 exposure = "bounded and redacted model-visible compatibility output"
 owner = "builtin.http output producer"
@@ -145,6 +153,7 @@ rationale = "The schema declares binary package input consumed by the skill inst
 [[boundary]]
 path = "crates/lanes/ironclaw_mcp/src/client.rs"
 indicator = "binary_unsupported"
+occurrences = 2
 classification = "semantic_unsupported_marker"
 exposure = "bounded semantic marker"
 owner = "hosted MCP result projection"
@@ -155,6 +164,7 @@ rationale = "MCP image, audio, and blob payloads are removed and represented as 
 [[boundary]]
 path = "crates/lanes/ironclaw_mcp/src/client.rs"
 indicator = "mcp_structured_content"
+occurrences = 3
 classification = "protocol_projection"
 exposure = "semantic JSON"
 owner = "hosted MCP result projection"
@@ -165,6 +175,7 @@ rationale = "The MCP lane removes JSON-RPC transport framing while preserving pr
 [[boundary]]
 path = "crates/extensions/ironclaw_extension_host/src/extension_lifecycle/hosted_mcp_test_support.rs"
 indicator = "json_rpc"
+occurrences = 2
 classification = "protocol_projection"
 exposure = "hosted MCP transport test fixture"
 owner = "hosted MCP lifecycle test support"
@@ -225,6 +236,7 @@ rationale = "Ciphertext is an opaque at-rest session blob under credential custo
 [[boundary]]
 path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
 indicator = "headers_field"
+occurrences = 2
 classification = "input_only"
 exposure = "validated HTTP request input"
 owner = "builtin.http request producer"
@@ -235,6 +247,7 @@ rationale = "These headers are caller inputs validated before mediated egress, n
 [[boundary]]
 path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http_output.rs"
 indicator = "headers_field"
+occurrences = 3
 classification = "compatibility_exception"
 exposure = "bounded and redacted model-visible compatibility output"
 owner = "builtin.http output producer"
@@ -265,6 +278,7 @@ rationale = "The MCP producer drops inline binary payloads and records an unsupp
 [[boundary]]
 path = "crates/lanes/ironclaw_mcp/src/client.rs"
 indicator = "json_rpc"
+occurrences = 2
 classification = "protocol_projection"
 exposure = "semantic MCP result"
 owner = "hosted MCP result projection"
@@ -285,6 +299,7 @@ rationale = "This is the typed JSON-RPC transport contract consumed by the MCP l
 [[boundary]]
 path = "crates/lanes/ironclaw_mcp/src/diagnostics.rs"
 indicator = "json_rpc"
+occurrences = 3
 classification = "protocol_projection"
 exposure = "bounded host diagnostic"
 owner = "hosted MCP lane diagnostics"
@@ -315,9 +330,60 @@ rationale = "This module validates and removes JSON-RPC envelopes before the sem
 [[boundary]]
 path = "crates/lanes/ironclaw_mcp/src/lib.rs"
 indicator = "json_rpc"
+occurrences = 4
 classification = "protocol_projection"
 exposure = "MCP lane module boundary"
 owner = "hosted MCP lane"
 evidence_path = "tests/integration/mcp.rs"
 evidence_test = "mcp_tool_call_reaches_mock_server"
 rationale = "The module declaration exposes the owned JSON-RPC implementation; model-visible output is projected by the client."
+
+[[boundary]]
+path = "crates/extensions/ironclaw_extension_support/src/skills.rs"
+indicator = "provider_base64_decode"
+classification = "input_only"
+exposure = "decoded skill package request input"
+owner = "skill package installer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs"
+evidence_test = "builtin_skill_install_accepts_base64_bundle_files_on_a_direct_install"
+rationale = "The installer decodes its explicit package-file encoding before constructing the install request; it is not model-facing output."
+
+[[boundary]]
+path = "crates/extensions/packages/github/wasm-src/src/api/contents.rs"
+indicator = "provider_base64_decode"
+classification = "producer_owned_decode"
+exposure = "decoded UTF-8 file content"
+owner = "github.get_file_content producer"
+evidence_path = "tests/integration/tool_call.rs"
+evidence_test = "github_file_content_decodes_before_the_durable_result_path"
+rationale = "The GitHub producer consumes its documented base64 transport encoding and emits semantic UTF-8 or an unsupported marker before durable storage."
+
+[[boundary]]
+path = "crates/extensions/packages/telegram/src/linked/session_blob.rs"
+indicator = "provider_base64_decode"
+classification = "opaque_custody"
+exposure = "encrypted linked-session persistence only"
+owner = "Telegram linked-session custody"
+evidence_path = "crates/extensions/packages/telegram/src/linked/session_blob.rs"
+evidence_test = "round_trips_including_the_auth_key"
+rationale = "The linked-session owner decodes its at-rest envelope inside credential custody; the bytes never become a tool result."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/document_output.rs"
+indicator = "provider_base64_decode"
+classification = "host_mediated_decode"
+exposure = "removed before runtime completion"
+owner = "host document-output obligation"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs"
+evidence_test = "host_runtime_services_extracts_google_drive_download_binary_into_text"
+rationale = "The capability-scoped host obligation consumes the Drive guest handoff and exposes only extracted text or a semantic failure marker."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
+indicator = "provider_base64_decode"
+classification = "input_only"
+exposure = "decoded HTTP request input"
+owner = "builtin.http request producer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
+evidence_test = "non_empty_body_base64_is_decoded"
+rationale = "builtin.http decodes caller-supplied request bytes before mediated egress; response output remains separately classified."
