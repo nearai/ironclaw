@@ -313,6 +313,48 @@ async fn github_webhook_normalization_dispatches_through_bundled_wasm() {
         .expect("local webhook normalization made no provider request");
 }
 
+/// Provider encoding is owned by the GitHub producer: decoded text, not the
+/// base64 transport field, must cross the shared durable writer and result_read.
+#[tokio::test]
+async fn github_file_content_decodes_before_the_durable_result_path() {
+    const ENCODED: &str = "UHJvdmlkZXItZW5jb2RlZCBub2lzZQ==";
+    let h = RebornIntegrationHarness::test_default()
+        .with_github_network_response(
+            200,
+            format!(
+                r#"{{"path":"notes.txt","type":"file","encoding":"base64","content":"{ENCODED}"}}"#
+            ),
+        )
+        .script([
+            RebornScriptedReply::tool_call(
+                "github.get_file_content",
+                json!({"owner": "nearai", "repo": "ironclaw", "path": "notes.txt"}),
+            ),
+            RebornScriptedReply::text("file read"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("read the GitHub file")
+        .await
+        .expect("turn completes");
+    let output = h
+        .tool_result_output("github.get_file_content")
+        .await
+        .expect("GitHub file result was durably recorded");
+    assert_eq!(output["encoding"], json!("utf-8"));
+    assert_eq!(output["content"], json!("Provider-encoded noise"));
+    assert!(!output.to_string().contains(ENCODED));
+    h.assert_model_request_contains("Provider-encoded noise")
+        .await
+        .expect("decoded content reached the next model request");
+    assert!(h.assert_model_request_contains(ENCODED).await.is_err());
+    h.assert_latest_result_json_round_trips("github.get_file_content")
+        .await
+        .expect("decoded GitHub result round-trips through result_read");
+}
+
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 
 /// A prior assistant refusal is conversation history, not capability truth.

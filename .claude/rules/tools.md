@@ -55,6 +55,20 @@ rg -n "CapabilityHost|RuntimeAdapter|dispatch|invoke|resume|Obligation" \
 - Results are bounded and redacted. External effects require authoritative
   evidence plus read-back verification; claim-only results are explicitly
   marked unverified as defined in `tool-evidence.md`.
+- Producers decode transport formats they explicitly own (for example, a
+  provider's documented base64url or MIME transfer encoding), select semantic
+  fields, and replace unsupported binary/media with a clear typed marker.
+  Genuinely encrypted content is reported as encrypted and unsupported; a
+  producer never presents ciphertext as readable content.
+- The shared durable result writer stores the producer-processed semantic
+  output and `builtin.result_read` exposes bounded views of those same bytes.
+  Neither layer guesses formats from field names/content, decrypts arbitrary
+  blobs, switches on capability/vendor ids, or owns a normalizer registry.
+- Encoded-output indicators in extension producers, runtime lanes, and host
+  mediation require a reviewed entry with live executable evidence in
+  `reborn_extension_output_boundaries.toml`. The exact, fail-closed inventory
+  is enforced by `reborn_extension_output_audit.rs`; run
+  `cargo test -p ironclaw_architecture_tests --test reborn_extension_output_audit`.
 
 Built-in capabilities are appropriate for host-coupled product behavior. WASM
 is the default for sandboxed extension code. MCP is appropriate for external
