@@ -43,11 +43,11 @@ use ironclaw_threads::{
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
     PREPARED_CONTEXT_METADATA_MARKER_KEY, ProviderToolCallReferenceEnvelope,
     PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
-    ToolResultIntrinsicOutcome, ToolResultRecordRead, ToolResultRecordSelection,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService,
+    SummaryContextMode, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
+    ThreadMessageId, ThreadScope, ToolResultIntrinsicOutcome, ToolResultRecordRead,
+    ToolResultRecordSelection, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use tokio::{
     sync::{Barrier, Mutex, OwnedMutexGuard},
@@ -1780,6 +1780,7 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("run a tool summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -1865,6 +1866,7 @@ async fn filesystem_store_exact_compaction_replacement_summary_replay_is_idempot
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -1877,6 +1879,7 @@ async fn filesystem_store_exact_compaction_replacement_summary_replay_is_idempot
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -1891,6 +1894,7 @@ async fn filesystem_store_exact_compaction_replacement_summary_replay_is_idempot
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("different summary"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await;
     assert!(matches!(
@@ -1939,6 +1943,26 @@ async fn filesystem_store_overlapping_replacement_summaries_are_rejected() {
             .await
             .unwrap();
     }
+    let non_prefix_barrier = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("invalid non-prefix barrier"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: Some(SummaryContextMode::CumulativeBarrier),
+        })
+        .await;
+    assert!(matches!(
+        non_prefix_barrier,
+        Err(SessionThreadError::InvalidSummaryRange {
+            start_sequence: 2,
+            end_sequence: 3
+        })
+    ));
+
     service
         .create_summary_artifact(CreateSummaryArtifactRequest {
             scope: thread_scope.clone(),
@@ -1948,6 +1972,7 @@ async fn filesystem_store_overlapping_replacement_summaries_are_rejected() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("one and two summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -1961,6 +1986,7 @@ async fn filesystem_store_overlapping_replacement_summaries_are_rejected() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("two and three summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await;
 
@@ -1968,6 +1994,101 @@ async fn filesystem_store_overlapping_replacement_summaries_are_rejected() {
         overlapping,
         Err(SessionThreadError::OverlappingSummaryRange { .. })
     ));
+}
+#[tokio::test]
+async fn filesystem_unvalidated_barrier_outside_retained_suffix_is_never_emitted() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-barrier-paging", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread_scope = scope("fs-barrier-paging");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-barrier-paging").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let covered = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("covered secret"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("covered second row"),
+        })
+        .await
+        .unwrap();
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("barrier must not expose covered secret"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: Some(SummaryContextMode::CumulativeBarrier),
+        })
+        .await
+        .unwrap();
+    service
+        .redact_message(RedactMessageRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: covered.message_id,
+            redaction_ref: "redaction/barrier-paging".into(),
+        })
+        .await
+        .unwrap();
+    for index in 0..6 {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(format!("suffix {index}")),
+            })
+            .await
+            .unwrap();
+    }
+
+    let context = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: thread_scope,
+            thread_id: thread.thread_id,
+            max_messages: 2,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        context
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["suffix 4", "suffix 5"]
+    );
 }
 
 #[tokio::test]
@@ -2749,6 +2870,7 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("summary that mentions secret token"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -6965,6 +7087,7 @@ async fn filesystem_summary_spanning_interior_rejected_busy_is_applied() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("first and third summarized"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -7074,6 +7197,7 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("should not appear"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .unwrap();
@@ -7161,6 +7285,7 @@ async fn create_summary_artifact_surfaces_backend_error_on_storage_write_failure
             summary_kind: SummaryKind::Compaction,
             content: MessageContent::text("compacted summary body"),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+            context_mode: None,
         })
         .await
         .expect_err("summary artifact write must surface the backend failure, not succeed");

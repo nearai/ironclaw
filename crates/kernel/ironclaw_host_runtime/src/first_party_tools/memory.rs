@@ -30,6 +30,7 @@ use ironclaw_host_api::{
     capability::EffectKind,
     dispatch::RuntimeDispatchErrorKind,
     ids::{AuditEventId, CapabilityId, CorrelationId, ExtensionId},
+    invocation::InvocationOrigin,
     resource::ResourceUsage,
 };
 use ironclaw_memory::{
@@ -37,12 +38,12 @@ use ironclaw_memory::{
     MEMORY_WRITE_CAPABILITY_ID, MemoryEventSinkError, MemoryInvocation, MemoryServiceError,
     MemoryServiceErrorKind, MemoryServiceProfileSetRequest, MemoryServiceReadRequest,
     MemoryServiceSearchRequest, MemoryServiceTreeRequest, MemoryServiceWriteRequest,
-    PROFILE_SET_CAPABILITY_ID, PromptSafetyReasonCode, PromptWriteOperation,
-    PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
-    profile_set_response_output, read_response_output, search_response_output,
-    tree_response_output, write_response_output,
+    MemoryServiceWriteResponse, MemoryWriteStatus, PROFILE_SET_CAPABILITY_ID,
+    PromptSafetyReasonCode, PromptWriteOperation, PromptWriteSafetyEvent,
+    PromptWriteSafetyEventKind, PromptWriteSafetyEventSink, profile_set_response_output,
+    read_response_output, search_response_output, tree_response_output, write_response_output,
 };
-use ironclaw_memory_native::NativeMemoryService;
+use ironclaw_memory_native::{NativeMemoryService, resolve_target_path};
 use serde_json::Value;
 
 use crate::{
@@ -271,6 +272,29 @@ async fn serve_native_tool(
         MEMORY_WRITE_CAPABILITY_ID => {
             let parsed = MemoryServiceWriteRequest::from_tool_input(&request.input)
                 .map_err(map_memory_service_error)?;
+            if matches!(
+                request.origin.as_ref(),
+                Some(InvocationOrigin::ScheduledLoopRun(_))
+            ) && !parsed.append
+                && parsed.old_string.is_none()
+                && parsed.expected_content_hash.is_none()
+            {
+                let path = resolve_target_path(&parsed.target, parsed.timezone.as_deref())
+                    .map_err(map_memory_service_error)?;
+                return Ok(write_response_output(MemoryServiceWriteResponse {
+                    status: MemoryWriteStatus::Conflict,
+                    path,
+                    append: false,
+                    content_length: 0,
+                    replacements: None,
+                    message: Some(
+                        "Scheduled full-document rewrites require expected_content_hash. \
+                         Read an existing document and re-apply the change, or use append=true \
+                         to create a new document safely."
+                            .to_string(),
+                    ),
+                }));
+            }
             let response = service
                 .write(invocation, parsed)
                 .await
@@ -658,6 +682,95 @@ mod tests {
             .expect("search result includes content");
         assert!(result_content.len() <= RESULT_BOUND);
         assert!(result_content.contains(QUERY));
+    }
+
+    #[tokio::test]
+    async fn scheduled_full_document_rewrite_requires_expected_content_hash() {
+        use ironclaw_host_api::ids::RunId;
+
+        let handler = handler();
+        let filesystem = Arc::new(InMemoryBackend::new());
+        handler
+            .dispatch(memory_request_over(
+                Arc::clone(&filesystem),
+                MEMORY_WRITE_CAPABILITY_ID,
+                json!({
+                    "target": "memory",
+                    "content": "newer user fact",
+                    "append": false
+                }),
+            ))
+            .await
+            .expect("interactive seed write succeeds");
+
+        let run_id = RunId::new();
+        let mut scheduled = memory_request_over(
+            Arc::clone(&filesystem),
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({
+                "target": "memory",
+                "content": "stale curation",
+                "append": false
+            }),
+        );
+        scheduled.run_id = Some(run_id);
+        scheduled.origin = Some(InvocationOrigin::ScheduledLoopRun(run_id));
+        let conflict = handler
+            .dispatch(scheduled)
+            .await
+            .expect("missing expectation is a model-visible conflict");
+        assert_eq!(conflict.output["status"], "conflict");
+        assert_eq!(conflict.output["path"], "MEMORY.md");
+        assert!(
+            conflict.output["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("append=true"))
+        );
+
+        let current = handler
+            .dispatch(memory_request_over(
+                filesystem,
+                MEMORY_READ_CAPABILITY_ID,
+                json!({"path": "MEMORY.md"}),
+            ))
+            .await
+            .expect("document remains readable");
+        assert_eq!(current.output["content"], "newer user fact");
+    }
+
+    #[tokio::test]
+    async fn scheduled_append_can_create_a_new_document_without_an_expected_hash() {
+        use ironclaw_host_api::ids::RunId;
+
+        let handler = handler();
+        let filesystem = Arc::new(InMemoryBackend::new());
+        let run_id = RunId::new();
+        let mut scheduled = memory_request_over(
+            Arc::clone(&filesystem),
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({
+                "target": "notes/new.md",
+                "content": "new scheduled note",
+                "append": true
+            }),
+        );
+        scheduled.run_id = Some(run_id);
+        scheduled.origin = Some(InvocationOrigin::ScheduledLoopRun(run_id));
+        let written = handler
+            .dispatch(scheduled)
+            .await
+            .expect("append safely creates an absent document");
+        assert_eq!(written.output["status"], "written");
+
+        let current = handler
+            .dispatch(memory_request_over(
+                filesystem,
+                MEMORY_READ_CAPABILITY_ID,
+                json!({"path": "notes/new.md"}),
+            ))
+            .await
+            .expect("new document reads back");
+        assert_eq!(current.output["content"], "new scheduled note\n");
     }
 
     /// An id the bound manifest never declared is refused even if something

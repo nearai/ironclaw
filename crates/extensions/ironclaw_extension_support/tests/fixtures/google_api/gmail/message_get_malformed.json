@@ -1,0 +1,12 @@
+{
+  "id": "msg-malformed",
+  "threadId": "thr-malformed",
+  "payload": {
+    "mimeType": "text/plain",
+    "headers": [
+      { "name": "From", "value": "Ada <ada@example.com>" },
+      { "name": "Subject", "value": "Malformed body" }
+    ],
+    "body": { "size": 3, "data": "%%%" }
+  }
+}

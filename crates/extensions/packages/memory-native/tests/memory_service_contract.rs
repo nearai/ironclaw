@@ -54,6 +54,7 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
                 replace_all: false,
                 metadata: None,
                 timezone: None,
+                expected_content_hash: None,
             },
         )
         .await
@@ -99,6 +100,54 @@ async fn native_provider_reads_writes_lists_and_searches_through_memory_service(
         .expect("search through IronClaw memory service");
     assert_eq!(search.results.len(), 1);
     assert_eq!(search.results[0].path, "notes/alpha.md");
+}
+
+#[tokio::test]
+async fn stale_expected_content_hash_does_not_overwrite_a_concurrent_write() {
+    let service = NativeMemoryService::from_filesystem(Arc::new(InMemoryBackend::new()), None);
+    let invocation = invocation();
+    write_general_doc(&service, "MEMORY.md", "original fact").await;
+
+    let stale_read = service
+        .read(
+            invocation.clone(),
+            MemoryServiceReadRequest {
+                path: "MEMORY.md".to_string(),
+            },
+        )
+        .await
+        .expect("standing memory reads");
+    write_general_doc(&service, "MEMORY.md", "newer user fact").await;
+
+    let outcome = service
+        .write(
+            invocation.clone(),
+            MemoryServiceWriteRequest {
+                target: "MEMORY.md".to_string(),
+                content: "stale curated fact".to_string(),
+                append: false,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+                metadata: None,
+                timezone: None,
+                expected_content_hash: Some(stale_read.content_hash),
+            },
+        )
+        .await
+        .expect("a stale expectation is a model-visible outcome");
+
+    assert_eq!(outcome.status, ironclaw_memory::MemoryWriteStatus::Conflict);
+    let current = service
+        .read(
+            invocation,
+            MemoryServiceReadRequest {
+                path: "MEMORY.md".to_string(),
+            },
+        )
+        .await
+        .expect("standing memory still reads");
+    assert_eq!(current.content, "newer user fact");
 }
 
 #[tokio::test]
@@ -419,6 +468,7 @@ async fn native_write_rejects_reserved_thread_namespace() {
                     replace_all: false,
                     metadata: None,
                     timezone: None,
+                    expected_content_hash: None,
                 },
             )
             .await;
@@ -1230,6 +1280,7 @@ async fn write_general_doc(service: &NativeMemoryService, path: &str, content: &
                 replace_all: false,
                 metadata: None,
                 timezone: None,
+                expected_content_hash: None,
             },
         )
         .await
@@ -1249,6 +1300,7 @@ async fn write_raw_profile(service: &NativeMemoryService, content: &str) {
                 replace_all: false,
                 metadata: None,
                 timezone: None,
+                expected_content_hash: None,
             },
         )
         .await
@@ -1312,6 +1364,7 @@ async fn save_standing_fact(
                 replace_all: false,
                 metadata: None,
                 timezone: None,
+                expected_content_hash: None,
             },
         )
         .await
@@ -1364,6 +1417,7 @@ async fn native_long_term_lane_keeps_search_hits_behind_the_standing_document() 
                 replace_all: false,
                 metadata: None,
                 timezone: None,
+                expected_content_hash: None,
             },
         )
         .await
@@ -1413,6 +1467,7 @@ async fn native_absent_standing_document_degrades_the_lane_to_search_only() {
                 replace_all: false,
                 metadata: None,
                 timezone: None,
+                expected_content_hash: None,
             },
         )
         .await
@@ -1565,6 +1620,7 @@ async fn native_long_term_lane_does_not_readmit_the_standing_document_as_a_searc
                 replace_all: false,
                 metadata: None,
                 timezone: None,
+                expected_content_hash: None,
             },
         )
         .await

@@ -32,9 +32,12 @@ async-trait = "0.1"
 base64 = "0.23.0"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
+encoding_rs = "0.8"
 futures-util = "0.3"
 glob = "0.3"
+htmd = "0.5.5"
 ironclaw_auth = { path = "../../domains/ironclaw_auth" }
+ironclaw_common = { path = "../../contracts/ironclaw_common" }
 ironclaw_extractors = { path = "../../domains/ironclaw_extractors" }
 ironclaw_documents = { path = "../../substrates/ironclaw_documents", version = "0.1.0" }
 ironclaw_filesystem = { path = "../../substrates/ironclaw_filesystem" }
@@ -42,6 +45,7 @@ ironclaw_host_api = { path = "../../contracts/ironclaw_host_api" }
 ironclaw_observability = { path = "../../substrates/ironclaw_observability" }
 ironclaw_safety = { path = "../../substrates/ironclaw_safety" }
 ironclaw_skills = { path = "../../domains/ironclaw_skills" }
+mime = "0.3"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -25,13 +25,12 @@ use super::{
 pub const THREAD_ARTIFACT_SCHEMA: &str = "ironclaw.thread_artifact.v1";
 pub use ironclaw_product_contracts::product_wire::RebornThreadArtifactRequest;
 
-/// A tool-heavy run persists several small rows per invocation. Keep the
-/// independent row-count guard high enough for those trajectories while the
-/// 16 MiB stored-data and 20 MiB serialized-output caps remain the primary
-/// memory and response-size bounds.
+/// A tool-heavy run persists several rows and can retain substantial tool
+/// arguments and results per invocation. Keep the row and byte guards high
+/// enough for those trajectories while bounding memory and response size.
 pub const THREAD_ARTIFACT_MAX_MESSAGES: usize = 10_000;
-const THREAD_ARTIFACT_MAX_STORED_BYTES: usize = 16 * 1024 * 1024;
-const THREAD_ARTIFACT_MAX_SERIALIZED_BYTES: usize = 20 * 1024 * 1024;
+const THREAD_ARTIFACT_MAX_STORED_BYTES: usize = 64 * 1024 * 1024;
+const THREAD_ARTIFACT_MAX_SERIALIZED_BYTES: usize = 80 * 1024 * 1024;
 pub const THREAD_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "thread_artifact",
     paginated: false,

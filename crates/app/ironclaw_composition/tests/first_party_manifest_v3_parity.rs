@@ -331,14 +331,31 @@ fn assert_projection_parity_with_additions(dir: &str, additions: &PackageAdditio
                     a.input_schema_ref, b.input_schema_ref,
                     "{dir}/{id}: input_schema_ref"
                 );
-                // Most v3 manifests drop `output_schema_ref` (schemas remain
-                // package assets); the dialect regained the field with the
-                // redirect-egress tool port, and a v3 declaration must then
-                // match the v2 baseline.
-                assert!(
-                    b.output_schema_ref.is_none() || a.output_schema_ref == b.output_schema_ref,
-                    "{dir}/{id}: a declared v3 output_schema_ref must match the v2 baseline"
-                );
+                if dir == "gmail" && id == "gmail.get_message" {
+                    assert_eq!(
+                        a.output_schema_ref
+                            .as_ref()
+                            .map(|schema_ref| schema_ref.as_str()),
+                        Some("schemas/gmail/get_message.output.v1.json"),
+                        "{dir}/{id}: frozen v2 baseline must remain on provider output"
+                    );
+                    assert_eq!(
+                        b.output_schema_ref
+                            .as_ref()
+                            .map(|schema_ref| schema_ref.as_str()),
+                        Some("schemas/gmail/get_message.output.v2.json"),
+                        "{dir}/{id}: semantic output graduation"
+                    );
+                } else {
+                    // Most v3 manifests drop `output_schema_ref` (schemas remain
+                    // package assets); the dialect regained the field with the
+                    // redirect-egress tool port, and a v3 declaration must then
+                    // match the v2 baseline.
+                    assert!(
+                        b.output_schema_ref.is_none() || a.output_schema_ref == b.output_schema_ref,
+                        "{dir}/{id}: a declared v3 output_schema_ref must match the v2 baseline"
+                    );
+                }
             }
         }
         assert_eq!(

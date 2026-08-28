@@ -512,6 +512,52 @@ async fn builtin_first_party_process_backend_package_and_handlers_keep_shell() {
     assert!(!host_shell.description.contains("/workspace/.venv"));
 }
 
+/// The shell description is the only place the model is told to reduce data
+/// *inside* the pipeline. Without it the model reads whole files and datasets
+/// into the conversation to count or sort them, which burns context on raw
+/// content that the shell could have collapsed to a one-line conclusion. The
+/// steering must reach the model on every process backend, so it lives in the
+/// base description rather than a backend-conditional suffix like the
+/// user-sandbox guidance above.
+#[tokio::test]
+async fn builtin_shell_description_steers_the_model_to_filter_in_the_pipeline() {
+    const STEERING: &str = "Prefer computing the answer in the pipeline";
+
+    for backend in [
+        ProcessBackendKind::LocalHost,
+        ProcessBackendKind::UserSandbox,
+        ProcessBackendKind::Docker,
+    ] {
+        let package = builtin_first_party_package_for_process_backend(backend)
+            .expect("built-in first-party package");
+        let descriptor = package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell descriptor");
+        assert!(
+            descriptor.description.contains(STEERING),
+            "{backend:?} shell descriptor lost the pipeline-filtering steering: {}",
+            descriptor.description
+        );
+        assert!(
+            descriptor.description.contains("conclusions, not content"),
+            "{backend:?} shell descriptor lost the conclusions-not-content rule: {}",
+            descriptor.description
+        );
+
+        // The manifest is the copy that reaches the model surface, so it must
+        // carry the same steering as the descriptor.
+        let manifest = package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == SHELL_CAPABILITY_ID)
+            .expect("shell manifest");
+        assert_eq!(manifest.description, descriptor.description);
+    }
+}
+
 fn assert_coding_manifest_contract(descriptor: &CapabilityDescriptor) {
     let expected_effects = match descriptor.id.as_str() {
         WRITE_FILE_CAPABILITY_ID => vec![EffectKind::WriteFilesystem],
@@ -3907,6 +3953,60 @@ async fn builtin_spawn_subagent_authorization_invokes_through_host_runtime() {
         .await
         .unwrap();
     assert_eq!(output, json!({"authorized": true}));
+}
+
+/// A shell failure the model can correct must say WHAT it broke.
+///
+/// When a first-party handler supplies no `safe_summary`, `failure_from`
+/// substitutes `ModelDiagnostic::unavailable()` — "the capability runtime did
+/// not provide additional diagnostic detail" — and the model retries the
+/// identical call because nothing told it what to change. A baseline benchmark
+/// run measured 119 such blind failures across 40 tasks. These two shell
+/// rejections (over-limit timeout, unsupported scoped workdir) were among the
+/// `resource` and `client` buckets; both are trivially correctable once named.
+#[tokio::test]
+async fn builtin_shell_rejections_name_the_cause_for_the_model() {
+    // Over-limit timeout: the model must learn the ceiling to lower its value.
+    let failure = invoke_failure_with_context(
+        &runtime(),
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo hi", "timeout": 9_000}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await;
+    assert_eq!(failure.kind, FailureKind::Resource);
+    let summary = failure
+        .safe_summary()
+        .expect("over-limit timeout must carry a model-visible reason, not a bare category");
+    assert!(
+        summary.contains("timeout") && summary.contains("120"),
+        "summary must name the ceiling the model has to respect, got: {summary}"
+    );
+
+    // Scoped workdir on a backend that cannot honour it: the model must learn
+    // to drop `workdir` rather than re-sending the same rejected call.
+    let root = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(root.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts_and_network(
+        [SHELL_CAPABILITY_ID],
+        mounts,
+        shell_test_policy(),
+    );
+    let failure = invoke_failure_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo hi", "workdir": "/workspace"}),
+        context,
+    )
+    .await;
+    let summary = failure
+        .safe_summary()
+        .expect("workdir rejection must carry a model-visible reason, not a bare category");
+    assert!(
+        summary.contains("workdir"),
+        "summary must name the offending parameter, got: {summary}"
+    );
 }
 
 #[tokio::test]

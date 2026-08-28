@@ -8,9 +8,9 @@
 use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 
 use crate::{
-    ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository, MemoryBackend,
-    MemoryBackendCapabilities, MemoryBackendWriteOptions, MemorySearchRequest, MemorySearchResult,
-    MemoryWriteOutcome, RepositoryMemoryBackend,
+    ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository, MemoryAppendOutcome,
+    MemoryBackend, MemoryBackendCapabilities, MemoryBackendWriteOptions, MemorySearchRequest,
+    MemorySearchResult, MemoryWriteOutcome, RepositoryMemoryBackend,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -231,10 +231,29 @@ impl NativeMemoryService {
             let context = context.clone().with_prompt_write_safety_allowance(
                 PromptSafetyAllowanceId::empty_prompt_file_clear(),
             );
-            self.backend
-                .write_document_with_backend_options(&context, &path, b"", &options)
-                .await
-                .map_err(MemoryServiceError::operation_from)?;
+            let outcome = match request.expected_content_hash.as_deref() {
+                Some(expected) => self
+                    .backend
+                    .compare_and_write_document_with_backend_options(
+                        &context,
+                        &path,
+                        Some(expected),
+                        b"",
+                        &options,
+                    )
+                    .await
+                    .map_err(MemoryServiceError::operation_from)?,
+                None => {
+                    self.backend
+                        .write_document_with_backend_options(&context, &path, b"", &options)
+                        .await
+                        .map_err(MemoryServiceError::operation_from)?;
+                    MemoryWriteOutcome::Written
+                }
+            };
+            if outcome == MemoryWriteOutcome::Conflict {
+                return Ok(write_conflict_response(&resolved_path));
+            }
             return Ok(MemoryServiceWriteResponse {
                 status: MemoryWriteStatus::Cleared,
                 path: resolved_path.clone(),
@@ -267,6 +286,7 @@ impl NativeMemoryService {
                     old_string,
                     new_string,
                     replace_all: request.replace_all,
+                    expected_content_hash: request.expected_content_hash.as_deref(),
                 })
                 .await;
         }
@@ -284,11 +304,49 @@ impl NativeMemoryService {
             // Berlin` and are surfaced to a later turn as one fact. Terminate
             // every appended entry with exactly one newline.
             let entry = format!("{}\n", request.content.trim_end());
-            self.backend
-                .append_document_with_backend_options(&context, &path, entry.as_bytes(), &options)
+            if let Some(expected) = request.expected_content_hash.as_deref() {
+                let outcome = self
+                    .backend
+                    .compare_and_append_document_with_backend_options(
+                        &context,
+                        &path,
+                        Some(expected),
+                        entry.as_bytes(),
+                        &options,
+                    )
+                    .await
+                    .map_err(MemoryServiceError::operation_from)?;
+                if outcome == MemoryAppendOutcome::Conflict {
+                    return Ok(write_conflict_response(&resolved_path));
+                }
+            } else {
+                self.backend
+                    .append_document_with_backend_options(
+                        &context,
+                        &path,
+                        entry.as_bytes(),
+                        &options,
+                    )
+                    .await
+                    .map_err(MemoryServiceError::operation_from)?;
+            }
+            entry.len()
+        } else if let Some(expected) = request.expected_content_hash.as_deref() {
+            let outcome = self
+                .backend
+                .compare_and_write_document_with_backend_options(
+                    &context,
+                    &path,
+                    Some(expected),
+                    request.content.as_bytes(),
+                    &options,
+                )
                 .await
                 .map_err(MemoryServiceError::operation_from)?;
-            entry.len()
+            if outcome == MemoryWriteOutcome::Conflict {
+                return Ok(write_conflict_response(&resolved_path));
+            }
+            request.content.len()
         } else {
             self.backend
                 .write_document_with_backend_options(
@@ -332,6 +390,7 @@ impl NativeMemoryService {
         Ok(MemoryServiceReadResponse {
             path: path.relative_path().to_string(),
             word_count: content.split_whitespace().count(),
+            content_hash: content_bytes_sha256(content.as_bytes()),
             content,
         })
     }
@@ -703,7 +762,14 @@ impl NativeMemoryService {
                 return Err(MemoryServiceError::operation());
             };
             let existing = String::from_utf8(bytes).map_err(MemoryServiceError::operation_from)?;
-            let expected = content_bytes_sha256(existing.as_bytes());
+            let current_hash = content_bytes_sha256(existing.as_bytes());
+            if request
+                .expected_content_hash
+                .is_some_and(|expected| expected != current_hash)
+            {
+                return Ok(write_conflict_response(request.resolved_path));
+            }
+            let expected = current_hash;
             let replacements = existing.matches(request.old_string).count();
             if replacements == 0 {
                 return Err(MemoryServiceError::input());
@@ -745,9 +811,23 @@ struct PatchDocumentRequest<'a> {
     path: &'a MemoryDocumentPath,
     resolved_path: &'a str,
     options: &'a MemoryBackendWriteOptions,
+    expected_content_hash: Option<&'a str>,
     old_string: &'a str,
     new_string: &'a str,
     replace_all: bool,
+}
+
+fn write_conflict_response(path: &str) -> MemoryServiceWriteResponse {
+    MemoryServiceWriteResponse {
+        status: MemoryWriteStatus::Conflict,
+        path: path.to_string(),
+        append: false,
+        content_length: 0,
+        replacements: None,
+        message: Some(
+            "Document changed since it was read. Re-read it and re-apply the change.".to_string(),
+        ),
+    }
 }
 
 fn build_native_backend(
@@ -774,7 +854,13 @@ fn build_native_backend(
     Arc::new(backend)
 }
 
-fn resolve_target_path(target: &str, timezone: Option<&str>) -> Result<String, MemoryServiceError> {
+/// Resolve a model-facing native-memory target alias to its canonical relative
+/// document path. The host handler uses the same resolver for pre-dispatch
+/// outcomes so conflict and success responses cannot disagree on `path`.
+pub fn resolve_target_path(
+    target: &str,
+    timezone: Option<&str>,
+) -> Result<String, MemoryServiceError> {
     match target {
         "memory" => Ok(MEMORY_PATH.to_string()),
         "heartbeat" => Ok(HEARTBEAT_PATH.to_string()),

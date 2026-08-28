@@ -9,6 +9,9 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_auth::{
+    GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
+};
 use ironclaw_threads::MessageKind;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
@@ -141,6 +144,138 @@ async fn runs_http_tool_call_through_recorded_egress() {
     h.assert_latest_result_json_round_trips("builtin.http")
         .await
         .expect("first-party output round-trips through durable result_read");
+}
+
+/// A provider-heavy Gmail response must be normalized by its owning producer
+/// before the unchanged staged/durable result path exposes it to the model.
+#[test]
+fn gmail_get_message_persists_semantic_markdown_without_provider_noise() {
+    run_async_test_with_stack(
+        "gmail_get_message_persists_semantic_markdown_without_provider_noise",
+        gmail_get_message_persists_semantic_markdown_without_provider_noise_impl,
+    );
+}
+
+async fn gmail_get_message_persists_semantic_markdown_without_provider_noise_impl() {
+    let group = RebornIntegrationGroup::extension_lifecycle_google_oauth_configured()
+        .await
+        .expect("Google-configured extension group builds");
+    let lifecycle = group
+        .thread("gmail-semantic-output-install")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "gmail"}),
+            ),
+            RebornScriptedReply::text("gmail ready"),
+        ])
+        .build()
+        .await
+        .expect("Gmail lifecycle thread builds");
+    lifecycle
+        .seed_capability_credential_account(
+            "google",
+            "itest Gmail semantic output",
+            &[
+                GOOGLE_GMAIL_MODIFY_SCOPE,
+                GOOGLE_GMAIL_READONLY_SCOPE,
+                GOOGLE_GMAIL_SEND_SCOPE,
+            ],
+        )
+        .await
+        .expect("Gmail account is seeded");
+    lifecycle
+        .submit_turn("install Gmail")
+        .await
+        .expect("Gmail installs");
+
+    let caller = group
+        .thread("gmail-semantic-output-call")
+        .script([
+            RebornScriptedReply::tool_call("gmail.get_message", json!({"message_id": "msg-html"})),
+            RebornScriptedReply::text("message inspected"),
+        ])
+        .build()
+        .await
+        .expect("Gmail caller thread builds");
+    let mut provider_response: serde_json::Value = serde_json::from_str(include_str!(
+        "../../crates/extensions/ironclaw_extension_support/tests/fixtures/google_api/gmail/message_get_html.json"
+    ))
+    .expect("recorded Gmail response parses");
+    provider_response["payload"]["headers"]
+        .as_array_mut()
+        .expect("recorded Gmail headers are an array")
+        .push(json!({
+            "name": "ARC-Authentication-Results",
+            "value": "provider-routing-noise".repeat(6 * 1024)
+        }));
+    let provider_bytes =
+        serde_json::to_vec(&provider_response).expect("provider fixture serializes");
+    assert!(
+        provider_bytes.len() > 100 * 1024,
+        "fixture must reproduce the provider-heavy output class"
+    );
+    caller
+        .capability_recorder
+        .install_network_response_script(200, provider_bytes)
+        .expect("Gmail provider response is scripted on mediated egress");
+
+    caller
+        .submit_turn("read the Gmail message")
+        .await
+        .expect("Gmail get_message turn completes");
+    caller
+        .assert_tool_invoked("gmail.get_message")
+        .await
+        .expect("production first-party Gmail capability dispatches");
+
+    let output = caller
+        .tool_result_output("gmail.get_message")
+        .await
+        .expect("processed Gmail result is recorded");
+    assert_eq!(output["body"]["headers"]["subject"], "Launch notes");
+    assert_eq!(output["body"]["body"]["kind"], "markdown");
+    let stored = serde_json::to_string(&output).expect("processed Gmail result serializes");
+    assert!(stored.contains("# Launch notes"), "{stored}");
+    assert!(stored.contains("Readable **decoded** message."), "{stored}");
+    for excluded in [
+        "ARC-Seal",
+        "DKIM-Signature",
+        "ARC-Authentication-Results",
+        "provider-routing-noise",
+        "data:image",
+        "PGgxPkxhdW5jaCBub3Rl",
+    ] {
+        assert!(!stored.contains(excluded), "leaked {excluded}: {stored}");
+    }
+
+    let envelopes = caller
+        .persisted_tool_result_envelopes()
+        .await
+        .expect("Gmail result envelope persists");
+    let observation = envelopes
+        .last()
+        .and_then(|envelope| envelope.model_observation.as_ref())
+        .expect("Gmail result has a model-visible observation");
+    let serialized_observation =
+        serde_json::to_vec(observation).expect("Gmail model observation serializes");
+    assert!(
+        serialized_observation.len() <= 4 * 1024,
+        "Gmail model observation must remain within 4 KiB"
+    );
+    let observation_text =
+        String::from_utf8(serialized_observation).expect("model observation is UTF-8 JSON");
+    assert!(
+        observation_text.contains("Launch notes"),
+        "{observation_text}"
+    );
+    assert!(observation_text.contains("Readable"), "{observation_text}");
+    assert!(!observation_text.contains("provider-routing-noise"));
+
+    caller
+        .assert_latest_result_json_round_trips("gmail.get_message")
+        .await
+        .expect("processed Gmail result round-trips through durable result_read");
 }
 
 /// `github.handle_webhook` is local normalization rather than a provider API

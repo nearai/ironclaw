@@ -184,12 +184,13 @@ async fn long_tool_run_keeps_the_original_task_after_raw_history_exceeds_window_
 }
 
 #[tokio::test]
-async fn compaction_summary_chain_preserves_earlier_compacted_history() {
+async fn cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_history() {
     const OLDEST_TURN: &str = "oldest transcript marker before compaction";
     const MIDDLE_TURN: &str = "middle transcript marker before the newest summary";
     const RETAINED_TAIL: &str = "retained transcript tail after the newest summary";
-    const OLDER_SUMMARY: &str = "older summary preserving earlier compacted history";
-    const NEWEST_SUMMARY: &str = "newest incremental compaction summary";
+    const OLDER_SUMMARY: &str = "obsolete incremental summary envelope";
+    const CUMULATIVE_SUMMARY: &str =
+        "cumulative checkpoint preserving the oldest and middle transcript facts";
 
     let harness = RebornIntegrationHarness::test_default()
         .script([
@@ -223,42 +224,48 @@ async fn compaction_summary_chain_preserves_earlier_compacted_history() {
             oldest.sequence,
             middle.sequence.checked_sub(1).expect("ordered messages"),
             OLDER_SUMMARY,
+            None,
         )
         .await
         .expect("older summary persists");
     harness
         .create_compaction_summary_for_test(
-            middle.sequence,
+            oldest.sequence,
             retained.sequence.checked_sub(1).expect("ordered messages"),
-            NEWEST_SUMMARY,
+            CUMULATIVE_SUMMARY,
+            Some(ironclaw_threads::SummaryContextMode::CumulativeBarrier),
         )
         .await
-        .expect("newest summary persists");
+        .expect("cumulative summary persists");
 
     harness
-        .submit_turn("build the prompt after the newest summary")
+        .submit_turn("build the prompt after the cumulative barrier")
         .await
         .expect("post-summary turn");
     harness
-        .assert_last_model_message_content_contains(NEWEST_SUMMARY)
+        .assert_last_model_message_content_contains(CUMULATIVE_SUMMARY)
         .await
-        .expect("newest summary reaches the prompt");
+        .expect("cumulative summary reaches the prompt");
     harness
         .assert_last_model_message_content_contains(RETAINED_TAIL)
         .await
         .expect("tail after the barrier remains visible");
     harness
-        .assert_last_model_message_content_contains(OLDER_SUMMARY)
+        .assert_last_model_message_content_not_contains(OLDER_SUMMARY)
         .await
-        .expect("earlier compacted history remains represented");
+        .expect("superseded incremental summary stays out of the prompt");
     harness
         .assert_last_model_message_content_not_contains(OLDEST_TURN)
         .await
-        .expect("raw history covered by a summary stays out of the prompt");
+        .expect("oldest raw history stays behind the barrier");
+    harness
+        .assert_last_model_message_content_not_contains(MIDDLE_TURN)
+        .await
+        .expect("middle raw history stays behind the barrier");
     harness
         .assert_conversation_history_contains(OLDEST_TURN)
         .await
-        .expect("summary projection does not delete durable history");
+        .expect("barrier projection does not delete durable history");
 }
 
 #[tokio::test]
