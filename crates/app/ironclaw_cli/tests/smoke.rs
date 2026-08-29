@@ -754,7 +754,15 @@ fn docker_reborn_production_config_uses_postgres_storage() {
     assert_eq!(policy.default_profile.as_deref(), Some("secure_default"));
 }
 
-#[cfg(unix)]
+// Linux, not just unix: this is the one entrypoint test that reaches the
+// canonicalized containment check, and that check runs `readlink -m`. `-m` is a
+// GNU coreutils extension, so on a BSD `readlink` the entrypoint fails closed
+// with "Failed to resolve ..." and the test fails on every macOS checkout. The
+// entrypoint is a Linux container's, so this asserts container behaviour and
+// belongs where the container runs. The sibling `rejects_*` tests stay `unix`:
+// they trip the lexical `IRONCLAW_REBORN_HOME` check and exit before any
+// canonicalization, so they pass on macOS for the right reason.
+#[cfg(target_os = "linux")]
 #[test]
 fn docker_reborn_entrypoint_uses_railway_volume_mount_for_home() {
     let temp = tempfile::tempdir().expect("tempdir");
