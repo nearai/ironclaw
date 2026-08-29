@@ -313,6 +313,48 @@ async fn github_webhook_normalization_dispatches_through_bundled_wasm() {
         .expect("local webhook normalization made no provider request");
 }
 
+/// Provider encoding is owned by the GitHub producer: decoded text, not the
+/// base64 transport field, must cross the shared durable writer and result_read.
+#[tokio::test]
+async fn github_file_content_decodes_before_the_durable_result_path() {
+    const ENCODED: &str = "UHJvdmlkZXItZW5jb2RlZCBub2lzZQ==";
+    let h = RebornIntegrationHarness::test_default()
+        .with_github_network_response(
+            200,
+            format!(
+                r#"{{"path":"notes.txt","type":"file","encoding":"base64","content":"{ENCODED}"}}"#
+            ),
+        )
+        .script([
+            RebornScriptedReply::tool_call(
+                "github.get_file_content",
+                json!({"owner": "nearai", "repo": "ironclaw", "path": "notes.txt"}),
+            ),
+            RebornScriptedReply::text("file read"),
+        ])
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn("read the GitHub file")
+        .await
+        .expect("turn completes");
+    let output = h
+        .tool_result_output("github.get_file_content")
+        .await
+        .expect("GitHub file result was durably recorded");
+    assert_eq!(output["encoding"], json!("utf-8"));
+    assert_eq!(output["content"], json!("Provider-encoded noise"));
+    assert!(!output.to_string().contains(ENCODED));
+    h.assert_model_request_contains("Provider-encoded noise")
+        .await
+        .expect("decoded content reached the next model request");
+    assert!(h.assert_model_request_contains(ENCODED).await.is_err());
+    h.assert_latest_result_json_round_trips("github.get_file_content")
+        .await
+        .expect("decoded GitHub result round-trips through result_read");
+}
+
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
 
 /// A prior assistant refusal is conversation history, not capability truth.
@@ -1942,6 +1984,63 @@ async fn result_read_out_of_range_max_bytes_surfaces_repair_guidance_impl() {
     )
     .await
     .expect("model-visible issue echoes the offending value");
+}
+
+/// Issue #7981: the two JSON-budget failures point in opposite directions and
+/// must not share guidance. `JsonViewBudgetTooSmall` means the page did not fit
+/// and the model must ask for MORE; `InvalidJsonBudget` means the request was
+/// above the ceiling and it must ask for LESS. Both collapsed into one arm
+/// reading "larger JSON page budget within the advertised range", which discarded
+/// the real bound both variants already carry and told an over-budget caller to
+/// grow. Production run `13bad7f5` retried `max_bytes: 400` five times against
+/// that text. This drives the too-small path end-to-end and pins the numbers in
+/// the model-visible transcript.
+#[test]
+fn result_read_undersized_json_budget_states_the_reachable_ceiling() {
+    run_async_test_with_stack(
+        "result_read_undersized_json_budget_states_the_reachable_ceiling",
+        result_read_undersized_json_budget_states_the_reachable_ceiling_impl,
+    );
+}
+
+async fn result_read_undersized_json_budget_states_the_reachable_ceiling_impl() {
+    let fixture = large_nested_result_fixture().await;
+    let h = &fixture.harness;
+
+    h.push_script([
+        RebornScriptedReply::tool_call(
+            "builtin.result_read",
+            json!({
+                "result_ref": &fixture.result_ref,
+                "offset": 0,
+                "max_bytes": 4,
+                "json_pointer": "/payload/items/2345/label",
+            }),
+        ),
+        RebornScriptedReply::text("recovered from the undersized budget"),
+    ]);
+    h.submit_turn("read the label through a budget too small to hold it")
+        .await
+        .expect("undersized JSON budget remains model-correctable");
+
+    h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, "invalid_value")
+        .await
+        .expect("an undersized JSON page is a structured model-visible input failure");
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        &format!(
+            "\"expected\":\"a JSON page budget above 4, up to {}\"",
+            ironclaw_host_api::model_result_preview::MODEL_RESULT_PREVIEW_MAX_BYTES
+        ),
+    )
+    .await
+    .expect("the model is told the ceiling it may actually grow to, not just 'larger'");
+    h.assert_conversation_history_role_contains(
+        MessageKind::ToolResultReference,
+        "\"received\":\"4\"",
+    )
+    .await
+    .expect("the model-visible issue echoes the budget that failed");
 }
 
 /// A malformed `result_ref` carrying a sensitive marker phrase the

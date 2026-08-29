@@ -1,5 +1,7 @@
 """Contract tests for the canonical integration-test inventory."""
 
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,6 +14,58 @@ import integration_test_inventory as inventory  # noqa: E402
 
 
 class IntegrationTestInventoryTests(unittest.TestCase):
+    def run_group_runner(
+        self, root: Path, registrations: list[tuple[str, str]]
+    ) -> tuple[subprocess.CompletedProcess[str], str]:
+        manifest = "".join(
+            f'[[test]]\nname = "{name}"\npath = "{path}"\n\n'
+            for name, path in registrations
+        )
+        (root / "Cargo.toml").write_text(manifest, encoding="utf-8")
+
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        command_log = root / "commands.log"
+        for command, body in (
+            (
+                "timeout",
+                """#!/usr/bin/env bash
+printf 'timeout:%s\\n' "$*" >>"${COMMAND_LOG}"
+while [[ "$1" == --* ]]; do shift; done
+shift
+"$@"
+""",
+            ),
+            (
+                "cargo",
+                """#!/usr/bin/env bash
+printf 'cargo:%s\\n' "$*" >>"${COMMAND_LOG}"
+""",
+            ),
+        ):
+            executable = bin_dir / command
+            executable.write_text(body, encoding="utf-8")
+            executable.chmod(0o755)
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "COMMAND_LOG": str(command_log),
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "REBORN_GROUP_TEST_TIMEOUT": "9m",
+            }
+        )
+        completed = subprocess.run(
+            [str(ROOT / "scripts/ci/run-reborn-group-tests.sh")],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        log = command_log.read_text(encoding="utf-8") if command_log.exists() else ""
+        return completed, log
+
     def test_preserves_current_registration_projections(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -75,6 +129,99 @@ test = [
             with self.subTest(field=field, value=value):
                 with self.assertRaisesRegex(ValueError, field):
                     inventory.validate_inventory_document(malformed)
+
+    def test_live_repository_group_topology_is_valid(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/ci/lib/integration_test_inventory.py"),
+                "--validate-group-topology",
+                str(ROOT),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(
+            completed.returncode,
+            0,
+            "live integration group topology validation failed:\n"
+            f"stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}",
+        )
+
+    def test_group_runner_rejects_invalid_topology_before_execution(self) -> None:
+        cases = (
+            ([], (), "No integration test group directories"),
+            ([], ("group_orphan/main.rs",), "unregistered integration test group"),
+            ([], ("group_incomplete/scenario.rs",), "missing main.rs"),
+            (
+                [("reborn_group_declared", "tests/integration/group_actual/main.rs")],
+                ("group_actual/main.rs",),
+                "group registration path mismatch",
+            ),
+            (
+                [("reborn_group_missing", "tests/integration/group_missing/main.rs")],
+                (),
+                "missing main.rs",
+            ),
+            (
+                [
+                    ("reborn_group_valid", "tests/integration/group_valid/main.rs"),
+                    ("reborn_group_outside", "tests/other.rs"),
+                ],
+                ("group_valid/main.rs",),
+                "group registration path mismatch",
+            ),
+        )
+        for registrations, group_entries, error in cases:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for entry in group_entries:
+                    group_file = root / "tests/integration" / entry
+                    group_file.parent.mkdir(parents=True)
+                    group_file.touch()
+
+                completed, command_log = self.run_group_runner(root, registrations)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(error, completed.stderr)
+                self.assertEqual(command_log, "")
+
+    def test_group_runner_preserves_valid_execution_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for suffix in ("zeta", "alpha"):
+                group = root / f"tests/integration/group_{suffix}"
+                group.mkdir(parents=True)
+                (group / "main.rs").touch()
+
+            completed, command_log = self.run_group_runner(
+                root,
+                [
+                    ("reborn_group_zeta", "tests/integration/group_zeta/main.rs"),
+                    ("reborn_group_alpha", "tests/integration/group_alpha/main.rs"),
+                ],
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(
+                command_log.splitlines(),
+                [
+                    "timeout:--signal=INT --kill-after=30s 9m cargo test -p "
+                    "ironclaw_integration_tests --test reborn_group_alpha "
+                    "--ignore-rust-version -- --nocapture",
+                    "cargo:test -p ironclaw_integration_tests --test "
+                    "reborn_group_alpha --ignore-rust-version -- --nocapture",
+                    "timeout:--signal=INT --kill-after=30s 9m cargo test -p "
+                    "ironclaw_integration_tests --test reborn_group_zeta "
+                    "--ignore-rust-version -- --nocapture",
+                    "cargo:test -p ironclaw_integration_tests --test "
+                    "reborn_group_zeta --ignore-rust-version -- --nocapture",
+                ],
+            )
 
 
 if __name__ == "__main__":

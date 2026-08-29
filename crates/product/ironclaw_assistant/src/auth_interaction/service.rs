@@ -5,7 +5,11 @@ use ironclaw_auth::{
     AuthChallenge, AuthFlowId, AuthFlowManager, AuthFlowStatus, AuthProductError,
     CredentialAccountId, CredentialSelectionInput,
 };
-use ironclaw_host_api::turn::{TurnGateRef, TurnRunId, TurnStatus};
+use ironclaw_host_api::turn::{TurnActor, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_notifications::{
+    NotificationInboxError, NotificationInboxStorePort, NotificationKind,
+    NotificationMutationRequest, NotificationRecipient,
+};
 use ironclaw_turns::{
     GateResumeDisposition, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
     TurnErrorCategory,
@@ -72,6 +76,8 @@ pub struct DefaultAuthInteractionService {
     read_model: Arc<dyn AuthInteractionReadModel>,
     flow_manager: Arc<dyn AuthFlowManager>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    // arch-exempt: optional_arc, standalone/test services may omit the durable Inbox while production wires verified auth lifecycle closure, plan #7875
+    notification_inbox: Option<Arc<dyn NotificationInboxStorePort>>,
 }
 
 impl DefaultAuthInteractionService {
@@ -84,6 +90,55 @@ impl DefaultAuthInteractionService {
             read_model,
             flow_manager,
             turn_coordinator,
+            notification_inbox: None,
+        }
+    }
+
+    pub fn with_notification_inbox(
+        mut self,
+        notification_inbox: Arc<dyn NotificationInboxStorePort>,
+    ) -> Self {
+        self.notification_inbox = Some(notification_inbox);
+        self
+    }
+
+    async fn resolve_auth_notification(
+        &self,
+        scope: &TurnScope,
+        actor: &TurnActor,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) {
+        let Some(inbox) = self.notification_inbox.as_ref() else {
+            return;
+        };
+        let notification_id = match crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::AuthenticationRequired,
+            Some(gate_ref.as_str()),
+        ) {
+            Ok(notification_id) => notification_id,
+            Err(error) => {
+                tracing::debug!(%error, %run_id, "invalid auth Inbox notification id");
+                return;
+            }
+        };
+        let result = inbox
+            .resolve(NotificationMutationRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: actor.user_id.clone(),
+                },
+                notification_id,
+                occurred_at: chrono::Utc::now(),
+            })
+            .await;
+        if let Err(error) = result
+            && !matches!(error, NotificationInboxError::NotificationNotFound)
+        {
+            // Inbox lifecycle is deliberately best-effort: a notification
+            // backend outage must not undo verified credential recovery.
+            tracing::debug!(%error, %run_id, "failed to resolve auth Inbox notification");
         }
     }
 
@@ -158,7 +213,25 @@ impl DefaultAuthInteractionService {
             }
         };
         validate_completion_ref(&gate, completion)?;
-        self.resume_auth_gate(request, run_id, None).await
+        self.resume_auth_gate_and_resolve(request, run_id, None)
+            .await
+    }
+
+    async fn resume_auth_gate_and_resolve(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        run_id: TurnRunId,
+        resume_disposition: Option<GateResumeDisposition>,
+    ) -> Result<ResolveAuthInteractionResponse, ProductSurfaceFailure> {
+        let scope = request.scope.clone();
+        let actor = request.actor.clone();
+        let gate_ref = request.gate_ref.clone();
+        let response = self
+            .resume_auth_gate(request, run_id, resume_disposition)
+            .await?;
+        self.resolve_auth_notification(&scope, &actor, run_id, &gate_ref)
+            .await;
+        Ok(response)
     }
 
     async fn resume_auth_gate(

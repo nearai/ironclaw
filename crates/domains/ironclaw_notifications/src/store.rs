@@ -8,7 +8,10 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    ids::ThreadId, path::ScopedPath, resource::ResourceScope, turn::TurnRunId,
+    ids::{ThreadId, VendorId},
+    path::ScopedPath,
+    resource::ResourceScope,
+    turn::TurnRunId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +85,8 @@ struct PersistedNotificationSourceV1 {
     thread_id: ThreadId,
     turn_run_id: Option<TurnRunId>,
     lifecycle_ref: Option<LifecycleRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    credential_providers: Vec<VendorId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +152,7 @@ where
         request: PublishNotificationRequest,
     ) -> Result<NotificationRecord, NotificationInboxError> {
         validate_new_notification_action(&request.source, &request.action)?;
+        validate_notification_source(request.kind, &request.source)?;
         let scope = notification_resource_scope(&request.recipient);
         let path = notification_inbox_path()?;
         let recipient = request.recipient.clone();
@@ -172,15 +178,38 @@ where
                         .iter_mut()
                         .find(|record| record.id == request.id)
                     {
+                        let same_source_identity = existing.source.thread_id
+                            == request.source.thread_id
+                            && existing.source.turn_run_id == request.source.turn_run_id
+                            && existing.source.lifecycle_ref == request.source.lifecycle_ref;
+                        let providers_match = existing.source.credential_providers
+                            == request.source.credential_providers;
+                        let provider_metadata_is_compatible = providers_match
+                            || (request.kind == crate::NotificationKind::AuthenticationRequired
+                                && (existing.source.credential_providers.is_empty()
+                                    || request.source.credential_providers.is_empty()));
                         if existing.recipient != request.recipient
                             || existing.kind != request.kind
                             || existing.severity != request.severity
-                            || existing.source != request.source
+                            || !same_source_identity
+                            || !provider_metadata_is_compatible
                             || existing.action != request.action
                         {
                             return Err(NotificationInboxError::InvalidRequest {
                                 reason: "notification id conflicts with an existing event",
                             });
+                        }
+                        if existing.source.credential_providers.is_empty()
+                            && !request.source.credential_providers.is_empty()
+                        {
+                            // One-way compatibility enrichment for records
+                            // written before auth sources carried providers.
+                            // Mixed-version retries with an empty set remain a
+                            // no-op and never erase trusted metadata.
+                            existing.source.credential_providers =
+                                request.source.credential_providers.clone();
+                            let record = existing.clone();
+                            return Ok(CasApply::new(snapshot, record));
                         }
                         if matches!(
                             request.kind,
@@ -523,6 +552,20 @@ fn validate_new_notification_action(
     validate_notification_action(source, action)
 }
 
+fn validate_notification_source(
+    kind: crate::NotificationKind,
+    source: &NotificationSource,
+) -> Result<(), NotificationInboxError> {
+    if kind != crate::NotificationKind::AuthenticationRequired
+        && !source.credential_providers.is_empty()
+    {
+        return Err(NotificationInboxError::InvalidRequest {
+            reason: "credential providers are only valid for authentication notifications",
+        });
+    }
+    Ok(())
+}
+
 fn validate_snapshot(
     snapshot: &NotificationInboxSnapshot,
     recipient: &NotificationRecipient,
@@ -642,6 +685,7 @@ fn notification_record_to_persisted_v1(
             thread_id: legacy_thread_id,
             turn_run_id: record.source.turn_run_id,
             lifecycle_ref: record.source.lifecycle_ref.clone(),
+            credential_providers: record.source.credential_providers.clone(),
         },
         action,
         source_v2,
@@ -698,6 +742,7 @@ fn notification_record_from_persisted_v1(
             thread_id: source_thread_id,
             turn_run_id: record.source.turn_run_id,
             lifecycle_ref: record.source.lifecycle_ref,
+            credential_providers: record.source.credential_providers,
         },
         action,
         created_at: record.created_at,
@@ -938,6 +983,7 @@ mod tests {
                     lifecycle_ref: Some(
                         LifecycleRef::new("trigger-fire:rollback").expect("lifecycle ref"),
                     ),
+                    credential_providers: Vec::new(),
                 },
                 action: NotificationAction::None,
                 created_at: occurred_at,
@@ -1113,6 +1159,7 @@ mod tests {
                     thread_id: Some(thread_id.clone()),
                     turn_run_id: None,
                     lifecycle_ref: None,
+                    credential_providers: Vec::new(),
                 },
                 action: NotificationAction::OpenThread { thread_id },
                 initial_state: crate::NotificationInitialState::Resolved,

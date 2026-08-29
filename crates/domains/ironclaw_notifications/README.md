@@ -54,6 +54,11 @@ archive, so a rollback rewrite cannot permanently hide or make an unarchived
 record eligible for capacity eviction. A rollback reader must never receive an
 actionable link for either representation.
 
+Authentication-required sources carry the credential-authority providers from
+the committed suspension. Provider-scoped recovery may settle only records
+whose persisted provider set contains that provider; legacy records without
+the metadata remain open until an authoritative run transition resolves them.
+
 ## Validation
 
 ```bash

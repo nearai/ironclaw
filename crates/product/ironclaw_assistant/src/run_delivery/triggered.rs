@@ -1,7 +1,10 @@
-//! Watches a trigger-submitted run and tells the creator's notification channels
-//! when it needs them through the [`DeliveryCoordinator`]. It deliberately does
-//! NOT push results: answers live in the fire's own run thread, and channel
-//! delivery is the model's explicit
+// arch-exempt: large_file, triggered watcher remains in the owning run_delivery split, plan #6175
+//! The background-run notifier: watches a trigger-submitted run and tells the
+//! creator's **notification channels** when it needs them — an approval gate,
+//! an expired credential, or a failure — through the [`DeliveryCoordinator`].
+//!
+//! It deliberately does NOT push results. A background run's answer lives in
+//! the fire's own run thread; putting it on a channel is the model's explicit
 //! `builtin.outbound_deliver` call, never an automatic push (spec §8).
 
 use ironclaw_product_contracts::prompt_source::BlockedAuthPromptRequest;
@@ -823,15 +826,9 @@ async fn notify_background_run(
                 )
                 .await;
         }
-        if let Some(kind) = super::blocked_status_notification_kind(state.status) {
+        if let Some((kind, gate_ref)) = super::blocked_status_notification(&state) {
             services
-                .publish_inbox_notification(
-                    &creator_user_id,
-                    &scope,
-                    run_id,
-                    kind,
-                    state.gate_ref.as_ref().map(|gate| gate.as_str()),
-                )
+                .publish_inbox_notification(&creator_user_id, &scope, run_id, kind, Some(gate_ref))
                 .await;
         }
         if result_delivery == ResultDeliveryPolicy::SuppressWhenNothingToReport
@@ -913,6 +910,22 @@ async fn notify_background_run(
                     error = %err,
                     "background run notification build failed"
                 );
+                if state.status == TurnStatus::BlockedAuth
+                    && let Some(marker) = blocked_actionable_marker(&state)
+                {
+                    // The Inbox publication happened before optional prompt
+                    // enrichment. Keep its lifecycle aligned after external
+                    // auth rendering fails, without retaining this delivery
+                    // permit or retrying the broken channel surface.
+                    spawn_inbox_gate_observer(
+                        services,
+                        *settings,
+                        scope.clone(),
+                        creator_user_id.clone(),
+                        run_id,
+                        marker,
+                    );
+                }
                 let outcome = TriggeredRunDeliveryOutcomeKind::Failed;
                 record_triggered_run_outcome(delivery_store, run_id, outcome).await;
                 return outcome;

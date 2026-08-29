@@ -87,6 +87,11 @@ for lane in "${lanes[@]}"; do
   fi
 done
 
+if [[ "${run_groups}" == "true" ]]; then
+  python3 "${script_dir}/lib/integration_test_inventory.py" \
+    --validate-group-topology "${PWD}"
+fi
+
 # reborn-coverage-int-tier-tests.sh prints alternating "--test"/"<name>"
 # lines; keep only the name lines (every 2nd line, portable awk — no GNU-only
 # `sed -n 2~2p`).

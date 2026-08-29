@@ -110,6 +110,7 @@ async fn publish_pre_submit_failure_inbox_notification(
             thread_id: None,
             turn_run_id: None,
             lifecycle_ref: Some(lifecycle_ref),
+            credential_providers: Vec::new(),
         },
         action: NotificationAction::None,
         initial_state: NotificationInitialState::Resolved,

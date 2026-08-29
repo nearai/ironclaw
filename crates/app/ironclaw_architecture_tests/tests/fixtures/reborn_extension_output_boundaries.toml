@@ -1,0 +1,389 @@
+# This fixture is intentionally reconciled as an exact set by
+# `reborn_extension_output_audit.rs`. An indicator is a review trigger, not a
+# defect verdict; each row records the owning boundary and executable evidence.
+
+[[boundary]]
+path = "crates/extensions/ironclaw_extension_support/src/gsuite/handlers/gmail_message.rs"
+indicator = "encrypted_marker"
+classification = "semantic_unsupported_marker"
+exposure = "semantic marker only"
+owner = "gmail.get_message producer"
+evidence_path = "crates/extensions/ironclaw_extension_support/tests/gsuite_recorded_shapes.rs"
+evidence_test = "gmail_get_message_reports_encrypted_content_without_exposing_ciphertext"
+rationale = "Encrypted MIME is reported as encrypted and unsupported; ciphertext is not exposed as readable content."
+
+[[boundary]]
+path = "crates/extensions/ironclaw_extension_support/src/gsuite/handlers/gmail_message.rs"
+indicator = "gmail_base64url_decode"
+occurrences = 2
+classification = "producer_owned_decode"
+exposure = "decoded semantic body"
+owner = "gmail.get_message producer"
+evidence_path = "tests/integration/tool_call.rs"
+evidence_test = "gmail_get_message_persists_semantic_markdown_without_provider_noise"
+rationale = "The Gmail producer owns and decodes Gmail body.data base64url before constructing semantic output."
+
+[[boundary]]
+path = "crates/extensions/ironclaw_extension_support/src/skills.rs"
+indicator = "bytes_base64"
+occurrences = 3
+classification = "input_only"
+exposure = "installer request input"
+owner = "skill package installer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs"
+evidence_test = "builtin_skill_install_accepts_base64_bundle_files_on_a_direct_install"
+rationale = "Binary package files use an explicit encoded input field; it is decoded by the producer and is not a tool-result envelope."
+
+[[boundary]]
+path = "crates/extensions/packages/github/wasm-src/src/api/contents.rs"
+indicator = "binary_unsupported"
+classification = "semantic_unsupported_marker"
+exposure = "bounded semantic marker"
+owner = "github.get_file_content producer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs"
+evidence_test = "host_runtime_services_marks_bundled_github_binary_file_content_unsupported"
+rationale = "The GitHub producer decodes owned base64 and replaces non-UTF-8 content with a typed unsupported marker."
+
+[[boundary]]
+path = "crates/extensions/packages/github/schemas/github/get_file_content.output.v1.json"
+indicator = "binary_unsupported"
+classification = "semantic_unsupported_marker"
+exposure = "declared semantic marker"
+owner = "github.get_file_content output contract"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs"
+evidence_test = "host_runtime_services_marks_bundled_github_binary_file_content_unsupported"
+rationale = "The output schema advertises the producer's bounded marker rather than an encoded binary content field."
+
+[[boundary]]
+path = "crates/extensions/packages/google-drive/wasm-src/src/api.rs"
+indicator = "content_base64"
+occurrences = 3
+classification = "host_mediated_decode"
+exposure = "transitional guest-to-host handoff"
+owner = "google-drive.download_file producer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs"
+evidence_test = "host_runtime_services_extracts_google_drive_download_binary_into_text"
+rationale = "The WASM guest cannot run host document extractors, so the host consumes and removes this field before completion."
+
+[[boundary]]
+path = "crates/extensions/packages/google-drive/wasm-src/src/types.rs"
+indicator = "content_base64"
+occurrences = 2
+classification = "host_mediated_decode"
+exposure = "transitional guest-to-host handoff"
+owner = "google-drive.download_file output contract"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs"
+evidence_test = "host_runtime_services_extracts_google_drive_download_binary_into_text"
+rationale = "The producer contract names the exact host-consumed field; generic durable storage never sees it."
+
+[[boundary]]
+path = "crates/extensions/packages/gmail/schemas/gmail/get_message.output.v2.json"
+indicator = "encrypted_marker"
+classification = "semantic_unsupported_marker"
+exposure = "declared semantic marker"
+owner = "gmail.get_message output contract"
+evidence_path = "crates/extensions/ironclaw_extension_support/tests/gsuite_recorded_shapes.rs"
+evidence_test = "gmail_get_message_reports_encrypted_content_without_exposing_ciphertext"
+rationale = "The schema makes encrypted an explicit unreadable state and exposes no ciphertext field."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/document_output.rs"
+indicator = "content_base64"
+occurrences = 15
+classification = "host_mediated_decode"
+exposure = "removed before runtime completion"
+owner = "host document-output obligation"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs"
+evidence_test = "host_runtime_services_extracts_google_drive_download_binary_into_text"
+rationale = "The capability-scoped host obligation extracts supported documents and strips the encoded handoff on every branch."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
+indicator = "body_base64"
+occurrences = 4
+classification = "input_only"
+exposure = "HTTP request input"
+owner = "builtin.http producer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
+evidence_test = "non_empty_body_base64_is_decoded"
+rationale = "The field encodes caller-supplied request bytes and is decoded before mediated egress."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http_output.rs"
+indicator = "body_base64"
+occurrences = 11
+classification = "compatibility_exception"
+exposure = "bounded model-visible compatibility output"
+owner = "builtin.http output producer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs"
+evidence_test = "builtin_http_final_budget_trim_preserves_base64_alignment"
+rationale = "builtin.http retains its existing bounded binary-response contract; changing it is outside the extension-output audit."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http_output.rs"
+indicator = "response_headers"
+occurrences = 2
+classification = "compatibility_exception"
+exposure = "bounded and redacted model-visible compatibility output"
+owner = "builtin.http output producer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs"
+evidence_test = "builtin_http_truncates_overlong_response_headers_to_model_visible_budget"
+rationale = "builtin.http intentionally exposes bounded non-sensitive headers under its existing public contract."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/schemas.rs"
+indicator = "body_base64"
+classification = "input_only"
+exposure = "HTTP request schema"
+owner = "builtin.http input contract"
+evidence_path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
+evidence_test = "non_empty_body_base64_is_decoded"
+rationale = "The schema declares explicit request bytes; output handling remains separately classified."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/schemas.rs"
+indicator = "bytes_base64"
+classification = "input_only"
+exposure = "skill installer request schema"
+owner = "builtin.skill_install input contract"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs"
+evidence_test = "builtin_skill_install_accepts_base64_bundle_files_on_a_direct_install"
+rationale = "The schema declares binary package input consumed by the skill installer, not a model-facing result field."
+
+[[boundary]]
+path = "crates/lanes/ironclaw_mcp/src/client.rs"
+indicator = "binary_unsupported"
+occurrences = 2
+classification = "semantic_unsupported_marker"
+exposure = "bounded semantic marker"
+owner = "hosted MCP result projection"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_mixed_content_is_normalized_before_durable_result_storage"
+rationale = "MCP image, audio, and blob payloads are removed and represented as unsupported before durable storage and model exposure."
+
+[[boundary]]
+path = "crates/lanes/ironclaw_mcp/src/client.rs"
+indicator = "mcp_structured_content"
+occurrences = 3
+classification = "protocol_projection"
+exposure = "semantic JSON"
+owner = "hosted MCP result projection"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_mixed_content_is_normalized_before_durable_result_storage"
+rationale = "The MCP lane removes JSON-RPC transport framing while preserving protocol-defined structured semantic content."
+
+[[boundary]]
+path = "crates/extensions/ironclaw_extension_host/src/extension_lifecycle/hosted_mcp_test_support.rs"
+indicator = "json_rpc"
+occurrences = 2
+classification = "protocol_projection"
+exposure = "hosted MCP transport test fixture"
+owner = "hosted MCP lifecycle test support"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_tool_call_reaches_mock_server"
+rationale = "This fixture emulates the owned JSON-RPC transport contract; the MCP lane projects its result before durable storage."
+
+[[boundary]]
+path = "crates/extensions/ironclaw_extension_support/src/gsuite/handlers.rs"
+indicator = "mime_transfer_encoding"
+classification = "producer_owned_decode"
+exposure = "decoded semantic Gmail body"
+owner = "gmail.get_message producer"
+evidence_path = "crates/extensions/ironclaw_extension_support/tests/gsuite_recorded_shapes.rs"
+evidence_test = "gmail_get_message_rejects_malformed_gmail_base64url"
+rationale = "The Gmail producer interprets the MIME transfer encoding it owns before selecting model-visible body content."
+
+[[boundary]]
+path = "crates/extensions/ironclaw_extension_support/src/gsuite/handlers/gmail_message.rs"
+indicator = "headers_field"
+classification = "producer_owned_decode"
+exposure = "bounded selected semantic headers"
+owner = "gmail.get_message producer"
+evidence_path = "crates/extensions/ironclaw_extension_support/tests/gsuite_recorded_shapes.rs"
+evidence_test = "gmail_get_message_bounds_selected_headers_and_attachment_fields"
+rationale = "The Gmail producer selects a bounded semantic header subset instead of forwarding the provider header envelope."
+
+[[boundary]]
+path = "crates/extensions/ironclaw_extension_support/src/web_access.rs"
+indicator = "json_rpc"
+classification = "protocol_projection"
+exposure = "parsed web-search and fetch semantics"
+owner = "web access MCP producer"
+evidence_path = "crates/extensions/ironclaw_extension_support/src/web_access.rs"
+evidence_test = "search_performs_mcp_handshake_and_returns_results"
+rationale = "Web access owns its JSON-RPC exchange and projects MCP transport responses into search or fetch results."
+
+[[boundary]]
+path = "crates/extensions/packages/gmail/schemas/gmail/get_message.output.v2.json"
+indicator = "headers_field"
+classification = "producer_owned_decode"
+exposure = "declared bounded semantic headers"
+owner = "gmail.get_message output contract"
+evidence_path = "crates/extensions/ironclaw_extension_support/tests/gsuite_recorded_shapes.rs"
+evidence_test = "gmail_get_message_bounds_selected_headers_and_attachment_fields"
+rationale = "The schema declares the producer-selected header view rather than arbitrary Gmail headers."
+
+[[boundary]]
+path = "crates/extensions/packages/telegram/src/linked/session_blob.rs"
+indicator = "ciphertext"
+classification = "opaque_custody"
+exposure = "encrypted linked-session persistence only"
+owner = "Telegram linked-session custody"
+evidence_path = "crates/extensions/packages/telegram/src/linked/session_blob.rs"
+evidence_test = "round_trips_including_the_auth_key"
+rationale = "Ciphertext is an opaque at-rest session blob under credential custody and is never a model-visible tool result."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
+indicator = "headers_field"
+occurrences = 2
+classification = "input_only"
+exposure = "validated HTTP request input"
+owner = "builtin.http request producer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs"
+evidence_test = "builtin_http_rejects_invalid_header_names_and_oversized_header_sets"
+rationale = "These headers are caller inputs validated before mediated egress, not provider response headers."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http_output.rs"
+indicator = "headers_field"
+occurrences = 3
+classification = "compatibility_exception"
+exposure = "bounded and redacted model-visible compatibility output"
+owner = "builtin.http output producer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs"
+evidence_test = "builtin_http_truncates_overlong_response_headers_to_model_visible_budget"
+rationale = "builtin.http intentionally emits the same bounded header object already classified by response_headers."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/schemas.rs"
+indicator = "headers_field"
+classification = "input_only"
+exposure = "HTTP request schema"
+owner = "builtin.http input contract"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs"
+evidence_test = "builtin_http_rejects_invalid_header_names_and_oversized_header_sets"
+rationale = "The schema declares validated caller-supplied request headers; response output is reviewed separately."
+
+[[boundary]]
+path = "crates/lanes/ironclaw_mcp/src/client.rs"
+indicator = "inline_binary"
+classification = "semantic_unsupported_marker"
+exposure = "bounded semantic unsupported marker"
+owner = "hosted MCP result projection"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_mixed_content_is_normalized_before_durable_result_storage"
+rationale = "The MCP producer drops inline binary payloads and records an unsupported marker before the unified durable result path."
+
+[[boundary]]
+path = "crates/lanes/ironclaw_mcp/src/client.rs"
+indicator = "json_rpc"
+occurrences = 2
+classification = "protocol_projection"
+exposure = "semantic MCP result"
+owner = "hosted MCP result projection"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_mixed_content_is_normalized_before_durable_result_storage"
+rationale = "The MCP client consumes JSON-RPC framing and returns only protocol-defined result content to the capability pipeline."
+
+[[boundary]]
+path = "crates/lanes/ironclaw_mcp/src/contract.rs"
+indicator = "json_rpc"
+classification = "protocol_projection"
+exposure = "MCP transport contract"
+owner = "hosted MCP lane"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_tool_call_reaches_mock_server"
+rationale = "This is the typed JSON-RPC transport contract consumed by the MCP lane, not a model-facing result shape."
+
+[[boundary]]
+path = "crates/lanes/ironclaw_mcp/src/diagnostics.rs"
+indicator = "json_rpc"
+occurrences = 3
+classification = "protocol_projection"
+exposure = "bounded host diagnostic"
+owner = "hosted MCP lane diagnostics"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_malformed_success_result_surfaces_output_decode_failure"
+rationale = "Diagnostics classify JSON-RPC failures after transport parsing and do not forward the raw response envelope."
+
+[[boundary]]
+path = "crates/lanes/ironclaw_mcp/src/egress.rs"
+indicator = "json_rpc"
+classification = "protocol_projection"
+exposure = "MCP transport request and response"
+owner = "hosted MCP egress"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_tool_call_reaches_mock_server"
+rationale = "Mediated egress carries JSON-RPC only within the owned MCP transport boundary before result projection."
+
+[[boundary]]
+path = "crates/lanes/ironclaw_mcp/src/jsonrpc.rs"
+indicator = "json_rpc"
+classification = "protocol_projection"
+exposure = "MCP transport parser"
+owner = "hosted MCP JSON-RPC boundary"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_malformed_success_result_surfaces_output_decode_failure"
+rationale = "This module validates and removes JSON-RPC envelopes before the semantic MCP result reaches durable storage."
+
+[[boundary]]
+path = "crates/lanes/ironclaw_mcp/src/lib.rs"
+indicator = "json_rpc"
+occurrences = 4
+classification = "protocol_projection"
+exposure = "MCP lane module boundary"
+owner = "hosted MCP lane"
+evidence_path = "tests/integration/mcp.rs"
+evidence_test = "mcp_tool_call_reaches_mock_server"
+rationale = "The module declaration exposes the owned JSON-RPC implementation; model-visible output is projected by the client."
+
+[[boundary]]
+path = "crates/extensions/ironclaw_extension_support/src/skills.rs"
+indicator = "provider_base64_decode"
+classification = "input_only"
+exposure = "decoded skill package request input"
+owner = "skill package installer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/first_party_builtin_tools.rs"
+evidence_test = "builtin_skill_install_accepts_base64_bundle_files_on_a_direct_install"
+rationale = "The installer decodes its explicit package-file encoding before constructing the install request; it is not model-facing output."
+
+[[boundary]]
+path = "crates/extensions/packages/github/wasm-src/src/api/contents.rs"
+indicator = "provider_base64_decode"
+classification = "producer_owned_decode"
+exposure = "decoded UTF-8 file content"
+owner = "github.get_file_content producer"
+evidence_path = "tests/integration/tool_call.rs"
+evidence_test = "github_file_content_decodes_before_the_durable_result_path"
+rationale = "The GitHub producer consumes its documented base64 transport encoding and emits semantic UTF-8 or an unsupported marker before durable storage."
+
+[[boundary]]
+path = "crates/extensions/packages/telegram/src/linked/session_blob.rs"
+indicator = "provider_base64_decode"
+classification = "opaque_custody"
+exposure = "encrypted linked-session persistence only"
+owner = "Telegram linked-session custody"
+evidence_path = "crates/extensions/packages/telegram/src/linked/session_blob.rs"
+evidence_test = "round_trips_including_the_auth_key"
+rationale = "The linked-session owner decodes its at-rest envelope inside credential custody; the bytes never become a tool result."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/document_output.rs"
+indicator = "provider_base64_decode"
+classification = "host_mediated_decode"
+exposure = "removed before runtime completion"
+owner = "host document-output obligation"
+evidence_path = "crates/kernel/ironclaw_host_runtime/tests/github_wasm_runtime_contract.rs"
+evidence_test = "host_runtime_services_extracts_google_drive_download_binary_into_text"
+rationale = "The capability-scoped host obligation consumes the Drive guest handoff and exposes only extracted text or a semantic failure marker."
+
+[[boundary]]
+path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
+indicator = "provider_base64_decode"
+classification = "input_only"
+exposure = "decoded HTTP request input"
+owner = "builtin.http request producer"
+evidence_path = "crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs"
+evidence_test = "non_empty_body_base64_is_decoded"
+rationale = "builtin.http decodes caller-supplied request bytes before mediated egress; response output remains separately classified."

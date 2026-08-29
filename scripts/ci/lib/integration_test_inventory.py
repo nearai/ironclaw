@@ -19,7 +19,9 @@ GROUP_NAME_PREFIX = "reborn_group_"
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
-def _registered_tests(repo_root: str | pathlib.Path = ROOT) -> list[tuple[str, str]]:
+def _registered_test_records(
+    repo_root: str | pathlib.Path = ROOT,
+) -> list[tuple[str, str]]:
     root = pathlib.Path(repo_root)
     with (root / "Cargo.toml").open("rb") as manifest:
         data = tomllib.load(manifest)
@@ -29,7 +31,14 @@ def _registered_tests(repo_root: str | pathlib.Path = ROOT) -> list[tuple[str, s
         if isinstance(entry, dict)
         and isinstance(entry.get("name"), str)
         and isinstance(entry.get("path"), str)
-        and entry["path"].startswith(INTEGRATION_PATH_PREFIX)
+    ]
+
+
+def _registered_tests(repo_root: str | pathlib.Path = ROOT) -> list[tuple[str, str]]:
+    return [
+        (path, name)
+        for path, name in _registered_test_records(repo_root)
+        if path.startswith(INTEGRATION_PATH_PREFIX)
     ]
 
 
@@ -144,9 +153,68 @@ def validate_inventory_document(document: Any) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--json", action="store_true", help="print versioned JSON")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help="print versioned JSON")
+    output.add_argument(
+        "--validate-group-topology",
+        action="store_true",
+        help="validate integration group registrations and entry points",
+    )
     parser.add_argument("repo_root", nargs="?", default=str(ROOT))
     args = parser.parse_args(argv)
+
+    if args.validate_group_topology:
+        try:
+            root = pathlib.Path(args.repo_root)
+            registered_names: set[str] = set()
+            for path, name in _registered_test_records(root):
+                if not name.startswith(GROUP_NAME_PREFIX):
+                    continue
+                suffix = name.removeprefix(GROUP_NAME_PREFIX)
+                expected_path = f"{INTEGRATION_PATH_PREFIX}group_{suffix}/main.rs"
+                if path != expected_path:
+                    raise ValueError(
+                        f"group registration path mismatch for {name!r}: "
+                        f"expected {expected_path!r}, found {path!r}"
+                    )
+                registered_names.add(name)
+
+            integration_root = root / INTEGRATION_PATH_PREFIX
+            group_directories = sorted(
+                entry
+                for entry in integration_root.glob("group_*")
+                if entry.is_dir()
+            )
+            incomplete = [
+                entry.name for entry in group_directories if not (entry / "main.rs").is_file()
+            ]
+            if incomplete:
+                raise ValueError(
+                    "integration test group directory missing main.rs: "
+                    + ", ".join(incomplete)
+                )
+            filesystem_names = {
+                f"{GROUP_NAME_PREFIX}{entry.name.removeprefix('group_')}"
+                for entry in group_directories
+            }
+            unregistered = sorted(filesystem_names - registered_names)
+            if unregistered:
+                raise ValueError(
+                    "unregistered integration test group(s): "
+                    + ", ".join(unregistered)
+                )
+            missing = sorted(registered_names - filesystem_names)
+            if missing:
+                raise ValueError(
+                    "registered integration test group(s) missing main.rs: "
+                    + ", ".join(missing)
+                )
+            if not group_directories:
+                raise ValueError("No integration test group directories found")
+        except (OSError, tomllib.TOMLDecodeError, ValueError) as error:
+            print(f"integration group topology error: {error}", file=sys.stderr)
+            return 1
+        return 0
 
     if args.json:
         print(json.dumps(inventory_document(args.repo_root), sort_keys=True))

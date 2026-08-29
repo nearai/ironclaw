@@ -19,13 +19,16 @@ use ironclaw_processes::{
     ProcessLifecycleStatus, ProcessSuspensionKind,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
+use ironclaw_turns::GateResumeDisposition;
 use serde::Deserialize;
 
-/// Materializes durable user-visible run facts from the authoritative process
-/// journal. It does not observe delivery watchers or poll run state.
+/// Materializes durable background-run outcomes from the authoritative
+/// process journal. It does not observe delivery watchers or poll run state.
 pub struct RunOutcomeProcessCommitObserver {
     inbox: Arc<dyn NotificationInboxStorePort>,
     thread_service: Arc<dyn SessionThreadService>,
+    process_journal_source:
+        Option<Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>>,
 }
 
 impl RunOutcomeProcessCommitObserver {
@@ -36,7 +39,16 @@ impl RunOutcomeProcessCommitObserver {
         Self {
             inbox,
             thread_service,
+            process_journal_source: None,
         }
+    }
+
+    pub fn with_process_journal_source(
+        mut self,
+        process_journal_source: Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+    ) -> Self {
+        self.process_journal_source = Some(process_journal_source);
+        self
     }
 
     async fn publish(
@@ -78,6 +90,7 @@ impl RunOutcomeProcessCommitObserver {
                     thread_id: Some(thread_id.clone()),
                     turn_run_id: Some(run_id),
                     lifecycle_ref: Some(outcome_lifecycle_ref("process-terminal")?),
+                    credential_providers: Vec::new(),
                 },
                 action: NotificationAction::OpenThread { thread_id },
                 initial_state: NotificationInitialState::Resolved,
@@ -86,6 +99,248 @@ impl RunOutcomeProcessCommitObserver {
             .await
             .map_err(|error| format!("publish run outcome notification failed: {error}"))?;
         Ok(())
+    }
+
+    async fn publish_authentication_required(
+        inbox: &dyn NotificationInboxStorePort,
+        process_journal_source: Option<
+            &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
+        >,
+        snapshot: &JournaledProcessSnapshot,
+        run_id: TurnRunId,
+        occurred_at: Timestamp,
+    ) -> Result<(), String> {
+        let Some(suspension) = snapshot.suspension.as_ref() else {
+            return Ok(());
+        };
+        if suspension.kind != ProcessSuspensionKind::Authorization {
+            return Ok(());
+        }
+        let Some(gate_ref) = suspension.gate_ref.as_ref() else {
+            // A gate-less auth suspension cannot be resumed from the product
+            // surface, so publishing an actionable notification would strand
+            // an item the user cannot complete.
+            return Ok(());
+        };
+        if !Self::auth_gate_is_current(process_journal_source, snapshot, gate_ref).await? {
+            return Self::resolve_authentication_required(
+                inbox,
+                snapshot,
+                run_id,
+                gate_ref,
+                occurred_at,
+            )
+            .await;
+        }
+        let thread_id = snapshot
+            .scope
+            .thread_id
+            .clone()
+            .ok_or_else(|| "eligible auth suspension has no thread id".to_string())?;
+        let owner_user_id = snapshot
+            .owner_user_id
+            .clone()
+            .ok_or_else(|| "eligible auth suspension has no owner".to_string())?;
+        let lifecycle_ref = LifecycleRef::new(gate_ref.as_str())
+            .map_err(|error| format!("build auth lifecycle reference failed: {error}"))?;
+        let notification_id = crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::AuthenticationRequired,
+            Some(gate_ref.as_str()),
+        )
+        .map_err(|error| format!("build auth notification id failed: {error}"))?;
+        let notification_id_for_reopen = notification_id.clone();
+        let recipient = NotificationRecipient {
+            tenant_id: snapshot.scope.tenant_id.clone(),
+            user_id: owner_user_id,
+        };
+        inbox
+            .publish(PublishNotificationRequest {
+                id: notification_id,
+                recipient: recipient.clone(),
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: Some(thread_id.clone()),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(lifecycle_ref),
+                    credential_providers: suspension
+                        .credential_requirements
+                        .iter()
+                        .map(|requirement| requirement.provider.clone())
+                        .collect(),
+                },
+                action: NotificationAction::OpenThread { thread_id },
+                initial_state: NotificationInitialState::Open,
+                occurred_at,
+            })
+            .await
+            .map_err(|error| format!("publish auth notification failed: {error}"))?;
+        // A verified resume may be followed by the same deterministic gate
+        // becoming current again. Publication must remain a no-op for ordinary
+        // retries, so the authoritative Suspended transition explicitly
+        // re-activates the settled lifecycle record.
+        inbox
+            .reopen(NotificationMutationRequest {
+                recipient,
+                notification_id: notification_id_for_reopen,
+                occurred_at,
+            })
+            .await
+            .map_err(|error| format!("reopen auth notification failed: {error}"))?;
+        // The continuation can settle the gate between the pre-publication
+        // state read and the Inbox CAS. Re-read after the write and retire the
+        // just-published record if recovery won that race.
+        if !Self::auth_gate_is_current(process_journal_source, snapshot, gate_ref).await? {
+            Self::resolve_authentication_required(inbox, snapshot, run_id, gate_ref, occurred_at)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn auth_gate_is_current(
+        process_journal_source: Option<
+            &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
+        >,
+        snapshot: &JournaledProcessSnapshot,
+        gate_ref: &ironclaw_host_api::turn::TurnGateRef,
+    ) -> Result<bool, String> {
+        let Some(source) = process_journal_source else {
+            return Ok(true);
+        };
+        Ok(Self::current_auth_gate_ref(source, snapshot)
+            .await?
+            .as_ref()
+            == Some(gate_ref))
+    }
+
+    async fn current_auth_gate_ref(
+        source: &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
+        snapshot: &JournaledProcessSnapshot,
+    ) -> Result<Option<ironclaw_host_api::turn::TurnGateRef>, String> {
+        let current = source
+            .get_process_snapshot(GetProcessSnapshotRequest {
+                scope: snapshot.scope.clone(),
+                process_id: snapshot.process_id,
+            })
+            .await
+            .map_err(|error| format!("read current auth process state failed: {error}"))?;
+        if current.status != ProcessLifecycleStatus::Suspended {
+            return Ok(None);
+        }
+        let Some(suspension) = current.suspension else {
+            return Ok(None);
+        };
+        if suspension.kind != ProcessSuspensionKind::Authorization {
+            return Ok(None);
+        }
+        Ok(suspension.gate_ref)
+    }
+
+    async fn resolve_authentication_required(
+        inbox: &dyn NotificationInboxStorePort,
+        snapshot: &JournaledProcessSnapshot,
+        run_id: TurnRunId,
+        gate_ref: &ironclaw_host_api::turn::TurnGateRef,
+        occurred_at: Timestamp,
+    ) -> Result<(), String> {
+        let Some(owner_user_id) = snapshot.owner_user_id.clone() else {
+            return Ok(());
+        };
+        let notification_id = crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::AuthenticationRequired,
+            Some(gate_ref.as_str()),
+        )
+        .map_err(|error| format!("build auth notification id failed: {error}"))?;
+        match inbox
+            .resolve(NotificationMutationRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: snapshot.scope.tenant_id.clone(),
+                    user_id: owner_user_id,
+                },
+                notification_id,
+                occurred_at,
+            })
+            .await
+        {
+            Ok(_) | Err(NotificationInboxError::NotificationNotFound) => Ok(()),
+            Err(error) => Err(format!("resolve auth notification failed: {error}")),
+        }
+    }
+
+    async fn resolve_run_authentication_required(
+        &self,
+        snapshot: &JournaledProcessSnapshot,
+        run_id: TurnRunId,
+        occurred_at: Timestamp,
+    ) -> Result<(), String> {
+        // A Resumed process snapshot no longer carries the suspension's gate
+        // reference. Reconcile by the notification's stable run identity;
+        // the recipient Inbox is bounded, and paging preserves older or
+        // archived records that may have survived a transient write outage.
+        let Some(owner_user_id) = snapshot.owner_user_id.clone() else {
+            return Ok(());
+        };
+        let recipient = NotificationRecipient {
+            tenant_id: snapshot.scope.tenant_id.clone(),
+            user_id: owner_user_id,
+        };
+        // A later auth gate can already be current by the time this older
+        // Resumed commit reaches the observer. Preserve that gate's stable
+        // record: actionable retries intentionally do not reopen records that
+        // were resolved by an earlier lifecycle transition.
+        let current_auth_gate_ref = match self.process_journal_source.as_deref() {
+            Some(source) => Self::current_auth_gate_ref(source, snapshot).await?,
+            None => None,
+        };
+        let mut cursor = None;
+        loop {
+            let page = self
+                .inbox
+                .list(ListNotificationsRequest {
+                    recipient: recipient.clone(),
+                    limit: NOTIFICATION_PAGE_LIMIT_MAX,
+                    cursor: cursor.clone(),
+                    include_archived: true,
+                })
+                .await
+                .map_err(|error| {
+                    format!("list auth notifications for resumed run failed: {error}")
+                })?;
+            for notification in page.notifications {
+                let is_current_auth_gate = current_auth_gate_ref.as_ref().is_some_and(|gate_ref| {
+                    notification
+                        .source
+                        .lifecycle_ref
+                        .as_ref()
+                        .is_some_and(|lifecycle_ref| lifecycle_ref.as_str() == gate_ref.as_str())
+                });
+                if notification.kind == NotificationKind::AuthenticationRequired
+                    && notification.source.turn_run_id == Some(run_id)
+                    && notification.resolved_at.is_none()
+                    && !is_current_auth_gate
+                {
+                    self.inbox
+                        .resolve(NotificationMutationRequest {
+                            recipient: recipient.clone(),
+                            notification_id: notification.id,
+                            occurred_at,
+                        })
+                        .await
+                        .map_err(|error| {
+                            format!("resolve auth notification for resumed run failed: {error}")
+                        })?;
+                }
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(());
+            };
+            if cursor.as_ref() == Some(&next_cursor) {
+                return Err("auth notification pagination cursor did not advance".to_string());
+            }
+            cursor = Some(next_cursor);
+        }
     }
 
     async fn reconcile_resource_block(
@@ -147,6 +402,7 @@ impl RunOutcomeProcessCommitObserver {
                     thread_id: Some(thread_id.clone()),
                     turn_run_id: Some(run_id),
                     lifecycle_ref: Some(lifecycle_ref),
+                    credential_providers: Vec::new(),
                 },
                 action: NotificationAction::OpenThread { thread_id },
                 initial_state: NotificationInitialState::Open,
@@ -261,16 +517,34 @@ impl RunOutcomeProcessCommitObserver {
 impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
     fn process_observer_id(&self) -> &'static str {
         // Keep the original cursor: changing this observer's identity would
-        // replay every historical terminal outcome, not just resource gates.
+        // replay every historical terminal outcome, not just auth or resource gates.
         "run-outcome-inbox-commit-observer-v1"
     }
 
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
-        let Some(metadata) = eligible_top_level_owned_run(&commit.state) else {
+        let Some(metadata) = eligible_user_run(&commit.state) else {
             return Ok(());
         };
         let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        if commit.kind == ProcessJournalKind::Resumed
+            && metadata.resume_disposition != Some(GateResumeDisposition::Denied)
+        {
+            self.resolve_run_authentication_required(&commit.state, run_id, occurred_at)
+                .await?;
+        }
+        if commit.kind == ProcessJournalKind::Suspended
+            && commit.state.status == ProcessLifecycleStatus::Suspended
+        {
+            Self::publish_authentication_required(
+                self.inbox.as_ref(),
+                self.process_journal_source.as_deref(),
+                &commit.state,
+                run_id,
+                occurred_at,
+            )
+            .await?;
+        }
         if resource_block_reconciliation_needed(&commit) {
             self.reconcile_resource_block(&commit.state, run_id, occurred_at)
                 .await?;
@@ -351,6 +625,53 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
     }
 }
 
+/// One-time durable replay for auth suspensions introduced after the primary
+/// outcome observer had already advanced past them. Its separate cursor is
+/// intentionally narrow: terminal outcomes stay owned by the original v1
+/// observer and cannot consume Inbox capacity during an upgrade.
+pub struct AuthNotificationBackfillProcessCommitObserver {
+    inbox: Arc<dyn NotificationInboxStorePort>,
+    process_journal_source: Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+}
+
+impl AuthNotificationBackfillProcessCommitObserver {
+    pub fn new(
+        inbox: Arc<dyn NotificationInboxStorePort>,
+        process_journal_source: Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>,
+    ) -> Self {
+        Self {
+            inbox,
+            process_journal_source,
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessJournalCommitObserver for AuthNotificationBackfillProcessCommitObserver {
+    fn process_observer_id(&self) -> &'static str {
+        "run-auth-inbox-backfill-observer-v1"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        if commit.kind != ProcessJournalKind::Suspended
+            || commit.state.status != ProcessLifecycleStatus::Suspended
+            || eligible_user_run(&commit.state).is_none()
+        {
+            return Ok(());
+        }
+        let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
+        let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        RunOutcomeProcessCommitObserver::publish_authentication_required(
+            self.inbox.as_ref(),
+            Some(self.process_journal_source.as_ref()),
+            &commit.state,
+            run_id,
+            occurred_at,
+        )
+        .await
+    }
+}
+
 /// One-time durable replay for resource suspensions introduced after the
 /// primary outcome observer had already advanced past them. Its separate
 /// cursor is intentionally narrow: terminal outcomes remain owned by the v1
@@ -395,7 +716,7 @@ impl ProcessJournalCommitObserver for ResourceBlockBackfillProcessCommitObserver
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
         if commit.kind != ProcessJournalKind::Suspended
             || commit.state.status != ProcessLifecycleStatus::Suspended
-            || eligible_top_level_owned_run(&commit.state).is_none()
+            || eligible_user_run(&commit.state).is_none()
         {
             return Ok(());
         }
@@ -454,6 +775,8 @@ struct OutcomeMetadata {
     subagent_depth: u32,
     #[serde(default)]
     ownerless_thread: bool,
+    #[serde(rename = "auth_resume_disposition", default)]
+    resume_disposition: Option<GateResumeDisposition>,
     product_context: Option<OutcomeProductContext>,
 }
 
@@ -464,7 +787,7 @@ struct OutcomeProductContext {
     execution_policy: Option<TurnExecutionPolicy>,
 }
 
-fn eligible_top_level_owned_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
+fn eligible_user_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
     if snapshot.process_kind != ProcessKind::AgentTurn
         || snapshot.parent_process_id.is_some()
         || snapshot.owner_user_id.is_none()
@@ -572,9 +895,10 @@ mod tests {
         },
     };
 
-    use async_trait::async_trait;
-    use chrono::Utc;
-    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use chrono::{TimeDelta, Utc};
+    use ironclaw_filesystem::{
+        Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
+    };
     use ironclaw_host_api::{
         ids::{AgentId, ProcessId, TenantId, ThreadId, UserId},
         mount::{MountGrant, MountPermissions, MountView},
@@ -591,12 +915,13 @@ mod tests {
         PublishNotificationRequest,
     };
     use ironclaw_processes::{
-        ClaimProcessesRequest, JournaledProcessSnapshot, ProcessJournalCommit,
-        ProcessJournalCommitObserver, ProcessJournalCursor, ProcessJournalKind,
-        ProcessJournalObserverRegistry, ProcessJournalPage, ProcessJournalSource,
-        ProcessJournalStore, ProcessKind, ProcessLeaseRequest, ProcessLifecycleStatus,
-        ProcessStateTransitionRequest, ProcessSubmissionPort, ProcessSuspension,
-        ProcessSuspensionKind, ProcessTransitionPort, ProcessWorkerId, SubmitProcessRequest,
+        ClaimProcessesRequest, GetProcessSnapshotRequest, JournaledProcessSnapshot,
+        ProcessJournalCommit, ProcessJournalCommitObserver, ProcessJournalCursor,
+        ProcessJournalKind, ProcessJournalObserverRegistry, ProcessJournalPage,
+        ProcessJournalSource, ProcessJournalStore, ProcessKind, ProcessLeaseRequest,
+        ProcessLifecycleStatus, ProcessStateTransitionRequest, ProcessSubmissionPort,
+        ProcessSuspension, ProcessSuspensionKind, ProcessTransitionPort, ProcessWorkerId,
+        SubmitProcessRequest,
     };
     use ironclaw_threads::{
         AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
@@ -604,49 +929,122 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{ResourceBlockBackfillProcessCommitObserver, RunOutcomeProcessCommitObserver};
+    use super::{
+        AuthNotificationBackfillProcessCommitObserver, ResourceBlockBackfillProcessCommitObserver,
+        RunOutcomeProcessCommitObserver,
+    };
 
-    fn tenant() -> TenantId {
-        TenantId::new("outcome-observer-tenant").expect("tenant")
+    struct CurrentProcessSource {
+        snapshot: Mutex<JournaledProcessSnapshot>,
     }
 
-    fn user() -> UserId {
-        UserId::new("outcome-observer-user").expect("user")
-    }
+    impl CurrentProcessSource {
+        fn new(snapshot: JournaledProcessSnapshot) -> Self {
+            Self {
+                snapshot: Mutex::new(snapshot),
+            }
+        }
 
-    fn agent() -> AgentId {
-        AgentId::new("outcome-observer-agent").expect("agent")
-    }
-
-    fn thread() -> ThreadId {
-        ThreadId::new("outcome-observer-thread").expect("thread")
-    }
-
-    fn thread_scope() -> ThreadScope {
-        ThreadScope {
-            tenant_id: tenant(),
-            agent_id: agent(),
-            project_id: None,
-            owner_user_id: Some(user()),
-            mission_id: None,
+        fn replace(&self, snapshot: JournaledProcessSnapshot) {
+            *self.snapshot.lock().expect("current process lock") = snapshot;
         }
     }
 
-    fn inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
-        let mounts = MountView::new(vec![MountGrant::new(
-            MountAlias::new("/notifications").expect("notification mount alias"),
-            VirtualPath::new("/engine/test/run-outcome-notifications")
-                .expect("notification mount target"),
-            MountPermissions::read_write_list_delete(),
-        )])
-        .expect("notification mount view");
-        Arc::new(NotificationInboxStore::new(
-            Arc::new(ScopedFilesystem::with_fixed_view(
-                Arc::new(InMemoryBackend::new()),
-                mounts,
-            )),
-            ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
-        ))
+    #[async_trait::async_trait]
+    impl ProcessJournalSource for CurrentProcessSource {
+        type Error = ironclaw_turns::TurnError;
+
+        async fn get_process_snapshot(
+            &self,
+            _request: GetProcessSnapshotRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            Ok(self.snapshot.lock().expect("current process lock").clone())
+        }
+
+        async fn read_process_journal_after(
+            &self,
+            _scope: &ResourceScope,
+            _owner_user_id: Option<&UserId>,
+            _after: Option<ProcessJournalCursor>,
+            _limit: usize,
+        ) -> Result<ProcessJournalPage, Self::Error> {
+            panic!("journal paging is not used by the current-state test")
+        }
+
+        async fn read_process_journal_log_after(
+            &self,
+            _after: Option<ProcessJournalCursor>,
+            _limit: usize,
+        ) -> Result<ProcessJournalPage, Self::Error> {
+            panic!("global journal paging is not used by the current-state test")
+        }
+    }
+
+    struct CurrentProcessJournalSource {
+        current: Mutex<VecDeque<JournaledProcessSnapshot>>,
+    }
+
+    impl CurrentProcessJournalSource {
+        fn new(current: JournaledProcessSnapshot) -> Self {
+            Self {
+                current: Mutex::new(VecDeque::from([current])),
+            }
+        }
+
+        fn set_current(&self, current: JournaledProcessSnapshot) {
+            *self.current.lock().expect("current process lock") = VecDeque::from([current]);
+        }
+
+        fn set_sequence(&self, current: impl IntoIterator<Item = JournaledProcessSnapshot>) {
+            let current = current.into_iter().collect::<VecDeque<_>>();
+            assert!(!current.is_empty(), "current process sequence is non-empty");
+            *self.current.lock().expect("current process lock") = current;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessJournalSource for CurrentProcessJournalSource {
+        type Error = ironclaw_turns::TurnError;
+
+        async fn get_process_snapshot(
+            &self,
+            _request: GetProcessSnapshotRequest,
+        ) -> Result<JournaledProcessSnapshot, Self::Error> {
+            let mut current = self.current.lock().expect("current process lock");
+            let snapshot = current.front().expect("current process snapshot").clone();
+            if current.len() > 1 {
+                current.pop_front();
+            }
+            Ok(snapshot)
+        }
+
+        async fn read_process_journal_after(
+            &self,
+            _scope: &ResourceScope,
+            _owner_user_id: Option<&UserId>,
+            _after: Option<ProcessJournalCursor>,
+            _limit: usize,
+        ) -> Result<ProcessJournalPage, Self::Error> {
+            Ok(ProcessJournalPage {
+                entries: Vec::new(),
+                next_cursor: ProcessJournalCursor(0),
+                truncated: false,
+                rebase_required: None,
+            })
+        }
+
+        async fn read_process_journal_log_after(
+            &self,
+            _after: Option<ProcessJournalCursor>,
+            _limit: usize,
+        ) -> Result<ProcessJournalPage, Self::Error> {
+            Ok(ProcessJournalPage {
+                entries: Vec::new(),
+                next_cursor: ProcessJournalCursor(0),
+                truncated: false,
+                rebase_required: None,
+            })
+        }
     }
 
     struct FailFirstResolveInbox {
@@ -663,7 +1061,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[async_trait::async_trait]
     impl NotificationInboxStorePort for FailFirstResolveInbox {
         async fn publish(
             &self,
@@ -718,6 +1116,109 @@ mod tests {
         ) -> Result<NotificationMutationOutcome, NotificationInboxError> {
             self.inner.archive(request).await
         }
+    }
+
+    fn tenant() -> TenantId {
+        TenantId::new("outcome-observer-tenant").expect("tenant")
+    }
+
+    fn user() -> UserId {
+        UserId::new("outcome-observer-user").expect("user")
+    }
+
+    fn agent() -> AgentId {
+        AgentId::new("outcome-observer-agent").expect("agent")
+    }
+
+    fn thread() -> ThreadId {
+        ThreadId::new("outcome-observer-thread").expect("thread")
+    }
+
+    fn thread_scope() -> ThreadScope {
+        ThreadScope {
+            tenant_id: tenant(),
+            agent_id: agent(),
+            project_id: None,
+            owner_user_id: Some(user()),
+            mission_id: None,
+        }
+    }
+
+    fn inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/run-outcome-notifications")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(InMemoryBackend::new()),
+                mounts,
+            )),
+            ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
+    }
+
+    fn inbox_with_capacity(capacity: usize) -> Arc<NotificationInboxStore<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/run-auth-backfill-capacity")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(InMemoryBackend::new()),
+                mounts,
+            )),
+            capacity,
+        ))
+    }
+
+    fn inbox_failing_first_write() -> Arc<NotificationInboxStore<FaultInjecting<InMemoryBackend>>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/run-outcome-faulted-notifications")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .nth(1)
+                    .backend("notification backend temporarily unavailable"),
+            ),
+        );
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)),
+            ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
+    }
+
+    fn inbox_failing_second_write() -> Arc<NotificationInboxStore<FaultInjecting<InMemoryBackend>>>
+    {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/run-outcome-resolve-fault-notifications")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .nth(2)
+                    .backend("notification backend temporarily unavailable"),
+            ),
+        );
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)),
+            ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
     }
 
     fn process_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -826,73 +1327,6 @@ mod tests {
         commit
     }
 
-    struct CurrentProcessJournalSource {
-        current: Mutex<VecDeque<JournaledProcessSnapshot>>,
-    }
-
-    impl CurrentProcessJournalSource {
-        fn new(current: JournaledProcessSnapshot) -> Self {
-            Self {
-                current: Mutex::new(VecDeque::from([current])),
-            }
-        }
-
-        fn set_current(&self, current: JournaledProcessSnapshot) {
-            *self.current.lock().expect("current process lock") = VecDeque::from([current]);
-        }
-
-        fn set_sequence(&self, current: impl IntoIterator<Item = JournaledProcessSnapshot>) {
-            let current = current.into_iter().collect::<VecDeque<_>>();
-            assert!(!current.is_empty(), "current process sequence is non-empty");
-            *self.current.lock().expect("current process lock") = current;
-        }
-    }
-
-    #[async_trait]
-    impl ProcessJournalSource for CurrentProcessJournalSource {
-        type Error = ironclaw_turns::TurnError;
-
-        async fn get_process_snapshot(
-            &self,
-            _request: ironclaw_processes::GetProcessSnapshotRequest,
-        ) -> Result<JournaledProcessSnapshot, Self::Error> {
-            let mut current = self.current.lock().expect("current process lock");
-            let snapshot = current.front().expect("current process snapshot").clone();
-            if current.len() > 1 {
-                current.pop_front();
-            }
-            Ok(snapshot)
-        }
-
-        async fn read_process_journal_after(
-            &self,
-            _scope: &ResourceScope,
-            _owner_user_id: Option<&UserId>,
-            _after: Option<ProcessJournalCursor>,
-            _limit: usize,
-        ) -> Result<ProcessJournalPage, Self::Error> {
-            Ok(ProcessJournalPage {
-                entries: Vec::new(),
-                next_cursor: ProcessJournalCursor(0),
-                truncated: false,
-                rebase_required: None,
-            })
-        }
-
-        async fn read_process_journal_log_after(
-            &self,
-            _after: Option<ProcessJournalCursor>,
-            _limit: usize,
-        ) -> Result<ProcessJournalPage, Self::Error> {
-            Ok(ProcessJournalPage {
-                entries: Vec::new(),
-                next_cursor: ProcessJournalCursor(0),
-                truncated: false,
-                rebase_required: None,
-            })
-        }
-    }
-
     async fn records(inbox: &dyn NotificationInboxStorePort) -> Vec<NotificationKind> {
         inbox
             .list(ListNotificationsRequest {
@@ -910,6 +1344,555 @@ mod tests {
             .into_iter()
             .map(|record| record.kind)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_webui_auth_gate_publishes_one_actionable_notification() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:webui-extension-auth").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref.clone()),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+
+        observer
+            .observe_process_commit(suspended.clone())
+            .await
+            .expect("publish auth notification");
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("replayed auth suspension is idempotent");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: false,
+            })
+            .await
+            .expect("list auth notification");
+        assert_eq!(page.notifications.len(), 1);
+        let notification = &page.notifications[0];
+        assert_eq!(notification.kind, NotificationKind::AuthenticationRequired);
+        assert_eq!(notification.source.thread_id, Some(thread()));
+        assert_eq!(notification.source.turn_run_id, Some(run_id));
+        assert_eq!(
+            notification
+                .source
+                .lifecycle_ref
+                .as_ref()
+                .map(LifecycleRef::as_str),
+            Some(gate_ref.as_str())
+        );
+        assert!(notification.resolved_at.is_none());
+        assert_eq!(
+            notification.action,
+            NotificationAction::OpenThread {
+                thread_id: thread()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_upgrade_does_not_publish_a_historical_gate_that_already_resumed() {
+        let inbox = inbox();
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:recovered-before-upgrade").expect("gate ref");
+        let mut historical_suspension = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        historical_suspension.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let mut current = historical_suspension.state.clone();
+        current.status = ProcessLifecycleStatus::Queued;
+        current.suspension = None;
+        let primary = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let observer = AuthNotificationBackfillProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(CurrentProcessSource::new(current)),
+        );
+
+        assert_eq!(
+            primary.process_observer_id(),
+            "run-outcome-inbox-commit-observer-v1"
+        );
+        assert_eq!(
+            observer.process_observer_id(),
+            "run-auth-inbox-backfill-observer-v1"
+        );
+        observer
+            .observe_process_commit(historical_suspension)
+            .await
+            .expect("historical suspension reconciliation");
+
+        assert!(records(inbox.as_ref()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auth_backfill_does_not_consume_capacity_with_historical_outcomes() {
+        let inbox = inbox_with_capacity(1);
+        let auth_run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:pending-during-upgrade").expect("gate ref");
+        let mut suspended = commit(
+            auth_run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let observer = AuthNotificationBackfillProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(CurrentProcessSource::new(suspended.state.clone())),
+        );
+
+        observer
+            .observe_process_commit(commit(
+                TurnRunId::new(),
+                ProcessLifecycleStatus::Completed,
+                ProcessJournalKind::Completed,
+                "scheduled_trigger",
+            ))
+            .await
+            .expect("historical outcome is outside auth backfill scope");
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("pending auth suspension uses the remaining Inbox capacity");
+
+        assert_eq!(
+            records(inbox.as_ref()).await,
+            vec![NotificationKind::AuthenticationRequired]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_publication_replay_does_not_revive_auth_after_the_run_recovers() {
+        let inbox = inbox_failing_first_write();
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:recovered-during-outage").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let current = Arc::new(CurrentProcessSource::new(suspended.state.clone()));
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        )
+        .with_process_journal_source(Arc::clone(&current)
+            as Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>);
+
+        observer
+            .observe_process_commit(suspended.clone())
+            .await
+            .expect_err("the first durable Inbox write is unavailable");
+
+        let mut recovered = suspended.state.clone();
+        recovered.status = ProcessLifecycleStatus::Queued;
+        recovered.suspension = None;
+        current.replace(recovered);
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("replay reconciles against the recovered process state");
+
+        assert!(records(inbox.as_ref()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_auth_publication_resolves_at_the_committed_transition_time() {
+        let inbox = inbox();
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:recovered-before-replay").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let publisher = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        publisher
+            .observe_process_commit(suspended.clone())
+            .await
+            .expect("publish auth notification");
+
+        let mut recovered = suspended.state.clone();
+        recovered.status = ProcessLifecycleStatus::Queued;
+        recovered.suspension = None;
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        )
+        .with_process_journal_source(Arc::new(CurrentProcessSource::new(recovered)));
+        let committed_at = Utc::now() + TimeDelta::hours(1);
+        suspended.occurred_at = Some(committed_at);
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("stale publication reconciles against recovered state");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list resolved auth notification");
+        assert_eq!(page.notifications[0].resolved_at, Some(committed_at));
+    }
+
+    #[tokio::test]
+    async fn resumed_commit_retries_auth_resolution_after_an_inbox_outage() {
+        let inbox = inbox_failing_second_write();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:resume-after-inbox-outage").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        observer
+            .observe_process_commit(suspended.clone())
+            .await
+            .expect("publish auth notification");
+
+        let mut resumed = suspended;
+        resumed.kind = ProcessJournalKind::Resumed;
+        resumed.state.status = ProcessLifecycleStatus::Queued;
+        resumed.state.suspension = None;
+        observer
+            .observe_process_commit(resumed.clone())
+            .await
+            .expect_err("the first durable resolution attempt fails");
+        observer
+            .observe_process_commit(resumed)
+            .await
+            .expect("durable observer replay resolves the notification");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list reconciled auth notification");
+        assert_eq!(page.notifications.len(), 1);
+        assert!(page.notifications[0].resolved_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn resumed_old_gate_does_not_resolve_the_current_auth_gate() {
+        let inbox = inbox();
+        let run_id = TurnRunId::new();
+        let old_gate = TurnGateRef::new("gate:old-auth").expect("old gate");
+        let current_gate = TurnGateRef::new("gate:current-auth").expect("current gate");
+
+        let mut old_suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        old_suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(old_gate),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let publisher = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        publisher
+            .observe_process_commit(old_suspended.clone())
+            .await
+            .expect("publish old gate");
+
+        let mut current_suspended = old_suspended.clone();
+        current_suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(current_gate.clone()),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        publisher
+            .observe_process_commit(current_suspended.clone())
+            .await
+            .expect("publish current gate before old resume is delivered");
+
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        )
+        .with_process_journal_source(Arc::new(CurrentProcessSource::new(current_suspended.state)));
+        let mut resumed_old = old_suspended;
+        resumed_old.kind = ProcessJournalKind::Resumed;
+        resumed_old.state.status = ProcessLifecycleStatus::Queued;
+        resumed_old.state.suspension = None;
+        observer
+            .observe_process_commit(resumed_old)
+            .await
+            .expect("reconcile old resume");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list auth notifications");
+        let mut old_is_resolved = false;
+        let mut current_is_open = false;
+        for notification in page.notifications {
+            let lifecycle_ref = notification
+                .source
+                .lifecycle_ref
+                .as_ref()
+                .map(LifecycleRef::as_str);
+            if lifecycle_ref == Some("gate:old-auth") {
+                old_is_resolved = notification.resolved_at.is_some();
+            }
+            if lifecycle_ref == Some(current_gate.as_str()) {
+                current_is_open = notification.resolved_at.is_none();
+            }
+        }
+        assert!(old_is_resolved, "the resumed old gate must be closed");
+        assert!(
+            current_is_open,
+            "an older resume must not close the current gate notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_resume_keeps_auth_actionable_until_verified_recovery() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:denied-then-authorized").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("publish auth notification");
+
+        let mut denied = commit(
+            run_id,
+            ProcessLifecycleStatus::Queued,
+            ProcessJournalKind::Resumed,
+            "web_ui",
+        );
+        denied.state.metadata["agent_turn"]["auth_resume_disposition"] = json!("denied");
+        observer
+            .observe_process_commit(denied)
+            .await
+            .expect("observe denied resume");
+        let denied_page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list after denial");
+        assert!(
+            denied_page.notifications[0].resolved_at.is_none(),
+            "denial does not prove credential recovery"
+        );
+
+        observer
+            .observe_process_commit(commit(
+                run_id,
+                ProcessLifecycleStatus::Queued,
+                ProcessJournalKind::Resumed,
+                "web_ui",
+            ))
+            .await
+            .expect("observe verified resume");
+        let recovered_page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list after recovery");
+        assert!(
+            recovered_page.notifications[0].resolved_at.is_some(),
+            "verified recovery closes the notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_auth_gate_reopens_when_it_blocks_again_after_a_verified_resume() {
+        let inbox = inbox();
+        let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:resume-then-reblock").expect("gate ref");
+        let mut suspended = commit(
+            run_id,
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        suspended.state.suspension = Some(ProcessSuspension {
+            kind: ProcessSuspensionKind::Authorization,
+            gate_ref: Some(gate_ref),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        });
+        let current = Arc::new(CurrentProcessSource::new(suspended.state.clone()));
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        )
+        .with_process_journal_source(Arc::clone(&current)
+            as Arc<dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>>);
+
+        observer
+            .observe_process_commit(suspended.clone())
+            .await
+            .expect("publish initial auth notification");
+
+        let mut resumed = suspended.clone();
+        resumed.kind = ProcessJournalKind::Resumed;
+        resumed.state.status = ProcessLifecycleStatus::Queued;
+        resumed.state.suspension = None;
+        current.replace(resumed.state.clone());
+        observer
+            .observe_process_commit(resumed)
+            .await
+            .expect("verified resume closes the auth notification");
+
+        current.replace(suspended.state.clone());
+        observer
+            .observe_process_commit(suspended)
+            .await
+            .expect("same gate blocks again");
+
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list re-blocked auth notification");
+        assert_eq!(page.notifications.len(), 1);
+        assert!(
+            page.notifications[0].resolved_at.is_none(),
+            "the same stable gate must become actionable again when it re-blocks"
+        );
     }
 
     /// A timed-out fire publishes an actionable block and the delivery watcher
@@ -958,6 +1941,7 @@ mod tests {
                             LifecycleRef::new(crate::run_delivery::TIMEOUT_LIFECYCLE_REF)
                                 .expect("timeout lifecycle ref"),
                         ),
+                        credential_providers: Vec::new(),
                     },
                     action: NotificationAction::OpenThread {
                         thread_id: thread(),

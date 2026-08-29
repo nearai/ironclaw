@@ -486,64 +486,118 @@ fn non_text_result_content() -> Resolution {
     )
 }
 
+fn read_failure_issue(
+    path: &str,
+    expected: impl Into<String>,
+    received: Option<String>,
+) -> CapabilityInputIssue {
+    CapabilityInputIssue {
+        path: path.to_string(),
+        code: DispatchInputIssueCode::InvalidValue,
+        expected: Some(expected.into()),
+        received,
+        schema_path: Some(format!("properties/{path}")),
+    }
+}
+
+/// Ceiling a JSON page may actually grow to.
+///
+/// A JSON page is bounded twice: by the model-preview envelope, and by the caller-side
+/// range gate, which uses the env-tunable effective read cap. `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES`
+/// clamps to `[4, 64 KiB]`, so the effective cap can sit BELOW the preview ceiling. Advertising
+/// the preview ceiling there would name a budget the gate rejects on the retry -- the same
+/// unreachable-advice failure this module's split budget arms exist to prevent.
+fn json_page_ceiling() -> usize {
+    usize::try_from(result_read_max_bytes())
+        .unwrap_or(MODEL_RESULT_PREVIEW_MAX_BYTES)
+        .min(MODEL_RESULT_PREVIEW_MAX_BYTES)
+}
+
 fn tool_result_read_failure(error: ToolResultRecordReadError) -> Resolution {
     let cause = sanitized_issue_text(error.to_string());
     tracing::debug!(%cause, "typed result-read failure is model-visible");
-    let (summary, path, expected) = match error {
-        ToolResultRecordReadError::MalformedStoredJson { .. } => {
-            return diagnostic_failure(
-                FailureKind::OutputDecode,
-                "stored tool result is not valid JSON".to_string(),
-            );
-        }
-        ToolResultRecordReadError::StoredResultTooLarge => {
-            return diagnostic_failure(
-                FailureKind::OutputTooLarge,
-                "stored tool result exceeds the durable storage limit".to_string(),
-            );
-        }
-        ToolResultRecordReadError::InvalidJsonPointer { .. } => (
+    match error {
+        ToolResultRecordReadError::MalformedStoredJson { .. } => diagnostic_failure(
+            FailureKind::OutputDecode,
+            "stored tool result is not valid JSON".to_string(),
+        ),
+        ToolResultRecordReadError::StoredResultTooLarge => diagnostic_failure(
+            FailureKind::OutputTooLarge,
+            "stored tool result exceeds the durable storage limit".to_string(),
+        ),
+        ToolResultRecordReadError::InvalidJsonPointer { .. } => *invalid_input_failure(
             "result_read json_pointer is invalid",
-            "json_pointer",
-            "RFC 6901 JSON Pointer",
+            read_failure_issue("json_pointer", "RFC 6901 JSON Pointer", None),
         ),
-        ToolResultRecordReadError::JsonPointerNotFound { .. } => (
+        ToolResultRecordReadError::JsonPointerNotFound { .. } => *invalid_input_failure(
             "result_read json_pointer does not select a value",
-            "json_pointer",
-            "pointer to an existing JSON value",
+            read_failure_issue("json_pointer", "pointer to an existing JSON value", None),
         ),
-        ToolResultRecordReadError::InvalidJsonOffset { .. } => (
+        ToolResultRecordReadError::InvalidJsonOffset { offset } => *invalid_input_failure(
             "result_read offset is outside the selected JSON value",
-            "offset",
-            "offset within the selected JSON value",
+            read_failure_issue(
+                "offset",
+                "offset within the selected JSON value",
+                Some(offset.to_string()),
+            ),
         ),
-        ToolResultRecordReadError::InvalidJsonLimit { .. } => (
+        ToolResultRecordReadError::InvalidJsonLimit { limit, max } => *invalid_input_failure(
             "result_read limit is outside the allowed range",
-            "limit",
-            "collection limit in the advertised range",
+            read_failure_issue("limit", format!("1..={max}"), Some(limit.to_string())),
         ),
-        ToolResultRecordReadError::JsonLimitRequiresCollection => (
+        ToolResultRecordReadError::JsonLimitRequiresCollection => *invalid_input_failure(
             "result_read limit requires an object or array selection",
-            "limit",
-            "omit limit when selecting a string or scalar",
+            read_failure_issue(
+                "limit",
+                "omit limit when selecting a string or scalar",
+                None,
+            ),
         ),
-        ToolResultRecordReadError::InvalidJsonBudget { .. }
-        | ToolResultRecordReadError::JsonViewBudgetTooSmall { .. } => (
+        // These two point in OPPOSITE directions and must never share guidance.
+        // `InvalidJsonBudget` means the request was above the ceiling, so the model
+        // has to ask for less; telling it to request a larger budget (as a single
+        // shared arm once did) is advice that can never succeed.
+        ToolResultRecordReadError::InvalidJsonBudget { max_bytes, max } => *invalid_input_failure(
+            "result_read max_bytes exceeds the JSON page ceiling",
+            read_failure_issue(
+                "max_bytes",
+                format!(
+                    "{RESULT_READ_MIN_BYTES}..={} for JSON reads",
+                    json_page_ceiling().min(max)
+                ),
+                Some(max_bytes.to_string()),
+            ),
+        ),
+        // A budget already at the ceiling has nowhere left to grow, so naming a larger
+        // one would be the same empty advice these split arms exist to avoid. The only
+        // move left is a narrower selection.
+        ToolResultRecordReadError::JsonViewBudgetTooSmall { max_bytes }
+            if max_bytes >= json_page_ceiling() =>
+        {
+            *invalid_input_failure(
+                "result_read JSON page does not fit the maximum budget",
+                read_failure_issue(
+                    "json_pointer",
+                    format!(
+                        "a narrower json_pointer; {} is the maximum JSON page budget",
+                        json_page_ceiling()
+                    ),
+                    Some(max_bytes.to_string()),
+                ),
+            )
+        }
+        ToolResultRecordReadError::JsonViewBudgetTooSmall { max_bytes } => *invalid_input_failure(
             "result_read JSON page does not fit max_bytes",
-            "max_bytes",
-            "larger JSON page budget within the advertised range",
+            read_failure_issue(
+                "max_bytes",
+                format!(
+                    "a JSON page budget above {max_bytes}, up to {}",
+                    json_page_ceiling()
+                ),
+                Some(max_bytes.to_string()),
+            ),
         ),
-    };
-    *invalid_input_failure(
-        summary,
-        CapabilityInputIssue {
-            path: path.to_string(),
-            code: DispatchInputIssueCode::InvalidValue,
-            expected: Some(expected.to_string()),
-            received: None,
-            schema_path: Some(format!("properties/{path}")),
-        },
-    )
+    }
 }
 
 fn diagnostic_failure(error_kind: FailureKind, safe_summary: String) -> Resolution {
@@ -946,6 +1000,28 @@ mod tests {
         );
     }
 
+    /// The advertised JSON ceiling must never exceed what the caller gate accepts.
+    ///
+    /// `IRONCLAW_TOOL_RESULT_READ_MAX_BYTES` clamps to `[4, 64 KiB]`, so the effective cap can
+    /// sit below the model-preview ceiling. Naming the preview ceiling in that configuration
+    /// would send the model to a budget `parse_result_read_input` rejects on the retry.
+    /// Asserted as a wiring identity rather than by setting the env var: these tests run
+    /// in-process and in parallel, so mutating the environment races every other reader.
+    #[test]
+    fn the_advertised_json_ceiling_never_exceeds_the_caller_gate() {
+        let ceiling = json_page_ceiling();
+
+        assert!(
+            u64::try_from(ceiling).expect("ceiling fits u64") <= result_read_max_bytes(),
+            "advertised ceiling {ceiling} exceeds the effective read cap {}",
+            result_read_max_bytes()
+        );
+        assert!(
+            ceiling <= MODEL_RESULT_PREVIEW_MAX_BYTES,
+            "advertised ceiling {ceiling} exceeds the model preview envelope"
+        );
+    }
+
     #[test]
     fn storage_failures_remain_terminal_and_model_safe() {
         let error = storage_unavailable_error(
@@ -1027,5 +1103,96 @@ mod tests {
             serde_json::to_string(&invalid_offset).expect("resolution serializes");
         assert!(invalid_offset_json.contains("invalid_input"));
         assert!(invalid_offset_json.contains("offset"));
+        assert!(
+            invalid_offset_json.contains("\"received\":\"99\""),
+            "the offending offset must reach the model, got: {invalid_offset_json}"
+        );
+
+        let invalid_limit = tool_result_read_failure(ToolResultRecordReadError::InvalidJsonLimit {
+            limit: 999,
+            max: TOOL_RESULT_JSON_MAX_LIMIT,
+        });
+        let invalid_limit_json =
+            serde_json::to_string(&invalid_limit).expect("resolution serializes");
+        assert!(
+            invalid_limit_json.contains(&format!(
+                "\"expected\":\"1..={TOOL_RESULT_JSON_MAX_LIMIT}\""
+            )),
+            "an out-of-range limit must state the real range, got: {invalid_limit_json}"
+        );
+        assert!(
+            invalid_limit_json.contains("\"received\":\"999\""),
+            "the offending limit must reach the model, got: {invalid_limit_json}"
+        );
+    }
+
+    /// The two JSON-budget failures point in opposite directions and must not share text.
+    ///
+    /// `InvalidJsonBudget` means the request was ABOVE the ceiling (go smaller);
+    /// `JsonViewBudgetTooSmall` means the page did not fit (go larger). Both collapsed
+    /// into one arm reading "larger JSON page budget within the advertised range", so an
+    /// over-budget request was told to grow — advice that can never succeed — and neither
+    /// carried the real bound, though both variants already hold it.
+    #[test]
+    fn json_budget_failures_state_real_bounds_and_the_right_direction() {
+        // Crate tier is the only reachable tier for the over-budget direction.
+        // `result_read_max_bytes()` and `MODEL_RESULT_PREVIEW_MAX_BYTES` are both
+        // 24 KiB by default, so the caller-side range gate above rejects an
+        // over-ceiling read before the domain can raise `InvalidJsonBudget`
+        // (pinned end-to-end by `result_read_out_of_range_max_bytes_surfaces_repair_guidance`).
+        // This arm is defence-in-depth for domain callers that do not pass that gate;
+        // driving it through a turn would mean fabricating a config production never has.
+        let over = tool_result_read_failure(ToolResultRecordReadError::InvalidJsonBudget {
+            max_bytes: MODEL_RESULT_PREVIEW_MAX_BYTES + 1,
+            max: MODEL_RESULT_PREVIEW_MAX_BYTES,
+        });
+        let over_json = serde_json::to_string(&over).expect("resolution serializes");
+        assert!(
+            over_json.contains(&format!(
+                "{RESULT_READ_MIN_BYTES}..={MODEL_RESULT_PREVIEW_MAX_BYTES}"
+            )),
+            "an over-budget read must state the real allowed range, got: {over_json}"
+        );
+        assert!(
+            over_json.contains(&(MODEL_RESULT_PREVIEW_MAX_BYTES + 1).to_string()),
+            "an over-budget read must echo the offending value, got: {over_json}"
+        );
+        assert!(
+            !over_json.contains("larger"),
+            "an over-budget read must never be told to ask for more, got: {over_json}"
+        );
+
+        // At the ceiling there is no larger budget to name, so the model must be sent to a
+        // narrower selection rather than an empty "above X, up to X" range.
+        let at_ceiling =
+            tool_result_read_failure(ToolResultRecordReadError::JsonViewBudgetTooSmall {
+                max_bytes: json_page_ceiling(),
+            });
+        let at_ceiling_json = serde_json::to_string(&at_ceiling).expect("resolution serializes");
+        assert!(
+            at_ceiling_json.contains("narrower json_pointer"),
+            "a page that cannot fit the maximum budget must ask for a narrower selection, got: {at_ceiling_json}"
+        );
+        assert!(
+            !at_ceiling_json.contains(&format!(
+                "above {}, up to {}",
+                json_page_ceiling(),
+                json_page_ceiling()
+            )),
+            "the ceiling case must not emit an empty range, got: {at_ceiling_json}"
+        );
+
+        let under = tool_result_read_failure(ToolResultRecordReadError::JsonViewBudgetTooSmall {
+            max_bytes: RESULT_READ_MIN_BYTES as usize,
+        });
+        let under_json = serde_json::to_string(&under).expect("resolution serializes");
+        assert!(
+            under_json.contains(&MODEL_RESULT_PREVIEW_MAX_BYTES.to_string()),
+            "a too-small page must name the ceiling it may grow to, got: {under_json}"
+        );
+        assert!(
+            under_json.contains(&format!("\"received\":\"{RESULT_READ_MIN_BYTES}\"")),
+            "a too-small page must echo the budget that failed, got: {under_json}"
+        );
     }
 }

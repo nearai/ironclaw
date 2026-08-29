@@ -785,6 +785,7 @@ pub(super) async fn build_backend_production(
             )),
             credential_account_visibility_policy,
             flow_record_source: product_auth_flow_record_source,
+            notification_inbox: Some(Arc::clone(&notification_inbox)),
         })?;
     let product_auth_dependencies = Arc::new(product_auth_core.clone());
     let product_auth_ready = true;

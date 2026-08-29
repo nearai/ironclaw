@@ -57,6 +57,7 @@ use crate::ProductSurfaceFailure;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
+use crate::run_delivery::inbox_gate_observer::spawn_inbox_gate_observer;
 use ironclaw_product_contracts::binding::{ResolveBindingRequest, ResolvedBinding};
 
 const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
@@ -591,6 +592,25 @@ impl RunDeliveryObserver {
                     )
                     .await;
             }
+            // Persist the actionable gate before optional prompt enrichment or
+            // channel rendering. An auth-provider outage must not hide the
+            // run-bound recovery action from the durable WebUI Inbox.
+            let auth_inbox_published = if actionable_state.status == TurnStatus::BlockedAuth
+                && let Some(gate_ref) = actionable_state.gate_ref.as_ref()
+                && let Some(kind) = super::blocked_status_notification_kind(actionable_state.status)
+            {
+                self.services
+                    .publish_inbox_notification(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        kind,
+                        Some(gate_ref.as_str()),
+                    )
+                    .await
+            } else {
+                false
+            };
             let notification = match self
                 .notification_for_actionable_state(
                     &envelope,
@@ -600,10 +620,10 @@ impl RunDeliveryObserver {
                     run_id,
                     &actionable_state,
                 )
-                .await?
+                .await
             {
-                Some(notification) => notification,
-                None => {
+                Ok(Some(notification)) => notification,
+                Ok(None) => {
                     if actionable_state.status == TurnStatus::BlockedResource
                         && let Some(marker) = next_blocked_marker
                     {
@@ -658,10 +678,41 @@ impl RunDeliveryObserver {
                     }
                     return Ok(());
                 }
+                Err(error)
+                    if actionable_state.status == TurnStatus::BlockedAuth
+                        && next_blocked_marker.is_some() =>
+                {
+                    // Prompt enrichment and external rendering are optional
+                    // delivery surfaces. Keep the authoritative Inbox item
+                    // actionable and continue observing so verified recovery
+                    // can resolve it even while the auth prompt backend is
+                    // unavailable.
+                    tracing::debug!(
+                        target: "ironclaw::reborn::run_delivery",
+                        %run_id,
+                        %error,
+                        "auth prompt enrichment failed; continuing with durable Inbox notification"
+                    );
+                    if auth_inbox_published && let Some(marker) = next_blocked_marker {
+                        spawn_inbox_gate_observer(
+                            &self.services,
+                            self.settings,
+                            scope,
+                            binding.actor_user_id,
+                            run_id,
+                            marker,
+                        );
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
             };
             let event_kind = notification.event_kind;
             let gate_ref_for_routing = notification.gate_ref_for_routing.clone();
-            if let Some(kind) = inbox_kind_for_event(event_kind) {
+            if actionable_state.status != TurnStatus::BlockedAuth
+                && let Some(kind) = inbox_kind_for_event(event_kind)
+            {
                 self.services
                     .publish_inbox_notification(
                         &binding.actor_user_id,

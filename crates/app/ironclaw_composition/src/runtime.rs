@@ -35,10 +35,11 @@ use uuid::Uuid;
 use ironclaw_assistant::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
-    DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    OutboundPreferencesProductService, PersistentApprovalGranteeResolver,
-    ResourceBlockBackfillProcessCommitObserver, RunOutcomeProcessCommitObserver,
-    RunStateApprovalInteractionReadModel, SuggestionsProcessCommitObserver,
+    AuthNotificationBackfillProcessCommitObserver, DefaultApprovalInteractionService,
+    DefaultAuthInteractionService, OutboundPreferencesProductService,
+    PersistentApprovalGranteeResolver, ResourceBlockBackfillProcessCommitObserver,
+    RunOutcomeProcessCommitObserver, RunStateApprovalInteractionReadModel,
+    SuggestionsProcessCommitObserver,
 };
 use ironclaw_event_log::{
     DurableAuditLog, DurableEventLog, EventError, NonBlockingEventSink, RuntimeEvent,
@@ -1318,8 +1319,11 @@ impl RebornRuntime {
         };
         if let Some(user_id) = paired_user.as_ref() {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
-            let continuation =
-                crate::factory::auth_continuation_dispatcher(turn_coordinator, Some(turn_state));
+            let continuation = crate::factory::auth_continuation_dispatcher(
+                turn_coordinator,
+                Some(turn_state),
+                Some(Arc::clone(&self.notification_inbox)),
+            );
             service
                 .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
                 .await
@@ -3269,12 +3273,25 @@ pub(crate) async fn build_runtime_with_resource_governor(
             reason: format!("suggestion generation observer wiring failed: {error}"),
         })?;
     processes
-        .subscribe_process_observer(Arc::new(RunOutcomeProcessCommitObserver::new(
-            Arc::clone(&services.notification_inbox),
-            Arc::clone(&thread_service),
-        )))
+        .subscribe_process_observer(Arc::new(
+            RunOutcomeProcessCommitObserver::new(
+                Arc::clone(&services.notification_inbox),
+                Arc::clone(&thread_service),
+            )
+            .with_process_journal_source(Arc::clone(&process_journal_source)),
+        ))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
             reason: format!("run outcome notification observer wiring failed: {error}"),
+        })?;
+    processes
+        .subscribe_process_observer(Arc::new(
+            AuthNotificationBackfillProcessCommitObserver::new(
+                Arc::clone(&services.notification_inbox),
+                Arc::clone(&process_journal_source),
+            ),
+        ))
+        .map_err(|error| RebornRuntimeError::MalformedConfig {
+            reason: format!("auth notification backfill observer wiring failed: {error}"),
         })?;
     processes
         .subscribe_process_observer(Arc::new(ResourceBlockBackfillProcessCommitObserver::new(
@@ -4222,6 +4239,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             services.product_auth.as_ref(),
             Arc::clone(&local_runtime.process_gate_query_source),
             Arc::clone(&planned_turn_coordinator),
+            Arc::clone(&services.notification_inbox),
         )
     } else {
         Arc::new(auth_interaction::UnavailableAuthInteractionService)
@@ -4782,17 +4800,21 @@ pub(crate) async fn build_runtime_with_resource_governor(
 }
 
 /// Thin wrapper over
+type NotificationInbox = Arc<dyn ironclaw_notifications::NotificationInboxStorePort>;
+
 /// `build_webui_auth_interaction_service_with_turn_run_source` using
 /// `agent_turn_runtime` as the turn-run state source.
 fn build_webui_auth_interaction_service(
     product_auth: &RebornProductAuthServices,
     process_gate_query_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    notification_inbox: NotificationInbox,
 ) -> Arc<dyn AuthInteractionService> {
     build_webui_auth_interaction_service_with_turn_run_source(
         product_auth,
         process_gate_query_source,
         turn_coordinator,
+        notification_inbox,
     )
 }
 
@@ -4805,6 +4827,7 @@ fn build_webui_auth_interaction_service_with_turn_run_source(
     product_auth: &RebornProductAuthServices,
     turn_run_source: Arc<dyn ProcessGateQuerySource<Error = TurnError>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    notification_inbox: NotificationInbox,
 ) -> Arc<dyn AuthInteractionService> {
     // `AuthFlowRecordSource` is optional on the product-auth bundle because
     // production may supply a durable read projection that is not the flow
@@ -4814,14 +4837,17 @@ fn build_webui_auth_interaction_service_with_turn_run_source(
     let Some(flow_records) = product_auth.flow_record_source() else {
         return Arc::new(auth_interaction::UnavailableAuthInteractionService);
     };
-    Arc::new(DefaultAuthInteractionService::new(
-        Arc::new(auth_interaction::ProcessGateAuthInteractionReadModel::new(
-            turn_run_source,
-            flow_records,
-        )),
-        product_auth.flow_manager(),
-        turn_coordinator,
-    ))
+    Arc::new(
+        DefaultAuthInteractionService::new(
+            Arc::new(auth_interaction::ProcessGateAuthInteractionReadModel::new(
+                turn_run_source,
+                flow_records,
+            )),
+            product_auth.flow_manager(),
+            turn_coordinator,
+        )
+        .with_notification_inbox(notification_inbox),
+    )
 }
 
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";

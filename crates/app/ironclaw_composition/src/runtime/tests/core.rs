@@ -6072,6 +6072,7 @@ async fn production_product_surface_uses_the_durable_notification_inbox() {
                         ironclaw_notifications::LifecycleRef::new("runtime-notification-gate")
                             .expect("lifecycle ref"),
                     ),
+                    credential_providers: Vec::new(),
                 },
                 action: ironclaw_notifications::NotificationAction::OpenThread { thread_id },
                 initial_state: ironclaw_notifications::NotificationInitialState::Open,

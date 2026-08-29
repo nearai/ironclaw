@@ -254,9 +254,23 @@ pub(crate) fn blocked_status_notification_kind(status: TurnStatus) -> Option<Not
     }
 }
 
+pub(crate) fn blocked_status_notification(
+    state: &TurnRunState,
+) -> Option<(NotificationKind, &str)> {
+    let gate_ref = state.gate_ref.as_ref()?;
+    blocked_status_notification_kind(state.status).map(|kind| (kind, gate_ref.as_str()))
+}
+
 pub(crate) fn blocked_actionable_marker(state: &TurnRunState) -> Option<BlockedActionableMarker> {
     match state.status {
-        TurnStatus::BlockedApproval | TurnStatus::BlockedAuth | TurnStatus::BlockedResource => {
+        TurnStatus::BlockedApproval | TurnStatus::BlockedAuth => Some(BlockedActionableMarker {
+            status: state.status,
+            gate_ref: state
+                .gate_ref
+                .as_ref()
+                .map(|gate| gate.as_str().to_string()),
+        }),
+        TurnStatus::BlockedResource => {
             let gate_ref = state
                 .gate_ref
                 .as_ref()
@@ -418,7 +432,8 @@ pub(crate) fn turn_scope_from_thread_scope(
 
 impl RunDeliveryServices {
     /// Best-effort publication of bounded, metadata-only run state to the
-    /// authenticated WebUI Inbox. External channel delivery remains separate.
+    /// authenticated WebUI Inbox. Returns `true` only when the durable store
+    /// accepted the record. External channel delivery remains separate.
     pub(crate) async fn publish_inbox_notification(
         &self,
         user_id: &ironclaw_host_api::ids::UserId,
@@ -426,22 +441,22 @@ impl RunDeliveryServices {
         run_id: TurnRunId,
         kind: NotificationKind,
         lifecycle_ref: Option<&str>,
-    ) {
+    ) -> bool {
         let Some(inbox) = self.notification_inbox.as_ref() else {
-            return;
+            return false;
         };
         let notification_id = match run_notification_inbox_id(run_id, kind, lifecycle_ref) {
             Ok(id) => id,
             Err(error) => {
                 tracing::warn!(%error, %run_id, "invalid durable Inbox notification id");
-                return;
+                return false;
             }
         };
         let lifecycle_ref = match lifecycle_ref.map(LifecycleRef::new).transpose() {
             Ok(value) => value,
             Err(error) => {
                 tracing::warn!(%error, %run_id, "invalid durable Inbox lifecycle reference");
-                return;
+                return false;
             }
         };
         let severity = match kind {
@@ -461,7 +476,7 @@ impl RunDeliveryServices {
             | NotificationKind::AuthenticationRequired
             | NotificationKind::RunBlocked => NotificationInitialState::Open,
         };
-        if let Err(error) = inbox
+        match inbox
             .publish(PublishNotificationRequest {
                 id: notification_id,
                 recipient: NotificationRecipient {
@@ -474,6 +489,7 @@ impl RunDeliveryServices {
                     thread_id: Some(scope.thread_id.clone()),
                     turn_run_id: Some(run_id),
                     lifecycle_ref,
+                    credential_providers: Vec::new(),
                 },
                 action: NotificationAction::OpenThread {
                     thread_id: scope.thread_id.clone(),
@@ -483,7 +499,11 @@ impl RunDeliveryServices {
             })
             .await
         {
-            tracing::warn!(%error, %run_id, "failed to publish durable Inbox notification");
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(%error, %run_id, "failed to publish durable Inbox notification");
+                false
+            }
         }
     }
 

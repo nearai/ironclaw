@@ -15,6 +15,10 @@ use async_trait::async_trait;
 pub use ironclaw_auth::RebornAuthContinuationDispatcher as ProductAuthContinuationDispatcher;
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
 use ironclaw_host_api::turn::{IdempotencyKey, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_notifications::{
+    NotificationInboxError, NotificationInboxStorePort, NotificationKind,
+    NotificationMutationRequest, NotificationRecipient,
+};
 use ironclaw_turns::{
     GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
     TurnCoordinator, TurnError, TurnErrorCategory,
@@ -85,11 +89,23 @@ impl ProductAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
 #[derive(Clone)]
 pub struct ProductAuthTurnGateResumeDispatcher {
     turn_coordinator: Arc<dyn TurnCoordinator>,
+    notification_inbox: Option<Arc<dyn NotificationInboxStorePort>>,
 }
 
 impl ProductAuthTurnGateResumeDispatcher {
     pub fn new(turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
-        Self { turn_coordinator }
+        Self {
+            turn_coordinator,
+            notification_inbox: None,
+        }
+    }
+
+    pub fn with_notification_inbox(
+        mut self,
+        notification_inbox: Arc<dyn NotificationInboxStorePort>,
+    ) -> Self {
+        self.notification_inbox = Some(notification_inbox);
+        self
     }
 
     pub async fn dispatch_auth_continuation(
@@ -192,10 +208,19 @@ impl ProductAuthTurnGateResumeDispatcher {
             .await
             .map_err(map_auth_resume_error)?;
         let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
-        if ignore_stale_gate
-            && (state.status != TurnStatus::BlockedAuth
-                || state.gate_ref.as_ref() != Some(&gate_resolution_ref))
-        {
+        let denied = resume_disposition == Some(GateResumeDisposition::Denied);
+        let gate_is_current = state.status == TurnStatus::BlockedAuth
+            && state.gate_ref.as_ref() == Some(&gate_resolution_ref);
+        if ignore_stale_gate && !gate_is_current {
+            if !denied {
+                self.resolve_auth_notification(
+                    &state.scope,
+                    &event.scope.resource.user_id,
+                    run_id,
+                    &gate_resolution_ref,
+                )
+                .await?;
+            }
             return Ok(run_id);
         }
         let actor = state
@@ -209,13 +234,12 @@ impl ProductAuthTurnGateResumeDispatcher {
             binding_id.push_str(&binding_ref_segment("disposition", disposition.as_str()));
         }
         let idempotency_key = idempotency_key_for_binding(&binding_id)?;
-
         self.turn_coordinator
             .resume_turn(ResumeTurnRequest {
                 scope,
                 actor,
                 run_id,
-                gate_resolution_ref,
+                gate_resolution_ref: gate_resolution_ref.clone(),
                 idempotency_key,
                 precondition: ResumeTurnPrecondition::BlockedAuthGate,
                 resume_disposition,
@@ -223,7 +247,82 @@ impl ProductAuthTurnGateResumeDispatcher {
             .await
             .map_err(map_auth_resume_error)?;
 
+        if !denied && self.notification_inbox.is_some() {
+            // `resume_turn` may return a cached success before checking the
+            // current process cursor. Read the committed state back so a
+            // replay cannot settle a newly-current instance of the same gate.
+            let committed_state = self
+                .turn_coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: state.scope.clone(),
+                    run_id,
+                })
+                .await
+                .map_err(map_auth_resume_error)?;
+            let gate_is_still_current = committed_state.status == TurnStatus::BlockedAuth
+                && committed_state.gate_ref.as_ref() == Some(&gate_resolution_ref);
+            if !gate_is_still_current {
+                self.resolve_auth_notification(
+                    &committed_state.scope,
+                    &event.scope.resource.user_id,
+                    run_id,
+                    &gate_resolution_ref,
+                )
+                .await?;
+            }
+        }
+
         Ok(run_id)
+    }
+
+    async fn resolve_auth_notification(
+        &self,
+        scope: &TurnScope,
+        fallback_user_id: &ironclaw_host_api::ids::UserId,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> Result<(), ProductSurfaceFailure> {
+        let Some(inbox) = self.notification_inbox.as_ref() else {
+            return Ok(());
+        };
+        resolve_auth_notification(inbox.as_ref(), scope, fallback_user_id, run_id, gate_ref).await
+    }
+}
+
+pub(crate) async fn resolve_auth_notification(
+    inbox: &dyn NotificationInboxStorePort,
+    scope: &TurnScope,
+    fallback_user_id: &ironclaw_host_api::ids::UserId,
+    run_id: TurnRunId,
+    gate_ref: &TurnGateRef,
+) -> Result<(), ProductSurfaceFailure> {
+    let notification_id = crate::run_delivery::run_notification_inbox_id(
+        run_id,
+        NotificationKind::AuthenticationRequired,
+        Some(gate_ref.as_str()),
+    )
+    .map_err(|error| ProductSurfaceFailure::Transient {
+        reason: format!("build auth Inbox notification id failed: {error}"),
+    })?;
+    let owner_user_id = scope
+        .explicit_owner_user_id()
+        .cloned()
+        .unwrap_or_else(|| fallback_user_id.clone());
+    match inbox
+        .resolve(NotificationMutationRequest {
+            recipient: NotificationRecipient {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: owner_user_id,
+            },
+            notification_id,
+            occurred_at: chrono::Utc::now(),
+        })
+        .await
+    {
+        Ok(_) | Err(NotificationInboxError::NotificationNotFound) => Ok(()),
+        Err(error) => Err(ProductSurfaceFailure::Transient {
+            reason: format!("resolve auth Inbox notification failed: {error}"),
+        }),
     }
 }
 
@@ -426,7 +525,7 @@ fn idempotency_key_for_binding(binding_id: &str) -> Result<IdempotencyKey, Produ
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{collections::HashMap, sync::Mutex};
 
     use async_trait::async_trait;
     use chrono::Utc;
@@ -435,10 +534,19 @@ mod tests {
         AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
         LifecyclePackageRef, TurnRunRef,
     };
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
         ids::{AgentId, InvocationId, ProcessId, ProjectId, TenantId, ThreadId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
         resource::ResourceScope,
         turn::TurnGateRef,
+    };
+    use ironclaw_notifications::{
+        LifecycleRef, ListNotificationsRequest, NotificationAction, NotificationInboxStore,
+        NotificationInboxStorePort, NotificationInitialState, NotificationKind,
+        NotificationMutationRequest, NotificationRecipient, NotificationSeverity,
+        NotificationSource, PublishNotificationRequest,
     };
     use ironclaw_processes::{
         ClaimProcessesRequest, ProcessCheckpointRef, ProcessKind, ProcessSuspension,
@@ -455,10 +563,13 @@ mod tests {
 
     use super::*;
 
+    mod notification_lifecycle;
+
     struct RecordingTurnCoordinator {
         resumes: Mutex<Vec<ResumeTurnRequest>>,
         state: Mutex<Option<TurnRunState>>,
         resume_error: Mutex<Option<TurnError>>,
+        resume_cache: Mutex<HashMap<String, ResumeTurnResponse>>,
     }
 
     impl Default for RecordingTurnCoordinator {
@@ -467,6 +578,7 @@ mod tests {
                 resumes: Mutex::new(Vec::new()),
                 state: Mutex::new(None),
                 resume_error: Mutex::new(None),
+                resume_cache: Mutex::new(HashMap::new()),
             }
         }
     }
@@ -483,6 +595,23 @@ mod tests {
         fn fail_resume_with(&self, error: TurnError) {
             *self.resume_error.lock().expect("resume error lock") = Some(error);
         }
+    }
+
+    fn notification_inbox() -> Arc<NotificationInboxStore<InMemoryBackend>> {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/notifications").expect("notification mount alias"),
+            VirtualPath::new("/engine/test/auth-continuation-notifications")
+                .expect("notification mount target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("notification mount view");
+        Arc::new(NotificationInboxStore::new(
+            Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(InMemoryBackend::new()),
+                mounts,
+            )),
+            ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
+        ))
     }
 
     #[async_trait]
@@ -502,6 +631,16 @@ mod tests {
             &self,
             request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
+            if let Some(cached) = self
+                .resume_cache
+                .lock()
+                .expect("resume cache lock")
+                .get(request.idempotency_key.as_str())
+                .cloned()
+            {
+                self.resumes.lock().expect("resume lock").push(request);
+                return Ok(cached);
+            }
             let state = self
                 .state
                 .lock()
@@ -540,12 +679,22 @@ mod tests {
                 return Err(error);
             }
             let run_id = request.run_id;
+            let cache_key = request.idempotency_key.as_str().to_string();
             self.resumes.lock().expect("resume lock").push(request);
-            Ok(ResumeTurnResponse {
+            let response = ResumeTurnResponse {
                 run_id,
                 status: TurnStatus::Running,
                 event_cursor: EventCursor::default(),
-            })
+            };
+            self.resume_cache
+                .lock()
+                .expect("resume cache lock")
+                .insert(cache_key, response.clone());
+            let mut state = self.state.lock().expect("state lock");
+            let state = state.as_mut().ok_or(TurnError::ScopeNotFound)?;
+            state.status = TurnStatus::Running;
+            state.gate_ref = None;
+            Ok(response)
         }
 
         async fn retry_turn(
@@ -704,18 +853,52 @@ mod tests {
     #[tokio::test]
     async fn canceled_turn_gate_continuation_denies_exact_blocked_auth_gate() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+        let inbox = notification_inbox();
         let run_id = TurnRunId::new();
+        let gate_ref = TurnGateRef::new("gate:auth").expect("gate ref");
         coordinator.set_state(run_state_for_actor_owner(
             run_id,
             TurnStatus::BlockedAuth,
-            Some("gate:auth"),
+            Some(gate_ref.as_str()),
             "authenticated-actor",
             "alice",
         ));
+        let notification_id = crate::run_delivery::run_notification_inbox_id(
+            run_id,
+            NotificationKind::AuthenticationRequired,
+            Some(gate_ref.as_str()),
+        )
+        .expect("notification id");
+        inbox
+            .publish(PublishNotificationRequest {
+                id: notification_id,
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: Some(ThreadId::new("thread-auth").expect("thread")),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(
+                        LifecycleRef::new(gate_ref.as_str()).expect("lifecycle ref"),
+                    ),
+                    credential_providers: Vec::new(),
+                },
+                action: NotificationAction::OpenThread {
+                    thread_id: ThreadId::new("thread-auth").expect("thread"),
+                },
+                initial_state: NotificationInitialState::Open,
+                occurred_at: Utc::now(),
+            })
+            .await
+            .expect("seed auth notification");
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone())
+            .with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
         let event = scoped_event(AuthContinuationRef::TurnGateResume {
             turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
-            gate_ref: AuthGateRef::new("gate:auth").unwrap(),
+            gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
         });
 
         dispatcher
@@ -743,21 +926,70 @@ mod tests {
                     GateResumeDisposition::Denied.as_str()
                 ))
         );
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list denied auth notification");
+        assert!(
+            page.notifications[0].resolved_at.is_none(),
+            "a canceled auth continuation is a denial, not verified recovery"
+        );
     }
 
     #[tokio::test]
     async fn canceled_continuation_leaves_stale_or_non_turn_gate_untouched() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+        let inbox = notification_inbox();
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone())
+            .with_notification_inbox(Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>);
         let run_id = TurnRunId::new();
+        let stale_gate_ref = TurnGateRef::new("gate:stale-auth").expect("stale gate ref");
         coordinator.set_state(run_state(
             run_id,
             TurnStatus::BlockedAuth,
             Some("gate:new-auth"),
         ));
+        inbox
+            .publish(PublishNotificationRequest {
+                id: crate::run_delivery::run_notification_inbox_id(
+                    run_id,
+                    NotificationKind::AuthenticationRequired,
+                    Some(stale_gate_ref.as_str()),
+                )
+                .expect("notification id"),
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                kind: NotificationKind::AuthenticationRequired,
+                severity: NotificationSeverity::Warning,
+                source: NotificationSource {
+                    thread_id: Some(ThreadId::new("thread-auth").expect("thread")),
+                    turn_run_id: Some(run_id),
+                    lifecycle_ref: Some(
+                        LifecycleRef::new(stale_gate_ref.as_str()).expect("lifecycle ref"),
+                    ),
+                    credential_providers: Vec::new(),
+                },
+                action: NotificationAction::OpenThread {
+                    thread_id: ThreadId::new("thread-auth").expect("thread"),
+                },
+                initial_state: NotificationInitialState::Open,
+                occurred_at: Utc::now(),
+            })
+            .await
+            .expect("seed stale auth notification");
         let stale = scoped_event(AuthContinuationRef::TurnGateResume {
             turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
-            gate_ref: AuthGateRef::new("gate:stale-auth").unwrap(),
+            gate_ref: AuthGateRef::new(stale_gate_ref.as_str()).unwrap(),
         });
 
         dispatcher
@@ -770,6 +1002,22 @@ mod tests {
             .expect("setup-only cancellation has no turn side effect");
 
         assert!(coordinator.resumes().is_empty());
+        let page = inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: TenantId::new("tenant-auth").expect("tenant"),
+                    user_id: UserId::new("alice").expect("user"),
+                },
+                limit: 10,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list stale denied notification");
+        assert!(
+            page.notifications[0].resolved_at.is_none(),
+            "a stale denial replay cannot prove credential recovery"
+        );
     }
 
     /// A replayed RESUME continuation whose gate already settled converges as

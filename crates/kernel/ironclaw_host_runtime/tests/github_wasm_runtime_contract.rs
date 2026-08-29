@@ -624,6 +624,74 @@ async fn host_runtime_services_extracts_google_drive_download_binary_into_text()
 }
 
 #[tokio::test]
+async fn host_runtime_services_strip_google_drive_download_bytes_when_extraction_fails() {
+    let capability_id = CapabilityId::new("google-drive.download_file").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_drive_policy();
+    let network = SequencedGoogleDriveDownloadEgress::new(
+        br#"{"id":"file-1","name":"opaque.png","mimeType":"image/png"}"#.to_vec(),
+        vec![0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02],
+    );
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("google_drive_failed_extract_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
+    let services = google_wasm_services_for_test!(
+        "google-drive",
+        policy,
+        network,
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+        required_scopes,
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"file_id": "file-1"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert!(
+                completed.output.get("content_base64").is_none(),
+                "failed extraction must not leak the guest-to-host base64 handoff: {:?}",
+                completed.output
+            );
+            let content = completed.output["content"].as_str().unwrap_or_default();
+            let encoded_handoff = "iVBORwABAg==";
+            assert!(
+                !content.contains(encoded_handoff),
+                "failed extraction must not copy the exact encoded handoff into content: {content}"
+            );
+            let serialized_output = serde_json::to_string(&completed.output)
+                .expect("completed output must serialize for the model");
+            assert!(
+                !serialized_output.contains(encoded_handoff),
+                "failed extraction must not expose the exact encoded handoff in serialized output: {serialized_output}"
+            );
+            assert!(
+                content.starts_with('[') && content.ends_with(']'),
+                "the model needs a clear unsupported/failure marker, got: {content}"
+            );
+        }
+        other => panic!("expected completed outcome with a semantic marker, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
     let capability_id = CapabilityId::new("google-drive.list_files").unwrap();
     let scope = sample_scope(InvocationId::new());

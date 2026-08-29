@@ -676,6 +676,22 @@ struct OAuthPromptSource {
     authorization_url: Option<String>,
 }
 
+struct FailingAuthPromptSource;
+
+#[async_trait]
+impl BlockedAuthPromptSource for FailingAuthPromptSource {
+    async fn auth_prompt_for_blocked_run(
+        &self,
+        _request: BlockedAuthPromptRequest<'_>,
+    ) -> Result<AuthPromptView, ProductAdapterError> {
+        Err(ProductAdapterError::SurfaceTransient {
+            reason: ironclaw_host_api::product_adapter_error::RedactedString::new(
+                "auth prompt backend unavailable",
+            ),
+        })
+    }
+}
+
 #[async_trait]
 impl BlockedAuthPromptSource for OAuthPromptSource {
     async fn auth_prompt_for_blocked_run(
@@ -1135,6 +1151,7 @@ fn build_harness_with_settings(
             }) as Arc<dyn BlockedAuthPromptSource>
         }),
         None,
+        None,
     )
 }
 
@@ -1153,12 +1170,15 @@ fn build_harness_with_gate_ports(
     resolved_binding: ironclaw_product_contracts::binding::ResolvedBinding,
     blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     auth_flow_cancel: Option<Arc<dyn ironclaw_auth::product_prompt::BlockedAuthFlowCanceller>>,
+    notification_inbox_override: Option<Arc<dyn NotificationInboxStorePort>>,
 ) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let notification_inbox = notification_inbox();
+    let notification_inbox_port = notification_inbox_override
+        .unwrap_or_else(|| Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>);
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     let threads = Arc::new(InMemorySessionThreadService::default());
     let project_files = Arc::new(ScriptedProjectFilesystemReader::default());
@@ -1185,9 +1205,7 @@ fn build_harness_with_gate_ports(
         outbound_store: Arc::clone(&store) as Arc<dyn OutboundStateStorePort>,
         route_store: Arc::clone(&route_store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-        notification_inbox: Some(
-            Arc::clone(&notification_inbox) as Arc<dyn NotificationInboxStorePort>
-        ),
+        notification_inbox: Some(notification_inbox_port),
         project_filesystem: Arc::clone(&project_files) as Arc<dyn ProjectFilesystemReader>,
         delivery_targets: Arc::new(StaticTargetCatalog {
             targets: Vec::new(),
@@ -2376,6 +2394,174 @@ async fn observer_delivers_a_prompt_for_each_distinct_auth_gate() {
 }
 
 #[tokio::test]
+async fn observer_does_not_publish_an_auth_inbox_item_without_a_gate_ref() {
+    let harness = build_harness(
+        vec![
+            // The first state satisfies the foreign-run existence guard; the
+            // second is the actionable state observed by the delivery loop.
+            scripted_state(TurnStatus::BlockedAuth, None),
+            scripted_state(TurnStatus::BlockedAuth, None),
+        ],
+        false,
+        Some("https://provider.example/oauth"),
+        Duration::from_millis(40),
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-auth-without-gate"),
+            accepted_ack(TurnRunId::new()),
+        )
+        .await;
+
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert!(
+        inbox.notifications.is_empty(),
+        "auth without a gate ref is not actionable and must not leave an unresolved Inbox item"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "auth without a gate ref must not produce an external prompt"
+    );
+}
+
+#[tokio::test]
+async fn observer_publishes_run_bound_auth_inbox_before_prompt_enrichment() {
+    const GATE: &str = "gate:auth-extension-00000000000000000000000001";
+    let harness = build_harness_with_gate_ports(
+        vec![scripted_state(TurnStatus::BlockedAuth, Some(GATE))],
+        false,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
+        },
+        &["status"],
+        None,
+        binding(),
+        Some(Arc::new(FailingAuthPromptSource)),
+        None,
+        None,
+    );
+    let run_id = TurnRunId::new();
+
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        harness.observer.observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-auth-enrichment-down"),
+            accepted_ack(run_id),
+        ),
+    )
+    .await
+    .expect("failed auth enrichment must release the sole delivery permit");
+
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::AuthenticationRequired
+    );
+    assert_eq!(inbox.notifications[0].source.turn_run_id, Some(run_id));
+    assert_eq!(
+        inbox.notifications[0]
+            .source
+            .lifecycle_ref
+            .as_ref()
+            .map(|reference| reference.as_str()),
+        Some(GATE)
+    );
+    assert!(
+        inbox.notifications[0].resolved_at.is_none(),
+        "the durable auth notification remains actionable while the run is parked"
+    );
+    assert!(
+        harness
+            .adapter
+            .texts()
+            .iter()
+            .all(|text| !text.contains("Authentication required")),
+        "a failed enrichment must not invent an auth channel prompt"
+    );
+
+    let unrelated_run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, unrelated_run_id, "unrelated run finished").await;
+    harness
+        .turns
+        .set_state(scripted_state(TurnStatus::Completed, None));
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        harness.observer.observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-unrelated-run"),
+            accepted_ack(unrelated_run_id),
+        ),
+    )
+    .await
+    .expect("an unrelated run must acquire the released delivery permit");
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::AuthenticationRequired,
+        GATE,
+    )
+    .await;
+    assert_eq!(
+        harness.adapter.texts().last().map(String::as_str),
+        Some("unrelated run finished"),
+        "the released permit must remain available to unrelated replies"
+    );
+}
+
+#[tokio::test]
+async fn observer_reports_failed_auth_enrichment_when_inbox_publication_also_fails() {
+    const GATE: &str = "gate:auth-extension-00000000000000000000000002";
+    let harness = build_harness_with_gate_ports(
+        vec![scripted_state(TurnStatus::BlockedAuth, Some(GATE))],
+        false,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait: Duration::from_secs(5),
+            max_concurrent_deliveries: NonZeroUsize::new(1).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            first_nudge_after: Duration::from_secs(3600),
+            renudge_interval: Duration::from_secs(3600),
+        },
+        &["status"],
+        None,
+        binding(),
+        Some(Arc::new(FailingAuthPromptSource)),
+        None,
+        Some(Arc::new(NoopNotificationInboxStore)),
+    );
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(
+                ProductTriggerReason::DirectChat,
+                "evt-auth-enrichment-and-inbox-down",
+            ),
+            accepted_ack(TurnRunId::new()),
+        )
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts().last().map(String::as_str),
+        Some("Something went wrong delivering the result here. Check the WebUI."),
+        "without durable Inbox evidence, enrichment failure must remain caller-visible"
+    );
+    assert!(
+        inbox_records(harness.notification_inbox.as_ref())
+            .await
+            .notifications
+            .is_empty(),
+        "the failing Inbox port must not invent durable notification evidence"
+    );
+}
+
+#[tokio::test]
 async fn observer_records_gate_route_without_a_vendor_ref_that_cannot_key_a_route() {
     // `vendor_message_ref` is an unvalidated vendor string, so a channel can
     // hand back a ref that is not a legal route segment (here: a control
@@ -3052,7 +3238,11 @@ fn build_triggered_harness_with_turns(
     let initially_active = catalog.clone();
     build_triggered_harness_with_turns_catalog(
         turns,
-        auth_url,
+        auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
         catalog,
         initially_active,
         None,
@@ -3102,7 +3292,11 @@ fn build_triggered_harness_with_catalog(
     let turns = Arc::new(ScriptedTurnCoordinator::with_states(states));
     build_triggered_harness_with_turns_catalog(
         turns,
-        auth_url,
+        auth_url.map(|url| {
+            Arc::new(OAuthPromptSource {
+                authorization_url: Some(url.to_string()),
+            }) as Arc<dyn BlockedAuthPromptSource>
+        }),
         catalog,
         initially_active,
         communication_preferences,
@@ -3114,7 +3308,7 @@ fn build_triggered_harness_with_catalog(
 /// [`build_triggered_harness_with_catalog`] with a prebuilt turn coordinator.
 fn build_triggered_harness_with_turns_catalog(
     turns: Arc<ScriptedTurnCoordinator>,
-    auth_url: Option<&str>,
+    blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     catalog: Vec<TestNotificationTarget>,
     initially_active: Vec<TestNotificationTarget>,
     communication_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
@@ -3180,11 +3374,7 @@ fn build_triggered_harness_with_turns_catalog(
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
         approval_context: None,
-        blocked_auth_prompts: auth_url.map(|url| {
-            Arc::new(OAuthPromptSource {
-                authorization_url: Some(url.to_string()),
-            }) as Arc<dyn BlockedAuthPromptSource>
-        }),
+        blocked_auth_prompts,
         auth_flow_cancel: None,
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
@@ -3959,6 +4149,83 @@ async fn triggered_auth_prompt_reaches_only_dm_targets_and_run_stays_parked() {
     assert_eq!(
         delivered_conversations(&harness.adapter),
         vec!["dm-creator".to_string(), "chan-eng".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn triggered_auth_without_a_gate_ref_does_not_publish_an_inbox_item() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::BlockedAuth, None)],
+        Some("https://provider.example/oauth"),
+        vec![DM_TARGET],
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Skipped
+    );
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert!(
+        inbox.notifications.is_empty(),
+        "a background auth block without a gate ref must not leave an unresolved Inbox item"
+    );
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "a background auth block without a gate ref must not reach external channels"
+    );
+}
+
+#[tokio::test]
+async fn triggered_auth_prompt_failure_keeps_inbox_lifecycle_observable() {
+    const GATE: &str = "gate:auth-extension-00000000000000000000000002";
+    let harness = build_triggered_harness_with_turns_catalog(
+        Arc::new(ScriptedTurnCoordinator::with_states(vec![
+            scripted_state(TurnStatus::BlockedAuth, Some(GATE)),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ])),
+        Some(Arc::new(FailingAuthPromptSource)),
+        vec![DM_TARGET],
+        vec![DM_TARGET],
+        None,
+        None,
+        TriggeredHarnessDeliveryMode::Normal,
+    );
+    seed_notification_targets(&harness.store, &[DM_TARGET]).await;
+    let run_id = TurnRunId::new();
+
+    harness
+        .driver
+        .on_trigger_submitted(triggered_request(run_id, false))
+        .await;
+
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed
+    );
+    wait_for_inbox_resolution(
+        harness.notification_inbox.as_ref(),
+        NotificationKind::AuthenticationRequired,
+        GATE,
+    )
+    .await;
+    let inbox = inbox_records(harness.notification_inbox.as_ref()).await;
+    assert_eq!(inbox.notifications.len(), 1);
+    assert_eq!(
+        inbox.notifications[0].kind,
+        NotificationKind::AuthenticationRequired
+    );
+    assert!(inbox.notifications[0].resolved_at.is_some());
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "failed enrichment must not invent or retry external auth copy"
     );
 }
 
