@@ -1203,7 +1203,19 @@ impl ToolDisclosureCapabilityPort {
                     "tool_call arguments must be a JSON object encoded as a string",
                 ))
             }
-            BridgeKind::Call => Ok(failed_invalid_input(
+            // A `tool_call` with no `name` really is malformed input, and it
+            // reaches the same fallback as an unresolvable name. Split it out so
+            // the kind below can be about resolution only.
+            BridgeKind::Call
+                if bridge
+                    .arguments
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_none() =>
+            {
+                Ok(failed_invalid_input("tool_call requires name"))
+            }
+            BridgeKind::Call => Ok(failed_unknown_target(
                 "tool_call target is not a known tool; use tool_search to find the correct tool name",
             )),
         }
@@ -1302,12 +1314,13 @@ impl ToolDisclosureCapabilityPort {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
             let Some(result) = state.catalog.search_result(name) else {
-                return Ok(failed_invalid_input("tool_describe target is unknown"));
+                return Ok(failed_unknown_target("tool_describe target is unknown"));
             };
             // #5712: same message as a truly unknown name — a narrowed profile
-            // must not learn that a non-allowlisted tool exists.
+            // must not learn that a non-allowlisted tool exists. The kind has to
+            // match for the same reason, so these two move together.
             if !self.policy.permits_capability_id(&result.capability_id) {
-                return Ok(failed_invalid_input("tool_describe target is unknown"));
+                return Ok(failed_unknown_target("tool_describe target is unknown"));
             }
             if let Some(selected_rank) = state.search_ranks.get(&result.name).copied() {
                 debug!(
@@ -1350,7 +1363,7 @@ impl ToolDisclosureCapabilityPort {
                 return Ok(failed_invalid_input("tool catalog is unavailable"));
             };
             let Some(result) = state.catalog.search_result(name) else {
-                return Ok(failed_invalid_input("auto-schema target is unknown"));
+                return Ok(failed_unknown_target("auto-schema target is unknown"));
             };
             state.disclosed_names.insert(result.name.clone());
             json!({
@@ -1649,6 +1662,21 @@ fn decode_tool_call_arguments(bridge_arguments: &Value) -> Option<Value> {
 fn failed_invalid_input(summary: &'static str) -> Resolution {
     resolution::failed(
         ironclaw_host_api::result_meta::FailureKind::InputEncode,
+        summary.to_string(),
+        CapabilityFailureDetail::Diagnostic {
+            text: summary.to_string(),
+        },
+    )
+}
+
+/// The model named a tool the catalog cannot resolve. The arguments encoded
+/// fine, so this is not `InputEncode`: its recovery hint is
+/// `CorrectArgumentsBeforeRetry`, which tells the model to rewrite arguments it
+/// did not get wrong. `UnknownCapability` carries `UseDifferentCapability`,
+/// which is the move that can actually succeed.
+fn failed_unknown_target(summary: &'static str) -> Resolution {
+    resolution::failed(
+        ironclaw_host_api::result_meta::FailureKind::UnknownCapability,
         summary.to_string(),
         CapabilityFailureDetail::Diagnostic {
             text: summary.to_string(),
@@ -3681,12 +3709,12 @@ mod tests {
                     if matches!(
                         o.verdict,
                         ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
+                            error_kind: FailureKind::UnknownCapability,
                             ..
                         }
                     )
             ),
-            "fallback must be a recoverable InvalidInput failure, not run death"
+            "fallback must be a recoverable unknown-target failure, not run death"
         );
     }
 
@@ -3745,12 +3773,12 @@ mod tests {
                     if matches!(
                         o.verdict,
                         ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
+                            error_kind: FailureKind::UnknownCapability,
                             ..
                         }
                     )
             ),
-            "recursive tool_call must be a recoverable InvalidInput failure, not run death"
+            "recursive tool_call must be a recoverable unknown-target failure, not run death"
         );
         assert!(
             inner
@@ -3908,12 +3936,12 @@ mod tests {
                     if matches!(
                         o.verdict,
                         ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::InputEncode,
+                            error_kind: FailureKind::UnknownCapability,
                             ..
                         }
                     )
             ),
-            "unknown-target tool_call must be a recoverable InvalidInput failure"
+            "unknown-target tool_call must be a recoverable unknown-capability failure"
         );
         assert!(
             inner
@@ -3931,6 +3959,83 @@ mod tests {
                 .is_empty(),
             "unknown target must not dispatch to the inner port"
         );
+    }
+
+    /// The kind has to separate "your arguments are wrong" from "no such tool".
+    ///
+    /// Observed in production with progressive disclosure on: the model called
+    /// `tool_call {"name": "commitment-digest", "arguments": "{}"}`, naming a
+    /// skill rather than a tool. The arguments encoded fine — the name simply
+    /// did not resolve — but the failure came back as `input_encode`, whose
+    /// recovery hint is `CorrectArgumentsBeforeRetry`. The model was told to
+    /// rewrite arguments that were already correct.
+    ///
+    /// `UnknownCapability` carries `UseDifferentCapability`, which is the move
+    /// that can actually succeed. A `tool_call` with no `name` at all is still
+    /// malformed input and must keep `InputEncode`; both halves are pinned here
+    /// so neither can drift onto the other.
+    #[tokio::test]
+    async fn tool_call_separates_an_unresolvable_name_from_malformed_arguments() {
+        let inner = Arc::new(SpyPort {
+            definitions: vec![provider_definition(
+                "fixture.read_file",
+                "read_file",
+                "Read a file",
+            )],
+            surface_version: CapabilitySurfaceVersion::new("surface:test")
+                .expect("valid surface version"),
+            registered_calls: Mutex::new(Vec::new()),
+            invocations: Mutex::new(Vec::new()),
+        });
+        let port = disclosure_port(
+            Arc::clone(&inner) as Arc<dyn LoopCapabilityPort>,
+            run_context(TurnId::new()).await,
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        port.visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("surface builds turn state");
+
+        for (arguments, expected, case) in [
+            (
+                json!({"name": "commitment-digest", "arguments": "{}"}),
+                FailureKind::UnknownCapability,
+                "a well-formed call naming a tool that does not exist",
+            ),
+            (
+                json!({"arguments": "{}"}),
+                FailureKind::InputEncode,
+                "a call with no name at all",
+            ),
+        ] {
+            let candidate =
+                port.register_provider_tool_call(RegisterProviderToolCallRequest::new(
+                    provider_call(TOOL_CALL_NAME, arguments),
+                ))
+                .await
+                .expect("tool_call registers on the bridge path");
+            let outcome = port
+                .invoke_capability(LoopRequest {
+                    activity_id: candidate.activity_id,
+                    surface_version: candidate.surface_version,
+                    capability_id: candidate.capability_id,
+                    input_ref: candidate.input_ref,
+                    approval_resume: None,
+                    auth_resume: None,
+                })
+                .await
+                .expect("bridge resolves the call");
+            let Resolution::Done(outcome) = outcome else {
+                panic!("{case} must resolve, got {outcome:?}");
+            };
+            let ToolVerdict::RecoverableFailure { error_kind, .. } = outcome.verdict else {
+                panic!(
+                    "{case} must be a recoverable failure, got {:?}",
+                    outcome.verdict
+                );
+            };
+            assert_eq!(error_kind, expected, "{case}");
+        }
     }
 
     #[tokio::test]
