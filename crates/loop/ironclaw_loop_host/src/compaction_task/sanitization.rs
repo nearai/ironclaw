@@ -1,16 +1,12 @@
 use std::ops::Range;
 
-use ironclaw_safety::{InjectionScanner, LeakScanner};
+use ironclaw_safety::{InjectionScanner, InjectionWarning, LeakScanner};
 use ironclaw_threads::MessageKind;
 
 use super::{ANTI_INJECTION_PREFIX, CompactionError, ValidatedCompactionMessage};
 
 const SUMMARY_OPEN_TAG: &str = "<summary>";
 const SUMMARY_CLOSE_TAG: &str = "</summary>";
-// The canonical 128-message context window may additionally pin the accepted
-// user task, so a valid compaction range can contain 129 transcript messages.
-const MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES: usize = 129;
-const MAX_UNTRUNCATED_TOTAL_MESSAGES: usize = 257;
 const MAX_UNTRUNCATED_COMPACTION_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct SanitizedContent {
@@ -123,7 +119,9 @@ impl<'a> CompactionSanitizer<'a> {
                 .checked_add(redaction.count)
                 .ok_or(CompactionError::LeakRedactionFailed)?;
             let body = redaction.content.unwrap_or_else(|| message.body.clone());
-            if redaction.count > 0 && !self.injection_scanner.scan_injection(&body).is_empty() {
+            if redaction.count > 0
+                && self.contains_actionable_injection(&body, "redacted_full_body")
+            {
                 return Err(CompactionError::InjectionDetected);
             }
             sanitized_messages.push(ValidatedCompactionMessage {
@@ -142,22 +140,6 @@ impl<'a> CompactionSanitizer<'a> {
         &self,
         messages: &[ValidatedCompactionMessage],
     ) -> Result<(), CompactionError> {
-        let transcript_message_count = messages
-            .iter()
-            .filter(|message| message.kind != MessageKind::Summary)
-            .count();
-        if transcript_message_count > MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES {
-            return Err(CompactionError::MessageCountExceeded {
-                cap: MAX_UNTRUNCATED_TRANSCRIPT_MESSAGES,
-                observed: transcript_message_count,
-            });
-        }
-        if messages.len() > MAX_UNTRUNCATED_TOTAL_MESSAGES {
-            return Err(CompactionError::MessageCountExceeded {
-                cap: MAX_UNTRUNCATED_TOTAL_MESSAGES,
-                observed: messages.len(),
-            });
-        }
         let validation_cap = messages.iter().try_fold(0_usize, |total, message| {
             let observed_bytes = total
                 .checked_add(message.body.len())
@@ -179,11 +161,7 @@ impl<'a> CompactionSanitizer<'a> {
         // Raw text is the trust boundary; XML escaping happens only after the
         // retained fragment is bounded.
         if let [message] = messages {
-            if !self
-                .injection_scanner
-                .scan_injection(&message.body)
-                .is_empty()
-            {
+            if self.contains_actionable_injection(&message.body, "full_body_single") {
                 return Err(CompactionError::InjectionDetected);
             }
             let scan = self.leak_scanner.scan_leaks(&message.body);
@@ -210,7 +188,7 @@ impl<'a> CompactionSanitizer<'a> {
             body_ranges.push(body_start..content.len());
         }
 
-        if !self.injection_scanner.scan_injection(&content).is_empty() {
+        if self.contains_actionable_injection(&content, "full_body_range") {
             return Err(CompactionError::InjectionDetected);
         }
         let scan = self.leak_scanner.scan_leaks(&content);
@@ -223,17 +201,14 @@ impl<'a> CompactionSanitizer<'a> {
         max_escaped_bytes: usize,
     ) -> Result<SanitizedContent, CompactionError> {
         ensure_within_cap(content, max_escaped_bytes)?;
-        if !self.injection_scanner.scan_injection(content).is_empty() {
+        if self.contains_actionable_injection(content, "retained_fragment") {
             return Err(CompactionError::InjectionDetected);
         }
 
         let redaction = self.redact_leaks(content)?;
         let redacted_content = redaction.content.as_deref().unwrap_or(content);
         if redaction.count > 0
-            && !self
-                .injection_scanner
-                .scan_injection(redacted_content)
-                .is_empty()
+            && self.contains_actionable_injection(redacted_content, "redacted_retained_fragment")
         {
             return Err(CompactionError::InjectionDetected);
         }
@@ -250,10 +225,7 @@ impl<'a> CompactionSanitizer<'a> {
         let escaped_content = escaped_redaction.content.unwrap_or(escaped);
         ensure_within_cap(&escaped_content, max_escaped_bytes)?;
         if (escape_transformed_content || escaped_redaction.count > 0)
-            && !self
-                .injection_scanner
-                .scan_injection(&escaped_content)
-                .is_empty()
+            && self.contains_actionable_injection(&escaped_content, "escaped_retained_fragment")
         {
             return Err(CompactionError::InjectionDetected);
         }
@@ -303,8 +275,27 @@ impl<'a> CompactionSanitizer<'a> {
         })
     }
 
+    fn contains_actionable_injection(&self, content: &str, stage: &'static str) -> bool {
+        self.injection_scanner
+            .scan_injection(content)
+            .into_iter()
+            .find(|warning| !is_benign_warning_context(content, warning))
+            .is_some_and(|warning| {
+                tracing::debug!(
+                    stage,
+                    rule_id = %warning.pattern,
+                    severity = ?warning.severity,
+                    location_start = warning.location.start,
+                    location_end = warning.location.end,
+                    content_bytes = content.len(),
+                    "compaction injection warning rejected"
+                );
+                true
+            })
+    }
+
     fn validate_serialized_content(&self, content: &str) -> Result<(), CompactionError> {
-        if !self.injection_scanner.scan_injection(content).is_empty() {
+        if self.contains_actionable_injection(content, "serialized_content") {
             return Err(CompactionError::InjectionDetected);
         }
         if !self.leak_scanner.scan_leaks(content).is_clean() {
@@ -312,6 +303,85 @@ impl<'a> CompactionSanitizer<'a> {
         }
         Ok(())
     }
+}
+
+fn is_benign_warning_context(content: &str, warning: &InjectionWarning) -> bool {
+    is_embedded_role_label(content, warning)
+        || is_object_property_role_label(content, warning)
+        || is_qualified_code_call(content, warning)
+        || is_institutional_counterpart_phrase(content, warning)
+}
+
+fn is_embedded_role_label(content: &str, warning: &InjectionWarning) -> bool {
+    if !matches!(
+        warning.pattern.to_ascii_lowercase().as_str(),
+        "system:" | "assistant:" | "user:"
+    ) || warning.location.start == 0
+        || warning.location.start > content.len()
+        || !content.is_char_boundary(warning.location.start)
+    {
+        return false;
+    }
+
+    content[..warning.location.start]
+        .chars()
+        .next_back()
+        .is_some_and(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '/' | '.')
+        })
+}
+
+fn is_object_property_role_label(content: &str, warning: &InjectionWarning) -> bool {
+    if !matches!(
+        warning.pattern.to_ascii_lowercase().as_str(),
+        "system:" | "assistant:" | "user:"
+    ) || warning.location.start > content.len()
+        || warning.location.end > content.len()
+        || !content.is_char_boundary(warning.location.start)
+        || !content.is_char_boundary(warning.location.end)
+    {
+        return false;
+    }
+    let previous = content[..warning.location.start]
+        .chars()
+        .rev()
+        .find(|character| !character.is_ascii_whitespace());
+    let next = content[warning.location.end..]
+        .chars()
+        .find(|character| !character.is_ascii_whitespace());
+    matches!(previous, Some('{' | ',')) && matches!(next, Some('\'' | '"'))
+}
+
+fn is_qualified_code_call(content: &str, warning: &InjectionWarning) -> bool {
+    if !matches!(
+        warning.pattern.to_ascii_lowercase().as_str(),
+        "exec_call" | "eval_call"
+    ) || warning.location.start == 0
+        || warning.location.start > content.len()
+        || !content.is_char_boundary(warning.location.start)
+    {
+        return false;
+    }
+    content[..warning.location.start].ends_with('.')
+}
+
+fn is_institutional_counterpart_phrase(content: &str, warning: &InjectionWarning) -> bool {
+    if !warning.pattern.eq_ignore_ascii_case("act as")
+        || warning.location.start > content.len()
+        || warning.location.end > content.len()
+        || !content.is_char_boundary(warning.location.start)
+        || !content.is_char_boundary(warning.location.end)
+    {
+        return false;
+    }
+    let before = &content.as_bytes()[..warning.location.start];
+    let after = &content.as_bytes()[warning.location.end..];
+    before
+        .get(before.len().saturating_sub(4)..)
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b"and "))
+        && after
+            .get(.." the open ".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b" the open "))
 }
 
 fn validate_matches_stay_within_bodies(
@@ -340,6 +410,28 @@ fn validate_matches_stay_within_bodies(
         }
     }
     Ok(())
+}
+
+pub(super) fn serialized_message_envelope_byte_len(
+    sequence: u64,
+    kind: MessageKind,
+) -> Option<usize> {
+    "<message sequence=\""
+        .len()
+        .checked_add(decimal_digit_count(sequence))
+        .and_then(|bytes| bytes.checked_add("\" kind=\"".len()))
+        .and_then(|bytes| bytes.checked_add(message_kind_name(kind).len()))
+        .and_then(|bytes| bytes.checked_add("\">".len()))
+        .and_then(|bytes| bytes.checked_add("</message>\n".len()))
+}
+
+fn decimal_digit_count(mut value: u64) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
 }
 
 fn append_message_checked(

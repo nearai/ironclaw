@@ -1107,6 +1107,11 @@ async fn executor_continues_after_forced_compaction_rejection_from_tool_result_o
         "compaction rejection after successful tool execution must not fail the run: {exit:?}"
     );
     assert_eq!(
+        host.compaction_requests()[0].deadline_ms,
+        60_000,
+        "default compaction must allow the provider tail observed above 30 seconds"
+    );
+    assert_eq!(
         host.model_requests().len(),
         2,
         "the loop should continue to the post-tool reply model turn"

@@ -19,7 +19,7 @@ const UNBOUND_DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "planner=DefaultPlanner;",
     "strategies=",
     "context:DefaultContextStrategy(max_messages=128),",
-    "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),",
+    "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=60000,ineffective_trip_limit=3),",
     "capability:DefaultCapabilityStrategy(all),",
     "model:DefaultModelStrategy(primary_or_fallback_index),",
     "batch:DefaultBatchPolicyStrategy(parallel_unless_exclusive),",
@@ -40,7 +40,7 @@ const UNBOUND_STRUCTURED_FAMILY_FINGERPRINT: &[u8] = concat!(
     "planner=DefaultPlanner;",
     "strategies=",
     "context:DefaultContextStrategy(max_messages=128),",
-    "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=30000,ineffective_trip_limit=3),",
+    "compaction:ActiveTaskPreservingCompactionStrategy(context_limit=128000,reserve=20000,preserve_tail=8000,min_compacted=3,min_tail=3,deadline_ms=60000,ineffective_trip_limit=3),",
     "capability:DefaultCapabilityStrategy(all),",
     "model:StructuredResultModelStrategy(primary_or_fallback_index,force_result_tool_on_structured_repair),",
     "batch:DefaultBatchPolicyStrategy(parallel_unless_exclusive),",
@@ -55,14 +55,14 @@ const UNBOUND_STRUCTURED_FAMILY_FINGERPRINT: &[u8] = concat!(
 
 /// Stable digest: BLAKE3-256 of the unbound-default family fingerprint.
 pub const UNBOUND_DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x25, 0xf3, 0x64, 0x56, 0x3f, 0x30, 0xb1, 0x7c, 0xce, 0x09, 0x3e, 0x8b, 0x3d, 0x36, 0x77, 0xef,
-    0xab, 0x51, 0xff, 0xa3, 0x29, 0x3d, 0xae, 0x6f, 0x6f, 0x5a, 0x22, 0xae, 0x27, 0xf8, 0xbd, 0xd5,
+    0x87, 0x50, 0xe7, 0x25, 0x82, 0x14, 0xed, 0x88, 0xdd, 0x7b, 0xa7, 0x33, 0x29, 0xc3, 0xfc, 0x75,
+    0x8d, 0x6b, 0xb9, 0x7f, 0x07, 0xf1, 0x8e, 0xfd, 0x98, 0x05, 0x72, 0xe6, 0xa5, 0xd1, 0x62, 0xd2,
 ]);
 
 /// Stable digest: BLAKE3-256 of the unbound-structured family fingerprint.
 pub const UNBOUND_STRUCTURED_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xfe, 0x39, 0x55, 0x21, 0xc6, 0x82, 0x8f, 0x4f, 0xb9, 0xf5, 0x26, 0x6a, 0xa9, 0xa8, 0xb5, 0xa6,
-    0x46, 0x71, 0xed, 0xbe, 0x77, 0x06, 0x80, 0x38, 0x21, 0xb5, 0xd3, 0x2c, 0x1d, 0x10, 0x87, 0x68,
+    0xc2, 0x1d, 0x29, 0xd6, 0xf6, 0x7f, 0xdb, 0xdc, 0x2c, 0x91, 0x44, 0x48, 0x99, 0x14, 0x08, 0x16,
+    0x47, 0x34, 0x2e, 0x91, 0x5f, 0xae, 0x90, 0x1d, 0x83, 0xdb, 0x7d, 0x65, 0x4a, 0x38, 0xfe, 0xc6,
 ]);
 
 fn structured_result_capability() -> CapabilityId {

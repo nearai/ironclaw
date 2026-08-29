@@ -18,7 +18,7 @@ use thiserror::Error;
 
 mod sanitization;
 
-use sanitization::CompactionSanitizer;
+use sanitization::{CompactionSanitizer, serialized_message_envelope_byte_len};
 
 pub const DEFAULT_COMPACTION_PROMPT_ID: &str = "compaction_summarizer_fresh";
 pub const ACTIVE_TASK_COMPACTION_PROMPT_ID: &str = "active_task_compaction_summarizer_fresh";
@@ -34,8 +34,6 @@ pub(crate) enum CompactionError {
     UnsupportedMode,
     #[error("compaction input too large")]
     InputTooLarge { cap: usize, observed_bytes: usize },
-    #[error("compaction message count {observed} exceeds bound {cap}")]
-    MessageCountExceeded { cap: usize, observed: usize },
     #[error("compaction content contains injection markers")]
     InjectionDetected,
     #[error("compaction leak redaction failed or left unsafe content")]
@@ -555,8 +553,59 @@ where
         &self,
         range: &ValidatedCompactionRange,
     ) -> Result<CompactionInput, CompactionError> {
+        let message_count = range.messages.len();
+        let envelope_budget = range.messages.iter().try_fold(0_usize, |total, message| {
+            serialized_message_envelope_byte_len(message.sequence, message.kind)
+                .and_then(|bytes| total.checked_add(bytes))
+        });
+        let Some(envelope_budget) = envelope_budget else {
+            tracing::debug!(
+                message_count,
+                max_input_bytes = self.max_input_bytes,
+                "compaction serialized envelope byte count overflowed"
+            );
+            return Err(CompactionError::InputTooLarge {
+                cap: self.max_input_bytes,
+                observed_bytes: usize::MAX,
+            });
+        };
+        let system_prompt_tokens = crate::estimate_tokens_from_chars(&self.system_prompt).as_u64();
+        let input_token_units_cap = self
+            .max_input_tokens
+            .saturating_sub(system_prompt_tokens)
+            .saturating_mul(crate::CHARS_PER_TOKEN_DEFAULT);
+        let envelope_token_units = u64::try_from(envelope_budget).unwrap_or(u64::MAX);
+        if envelope_budget > self.max_input_bytes || envelope_token_units > input_token_units_cap {
+            tracing::debug!(
+                message_count,
+                envelope_bytes = envelope_budget,
+                envelope_token_units,
+                max_input_bytes = self.max_input_bytes,
+                input_token_units_cap,
+                "compaction serialized envelopes exceed input budget"
+            );
+            let cap = self
+                .max_input_bytes
+                .min(usize::try_from(input_token_units_cap).unwrap_or(usize::MAX));
+            return Err(CompactionError::InputTooLarge {
+                cap,
+                observed_bytes: envelope_budget,
+            });
+        }
+        // Envelope admission is metadata-only and must precede any allocation
+        // proportional to attacker-controlled message count. Admitted ranges
+        // still scan complete durable bodies before body truncation.
         let sanitizer = self.sanitizer();
         let pre_truncation = sanitizer.sanitize_messages_before_truncation(&range.messages)?;
+        let aggregate_message_budget = self.max_input_bytes - envelope_budget;
+        let per_message_budget = aggregate_message_budget
+            .checked_div(message_count)
+            .unwrap_or(0)
+            .min(MAX_COMPACTION_MESSAGE_BYTES);
+        let aggregate_token_units = input_token_units_cap - envelope_token_units;
+        let per_message_token_units = aggregate_token_units
+            .checked_div(u64::try_from(message_count).unwrap_or(u64::MAX))
+            .unwrap_or(0);
         let mut truncated_message_count = 0_u32;
         let mut omitted_input_bytes = 0_u64;
         let truncated = pre_truncation
@@ -564,14 +613,12 @@ where
             .into_iter()
             .map(|message| {
                 let original_bytes = message.body.len();
-                let (body, omitted_bytes) = if message.kind == MessageKind::Summary {
-                    (message.body, 0)
-                } else {
-                    truncate_message_body_for_compaction(
-                        &message.body,
-                        MAX_COMPACTION_MESSAGE_BYTES,
-                    )
-                };
+                let (body, omitted_bytes) = truncate_message_body_for_compaction(
+                    &message.body,
+                    per_message_budget,
+                    per_message_budget,
+                    per_message_token_units,
+                );
                 if omitted_bytes > 0 {
                     truncated_message_count = truncated_message_count.checked_add(1).ok_or(
                         CompactionError::InputTooLarge {
@@ -714,30 +761,104 @@ where
         })
     }
 }
-fn truncate_message_body_for_compaction(body: &str, max_bytes: usize) -> (String, usize) {
-    if body.len() <= max_bytes {
+fn truncate_message_body_for_compaction(
+    body: &str,
+    max_bytes: usize,
+    max_escaped_bytes: usize,
+    max_token_units: u64,
+) -> (String, usize) {
+    if body.len() <= max_bytes
+        && xml_escaped_byte_len(body) <= max_escaped_bytes
+        && xml_escaped_token_units(body) <= max_token_units
+    {
         return (body.to_string(), 0);
     }
     const MARKER: &str = "\n[... omitted oversized message bytes ...]\n";
-    let available = max_bytes.saturating_sub(MARKER.len());
-    let head_budget = available / 2;
-    let tail_budget = available.saturating_sub(head_budget);
+    let marker_token_units = u64::try_from(MARKER.len()).unwrap_or(u64::MAX);
+    if max_bytes < MARKER.len()
+        || max_escaped_bytes < MARKER.len()
+        || max_token_units < marker_token_units
+    {
+        return (String::new(), body.len());
+    }
+    let available_escaped = max_escaped_bytes.saturating_sub(MARKER.len());
+    let head_budget = available_escaped / 2;
+    let tail_budget = available_escaped.saturating_sub(head_budget);
+    let available_token_units = max_token_units.saturating_sub(marker_token_units);
+    let head_token_budget = available_token_units / 2;
+    let tail_token_budget = available_token_units.saturating_sub(head_token_budget);
 
-    let mut head_end = head_budget.min(body.len());
-    while head_end > 0 && !body.is_char_boundary(head_end) {
-        head_end = head_end.saturating_sub(1);
+    let mut head_end = 0;
+    let mut head_escaped_bytes = 0_usize;
+    let mut head_token_units = 0_u64;
+    for (index, character) in body.char_indices() {
+        let next_bytes = head_escaped_bytes.saturating_add(xml_escaped_char_len(character));
+        let next_token_units =
+            head_token_units.saturating_add(xml_escaped_char_token_units(character));
+        if next_bytes > head_budget || next_token_units > head_token_budget {
+            break;
+        }
+        head_escaped_bytes = next_bytes;
+        head_token_units = next_token_units;
+        head_end = index.saturating_add(character.len_utf8());
     }
-    let mut tail_start = body.len().saturating_sub(tail_budget);
-    while tail_start < body.len() && !body.is_char_boundary(tail_start) {
-        tail_start = tail_start.saturating_add(1);
+
+    let mut tail_start = body.len();
+    let mut tail_escaped_bytes = 0_usize;
+    let mut tail_token_units = 0_u64;
+    for (index, character) in body.char_indices().rev() {
+        if index < head_end {
+            break;
+        }
+        let next_bytes = tail_escaped_bytes.saturating_add(xml_escaped_char_len(character));
+        let next_token_units =
+            tail_token_units.saturating_add(xml_escaped_char_token_units(character));
+        if next_bytes > tail_budget || next_token_units > tail_token_budget {
+            break;
+        }
+        tail_escaped_bytes = next_bytes;
+        tail_token_units = next_token_units;
+        tail_start = index;
     }
+
     let omitted = tail_start.saturating_sub(head_end);
-    let mut truncated = String::with_capacity(max_bytes);
+    let mut truncated = String::with_capacity(max_bytes.min(max_escaped_bytes));
     truncated.push_str(&body[..head_end]);
     truncated.push_str(MARKER);
     truncated.push_str(&body[tail_start..]);
     debug_assert!(truncated.len() <= max_bytes);
+    debug_assert!(xml_escaped_byte_len(&truncated) <= max_escaped_bytes);
+    debug_assert!(xml_escaped_token_units(&truncated) <= max_token_units);
     (truncated, omitted)
+}
+
+fn xml_escaped_byte_len(value: &str) -> usize {
+    value.chars().fold(0_usize, |bytes, character| {
+        bytes.saturating_add(xml_escaped_char_len(character))
+    })
+}
+
+fn xml_escaped_token_units(value: &str) -> u64 {
+    value.chars().fold(0_u64, |units, character| {
+        units.saturating_add(xml_escaped_char_token_units(character))
+    })
+}
+
+fn xml_escaped_char_len(character: char) -> usize {
+    match character {
+        '&' => "&amp;".len(),
+        '<' | '>' => "&lt;".len(),
+        _ => character.len_utf8(),
+    }
+}
+
+fn xml_escaped_char_token_units(character: char) -> u64 {
+    match character {
+        '&' => "&amp;".len() as u64,
+        '<' | '>' => "&lt;".len() as u64,
+        _ if character.is_ascii() => 1,
+        _ => (character.len_utf8() as u64).saturating_mul(2),
+    }
 }
 
 fn select_prior_compaction_summaries(
@@ -958,7 +1079,6 @@ fn compaction_error_to_loop(error: CompactionError) -> LoopCompactionError {
         CompactionError::InvalidCutPoint => LoopCompactionError::InvalidCutPoint,
         CompactionError::UnsupportedMode => LoopCompactionError::UnsupportedMode,
         CompactionError::InputTooLarge { .. } => LoopCompactionError::InputTooLarge,
-        CompactionError::MessageCountExceeded { .. } => LoopCompactionError::InputTooLarge,
         CompactionError::InjectionDetected => LoopCompactionError::SecurityRejected {
             safe_summary: safe("injection detected"),
         },
