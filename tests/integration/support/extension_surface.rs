@@ -188,6 +188,7 @@ const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
     "google-slides",
     "nearai-mcp",
     "notion-mcp",
+    "xquik-mcp",
 ];
 
 /// Real capability ids declared by every non-github bundled first-party
@@ -220,7 +221,8 @@ pub fn bundled_extension_manifest_capability_ids()
             ironclaw_extension_registry::ExtensionManifest::try_from(record.manifest().clone())?;
         // The manifest's OWN `id` (not the asset directory name) must match
         // the `ExtensionPackage` root's last segment — they differ for
-        // `nearai-mcp`/`notion-mcp` (manifest id `nearai`/`notion`).
+        // Hosted-MCP asset directories use an `-mcp` suffix while their
+        // manifest ids do not.
         let extension_id = manifest.id.as_str().to_string();
         let package = ironclaw_extension_registry::ExtensionPackage::from_manifest(
             manifest,

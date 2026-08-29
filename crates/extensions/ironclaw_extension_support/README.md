@@ -17,7 +17,7 @@ vendor-blind host.
 Executor entry points behind narrow request types this crate defines
 (`GsuiteDispatchRequest`, `WebAccessDispatchRequest`, `SkillUrlFetchContext`,
 …), returning this crate's own error types; and `packages::PACKAGES` — the
-package inventory (11 entries; `nearai`'s embed module is deliberately outside
+package inventory (12 entries; `nearai`'s embed module is deliberately outside
 the table — the host patches its `[mcp].server` from operator configuration;
 read `src/packages/nearai.rs`'s header). Executors reach the world only through
 contracts-layer ports handed in per invocation (`RuntimeHttpEgress`,
