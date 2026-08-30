@@ -174,11 +174,15 @@ enum BridgeKind {
     /// Internal auto-schema (describe-first): return a deferred tool's schema
     /// after a blind call to it failed pre-dispatch validation.
     DescribeFirst,
-    /// `tool_call` — invoke a tool by name. Reaching invoke with this kind means
-    /// the target could not be resolved (a resolvable target is dispatched
-    /// directly and never stored as a bridge invocation), so it always errors
-    /// recoverably.
+    /// `tool_call` — invoke a tool by name that the catalog could not resolve,
+    /// or that policy hides. A resolvable, registrable target is dispatched
+    /// directly and never stored as a bridge invocation.
     Call,
+    /// `tool_call` — the target DID resolve and was allowed, but the inner port
+    /// refused to register it (typically malformed arguments for a deferred
+    /// tool). Distinct from [`BridgeKind::Call`] because the tool exists: the
+    /// model should fix its arguments, not go looking for another tool.
+    CallUnregistrable,
 }
 
 struct BoundedCountingWriter {
@@ -558,11 +562,12 @@ impl LoopCapabilityPort for ToolDisclosureCapabilityPort {
                         error_kind = ?error.kind,
                         "tool_call target registration failed; falling back to recoverable bridge failure"
                     );
-                    return self.register_bridge_call(tool_call);
+                    return self
+                        .register_bridge_call(tool_call, Some(BridgeKind::CallUnregistrable));
                 }
             }
         }
-        self.register_bridge_call(tool_call)
+        self.register_bridge_call(tool_call, None)
     }
 
     async fn visible_capabilities(
@@ -1038,6 +1043,7 @@ impl ToolDisclosureCapabilityPort {
     fn register_bridge_call(
         &self,
         tool_call: ProviderToolCall,
+        kind_override: Option<BridgeKind>,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         let Some(definition) = bridge_tool_definitions()
             .into_iter()
@@ -1061,9 +1067,13 @@ impl ToolDisclosureCapabilityPort {
             .insert(
                 input_ref.as_str().to_string(),
                 BridgeInvocation {
-                    kind: BridgeKind::from_provider_name(tool_call.name.as_str()).ok_or_else(
-                        || invalid_invocation("bridge tool definition is unavailable"),
-                    )?,
+                    kind: match kind_override {
+                        Some(kind) => kind,
+                        None => BridgeKind::from_provider_name(tool_call.name.as_str())
+                            .ok_or_else(|| {
+                                invalid_invocation("bridge tool definition is unavailable")
+                            })?,
+                    },
                     arguments: tool_call.arguments.clone(),
                 },
             );
@@ -1215,6 +1225,11 @@ impl ToolDisclosureCapabilityPort {
             {
                 Ok(failed_invalid_input("tool_call requires name"))
             }
+            // The target resolved and was allowed; only registration failed, so
+            // the tool exists and the arguments are the thing to fix.
+            BridgeKind::CallUnregistrable => Ok(failed_invalid_input(
+                "tool_call arguments were rejected by the target tool; check its schema with tool_describe and retry",
+            )),
             BridgeKind::Call => Ok(failed_unknown_target(
                 "tool_call target is not a known tool; use tool_search to find the correct tool name",
             )),
@@ -3709,12 +3724,30 @@ mod tests {
                     if matches!(
                         o.verdict,
                         ToolVerdict::RecoverableFailure {
-                            error_kind: FailureKind::UnknownCapability,
+                            error_kind: FailureKind::InputEncode,
                             ..
                         }
                     )
             ),
-            "fallback must be a recoverable unknown-target failure, not run death"
+            "a resolved target that failed registration is an input error, not an unknown tool"
+        );
+        // And it must not be described as an unknown tool either: the summary is
+        // the other half of the signal, and sending the model tool_search here
+        // would be a wild goose chase for a tool that exists.
+        let Resolution::Done(done) = outcome else {
+            panic!("registration failure must resolve");
+        };
+        let ToolVerdict::RecoverableFailure { diagnostic, .. } = done.verdict else {
+            panic!("registration failure must be recoverable");
+        };
+        let summary = format!("{diagnostic:?}");
+        assert!(
+            !summary.contains("not a known tool"),
+            "a registrable-but-rejected target must not read as unknown: {summary}"
+        );
+        assert!(
+            summary.contains("arguments"),
+            "the summary should point at the arguments, which are the fixable thing: {summary}"
         );
     }
 
