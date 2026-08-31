@@ -609,7 +609,7 @@ fn attention_signature(snapshot: &ReplySnapshot) -> Option<(ReplyAttentionKind, 
     })
 }
 
-#[allow(clippy::too_many_arguments)] // arch-exempt: too_many_args, worker bookkeeping bundle pending a `PublicationWrite` struct, plan docs/internal/design/2026-08-31-progressive-reply-publication.md
+#[allow(clippy::too_many_arguments)] // arch-exempt: too_many_args, worker bookkeeping bundle pending a `PublicationWrite` struct, plan #8007
 async fn record_outcome(
     inner: &Arc<Inner>,
     target: &TargetState,

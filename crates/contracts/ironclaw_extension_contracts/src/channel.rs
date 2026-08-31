@@ -846,7 +846,7 @@ mod tests {
     /// the same documented webhook channel validates with either reply
     /// transport, and the transport decides only which half the binding rule
     /// demands (`ironclaw_extension_host::entrypoint::check_channel_halves`).
-    // arch-exempt: large_file, one cadence test beside the transport it pins; decomposition follow-up in docs/internal/design/2026-08-31-progressive-reply-publication.md
+    // arch-exempt: large_file, one cadence test beside the transport it pins (decomposition follow-up), plan #8007
     #[test]
     fn the_reply_transport_is_independent_of_the_ingress_trust_class() {
         let mut channel: ChannelDescriptor =

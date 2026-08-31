@@ -1709,7 +1709,7 @@ async fn product_event_stream_delivers_prior_completed_activity_before_pending_a
 }
 
 #[tokio::test]
-// arch-exempt: large_file, existing test re-pointed at the projection-driven live path; decomposition follow-up in docs/internal/design/2026-08-31-progressive-reply-publication.md
+// arch-exempt: large_file, existing test re-pointed at the projection-driven live path (decomposition follow-up), plan #8007
 async fn product_event_stream_maps_subscription_terminated_work_summary_to_context() {
     let tenant_id = TenantId::new("webui-terminated-summary-tenant").unwrap();
     let user_id = UserId::new("webui-terminated-summary-user").unwrap();

@@ -145,7 +145,7 @@ pub struct ChannelSurfaces {
     /// The reply half: the sink that reconciles this channel's provider
     /// toward the run's reply. Progressive (`stream`) or terminal-only
     /// (`message`) is the manifest's call, not the binding's.
-    // arch-exempt: optional_arc, a channel binds only the halves its manifest declares and activation checks the set (`check_channel_halves`), plan docs/internal/design/2026-08-31-progressive-reply-publication.md
+    // arch-exempt: optional_arc, a channel binds only the halves its manifest declares and activation checks the set (`check_channel_halves`), plan #8007
     pub reply: Option<Arc<dyn ReplySink>>,
     pub delivery: Option<Arc<dyn ChannelDelivery>>,
 }

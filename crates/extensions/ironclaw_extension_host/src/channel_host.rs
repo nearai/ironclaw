@@ -1409,7 +1409,7 @@ mod tests {
     /// `sendMessage`-only send) reports `false` and a channel with no delivery
     /// half at all reports `false` too.
     #[test]
-    // arch-exempt: large_file, one test beside the gate it pins; decomposition follow-up in docs/internal/design/2026-08-31-progressive-reply-publication.md
+    // arch-exempt: large_file, one test beside the gate it pins (decomposition follow-up), plan #8007
     fn private_delivery_support_is_read_from_the_bound_delivery_adapter() {
         use ironclaw_extension_contracts::channel_adapter::{
             ChannelDelivery, ChannelError, ChannelSurfaces, DeliveryReport, OutboundEnvelope,
