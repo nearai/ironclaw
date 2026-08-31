@@ -83,13 +83,12 @@ use crate::{
     DeliveryDefaultScope, LoadSubscriptionCursorRequest, MAX_RUN_DELIVERY_CLEANUP_RECORDS,
     OpenReplyPublicationRequest, OutboundDeliveryAttempt, OutboundDeliveryId,
     OutboundDeliveryStatus, OutboundError, OutboundStateStorePort, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, ReleaseReplyPublicationLeaseRequest,
-    RenewReplyPublicationLeaseRequest, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
-    ReplyPublicationClaim, ReplyPublicationLease, ReplyPublicationRecord,
-    ReplyPublicationSettlement, ReplyPublicationState, ReplyPublicationStatus,
-    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, SettleReplyPublicationRequest,
-    ThreadNotificationPolicy, TriggeredRunDeliveryRecord, TriggeredRunDeliveryStore,
-    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    ProjectionSubscriptionRecord, ReleaseReplyPublicationLeaseRequest, ReplyAttachmentIntent,
+    ReplyAttachmentIntentPort, ReplyPublicationClaim, ReplyPublicationLease,
+    ReplyPublicationRecord, ReplyPublicationSettlement, ReplyPublicationState,
+    ReplyPublicationStatus, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
+    SettleReplyPublicationRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
+    TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
 };
 
@@ -1359,36 +1358,6 @@ where
             Ok(RowUpdate::Write(ReplyPublicationClaim::Acquired(
                 publication_record(attempt, publication),
             )))
-        })
-        .await
-    }
-
-    async fn renew_reply_publication_lease(
-        &self,
-        request: RenewReplyPublicationLeaseRequest,
-    ) -> Result<bool, OutboundError> {
-        let RenewReplyPublicationLeaseRequest {
-            delivery_id,
-            scope,
-            owner,
-            fence,
-            ttl,
-            now,
-        } = request;
-        let expires_at = lease_expires_at(now, ttl)?;
-        self.update_reply_publication(&scope, delivery_id, |_attempt, publication| {
-            if publication.fence != fence {
-                return Ok(RowUpdate::Keep(false));
-            }
-            let Some(lease) = publication.lease.as_mut() else {
-                return Ok(RowUpdate::Keep(false));
-            };
-            if lease.owner != owner {
-                return Ok(RowUpdate::Keep(false));
-            }
-            lease.expires_at = lease.expires_at.max(expires_at);
-            publication.updated_at = now;
-            Ok(RowUpdate::Write(true))
         })
         .await
     }

@@ -2179,7 +2179,6 @@ pub(crate) fn extension_delivery_with_gated_write_tools_profile() -> HarnessResu
 fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
     ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        host_owned_reply: false,
         surfaces: {
             let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
             ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
@@ -2199,7 +2198,6 @@ fn slack_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBi
 fn telegram_channel_extension_binding() -> ironclaw_composition::ChannelExtensionBinding {
     ironclaw_composition::ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("telegram".to_string()),
-        host_owned_reply: false,
         surfaces: {
             let adapter = Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default());
             ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()

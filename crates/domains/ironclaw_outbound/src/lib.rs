@@ -61,11 +61,10 @@ pub use reply_attachment_intents::{
 pub use reply_publication::{
     AdvanceReplyPublicationRequest, ClaimReplyPublicationLeaseRequest, OpenReplyPublicationRequest,
     PublisherId, REPLY_PUBLICATION_IDENTIFIER_MAX_BYTES, ReleaseReplyPublicationLeaseRequest,
-    RenewReplyPublicationLeaseRequest, ReplyPublicationClaim, ReplyPublicationEvidence,
-    ReplyPublicationIdentifierError, ReplyPublicationLease, ReplyPublicationRecord,
-    ReplyPublicationSettlement, ReplyPublicationState, ReplyPublicationStatus,
-    ReplyPublicationTarget, ReplyPublicationTargetDescriptor, ReplyPublicationTargetKey,
-    SettleReplyPublicationRequest,
+    ReplyPublicationClaim, ReplyPublicationEvidence, ReplyPublicationIdentifierError,
+    ReplyPublicationLease, ReplyPublicationRecord, ReplyPublicationSettlement,
+    ReplyPublicationState, ReplyPublicationStatus, ReplyPublicationTarget,
+    ReplyPublicationTargetDescriptor, ReplyPublicationTargetKey, SettleReplyPublicationRequest,
 };
 pub use run_delivery_cleanup::{
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,

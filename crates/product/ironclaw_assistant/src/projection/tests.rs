@@ -69,11 +69,11 @@ impl ironclaw_extension_contracts::tool_adapter::RestrictedEgress for NoLiveEgre
 /// the reply projection composes the run's safe document, the projection
 /// reply sink renders each revision as live projection items — without the
 /// publication worker between them (its coalescing, leases, and persistence
-/// are covered by `crate::reply_publication`). Each revision is reconciled
+/// are covered by `crate::delivery_coordinator::publication`). Each revision is reconciled
 /// synchronously with the sink's own checkpoint from the previous one.
 struct ProjectionReplyDrive {
     inner: Arc<dyn LoopHostMilestoneSink>,
-    projection: Arc<crate::reply_projection::ReplyProjection>,
+    projection: Arc<crate::projection::reply::ReplyProjection>,
     sink: crate::projection::reply_sink::ProjectionReplySink,
     owner: UserId,
     checkpoints: std::sync::Mutex<
@@ -90,8 +90,8 @@ struct ProjectionReplyDrive {
 impl ProjectionReplyDrive {
     async fn reconcile_latest(&self, scope: &TurnScope, run_id: TurnRunId) {
         use ironclaw_extension_contracts::reply::{
-            ReplyAudience, ReplyId, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision,
-            ReplySink, ReplyTarget,
+            ReplyAudience, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink,
+            ReplyTarget,
         };
         let Some(snapshot) = self.projection.snapshot(scope, run_id) else {
             return;
@@ -119,7 +119,6 @@ impl ProjectionReplyDrive {
             .reconcile(
                 ReplyReconcileRequest {
                     revision: ReplyRevision {
-                        reply_id: ReplyId::for_run(&run_id),
                         revision: snapshot.revision,
                         document: snapshot.document,
                     },
@@ -176,7 +175,7 @@ fn live_progress_sink_for_tests(
     assert!(sink.bind_publisher(publisher));
     Arc::new(ProjectionReplyDrive {
         inner,
-        projection: Arc::new(crate::reply_projection::ReplyProjection::new()),
+        projection: Arc::new(crate::projection::reply::ReplyProjection::new()),
         sink,
         owner,
         checkpoints: std::sync::Mutex::new(std::collections::HashMap::new()),

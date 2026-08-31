@@ -14,7 +14,7 @@ skill walks this manifest section by section.
   manifest `description` is only the Slack addendum
 - **Vendor (credential authority):** `slack`
 - **Runtime:** `wasm` for the tools (`wasm/slack_user_tool.wasm`, source in `wasm-src/`); the channel capabilities are a first-party crate the binary links
-- **Code:** crate `ironclaw_slack_extension` (`src/`: `channel.rs` ingress + delivery, `reply_sink.rs` the streamed reply, `reply_context.rs`, `api.rs` endpoint inventory, `payload.rs` parsing, `mrkdwn.rs` rendering, delivery/attachments/preference codecs) + `manifest.toml`, `prompts/`, `wasm/`, `wasm-src/`
+- **Code:** crate `ironclaw_slack_extension` (`src/`: `channel.rs` ingress + delivery, `reply_sink/` the streamed reply, `reply_context.rs`, `api.rs` endpoint inventory, `payload.rs` parsing, `mrkdwn.rs` rendering, delivery/attachments/preference codecs) + `manifest.toml`, `prompts/`, `wasm/`, `wasm-src/`
 - **Depends on:** contracts tier only (`host_api`, `extension_contracts`, `product_contracts`, `attachments`); linked only by the binary and tests
 - **Tests:** `cargo test -p ironclaw_slack_extension` — `tests/channel_conformance.rs`
   runs the exported `ironclaw_extension_contracts::test_support::conformance`

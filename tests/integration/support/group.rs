@@ -265,7 +265,7 @@ pub(crate) struct GroupSharedStorage {
     /// their own run-delivery observer build their publication service over
     /// it, so channel replies are published from the same live document the
     /// composed runtime would use — not only from terminal facts.
-    pub(crate) reply_projection: Arc<ironclaw_assistant::reply_projection::ReplyProjection>,
+    pub(crate) reply_projection: Arc<ironclaw_assistant::projection::reply::ReplyProjection>,
     /// Enabler (c): the `trace_scope_key(tenant, owner)` the production
     /// trace-capture sink was seeded with when `.with_trace_capture()` opted
     /// in; `None` otherwise. Recorded at wiring time so a test asserts against
@@ -1097,9 +1097,9 @@ impl RebornIntegrationGroupBuilder {
         // durably logged) first, then composed into the group's reply
         // projection, exactly as `build_reborn_runtime` wires it.
         let reply_projection =
-            Arc::new(ironclaw_assistant::reply_projection::ReplyProjection::new());
+            Arc::new(ironclaw_assistant::projection::reply::ReplyProjection::new());
         let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
-            ironclaw_assistant::reply_projection::ReplyProjectionMilestoneSink::new(
+            ironclaw_assistant::projection::reply::ReplyProjectionMilestoneSink::new(
                 recorded_milestone_sink,
                 Arc::clone(&reply_projection),
             ),

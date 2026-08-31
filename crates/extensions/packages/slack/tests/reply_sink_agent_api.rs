@@ -13,8 +13,8 @@ use std::time::Duration;
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::reply::{
     ReplyActivityState, ReplyAnswerText, ReplyAttention, ReplyAttentionKind, ReplyAudience,
-    ReplyChange, ReplyContextBytes, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument, ReplyId,
-    ReplyItemId, ReplyPhase, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink,
+    ReplyContextBytes, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument, ReplyItemId,
+    ReplyPhase, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink,
     ReplySinkCheckpoint, ReplySinkOutcome, ReplySinkReport, ReplyTarget,
 };
 use ironclaw_host_api::attachment::WorkspaceFile;
@@ -49,12 +49,6 @@ fn answer(value: &str) -> ReplyAnswerText {
     ReplyAnswerText::new(value).expect("answer text")
 }
 
-fn appended(value: &str) -> ReplyChange {
-    ReplyChange::AnswerAppended {
-        text: answer(value),
-    }
-}
-
 fn scope() -> TurnScope {
     TurnScope::new_with_owner(
         TenantId::new("tenant-a").expect("tenant"),
@@ -73,7 +67,6 @@ struct Harness {
     reply_context: Option<ReplyContextBytes>,
     checkpoint: Option<ReplySinkCheckpoint>,
     generation: u64,
-    reply_id: ReplyId,
     attachments: Vec<WorkspaceFile>,
     document: ReplyDocument,
     revision: u64,
@@ -117,7 +110,6 @@ impl Harness {
             reply_context,
             checkpoint: None,
             generation: 1,
-            reply_id: ReplyId::for_run(&run_id),
             attachments: Vec::new(),
             document: ReplyDocument::default(),
             revision: 0,
@@ -132,17 +124,14 @@ impl Harness {
         Self::new(DM, true, true)
     }
 
-    fn apply(&mut self, changes: &[ReplyChange]) {
-        for change in changes {
-            self.document.apply(change);
-        }
+    fn append(&mut self, text: &str) {
+        self.document.append_answer(text);
     }
 
     async fn reconcile(&mut self, point: ReplyReconcilePoint) -> ReplySinkReport {
         self.revision += 1;
         let request = ReplyReconcileRequest {
             revision: ReplyRevision {
-                reply_id: self.reply_id.clone(),
                 revision: self.revision,
                 document: self.document.clone(),
             },
@@ -213,10 +202,7 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     let mut harness = Harness::channel();
 
     // Opened: a status line, no answer yet → session processing + stream.
-    harness.apply(&[ReplyChange::StatusSummary {
-        text: text("Thinking…"),
-        work: None,
-    }]);
+    harness.document.set_status(text("Thinking…"), None);
     let report = harness.reconcile(ReplyReconcilePoint::Opened).await;
     assert_applied(&report);
     let ts = harness.stream_ts();
@@ -252,17 +238,15 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     );
 
     // ControlCritical: attention before any text → block + suspended.
-    harness.apply(&[ReplyChange::AttentionRequired {
-        attention: ReplyAttention {
-            kind: ReplyAttentionKind::Approval,
-            headline: text("Approve writing report.md"),
-            body: Some(preview(
-                "The run wants to write report.md in your workspace.",
-            )),
-            action_url: None,
-            gate_ref: Some(text("gate:approval-1")),
-        },
-    }]);
+    harness.document.require_attention(ReplyAttention {
+        kind: ReplyAttentionKind::Approval,
+        headline: text("Approve writing report.md"),
+        body: Some(preview(
+            "The run wants to write report.md in your workspace.",
+        )),
+        action_url: None,
+        gate_ref: Some(text("gate:approval-1")),
+    });
     assert_applied(
         &harness
             .reconcile(ReplyReconcilePoint::ControlCritical)
@@ -291,7 +275,7 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     );
 
     // Cleared → processing again, nothing appended.
-    harness.apply(&[ReplyChange::AttentionCleared]);
+    harness.document.clear_attention();
     assert_applied(
         &harness
             .reconcile(ReplyReconcilePoint::ControlCritical)
@@ -306,14 +290,12 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     );
 
     // Progress: an activity starts and the answer begins → one append.
-    harness.apply(&[
-        ReplyChange::ActivityStarted {
-            id: item("act-1"),
-            title: text("Read runbook"),
-            detail: Some(preview("docs/runbook.md")),
-        },
-        appended("Hello"),
-    ]);
+    harness.document.activity_started(
+        item("act-1"),
+        text("Read runbook"),
+        Some(preview("docs/runbook.md")),
+    );
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
     assert_eq!(harness.fake.calls()[5..], ["chat.appendStream"]);
     assert_eq!(
@@ -329,15 +311,13 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     );
 
     // Progress: the activity finishes with output, more text → one append.
-    harness.apply(&[
-        ReplyChange::ActivityFinished {
-            id: item("act-1"),
-            state: ReplyActivityState::Completed,
-            output_preview: Some(preview("12 lines")),
-            provenance: None,
-        },
-        appended(" world"),
-    ]);
+    harness.document.activity_finished(
+        item("act-1"),
+        ReplyActivityState::Completed,
+        Some(preview("12 lines")),
+        None,
+    );
+    harness.append(" world");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
     assert_eq!(harness.fake.calls()[6..], ["chat.appendStream"]);
     assert_eq!(
@@ -354,13 +334,10 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
 
     // Terminal: the canonical answer extends the streamed text → one stop
     // carrying the remaining delta and `session_status: active`.
-    harness.apply(&[
-        ReplyChange::AnswerFinalized {
-            text: answer("Hello world!"),
-            attachments: Vec::new(),
-        },
-        ReplyChange::Completed,
-    ]);
+    harness
+        .document
+        .finalize_answer(answer("Hello world!"), Vec::new());
+    harness.document.complete();
     let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
     assert_applied(&report);
     assert_eq!(harness.fake.calls()[7..], ["chat.stopStream"]);
@@ -406,12 +383,8 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
 #[tokio::test]
 async fn repeated_revisions_and_terminals_make_no_calls() {
     let mut harness = Harness::dm();
-    harness.apply(&[
-        ReplyChange::PhaseChanged {
-            phase: ReplyPhase::Working,
-        },
-        appended("Hello"),
-    ]);
+    harness.document.note_phase(ReplyPhase::Working);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     assert_eq!(harness.fake.calls().len(), 2);
 
@@ -424,13 +397,10 @@ async fn repeated_revisions_and_terminals_make_no_calls() {
         "a reflected revision costs no provider call"
     );
 
-    harness.apply(&[
-        ReplyChange::AnswerFinalized {
-            text: answer("Hello"),
-            attachments: Vec::new(),
-        },
-        ReplyChange::Completed,
-    ]);
+    harness
+        .document
+        .finalize_answer(answer("Hello"), Vec::new());
+    harness.document.complete();
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
     let ts = harness.stream_ts();
     assert_eq!(
@@ -455,11 +425,11 @@ async fn repeated_revisions_and_terminals_make_no_calls() {
 #[tokio::test]
 async fn text_deltas_are_char_offsets_never_byte_slices() {
     let mut harness = Harness::dm();
-    harness.apply(&[appended("hé")]);
+    harness.append("hé");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
-    harness.apply(&[appended("llo 世界")]);
+    harness.append("llo 世界");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
-    harness.apply(&[appended("!")]);
+    harness.append("!");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
 
     let ts = harness.stream_ts();
@@ -486,14 +456,14 @@ async fn text_deltas_are_char_offsets_never_byte_slices() {
 #[tokio::test]
 async fn a_rate_limited_append_is_retryable_with_the_provider_hint_and_never_duplicates() {
     let mut harness = Harness::dm();
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
 
     harness.fake.inject(Fault::RateLimited {
         method: SlackWebApiMethod::ChatAppendStream,
         retry_after: Duration::from_secs(7),
     });
-    harness.apply(&[appended(" world")]);
+    harness.append(" world");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(
         matches!(
@@ -525,7 +495,7 @@ async fn a_rate_limited_append_is_retryable_with_the_provider_hint_and_never_dup
     harness.fake.inject(Fault::ServerError {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.apply(&[appended("!")]);
+    harness.append("!");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(
         matches!(
@@ -545,7 +515,7 @@ async fn a_rate_limited_append_is_retryable_with_the_provider_hint_and_never_dup
 #[tokio::test]
 async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_the_continuation() {
     let mut harness = Harness::dm();
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
 
@@ -553,7 +523,7 @@ async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_
     harness.fake.inject(Fault::TransportAfterAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.apply(&[appended(" world")]);
+    harness.append(" world");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(
         matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
@@ -565,7 +535,7 @@ async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_
         "the checkpoint remembers the unanswered request"
     );
 
-    harness.apply(&[appended("!")]);
+    harness.append("!");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert_applied(&report);
     assert!(
@@ -609,11 +579,11 @@ async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_
     harness.fake.inject(Fault::TransportBeforeAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.apply(&[appended(" Bye")]);
+    harness.append(" Bye");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
 
-    harness.apply(&[appended(".")]);
+    harness.append(".");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert_applied(&report);
     assert!(
@@ -641,19 +611,19 @@ async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_
 #[tokio::test]
 async fn stopped_by_user_maps_to_stopped_by_user_and_a_cancelled_terminal_settles_the_session() {
     let mut harness = Harness::dm();
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
 
     harness.fake.stop_by_user(&ts);
-    harness.apply(&[appended(" world")]);
+    harness.append(" world");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert_eq!(report.outcome, ReplySinkOutcome::StoppedByUser);
 
     // The host cancels the run; the terminal must transition the session
     // itself ("The session status does not update automatically when the
     // user clicks stop") without failing on the already-ended stream.
-    harness.apply(&[ReplyChange::Cancelled]);
+    harness.document.cancel();
     let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
     assert_applied(&report);
     let calls = harness.fake.calls();
@@ -683,11 +653,11 @@ async fn stopped_by_user_maps_to_stopped_by_user_and_a_cancelled_terminal_settle
 #[tokio::test]
 async fn a_generation_change_starts_a_fresh_presentation() {
     let mut harness = Harness::dm();
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
 
     harness.generation = 2;
-    harness.apply(&[appended(" world")]);
+    harness.append(" world");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
     let calls = harness.fake.calls();
     assert_eq!(
@@ -707,7 +677,7 @@ async fn a_generation_change_starts_a_fresh_presentation() {
 #[tokio::test]
 async fn an_unknown_checkpoint_version_starts_a_fresh_presentation() {
     let mut harness = Harness::dm();
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
 
     let payload = harness
@@ -719,7 +689,7 @@ async fn an_unknown_checkpoint_version_starts_a_fresh_presentation() {
     harness.checkpoint = Some(
         ReplySinkCheckpoint::new(SLACK_REPLY_CHECKPOINT_VERSION + 1, payload).expect("checkpoint"),
     );
-    harness.apply(&[appended(" world")]);
+    harness.append(" world");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
     assert_eq!(harness.fake.streams().len(), 2);
     assert_eq!(
@@ -732,15 +702,14 @@ async fn an_unknown_checkpoint_version_starts_a_fresh_presentation() {
 #[tokio::test]
 async fn an_answer_rewritten_under_the_stream_is_re_presented_in_full() {
     let mut harness = Harness::dm();
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let first = harness.stream_ts();
 
     // The canonical text is not an extension of what was streamed.
-    harness.apply(&[ReplyChange::AnswerFinalized {
-        text: answer("Goodbye"),
-        attachments: Vec::new(),
-    }]);
+    harness
+        .document
+        .finalize_answer(answer("Goodbye"), Vec::new());
     assert_applied(
         &harness
             .reconcile(ReplyReconcilePoint::ControlCritical)
@@ -771,7 +740,7 @@ async fn a_workspace_without_the_agent_feature_fails_clearly_with_no_fallback() 
         method: SlackWebApiMethod::AgentsSessionsSetStatus,
         error: "feature_disabled",
     });
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     let report = harness.reconcile(ReplyReconcilePoint::Opened).await;
     let ReplySinkOutcome::Permanent { reason } = &report.outcome else {
         panic!("expected Permanent, got {:?}", report.outcome);
@@ -793,7 +762,7 @@ async fn a_workspace_without_the_agent_feature_fails_clearly_with_no_fallback() 
         method: SlackWebApiMethod::ChatStartStream,
         error: "missing_scope",
     });
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     let report = harness.reconcile(ReplyReconcilePoint::Opened).await;
     let ReplySinkOutcome::Permanent { reason } = &report.outcome else {
         panic!("expected Permanent, got {:?}", report.outcome);
@@ -811,7 +780,7 @@ async fn a_workspace_without_the_agent_feature_fails_clearly_with_no_fallback() 
 async fn channel_streaming_requires_the_recipient_ids_from_the_reply_context() {
     // No stored reply context at all: nothing to stream as.
     let mut harness = Harness::new(CHANNEL, false, false);
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     let report = harness.reconcile(ReplyReconcilePoint::Opened).await;
     let ReplySinkOutcome::Permanent { reason } = &report.outcome else {
         panic!("expected Permanent, got {:?}", report.outcome);
@@ -838,7 +807,7 @@ async fn channel_streaming_requires_the_recipient_ids_from_the_reply_context() {
         )
         .expect("bounded"),
     );
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     let report = harness.reconcile(ReplyReconcilePoint::Opened).await;
     let ReplySinkOutcome::Permanent { reason } = &report.outcome else {
         panic!("expected Permanent, got {:?}", report.outcome);
@@ -849,7 +818,7 @@ async fn channel_streaming_requires_the_recipient_ids_from_the_reply_context() {
 #[tokio::test]
 async fn a_direct_message_streams_without_a_stored_reply_context() {
     let mut harness = Harness::new(DM, true, false);
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStartStream),
@@ -875,9 +844,7 @@ async fn a_direct_message_streams_without_a_stored_reply_context() {
 async fn a_terminal_without_an_open_stream_posts_the_text_and_activates_the_session() {
     // The run failed before its first revision reached Slack.
     let mut harness = Harness::dm();
-    harness.apply(&[ReplyChange::Failed {
-        summary: text("The model provider timed out."),
-    }]);
+    harness.document.fail(text("The model provider timed out."));
     let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
     assert_applied(&report);
     assert_eq!(
@@ -909,19 +876,16 @@ async fn a_terminal_without_an_open_stream_posts_the_text_and_activates_the_sess
 
     // A completed answer that never streamed goes out the same way.
     let mut harness = Harness::dm();
-    harness.apply(&[
-        ReplyChange::AnswerFinalized {
-            text: answer("Done — **two** files updated."),
-            attachments: Vec::new(),
-        },
-        ReplyChange::Completed,
-    ]);
+    harness
+        .document
+        .finalize_answer(answer("Done — **two** files updated."), Vec::new());
+    harness.document.complete();
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
     assert_eq!(harness.fake.posted()[0].text, "Done — *two* files updated.");
 
     // A cancellation that never streamed leaves a one-line note.
     let mut harness = Harness::dm();
-    harness.apply(&[ReplyChange::Cancelled]);
+    harness.document.cancel();
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
     assert_eq!(harness.fake.posted()[0].text, "_Stopped._");
 }
@@ -931,7 +895,7 @@ async fn a_terminal_without_an_open_stream_posts_the_text_and_activates_the_sess
 #[tokio::test]
 async fn a_heartbeat_reasserts_processing_only_once_the_assertion_is_stale() {
     let mut harness = Harness::dm();
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let before = harness.fake.calls().len();
 
@@ -978,15 +942,12 @@ async fn terminal_attachments_upload_after_the_stream_closes() {
         mime_type: "text/plain".to_string(),
         bytes: b"hello".to_vec(),
     }];
-    harness.apply(&[appended("Hello")]);
+    harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
-    harness.apply(&[
-        ReplyChange::AnswerFinalized {
-            text: answer("Hello"),
-            attachments: Vec::new(),
-        },
-        ReplyChange::Completed,
-    ]);
+    harness
+        .document
+        .finalize_answer(answer("Hello"), Vec::new());
+    harness.document.complete();
     let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
     assert_applied(&report);
     assert_eq!(
@@ -1038,13 +999,13 @@ async fn slack_errors_map_to_the_documented_outcomes() {
         ("stopped_by_user", "stopped_by_user"),
     ] {
         let mut harness = Harness::dm();
-        harness.apply(&[appended("Hello")]);
+        harness.append("Hello");
         assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
         harness.fake.inject(Fault::SlackError {
             method: SlackWebApiMethod::ChatAppendStream,
             error,
         });
-        harness.apply(&[appended(" world")]);
+        harness.append(" world");
         let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
         assert_eq!(
             report.outcome.kind_name(),

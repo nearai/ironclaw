@@ -2,65 +2,61 @@
 //! §5–§6).
 //!
 //! Every run's reply is published from one place. The reply projection
-//! ([`crate::reply_projection`]) holds the desired document; this service
-//! owns *targets* — the exact places a run answers to (its originating
-//! vendor conversation, the deployment's session channel) — and, per target,
-//! one worker that reconciles the channel's bound [`ReplySink`] toward the
-//! newest revision. Cadence is the channel's declared `[channel.reply]`
-//! transport: a `stream` sink hears every reconcile point, a `message` sink
-//! hears the terminal one only. Audience disclosure is applied to the copy
-//! each target receives.
+//! ([`crate::projection::reply`]) holds the desired document; this lane owns
+//! *targets* — the exact places a run answers to (its originating vendor
+//! conversation, the deployment's session channel) — and, per target, one
+//! worker that reconciles the channel's bound [`ReplySink`] toward the newest
+//! revision. Cadence is the channel's declared `[channel.reply]` transport: a
+//! `stream` sink hears every reconcile point, a `message` sink hears the
+//! terminal one only. Audience disclosure is applied to the copy each target
+//! receives.
 //!
 //! Publication state never lives here. It lives on the outbound delivery
 //! attempt aggregate (one attempt row per run and exact target, written only
-//! through the [`DeliveryCoordinator`]): lease + fence for horizontal safety,
-//! monotonic desired/published revisions, the sink's generation-pinned
-//! checkpoint, bounded provider evidence, and a one-way settlement that says
-//! `Delivered` only once the terminal revision was applied, `Unknown` when
-//! read-back could not resolve an ambiguous provider answer, and `Failed`
-//! otherwise. A publisher on any node can resume an open publication from
-//! that row: the target descriptor is persisted at open, the terminal
-//! revision is rebuilt from durable history, and the fence rejects the
-//! stale worker.
+//! through the [`DeliveryCoordinator`]): the atomic publication claim (a
+//! lease and fence) a worker must hold before provider egress, monotonic
+//! desired/published revisions, the sink's generation-pinned checkpoint,
+//! bounded provider evidence, and a one-way settlement that says `Delivered`
+//! only once the terminal revision was applied, `Unknown` when read-back
+//! could not resolve an ambiguous provider answer, and `Failed` otherwise. A
+//! publisher on any node can resume an open publication from that row: the
+//! target descriptor is persisted at open, the terminal revision is rebuilt
+//! from durable history, and the fence rejects the stale worker.
+//!
+//! [`ReplySink`]: ironclaw_extension_contracts::reply::ReplySink
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::external::ExternalConversationRef;
-use ironclaw_extension_contracts::reply::{
-    ReplyAudience, ReplyDocument, ReplyTarget, ReplyThreadAnchor,
-};
+use ironclaw_extension_contracts::reply::{ReplyAudience, ReplyThreadAnchor};
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_outbound::{
     OutboundDeliveryId, PublisherId, ReplyPublicationRecord, ReplyPublicationSettlement,
     ReplyPublicationTargetDescriptor, ReplyPublicationTargetKey,
 };
-use ironclaw_threads::AttachmentRef;
+use ironclaw_product_contracts::prompt_source::{
+    ApprovalPromptContextSource, BlockedAuthPromptSource,
+};
+use ironclaw_threads::{AttachmentRef, SessionThreadService};
+use ironclaw_turns::TurnCoordinator;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use super::{CoordinatedDeliveryError, DeliveryCoordinator, OpenReplyPublication};
 use crate::ProjectFilesystemReader;
-use crate::delivery_coordinator::{
-    CoordinatedDeliveryError, DeliveryCoordinator, OpenReplyPublication,
-};
-use crate::reply_projection::{
-    ReplyProjection, ReplyProjectionEvent, ReplyProjectionObserver, TerminalReplyFacts,
-};
+use crate::projection::reply::{ReplyProjection, ReplyProjectionEvent, ReplyProjectionObserver};
 
-pub mod kernel;
+mod kernel_ports;
 mod worker;
 
 #[cfg(test)]
 mod tests;
 
-pub use kernel::{
-    GateAttentionEnricher, KernelTerminalReplyFacts, ReplyPublicationCommitObserver,
-    TurnCoordinatorStopRequester,
-};
+pub use kernel_ports::ReplyPublicationCommitObserver;
 
 /// Why a target could not be registered or a publication could not proceed.
 #[derive(Debug, thiserror::Error)]
@@ -79,40 +75,11 @@ pub enum ReplyPublicationError {
     TerminalFactsUnavailable { reason: String },
 }
 
-/// The durable facts the terminal revision is built from. Implemented over
-/// the turn kernel and the thread service in production; a fake in tests.
-#[async_trait]
-pub trait TerminalReplyFactSource: Send + Sync {
-    async fn terminal_reply_facts(
-        &self,
-        scope: &TurnScope,
-        actor: &TurnActor,
-        run_id: TurnRunId,
-    ) -> Result<TerminalReplyFacts, ReplyPublicationError>;
-}
-
-/// How a sink's `StoppedByUser` reaches the run: a cancel request through the
-/// turn kernel. Best effort; the run's own terminal commit closes the loop.
-#[async_trait]
-pub trait ReplyStopRequester: Send + Sync {
-    async fn request_stop(&self, scope: &TurnScope, actor: &TurnActor, run_id: TurnRunId);
-}
-
-/// Enriches the attention facet of a document copy right before it is
-/// handed to a sink (approval prompt context, auth challenge). The
-/// projection carries only the gate ref; the prompt sources are async and
-/// store-backed, so they are consulted here, per target, never inside the
-/// milestone path.
-#[async_trait]
-pub trait ReplyAttentionEnricher: Send + Sync {
-    async fn enrich(&self, target: &ReplyTarget, document: &mut ReplyDocument);
-}
-
 /// Pacing and budgets. Defaults suit a production deployment; tests shrink
 /// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplyPublicationSettings {
-    /// How long one worker owns a publication between heartbeats.
+    /// How long one worker owns a publication between claim re-entries.
     pub lease_ttl: Duration,
     /// Minimum gap between two `Progress` reconciles of one target; control
     /// -critical and terminal reconciles are never delayed by it.
@@ -165,13 +132,20 @@ pub struct ReplyTargetRegistration {
     pub audience: ReplyAudience,
 }
 
-/// Everything the service needs.
+/// Everything the publication lane needs. The durable-fact and gate-prompt
+/// reads go straight to their owners — the turn kernel, the thread service,
+/// and the same prompt sources the delivery observer consults — rather than
+/// through publication-local port traits.
 pub struct ReplyPublicationDeps {
     pub coordinator: Arc<DeliveryCoordinator>,
     pub projection: Arc<ReplyProjection>,
-    pub terminal_facts: Arc<dyn TerminalReplyFactSource>,
-    pub stop_requests: Arc<dyn ReplyStopRequester>,
-    pub attention: Option<Arc<dyn ReplyAttentionEnricher>>,
+    pub turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub thread_service: Arc<dyn SessionThreadService>,
+    /// Approval prompt copy for an approval-gate attention facet.
+    pub approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
+    /// Auth challenge copy (and private-audience setup link) for an
+    /// auth-gate attention facet.
+    pub blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     /// The deployment's authenticated-session channel, registered as a
     /// target for every run at its first revision. `None` for a deployment
@@ -208,9 +182,10 @@ pub(crate) struct TargetState {
 pub(crate) struct Inner {
     pub(crate) coordinator: Arc<DeliveryCoordinator>,
     pub(crate) projection: Arc<ReplyProjection>,
-    pub(crate) terminal_facts: Arc<dyn TerminalReplyFactSource>,
-    pub(crate) stop_requests: Arc<dyn ReplyStopRequester>,
-    pub(crate) attention: Option<Arc<dyn ReplyAttentionEnricher>>,
+    pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
+    pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    pub(crate) approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
+    pub(crate) blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
     pub(crate) project_filesystem: Arc<dyn ProjectFilesystemReader>,
     pub(crate) session_channel: Option<ExtensionId>,
     pub(crate) settings: ReplyPublicationSettings,
@@ -283,9 +258,10 @@ impl ReplyPublicationService {
         let inner = Arc::new(Inner {
             coordinator: deps.coordinator,
             projection: deps.projection,
-            terminal_facts: deps.terminal_facts,
-            stop_requests: deps.stop_requests,
-            attention: deps.attention,
+            turn_coordinator: deps.turn_coordinator,
+            thread_service: deps.thread_service,
+            approval_context: deps.approval_context,
+            blocked_auth_prompts: deps.blocked_auth_prompts,
             project_filesystem: deps.project_filesystem,
             session_channel: deps.session_channel,
             settings: deps.settings,
@@ -772,10 +748,14 @@ impl Inner {
         }
         let mut delay = Duration::from_millis(50);
         for _ in 0..self.settings.terminal_fact_attempts.max(1) {
-            let facts = self
-                .terminal_facts
-                .terminal_reply_facts(&key.scope, &actor, key.run_id)
-                .await?;
+            let facts = kernel_ports::terminal_reply_facts(
+                self.turn_coordinator.as_ref(),
+                self.thread_service.as_ref(),
+                &key.scope,
+                &actor,
+                key.run_id,
+            )
+            .await?;
             if is_terminal(facts.status) {
                 self.terminal_attachments
                     .lock()

@@ -1,12 +1,11 @@
-//! The progressive-reply vocabulary: what crosses the reply-sink seam
-//! (`docs/internal/design/2026-08-31-progressive-reply-publication.md` §3–§4).
+//! The progressive-reply seam: what crosses between the host's publication
+//! lane and a channel's reply adapter.
 //!
-//! A run's answer is published as a **desired-state document** that evolves
-//! by typed [`ReplyChange`]s. Every channel that declares `[channel.reply]`
-//! binds one [`ReplySink`]; the declared [`ReplyTransport`] decides the
-//! **cadence** at which the host asks it to reconcile: `stream` sees every
-//! revision, `message` sees only the terminal materialization. One seam, two
-//! cadences.
+//! A run's answer is published as a **desired-state document**. Every channel
+//! that declares `[channel.reply]` binds one [`ReplySink`]; the declared
+//! [`ReplyTransport`] decides the **cadence** at which the host asks it to
+//! reconcile: `stream` sees every revision, `message` sees only the terminal
+//! materialization. One seam, two cadences.
 //!
 //! **What this vocabulary cannot represent is the point.** There is no field
 //! for raw chain-of-thought, hidden model reasoning, unrestricted tool
@@ -17,8 +16,11 @@
 //! Provider verbs (`startStream`, session status, Block Kit, SSE frames)
 //! never appear here — a sink owns those behind its checkpoint.
 //!
-//! The reducer ([`ReplyDocument::apply`]) is deterministic, side-effect free,
-//! and total: the same change sequence always yields the same document.
+//! The document evolves only through its bounded semantic mutators
+//! (deterministic, side-effect free, total: overflow truncates or drops with
+//! a flag, ordering surprises land as rows rather than errors, and the first
+//! terminal outcome is durable). The host's projection is the only producer;
+//! sinks read the document and never mutate it.
 
 use std::fmt;
 use std::time::Duration;
@@ -297,75 +299,51 @@ fn validate_identifier(field: &'static str, value: &str) -> Result<(), ReplyCont
     Ok(())
 }
 
-macro_rules! bounded_identifier {
-    ($(#[$doc:meta])* $name:ident, $field:literal) => {
-        $(#[$doc])*
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-        #[serde(try_from = "String")]
-        pub struct $name(String);
+/// Stable identity of one item inside a document (an activity row, an
+/// attachment). Sinks key provider-side state on it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ReplyItemId(String);
 
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, ReplyContractError> {
-                let value = value.into();
-                validate_identifier($field, &value)?;
-                Ok(Self(value))
-            }
+impl ReplyItemId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ReplyContractError> {
+        let value = value.into();
+        validate_identifier("reply item id", &value)?;
+        Ok(Self(value))
+    }
 
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 
-            pub fn into_inner(self) -> String {
-                self.0
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = ReplyContractError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl AsRef<str> for $name {
-            fn as_ref(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
-    };
+    pub fn into_inner(self) -> String {
+        self.0
+    }
 }
 
-bounded_identifier!(
-    /// Stable identity of one reply: the run it answers.
-    ReplyId,
-    "reply id"
-);
+impl TryFrom<String> for ReplyItemId {
+    type Error = ReplyContractError;
 
-bounded_identifier!(
-    /// Stable identity of one item inside a document (an activity row, an
-    /// attachment). Sinks key provider-side state on it.
-    ReplyItemId,
-    "reply item id"
-);
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
 
-impl ReplyId {
-    /// The canonical reply identity for a run. A run has exactly one reply.
-    pub fn for_run(run_id: &TurnRunId) -> Self {
-        Self(run_id.to_string())
+impl AsRef<str> for ReplyItemId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ReplyItemId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
     }
 }
 
 /// Where a reply stands. `WaitingForInput`, `Completed`, `Failed`, and
-/// `Cancelled` are derived by the reducer from control-critical changes; the
-/// others are set by explicit [`ReplyChange::PhaseChanged`] or by activity
-/// starts.
+/// `Cancelled` are derived from the control-critical mutators; the others are
+/// set by [`ReplyDocument::note_phase`] or by activity starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyPhase {
@@ -402,7 +380,7 @@ pub struct ReplyAnswer {
     /// Cumulative text (progressive appends, then the canonical finalized
     /// transcript text once the run finalizes it).
     pub text: ReplyAnswerText,
-    /// True once [`ReplyChange::AnswerFinalized`] replaced the progressive
+    /// True once [`ReplyDocument::finalize_answer`] replaced the progressive
     /// text with the canonical transcript row. Progressive appends after that
     /// are ignored.
     pub finalized: bool,
@@ -466,9 +444,9 @@ pub struct ReplyActivity {
     pub output_preview: Option<ReplyDisplayPreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ReplyActivityProvenance>,
-    /// The change ordinal that created this row; rows render in this order.
+    /// The mutation ordinal that created this row; rows render in this order.
     pub started_ordinal: u64,
-    /// The change ordinal of the last update to this row.
+    /// The mutation ordinal of the last update to this row.
     pub updated_ordinal: u64,
 }
 
@@ -515,6 +493,16 @@ pub enum ReplyOutcome {
     Cancelled,
 }
 
+/// The kind of work a status line describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyStatusKind {
+    Planning,
+    Waiting,
+    Retrying,
+    Context,
+}
+
 /// The desired state of one reply at one revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyDocument {
@@ -528,8 +516,8 @@ pub struct ReplyDocument {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning: Vec<ReplyReasoningText>,
     /// True while the last reasoning segment is still being produced
-    /// ([`ReplyChange::ReasoningAppended`] grows it; a
-    /// [`ReplyChange::ReasoningSummary`] closes it).
+    /// ([`ReplyDocument::append_reasoning`] grows it;
+    /// [`ReplyDocument::close_reasoning`] closes it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reasoning_open: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -543,7 +531,7 @@ pub struct ReplyDocument {
     pub attachments: Vec<ReplyAttachmentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ReplyOutcome>,
-    /// Number of changes folded so far; the source of activity ordinals.
+    /// Number of mutations folded so far; the source of activity ordinals.
     #[serde(default)]
     pub applied_changes: u64,
 }
@@ -567,189 +555,275 @@ impl Default for ReplyDocument {
     }
 }
 
+/// The bounded semantic mutators. Each returns whether the document changed —
+/// mutations after the terminal outcome (and appends after finalization) are
+/// ignored, matching the first-terminal-wins rule. Every text bound holds by
+/// construction of the argument newtypes; the two raw-`&str` answer paths
+/// truncate at the answer byte bound on a character boundary and set
+/// `answer.truncated`.
 impl ReplyDocument {
     /// Whether a terminal outcome has been recorded.
     pub fn is_terminal(&self) -> bool {
         self.outcome.is_some()
     }
 
-    /// Fold one change into the document. Total and deterministic: bound
-    /// overflow truncates or drops with a flag, ordering surprises land as
-    /// rows rather than errors, and the first terminal outcome is durable.
-    pub fn apply(&mut self, change: &ReplyChange) {
+    fn next_ordinal(&mut self) -> u64 {
         self.applied_changes = self.applied_changes.saturating_add(1);
-        let ordinal = self.applied_changes;
-        match change {
-            ReplyChange::PhaseChanged { phase } => {
-                if !self.is_terminal() && self.attention.is_none() && !phase.is_terminal() {
-                    self.phase = *phase;
-                }
-            }
-            ReplyChange::StatusSummary { text, work } => {
-                if !self.is_terminal() {
-                    self.status = Some(text.clone());
-                    self.status_kind = *work;
-                }
-            }
-            ReplyChange::AnswerAppended { text } => {
-                if self.is_terminal() || self.answer.finalized {
-                    return;
-                }
-                self.append_answer(text.as_str());
-            }
-            ReplyChange::AnswerRewritten { text } => {
-                if self.is_terminal() || self.answer.finalized {
-                    return;
-                }
-                self.answer.text = ReplyAnswerText(String::new());
-                self.answer.truncated = false;
-                self.append_answer(text.as_str());
-            }
-            ReplyChange::AnswerFinalized { text, attachments } => {
-                self.answer.text = text.clone();
-                self.answer.finalized = true;
-                self.answer.truncated = false;
-                self.attachments = attachments
-                    .iter()
-                    .take(REPLY_MAX_ATTACHMENTS)
-                    .cloned()
-                    .collect();
-            }
-            ReplyChange::ReasoningSummary { text } => {
-                if self.is_terminal() {
-                    return;
-                }
-                if self.reasoning_open {
-                    // The summary is the open segment's final text: replace,
-                    // never duplicate.
-                    if let Some(open) = self.reasoning.last_mut() {
-                        *open = text.clone();
-                    }
-                    self.reasoning_open = false;
-                } else if self.reasoning.len() < REPLY_MAX_REASONING_SEGMENTS {
-                    self.reasoning.push(text.clone());
-                }
-                if self.attention.is_none() && matches!(self.phase, ReplyPhase::Preparing) {
-                    self.phase = ReplyPhase::Thinking;
-                }
-            }
-            ReplyChange::ReasoningAppended { text } => {
-                if self.is_terminal() {
-                    return;
-                }
-                if self.reasoning_open
-                    && let Some(open) = self.reasoning.last_mut()
-                {
-                    let remaining = REPLY_REASONING_SEGMENT_MAX_BYTES.saturating_sub(open.0.len());
-                    let fit = char_boundary_prefix(text.as_str(), remaining);
-                    open.0.push_str(fit);
-                } else if self.reasoning.len() < REPLY_MAX_REASONING_SEGMENTS {
-                    self.reasoning.push(text.clone());
-                    self.reasoning_open = true;
-                }
-                if self.attention.is_none() && matches!(self.phase, ReplyPhase::Preparing) {
-                    self.phase = ReplyPhase::Thinking;
-                }
-            }
-            ReplyChange::ActivityStarted { id, title, detail } => {
-                if self.is_terminal() {
-                    return;
-                }
-                if let Some(existing) = self.activities.iter_mut().find(|row| &row.id == id) {
-                    existing.title = title.clone();
-                    if detail.is_some() {
-                        existing.detail = detail.clone();
-                    }
-                    existing.updated_ordinal = ordinal;
-                } else if self.activities.len() >= REPLY_MAX_ACTIVITIES {
-                    self.activities_truncated = true;
-                } else {
-                    self.activities.push(ReplyActivity {
-                        id: id.clone(),
-                        title: title.clone(),
-                        state: ReplyActivityState::Started,
-                        detail: detail.clone(),
-                        output_preview: None,
-                        provenance: None,
-                        started_ordinal: ordinal,
-                        updated_ordinal: ordinal,
-                    });
-                }
-                if self.attention.is_none() {
-                    self.phase = ReplyPhase::Working;
-                }
-            }
-            ReplyChange::ActivityProgress { id, detail } => {
-                if let Some(existing) = self.activities.iter_mut().find(|row| &row.id == id) {
-                    if !existing.state.is_terminal() {
-                        existing.state = ReplyActivityState::Running;
-                    }
-                    if detail.is_some() {
-                        existing.detail = detail.clone();
-                    }
-                    existing.updated_ordinal = ordinal;
-                }
-            }
-            ReplyChange::ActivityFinished {
-                id,
-                state,
-                output_preview,
-                provenance,
-            } => {
-                if let Some(existing) = self.activities.iter_mut().find(|row| &row.id == id) {
-                    existing.state = state.clone();
-                    if output_preview.is_some() {
-                        existing.output_preview = output_preview.clone();
-                    }
-                    if provenance.is_some() {
-                        existing.provenance = provenance.clone();
-                    }
-                    existing.updated_ordinal = ordinal;
-                } else if self.activities.len() >= REPLY_MAX_ACTIVITIES {
-                    self.activities_truncated = true;
-                } else {
-                    // A finish for a row this document never saw start (a
-                    // producer that only observed the terminal milestone)
-                    // still lands as a row: dropping it would hide a failure.
-                    self.activities.push(ReplyActivity {
-                        id: id.clone(),
-                        title: ReplyDisplayText(id.as_str().to_string()),
-                        state: state.clone(),
-                        detail: None,
-                        output_preview: output_preview.clone(),
-                        provenance: provenance.clone(),
-                        started_ordinal: ordinal,
-                        updated_ordinal: ordinal,
-                    });
-                }
-            }
-            ReplyChange::AttentionRequired { attention } => {
-                if self.is_terminal() {
-                    return;
-                }
-                self.attention = Some(attention.clone());
-                self.phase = ReplyPhase::WaitingForInput;
-            }
-            ReplyChange::AttentionCleared => {
-                if self.is_terminal() {
-                    return;
-                }
-                if self.attention.take().is_some() {
-                    self.phase = ReplyPhase::Working;
-                }
-            }
-            ReplyChange::Completed => self.settle(ReplyOutcome::Completed, ReplyPhase::Completed),
-            ReplyChange::Failed { summary } => self.settle(
-                ReplyOutcome::Failed {
-                    summary: summary.clone(),
-                },
-                ReplyPhase::Failed,
-            ),
-            ReplyChange::Cancelled => self.settle(ReplyOutcome::Cancelled, ReplyPhase::Cancelled),
-        }
+        self.applied_changes
     }
 
-    fn append_answer(&mut self, delta: &str) {
+    /// Note a non-terminal phase while nothing overrides it (attention and
+    /// the terminal outcome own the phase once present).
+    pub fn note_phase(&mut self, phase: ReplyPhase) -> bool {
+        if self.is_terminal() || self.attention.is_some() || phase.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        self.phase = phase;
+        true
+    }
+
+    /// The current one-line status (a driver note) and what kind of work it
+    /// describes.
+    pub fn set_status(&mut self, text: ReplyDisplayText, work: Option<ReplyStatusKind>) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        self.status = Some(text);
+        self.status_kind = work;
+        true
+    }
+
+    /// Grow the progressive answer. Ignored once finalized or terminal;
+    /// growth past the answer bound truncates on a character boundary.
+    pub fn append_answer(&mut self, delta: &str) -> bool {
+        if self.is_terminal() || self.answer.finalized || delta.is_empty() {
+            return false;
+        }
+        self.next_ordinal();
+        self.push_answer_bounded(delta);
+        true
+    }
+
+    /// Replace the progressive answer wholesale (a model call restarted its
+    /// text, a moderation rewrite). Ignored once finalized: the transcript
+    /// row is authoritative from then on.
+    pub fn rewrite_answer(&mut self, text: &str) -> bool {
+        if self.is_terminal() || self.answer.finalized {
+            return false;
+        }
+        self.next_ordinal();
+        self.answer.text = ReplyAnswerText(String::new());
+        self.answer.truncated = false;
+        self.push_answer_bounded(text);
+        true
+    }
+
+    /// The canonical finalized transcript text (and its attachments) — the
+    /// authoritative answer, replacing progressive appends.
+    pub fn finalize_answer(
+        &mut self,
+        text: ReplyAnswerText,
+        attachments: Vec<ReplyAttachmentRef>,
+    ) -> bool {
+        self.next_ordinal();
+        self.answer.text = text;
+        self.answer.finalized = true;
+        self.answer.truncated = false;
+        self.attachments = attachments
+            .into_iter()
+            .take(REPLY_MAX_ATTACHMENTS)
+            .collect();
+        true
+    }
+
+    /// Grow the open reasoning segment — the one the model is still
+    /// producing — so a progressive surface can show thinking as it happens.
+    /// Bounded like every segment: growth past the segment bound is dropped
+    /// until [`Self::close_reasoning`] closes it.
+    pub fn append_reasoning(&mut self, text: &ReplyReasoningText) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        if self.reasoning_open
+            && let Some(open) = self.reasoning.last_mut()
+        {
+            let remaining = REPLY_REASONING_SEGMENT_MAX_BYTES.saturating_sub(open.0.len());
+            let fit = char_boundary_prefix(text.as_str(), remaining);
+            open.0.push_str(fit);
+        } else if self.reasoning.len() < REPLY_MAX_REASONING_SEGMENTS {
+            self.reasoning.push(text.clone());
+            self.reasoning_open = true;
+        }
+        if self.attention.is_none() && matches!(self.phase, ReplyPhase::Preparing) {
+            self.phase = ReplyPhase::Thinking;
+        }
+        true
+    }
+
+    /// Close the open reasoning segment with its final text (replace, never
+    /// duplicate), or record `text` as a finished segment.
+    pub fn close_reasoning(&mut self, text: ReplyReasoningText) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        if self.reasoning_open {
+            if let Some(open) = self.reasoning.last_mut() {
+                *open = text;
+            }
+            self.reasoning_open = false;
+        } else if self.reasoning.len() < REPLY_MAX_REASONING_SEGMENTS {
+            self.reasoning.push(text);
+        }
+        if self.attention.is_none() && matches!(self.phase, ReplyPhase::Preparing) {
+            self.phase = ReplyPhase::Thinking;
+        }
+        true
+    }
+
+    /// Start (or retitle) one activity row; the phase moves to `Working`
+    /// while no attention overrides it.
+    pub fn activity_started(
+        &mut self,
+        id: ReplyItemId,
+        title: ReplyDisplayText,
+        detail: Option<ReplyDisplayPreview>,
+    ) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        let ordinal = self.next_ordinal();
+        if let Some(existing) = self.activities.iter_mut().find(|row| row.id == id) {
+            existing.title = title;
+            if detail.is_some() {
+                existing.detail = detail;
+            }
+            existing.updated_ordinal = ordinal;
+        } else if self.activities.len() >= REPLY_MAX_ACTIVITIES {
+            self.activities_truncated = true;
+        } else {
+            self.activities.push(ReplyActivity {
+                id,
+                title,
+                state: ReplyActivityState::Started,
+                detail,
+                output_preview: None,
+                provenance: None,
+                started_ordinal: ordinal,
+                updated_ordinal: ordinal,
+            });
+        }
+        if self.attention.is_none() {
+            self.phase = ReplyPhase::Working;
+        }
+        true
+    }
+
+    /// Progress on a known activity row; unknown rows are ignored.
+    pub fn activity_progress(
+        &mut self,
+        id: &ReplyItemId,
+        detail: Option<ReplyDisplayPreview>,
+    ) -> bool {
+        let ordinal = self.next_ordinal();
+        let Some(existing) = self.activities.iter_mut().find(|row| &row.id == id) else {
+            return false;
+        };
+        if !existing.state.is_terminal() {
+            existing.state = ReplyActivityState::Running;
+        }
+        if detail.is_some() {
+            existing.detail = detail;
+        }
+        existing.updated_ordinal = ordinal;
+        true
+    }
+
+    /// Finish one activity row. A finish for a row this document never saw
+    /// start (a producer that only observed the terminal milestone) still
+    /// lands as a row: dropping it would hide a failure.
+    pub fn activity_finished(
+        &mut self,
+        id: ReplyItemId,
+        state: ReplyActivityState,
+        output_preview: Option<ReplyDisplayPreview>,
+        provenance: Option<ReplyActivityProvenance>,
+    ) -> bool {
+        let ordinal = self.next_ordinal();
+        if let Some(existing) = self.activities.iter_mut().find(|row| row.id == id) {
+            existing.state = state;
+            if output_preview.is_some() {
+                existing.output_preview = output_preview;
+            }
+            if provenance.is_some() {
+                existing.provenance = provenance;
+            }
+            existing.updated_ordinal = ordinal;
+        } else if self.activities.len() >= REPLY_MAX_ACTIVITIES {
+            self.activities_truncated = true;
+        } else {
+            let title = ReplyDisplayText(id.as_str().to_string());
+            self.activities.push(ReplyActivity {
+                id,
+                title,
+                state,
+                detail: None,
+                output_preview,
+                provenance,
+                started_ordinal: ordinal,
+                updated_ordinal: ordinal,
+            });
+        }
+        true
+    }
+
+    /// The run parked on the user.
+    pub fn require_attention(&mut self, attention: ReplyAttention) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        self.attention = Some(attention);
+        self.phase = ReplyPhase::WaitingForInput;
+        true
+    }
+
+    /// The gate was answered; the run works again.
+    pub fn clear_attention(&mut self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+        self.next_ordinal();
+        if self.attention.take().is_none() {
+            return false;
+        }
+        self.phase = ReplyPhase::Working;
+        true
+    }
+
+    pub fn complete(&mut self) -> bool {
+        self.settle(ReplyOutcome::Completed, ReplyPhase::Completed)
+    }
+
+    pub fn fail(&mut self, summary: ReplyDisplayText) -> bool {
+        self.settle(ReplyOutcome::Failed { summary }, ReplyPhase::Failed)
+    }
+
+    pub fn cancel(&mut self) -> bool {
+        self.settle(ReplyOutcome::Cancelled, ReplyPhase::Cancelled)
+    }
+
+    fn push_answer_bounded(&mut self, delta: &str) {
+        // The ban on control characters holds by construction even on the
+        // raw-`&str` paths: strip them (keeping line structure) before the
+        // byte bound is applied.
+        let delta: String = delta
+            .chars()
+            .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+            .collect();
         let current = &self.answer.text.0;
         let remaining = REPLY_ANSWER_MAX_BYTES.saturating_sub(current.len());
         if remaining == 0 {
@@ -757,24 +831,23 @@ impl ReplyDocument {
             return;
         }
         if delta.len() <= remaining {
-            self.answer.text.0.push_str(delta);
+            self.answer.text.0.push_str(&delta);
             return;
         }
-        let mut end = remaining;
-        while end > 0 && !delta.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.answer.text.0.push_str(&delta[..end]); // safety: `end` walked back to a char boundary above.
+        let fit = char_boundary_prefix(&delta, remaining);
+        self.answer.text.0.push_str(fit);
         self.answer.truncated = true;
     }
 
-    fn settle(&mut self, outcome: ReplyOutcome, phase: ReplyPhase) {
+    fn settle(&mut self, outcome: ReplyOutcome, phase: ReplyPhase) -> bool {
         if self.is_terminal() {
-            return;
+            return false;
         }
+        self.next_ordinal();
         self.outcome = Some(outcome);
         self.phase = phase;
         self.attention = None;
+        true
     }
 }
 
@@ -791,154 +864,6 @@ fn char_boundary_prefix(text: &str, max_bytes: usize) -> &str {
     &text[..end] // safety: `end` walked back to a char boundary above.
 }
 
-/// The kind of work a status line describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReplyStatusKind {
-    Planning,
-    Waiting,
-    Retrying,
-    Context,
-}
-
-/// One semantic change. The `kind` tag is the persisted/wire name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ReplyChange {
-    PhaseChanged {
-        phase: ReplyPhase,
-    },
-    StatusSummary {
-        text: ReplyDisplayText,
-        /// What kind of work the line describes, when the producer knows —
-        /// a surface may pick an icon or grouping from it. (Named `work`
-        /// because `kind` is the change's own wire tag.)
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        work: Option<ReplyStatusKind>,
-    },
-    AnswerAppended {
-        text: ReplyAnswerText,
-    },
-    /// The progressive answer was replaced wholesale (a model call restarted
-    /// its text, a moderation rewrite). Ignored once the answer is finalized:
-    /// the transcript row is authoritative from then on.
-    AnswerRewritten {
-        text: ReplyAnswerText,
-    },
-    /// The canonical finalized transcript text (and its attachments) — the
-    /// authoritative answer, replacing progressive appends.
-    AnswerFinalized {
-        text: ReplyAnswerText,
-        #[serde(default)]
-        attachments: Vec<ReplyAttachmentRef>,
-    },
-    /// Closes the open reasoning segment (if any) and records `text` as a
-    /// finished one.
-    ReasoningSummary {
-        text: ReplyReasoningText,
-    },
-    /// Grows the open reasoning segment — the one the model is still
-    /// producing — so a progressive surface can show thinking as it happens.
-    /// Bounded like every segment: growth past the segment bound is dropped
-    /// until a `ReasoningSummary` closes it.
-    ReasoningAppended {
-        text: ReplyReasoningText,
-    },
-    ActivityStarted {
-        id: ReplyItemId,
-        title: ReplyDisplayText,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<ReplyDisplayPreview>,
-    },
-    ActivityProgress {
-        id: ReplyItemId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<ReplyDisplayPreview>,
-    },
-    ActivityFinished {
-        id: ReplyItemId,
-        state: ReplyActivityState,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        output_preview: Option<ReplyDisplayPreview>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        provenance: Option<ReplyActivityProvenance>,
-    },
-    AttentionRequired {
-        attention: ReplyAttention,
-    },
-    AttentionCleared,
-    Completed,
-    Failed {
-        summary: ReplyDisplayText,
-    },
-    Cancelled,
-}
-
-/// How a change matters to a publisher.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ReplyChangeClass {
-    /// Superseded intermediate state a publisher may coalesce under
-    /// backpressure (text growth, reasoning, status, activity progress).
-    Replaceable,
-    /// An input-required transition or the canonical answer: reconciled as
-    /// its own revision, never coalesced across.
-    ControlCritical,
-    /// The reply is over.
-    Terminal,
-}
-
-impl ReplyChange {
-    pub fn class(&self) -> ReplyChangeClass {
-        match self {
-            Self::Completed | Self::Failed { .. } | Self::Cancelled => ReplyChangeClass::Terminal,
-            Self::AttentionRequired { .. }
-            | Self::AttentionCleared
-            | Self::AnswerFinalized { .. } => ReplyChangeClass::ControlCritical,
-            Self::PhaseChanged { .. }
-            | Self::StatusSummary { .. }
-            | Self::AnswerAppended { .. }
-            | Self::AnswerRewritten { .. }
-            | Self::ReasoningSummary { .. }
-            | Self::ReasoningAppended { .. }
-            | Self::ActivityStarted { .. }
-            | Self::ActivityProgress { .. }
-            | Self::ActivityFinished { .. } => ReplyChangeClass::Replaceable,
-        }
-    }
-
-    /// Control-critical changes are the ones a publisher may never coalesce
-    /// *across*: input-required transitions and terminal facts must each be
-    /// reconciled as their own revision, however far behind the publisher is.
-    pub fn is_control_critical(&self) -> bool {
-        !matches!(self.class(), ReplyChangeClass::Replaceable)
-    }
-
-    /// Whether this change ends the reply.
-    pub fn is_terminal(&self) -> bool {
-        matches!(self.class(), ReplyChangeClass::Terminal)
-    }
-
-    pub fn kind_name(&self) -> &'static str {
-        match self {
-            Self::PhaseChanged { .. } => "phase_changed",
-            Self::StatusSummary { .. } => "status_summary",
-            Self::AnswerAppended { .. } => "answer_appended",
-            Self::AnswerRewritten { .. } => "answer_rewritten",
-            Self::AnswerFinalized { .. } => "answer_finalized",
-            Self::ReasoningSummary { .. } => "reasoning_summary",
-            Self::ReasoningAppended { .. } => "reasoning_appended",
-            Self::ActivityStarted { .. } => "activity_started",
-            Self::ActivityProgress { .. } => "activity_progress",
-            Self::ActivityFinished { .. } => "activity_finished",
-            Self::AttentionRequired { .. } => "attention_required",
-            Self::AttentionCleared => "attention_cleared",
-            Self::Completed => "completed",
-            Self::Failed { .. } => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
 /// Why the host is reconciling now — the cadence point this revision sits on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -953,8 +878,8 @@ pub enum ReplyReconcilePoint {
     /// The terminal materialization.
     Terminal,
     /// No new change: the host is re-reconciling the same desired state
-    /// (a retry, a lease takeover, or a periodic heartbeat while the reply is
-    /// open) so a sink may refresh a provider-side liveness signal.
+    /// (a retry or a periodic heartbeat while the reply is open) so a sink
+    /// may refresh a provider-side liveness signal.
     Heartbeat,
 }
 
@@ -975,7 +900,6 @@ impl ReplyTransport {
 /// One desired state at one monotonic revision of one reply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyRevision {
-    pub reply_id: ReplyId,
     /// Monotonic within one publisher's ownership of the reply. A sink keys
     /// idempotency on its checkpoint, never on this number alone.
     pub revision: u64,
@@ -1100,54 +1024,6 @@ pub struct ReplyReconcileRequest {
     pub materialized_attachments: Vec<WorkspaceFile>,
 }
 
-/// What the provider did with one reconciliation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplySinkOutcome {
-    /// The provider now reflects the requested revision.
-    Applied,
-    /// Nothing was changed provider-side; try the same revision again after
-    /// `retry_after` (the provider's hint) or the host's backoff.
-    Retryable {
-        reason: ReplyOutcomeReason,
-        retry_after: Option<Duration>,
-    },
-    /// The request crossed into transport and the provider may or may not
-    /// have applied it. The host records the uncertainty; the sink's returned
-    /// checkpoint should reflect what it could read back.
-    Ambiguous { reason: ReplyOutcomeReason },
-    /// This target can no longer take this reply.
-    Permanent { reason: ReplyOutcomeReason },
-    /// The provider rejected the credential; the host raises re-auth.
-    Unauthorized { reason: ReplyOutcomeReason },
-    /// The provider reports the user stopped this reply. The host records a
-    /// cancellation for the reply.
-    StoppedByUser,
-}
-
-impl ReplySinkOutcome {
-    pub fn is_applied(&self) -> bool {
-        matches!(self, Self::Applied)
-    }
-
-    pub fn retry_after(&self) -> Option<Duration> {
-        match self {
-            Self::Retryable { retry_after, .. } => *retry_after,
-            _ => None,
-        }
-    }
-
-    pub fn kind_name(&self) -> &'static str {
-        match self {
-            Self::Applied => "applied",
-            Self::Retryable { .. } => "retryable",
-            Self::Ambiguous { .. } => "ambiguous",
-            Self::Permanent { .. } => "permanent",
-            Self::Unauthorized { .. } => "unauthorized",
-            Self::StoppedByUser => "stopped_by_user",
-        }
-    }
-}
-
 /// Provider-issued references, bounded by construction: at most
 /// [`REPLY_MAX_PROVIDER_REFS`], each within [`REPLY_PROVIDER_REF_MAX_BYTES`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1199,14 +1075,65 @@ impl TryFrom<Vec<ReplyProviderRef>> for ReplyProviderRefs {
     }
 }
 
-/// Provider evidence a sink reports. `read_back_verified` is true only when
-/// the sink re-read provider state and found the revision reflected.
+/// Provider evidence a sink reports — the neutral proof of what the provider
+/// did, distinct from the resume-state checkpoint. `read_back_verified` is
+/// true only when the sink re-read provider state and found the revision
+/// reflected. The host persists the latest evidence on the attempt
+/// aggregate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplySinkEvidence {
     #[serde(default)]
     pub provider_refs: ReplyProviderRefs,
     #[serde(default)]
     pub read_back_verified: bool,
+}
+
+/// What the provider did with one reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplySinkOutcome {
+    /// The provider now reflects the requested revision.
+    Applied,
+    /// Nothing was changed provider-side; try the same revision again after
+    /// `retry_after` (the provider's hint) or the host's backoff.
+    Retryable {
+        reason: ReplyOutcomeReason,
+        retry_after: Option<Duration>,
+    },
+    /// The request crossed into transport and the provider may or may not
+    /// have applied it. The host records the uncertainty; the sink's returned
+    /// checkpoint should reflect what it could read back.
+    Ambiguous { reason: ReplyOutcomeReason },
+    /// This target can no longer take this reply.
+    Permanent { reason: ReplyOutcomeReason },
+    /// The provider rejected the credential; the host raises re-auth.
+    Unauthorized { reason: ReplyOutcomeReason },
+    /// The provider reports the user stopped this reply. The host records a
+    /// cancellation for the reply.
+    StoppedByUser,
+}
+
+impl ReplySinkOutcome {
+    pub fn is_applied(&self) -> bool {
+        matches!(self, Self::Applied)
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Retryable { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Retryable { .. } => "retryable",
+            Self::Ambiguous { .. } => "ambiguous",
+            Self::Permanent { .. } => "permanent",
+            Self::Unauthorized { .. } => "unauthorized",
+            Self::StoppedByUser => "stopped_by_user",
+        }
+    }
 }
 
 /// One reconciliation's result.

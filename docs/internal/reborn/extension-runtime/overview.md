@@ -231,9 +231,10 @@ Notes on the sections:
   `ReplySink` (`ironclaw_extension_contracts::reply`); `transport` only sets
   the cadence — `stream` sinks are reconciled at every point of the run's
   reply document, `message` sinks at the terminal revision only. The
-  authenticated-session channel's sink is the host's projection sink, bound by
-  composition (`host_owned_reply`). Every delivery section binds
-  `ChannelDelivery`.
+  deployment's session-reply channel (named by the binary via
+  `with_session_reply_channel`) gets the host's projection sink, attached by
+  composition through the same `surfaces.reply` slot every package-bound
+  sink uses. Every delivery section binds `ChannelDelivery`.
 - **`[[channel.egress]]`** may narrow a host/method grant with exact `paths`,
   segment-bounded `path_prefixes`, and request/response byte limits. Empty path
   lists preserve the legacy host+method policy. Path-placeholder credentials

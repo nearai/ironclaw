@@ -1,10 +1,10 @@
-//! Reply publication: the evolved delivery coordinator's progressive lane.
-//! One worker per (run, exact target) reconciles the projection's document
+//! Reply publication: the delivery coordinator's progressive lane. One
+//! worker per (run, exact target) reconciles the projection's document
 //! through the channel's bound `ReplySink`, keeps its state on the outbound
 //! attempt aggregate (lease, fence, revisions, checkpoint, evidence), and
 //! settles truthfully. These tests drive the production service over the
-//! real coordinator and the real in-memory outbound store; only the sink,
-//! the durable-fact source, and the run-stop requester are doubles.
+//! real coordinator, the real in-memory outbound store, and the real
+//! in-memory thread service; only the sink and the turn kernel are doubles.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,7 +22,8 @@ use ironclaw_extension_contracts::tool_adapter::{
 use ironclaw_host_api::ids::{AgentId, ExtensionId, TenantId, ThreadId, UserId};
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use ironclaw_host_api::turn::{
-    ReplyTargetBindingRef, TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    TurnActor, TurnId, TurnRunId, TurnScope, TurnStatus,
 };
 use ironclaw_loop_contracts::{
     LoopCompletionKind, LoopDriverId, LoopHostMilestone, LoopHostMilestoneKind,
@@ -36,14 +37,23 @@ use ironclaw_product_contracts::delivery::{
     ResolvedChannelDelivery,
 };
 
+use ironclaw_threads::{
+    AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
+    SessionThreadService, ThreadScope,
+};
+use ironclaw_turns::{
+    CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnRunState,
+};
+
 use super::{
     ReplyPublicationDeps, ReplyPublicationError, ReplyPublicationService, ReplyPublicationSettings,
-    ReplyStopRequester, ReplyTargetRegistration, TerminalReplyFactSource,
+    ReplyTargetRegistration,
 };
 use crate::delivery_coordinator::{
     DeliveryCoordinator, DeliveryRetryPolicy, NoDeliveryRegistrations,
 };
-use crate::reply_projection::{ReplyProjection, TerminalReplyFacts};
+use crate::projection::reply::ReplyProjection;
 
 struct DenyAllEgress;
 
@@ -97,46 +107,104 @@ impl DeliveryReplyContextSource for FixedReplyContext {
     }
 }
 
-#[derive(Default)]
-struct FakeTerminalFacts {
-    facts: Mutex<Option<TerminalReplyFacts>>,
-    reads: Mutex<u32>,
-}
-
-#[async_trait]
-impl TerminalReplyFactSource for FakeTerminalFacts {
-    async fn terminal_reply_facts(
-        &self,
-        _scope: &TurnScope,
-        _actor: &TurnActor,
-        _run_id: TurnRunId,
-    ) -> Result<TerminalReplyFacts, ReplyPublicationError> {
-        *self.reads.lock().unwrap() += 1;
-        Ok(self
-            .facts
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or(TerminalReplyFacts {
-                actor: None,
-                status: TurnStatus::Running,
-                nothing_to_report: false,
-                answer: None,
-                attachments: Vec::new(),
-                failure_summary: None,
-            }))
-    }
-}
-
-#[derive(Default)]
-struct FakeStopRequester {
+/// The turn-kernel double the lane's durable reads and stop requests go
+/// through — the same `TurnCoordinator` seam production wires. The run
+/// state is scriptable (`Running` until a test commits a terminal status);
+/// the finalized answer lives on the harness's real in-memory thread
+/// service; a sink's `StoppedByUser` lands here as a recorded cancel.
+struct FakeTurnKernel {
+    status: Mutex<TurnStatus>,
     stops: Mutex<Vec<TurnRunId>>,
 }
 
+impl Default for FakeTurnKernel {
+    fn default() -> Self {
+        Self {
+            status: Mutex::new(TurnStatus::Running),
+            stops: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl FakeTurnKernel {
+    fn set_status(&self, status: TurnStatus) {
+        *self.status.lock().unwrap() = status;
+    }
+
+    fn stops(&self) -> Vec<TurnRunId> {
+        self.stops.lock().unwrap().clone()
+    }
+}
+
 #[async_trait]
-impl ReplyStopRequester for FakeStopRequester {
-    async fn request_stop(&self, _scope: &TurnScope, _actor: &TurnActor, run_id: TurnRunId) {
-        self.stops.lock().unwrap().push(run_id);
+impl TurnCoordinator for FakeTurnKernel {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "publication kernel double".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "publication kernel double".to_string(),
+        })
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "publication kernel double".to_string(),
+        })
+    }
+
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        self.stops.lock().unwrap().push(request.run_id);
+        Ok(CancelRunResponse {
+            run_id: request.run_id,
+            status: TurnStatus::Cancelled,
+            event_cursor: EventCursor::default(),
+            already_terminal: false,
+            actor: None,
+        })
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Ok(TurnRunState {
+            scope: request.scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: *self.status.lock().unwrap(),
+            accepted_message_ref: AcceptedMessageRef::new("msg:publication").unwrap(),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
+            allow_steering: true,
+            resolved_model_route: None,
+            model_usage: None,
+            execution_outcome: None,
+            received_at: chrono::Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor::default(),
+            product_context: None,
+            resume_disposition: None,
+        })
     }
 }
 
@@ -146,8 +214,8 @@ struct Harness {
     projection: Arc<ReplyProjection>,
     sink: Arc<RecordingReplySink>,
     resolver: Arc<SinkResolver>,
-    facts: Arc<FakeTerminalFacts>,
-    stops: Arc<FakeStopRequester>,
+    kernel: Arc<FakeTurnKernel>,
+    threads: Arc<InMemorySessionThreadService>,
     service: Arc<ReplyPublicationService>,
     scope: TurnScope,
     actor: TurnActor,
@@ -224,14 +292,15 @@ fn harness_over_files(
         },
     ));
     let projection = Arc::new(ReplyProjection::new());
-    let facts = Arc::new(FakeTerminalFacts::default());
-    let stops = Arc::new(FakeStopRequester::default());
+    let kernel = Arc::new(FakeTurnKernel::default());
+    let threads = Arc::new(InMemorySessionThreadService::default());
     let service = ReplyPublicationService::start(ReplyPublicationDeps {
         coordinator: Arc::clone(&coordinator),
         projection: Arc::clone(&projection),
-        terminal_facts: Arc::clone(&facts) as Arc<dyn TerminalReplyFactSource>,
-        stop_requests: Arc::clone(&stops) as Arc<dyn ReplyStopRequester>,
-        attention: None,
+        turn_coordinator: Arc::clone(&kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
         project_filesystem,
         session_channel: session_channel.map(|id| ExtensionId::new(id).unwrap()),
         settings,
@@ -242,8 +311,8 @@ fn harness_over_files(
         projection,
         sink,
         resolver,
-        facts,
-        stops,
+        kernel,
+        threads,
         service,
         scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
         actor: TurnActor::new(user_id),
@@ -285,15 +354,54 @@ impl Harness {
             }));
     }
 
-    fn complete_with(&self, answer: &str) {
-        *self.facts.facts.lock().unwrap() = Some(TerminalReplyFacts {
-            actor: Some(self.actor.clone()),
-            status: TurnStatus::Completed,
-            nothing_to_report: false,
-            answer: Some(answer.to_string()),
-            attachments: Vec::new(),
-            failure_summary: None,
-        });
+    fn thread_scope(&self) -> ThreadScope {
+        ThreadScope {
+            tenant_id: self.scope.tenant_id.clone(),
+            agent_id: self.scope.agent_id.clone().unwrap(),
+            project_id: self.scope.project_id.clone(),
+            owner_user_id: Some(self.actor.user_id.clone()),
+            mission_id: None,
+        }
+    }
+
+    /// Commit the run's durable terminal facts the way the kernel would: the
+    /// finalized transcript row on the thread service and a Completed run
+    /// state, then the loop's terminal milestone.
+    async fn commit_answer(&self, content: MessageContent) {
+        self.threads
+            .ensure_thread(EnsureThreadRequest {
+                scope: self.thread_scope(),
+                thread_id: Some(self.scope.thread_id.clone()),
+                created_by_actor_id: "publication-test".into(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        let message = self
+            .threads
+            .append_assistant_draft(AppendAssistantDraftRequest {
+                scope: self.thread_scope(),
+                thread_id: self.scope.thread_id.clone(),
+                turn_run_id: self.run_id.to_string(),
+                content: content.clone(),
+            })
+            .await
+            .unwrap();
+        self.threads
+            .finalize_assistant_message(
+                &self.thread_scope(),
+                &self.scope.thread_id,
+                message.message_id,
+                content,
+            )
+            .await
+            .unwrap();
+        self.kernel.set_status(TurnStatus::Completed);
+    }
+
+    async fn complete_with(&self, answer: &str) {
+        self.commit_answer(MessageContent::text(answer)).await;
         self.projection
             .observe_milestone(&self.milestone(LoopHostMilestoneKind::Completed {
                 completion_kind: LoopCompletionKind::FinalReply,
@@ -390,7 +498,9 @@ async fn a_stream_target_receives_opened_progress_and_terminal_revisions_and_set
         "the sink's own checkpoint from the previous apply is handed back"
     );
 
-    harness.complete_with("Here is what I found, finalized.");
+    harness
+        .complete_with("Here is what I found, finalized.")
+        .await;
     let settled = harness.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -459,7 +569,7 @@ async fn a_message_target_receives_only_the_terminal_revision() {
         "a message-transport channel is reconciled at the terminal point only"
     );
 
-    harness.complete_with("The answer.");
+    harness.complete_with("The answer.").await;
     let settled = harness.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -562,7 +672,7 @@ async fn retryable_outcomes_back_off_and_the_terminal_budget_fails_closed() {
         .await
         .unwrap();
     let started = tokio::time::Instant::now();
-    harness.complete_with("eventually");
+    harness.complete_with("eventually").await;
     let settled = harness.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -594,7 +704,7 @@ async fn retryable_outcomes_back_off_and_the_terminal_budget_fails_closed() {
         .register_target(stuck.registration(ReplyAudience::Private))
         .await
         .unwrap();
-    stuck.complete_with("never lands");
+    stuck.complete_with("never lands").await;
     let settled = stuck.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -634,7 +744,7 @@ async fn permanent_and_unauthorized_outcomes_settle_failed_without_another_attem
         .register_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
-    harness.complete_with("gone");
+    harness.complete_with("gone").await;
     let settled = harness.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -653,7 +763,7 @@ async fn permanent_and_unauthorized_outcomes_settle_failed_without_another_attem
         .register_target(unauthorized.registration(ReplyAudience::Private))
         .await
         .unwrap();
-    unauthorized.complete_with("gone");
+    unauthorized.complete_with("gone").await;
     let settled = unauthorized.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -678,7 +788,7 @@ async fn an_ambiguous_terminal_outcome_settles_unknown_after_read_back_attempts(
         .register_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
-    harness.complete_with("maybe landed");
+    harness.complete_with("maybe landed").await;
     let settled = harness.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -712,19 +822,15 @@ async fn a_stop_from_the_channel_requests_a_run_cancel_and_the_terminal_revision
         .unwrap();
     harness.text("working…");
     wait_until(|| async {
-        let stops = harness.stops.stops.lock().unwrap().clone();
-        stops.contains(&harness.run_id).then_some(())
+        harness
+            .kernel
+            .stops()
+            .contains(&harness.run_id)
+            .then_some(())
     })
     .await;
     // The kernel cancels the run; its terminal commit yields Cancelled facts.
-    *harness.facts.facts.lock().unwrap() = Some(TerminalReplyFacts {
-        actor: Some(harness.actor.clone()),
-        status: TurnStatus::Cancelled,
-        nothing_to_report: false,
-        answer: None,
-        attachments: Vec::new(),
-        failure_summary: None,
-    });
+    harness.kernel.set_status(TurnStatus::Cancelled);
     harness
         .service
         .run_terminal(&harness.scope, harness.run_id)
@@ -774,21 +880,20 @@ async fn a_publisher_on_another_node_resumes_an_open_publication_from_the_store(
             backoff: Duration::ZERO,
         },
     ));
-    let facts = Arc::new(FakeTerminalFacts::default());
-    *facts.facts.lock().unwrap() = Some(TerminalReplyFacts {
-        actor: Some(first.actor.clone()),
-        status: TurnStatus::Completed,
-        nothing_to_report: false,
-        answer: Some("the whole answer".to_string()),
-        attachments: Vec::new(),
-        failure_summary: None,
-    });
+    // The durable facts survive the crash: the finalized transcript row is
+    // on the (shared) thread service and the run committed Completed.
+    first
+        .commit_answer(MessageContent::text("the whole answer"))
+        .await;
+    let second_kernel = Arc::new(FakeTurnKernel::default());
+    second_kernel.set_status(TurnStatus::Completed);
     let second = ReplyPublicationService::start(ReplyPublicationDeps {
         coordinator,
         projection: Arc::new(ReplyProjection::new()),
-        terminal_facts: Arc::clone(&facts) as Arc<dyn TerminalReplyFactSource>,
-        stop_requests: Arc::new(FakeStopRequester::default()),
-        attention: None,
+        turn_coordinator: Arc::clone(&second_kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&first.threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
         project_filesystem: Arc::new(crate::NoProjectFilesystem),
         session_channel: None,
         settings: settings(),
@@ -863,7 +968,7 @@ async fn a_live_lease_held_elsewhere_is_respected_until_it_lapses() {
         ironclaw_outbound::ReplyPublicationClaim::Acquired(_)
     ));
 
-    harness.complete_with("after the lease lapses");
+    harness.complete_with("after the lease lapses").await;
     tokio::time::sleep(Duration::from_millis(60)).await;
     assert!(
         harness.sink.requests().is_empty(),
@@ -896,9 +1001,10 @@ async fn a_channel_that_cannot_reply_is_refused_at_registration() {
     let service = ReplyPublicationService::start(ReplyPublicationDeps {
         coordinator,
         projection: Arc::clone(&harness.projection),
-        terminal_facts: Arc::clone(&harness.facts) as Arc<dyn TerminalReplyFactSource>,
-        stop_requests: Arc::clone(&harness.stops) as Arc<dyn ReplyStopRequester>,
-        attention: None,
+        turn_coordinator: Arc::clone(&harness.kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&harness.threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
         project_filesystem: Arc::new(crate::NoProjectFilesystem),
         session_channel: None,
         settings: settings(),
@@ -1165,19 +1271,13 @@ fn attachment_ref(
 }
 
 impl Harness {
-    fn complete_with_attachments(
+    async fn complete_with_attachments(
         &self,
         answer: &str,
         attachments: Vec<ironclaw_threads::AttachmentRef>,
     ) {
-        *self.facts.facts.lock().unwrap() = Some(TerminalReplyFacts {
-            actor: Some(self.actor.clone()),
-            status: TurnStatus::Completed,
-            nothing_to_report: false,
-            answer: Some(answer.to_string()),
-            attachments,
-            failure_summary: None,
-        });
+        self.commit_answer(MessageContent::with_attachments(answer, attachments))
+            .await;
         self.projection
             .observe_milestone(&self.milestone(LoopHostMilestoneKind::Completed {
                 completion_kind: LoopCompletionKind::FinalReply,
@@ -1210,15 +1310,17 @@ async fn terminal_attachments_ride_the_terminal_reconcile_with_their_workspace_b
         "no workspace bytes are read for progress"
     );
 
-    harness.complete_with_attachments(
-        "report attached",
-        vec![attachment_ref(
-            "att-1",
-            "/workspace/report.txt",
-            "renamed.txt",
-            5,
-        )],
-    );
+    harness
+        .complete_with_attachments(
+            "report attached",
+            vec![attachment_ref(
+                "att-1",
+                "/workspace/report.txt",
+                "renamed.txt",
+                5,
+            )],
+        )
+        .await;
     let settled = harness.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -1263,15 +1365,17 @@ async fn a_missing_or_oversized_workspace_file_fails_the_publication_closed() {
         .register_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
-    harness.complete_with_attachments(
-        "see attached",
-        vec![attachment_ref(
-            "att-1",
-            "/workspace/missing.txt",
-            "missing.txt",
-            5,
-        )],
-    );
+    harness
+        .complete_with_attachments(
+            "see attached",
+            vec![attachment_ref(
+                "att-1",
+                "/workspace/missing.txt",
+                "missing.txt",
+                5,
+            )],
+        )
+        .await;
     let settled = harness.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -1315,7 +1419,7 @@ async fn a_missing_or_oversized_workspace_file_fails_the_publication_closed() {
             attachment_ref(&format!("att-{index}"), &path, &format!("f{index}.txt"), 1)
         })
         .collect();
-    harness.complete_with_attachments("many", too_many);
+    harness.complete_with_attachments("many", too_many).await;
     let settled = harness.wait_settled().await;
     assert_eq!(
         settled.publication.status,
@@ -1346,15 +1450,17 @@ async fn an_unavailable_workspace_reader_is_retried_then_fails_closed_as_transpo
         .register_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
-    harness.complete_with_attachments(
-        "report attached",
-        vec![attachment_ref(
-            "att-1",
-            "/workspace/report.txt",
-            "report.txt",
-            5,
-        )],
-    );
+    harness
+        .complete_with_attachments(
+            "report attached",
+            vec![attachment_ref(
+                "att-1",
+                "/workspace/report.txt",
+                "report.txt",
+                5,
+            )],
+        )
+        .await;
     let settled = harness.wait_settled().await;
     assert_eq!(
         settled.publication.status,

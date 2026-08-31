@@ -40,9 +40,9 @@ use crate::channel_adapter::{
     VerifiedInbound,
 };
 use crate::reply::{
-    ReplyAnswerText, ReplyAudience, ReplyChange, ReplyContextBytes, ReplyDisplayText,
-    ReplyDocument, ReplyId, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink,
-    ReplySinkCheckpoint, ReplySinkOutcome, ReplyTarget, ReplyThreadAnchor,
+    ReplyAnswerText, ReplyAudience, ReplyContextBytes, ReplyDisplayText, ReplyDocument,
+    ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink, ReplySinkCheckpoint,
+    ReplySinkOutcome, ReplyTarget, ReplyThreadAnchor,
 };
 use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope};
@@ -359,7 +359,6 @@ async fn run_reply_sink_conformance(
             .map(|anchor| conformance_value(ReplyThreadAnchor::new(anchor), "conformance: anchor")),
         audience: ReplyAudience::Private,
     };
-    let reply_id = ReplyId::for_run(&run_id);
     let reply_context = outbound_envelope.reply_context.clone().map(|bytes| {
         conformance_value(ReplyContextBytes::new(bytes), "conformance: reply context")
     });
@@ -374,14 +373,9 @@ async fn run_reply_sink_conformance(
             .collect();
 
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::PhaseChanged {
-        phase: crate::reply::ReplyPhase::Working,
-    });
-    document.apply(&ReplyChange::AnswerAppended {
-        text: conformance_value(ReplyAnswerText::new(&answer_text), "conformance: answer"),
-    });
+    document.note_phase(crate::reply::ReplyPhase::Working);
+    document.append_answer(&answer_text);
     let first = ReplyRevision {
-        reply_id: reply_id.clone(),
         revision: 1,
         document: document.clone(),
     };
@@ -427,17 +421,16 @@ async fn run_reply_sink_conformance(
         checkpoint = repeat.checkpoint.or(checkpoint);
     }
 
-    document.apply(&ReplyChange::AnswerFinalized {
-        text: conformance_value(ReplyAnswerText::new(&answer_text), "conformance: answer"),
-        attachments: Vec::new(),
-    });
-    document.apply(&ReplyChange::StatusSummary {
-        text: conformance_value(ReplyDisplayText::new("done"), "conformance: status"),
-        work: None,
-    });
-    document.apply(&ReplyChange::Completed);
+    document.finalize_answer(
+        conformance_value(ReplyAnswerText::new(&answer_text), "conformance: answer"),
+        Vec::new(),
+    );
+    document.set_status(
+        conformance_value(ReplyDisplayText::new("done"), "conformance: status"),
+        None,
+    );
+    document.complete();
     let terminal = ReplyRevision {
-        reply_id,
         revision: 2,
         document,
     };

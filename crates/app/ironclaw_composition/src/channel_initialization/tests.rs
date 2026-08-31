@@ -68,7 +68,6 @@ fn binding(
 ) -> ChannelExtensionBinding {
     ChannelExtensionBinding {
         extension_id: ExtensionId::new(extension_id).expect("extension id"),
-        host_owned_reply: false,
         surfaces: ChannelSurfaces::default(),
         preference_target_codec: None,
         outbound_target_provider: None,

@@ -6,10 +6,9 @@
 use super::*;
 use crate::projection::reply_sink::ProjectionReplySink;
 use ironclaw_extension_contracts::reply::{
-    ReplyActivityState, ReplyAnswerText, ReplyAudience, ReplyChange, ReplyDisplayPreview,
-    ReplyDisplayText, ReplyDocument, ReplyId, ReplyItemId, ReplyPhase, ReplyReasoningText,
-    ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink, ReplySinkCheckpoint,
-    ReplySinkOutcome, ReplyTarget,
+    ReplyActivityState, ReplyAudience, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument,
+    ReplyItemId, ReplyPhase, ReplyReasoningText, ReplyReconcilePoint, ReplyReconcileRequest,
+    ReplyRevision, ReplySink, ReplySinkCheckpoint, ReplySinkOutcome, ReplyTarget,
 };
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
@@ -86,11 +85,7 @@ impl SinkFixture {
             ReplyReconcilePoint::Progress
         };
         ReplyReconcileRequest {
-            revision: ReplyRevision {
-                reply_id: ReplyId::for_run(&self.run_id),
-                revision,
-                document,
-            },
+            revision: ReplyRevision { revision, document },
             point,
             target: self.target(),
             reply_context: None,
@@ -136,24 +131,15 @@ fn text(value: &str) -> ReplyDisplayText {
 async fn projection_reply_sink_publishes_each_facet_as_the_live_items_the_browser_renders() {
     let fixture = sink_fixture("reply-sink-facets");
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::PhaseChanged {
-        phase: ReplyPhase::Thinking,
-    });
-    document.apply(&ReplyChange::ReasoningSummary {
-        text: ReplyReasoningText::new("Checking the workspace first.").unwrap(),
-    });
-    document.apply(&ReplyChange::AnswerAppended {
-        text: ReplyAnswerText::new("Here is ").unwrap(),
-    });
-    document.apply(&ReplyChange::ActivityStarted {
-        id: ReplyItemId::new(fixture.invocation_id.to_string()).unwrap(),
-        title: text("acme.search"),
-        detail: Some(ReplyDisplayPreview::new("query: runbook").unwrap()),
-    });
-    document.apply(&ReplyChange::StatusSummary {
-        text: text("Searching the runbook"),
-        work: None,
-    });
+    document.note_phase(ReplyPhase::Thinking);
+    document.close_reasoning(ReplyReasoningText::new("Checking the workspace first.").unwrap());
+    document.append_answer("Here is ");
+    document.activity_started(
+        ReplyItemId::new(fixture.invocation_id.to_string()).unwrap(),
+        text("acme.search"),
+        Some(ReplyDisplayPreview::new("query: runbook").unwrap()),
+    );
+    document.set_status(text("Searching the runbook"), None);
 
     let report = fixture
         .sink
@@ -213,15 +199,13 @@ async fn projection_reply_sink_publishes_each_facet_as_the_live_items_the_browse
 
     // Revision 2: the activity finishes and the answer grows. Only the
     // changed facets are re-published; the reasoning segment is not repeated.
-    document.apply(&ReplyChange::ActivityFinished {
-        id: ReplyItemId::new(fixture.invocation_id.to_string()).unwrap(),
-        state: ReplyActivityState::Completed,
-        output_preview: Some(ReplyDisplayPreview::new("3 matches").unwrap()),
-        provenance: None,
-    });
-    document.apply(&ReplyChange::AnswerAppended {
-        text: ReplyAnswerText::new("what I found.").unwrap(),
-    });
+    document.activity_finished(
+        ReplyItemId::new(fixture.invocation_id.to_string()).unwrap(),
+        ReplyActivityState::Completed,
+        Some(ReplyDisplayPreview::new("3 matches").unwrap()),
+        None,
+    );
+    document.append_answer("what I found.");
     let report = fixture
         .sink
         .reconcile(fixture.request(2, document, Some(checkpoint)), &NoEgress)
@@ -268,9 +252,7 @@ async fn projection_reply_sink_publishes_each_facet_as_the_live_items_the_browse
 async fn projection_reply_sink_repeats_nothing_for_a_repeated_revision() {
     let fixture = sink_fixture("reply-sink-idempotent");
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::AnswerAppended {
-        text: ReplyAnswerText::new("stable").unwrap(),
-    });
+    document.append_answer("stable");
     let report = fixture
         .sink
         .reconcile(fixture.request(1, document.clone(), None), &NoEgress)
@@ -302,9 +284,7 @@ async fn projection_reply_sink_fails_closed_until_composition_binds_the_publishe
     let fixture = sink_fixture("reply-sink-unbound");
     let unbound = ProjectionReplySink::new();
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::AnswerAppended {
-        text: ReplyAnswerText::new("nobody sees this yet").unwrap(),
-    });
+    document.append_answer("nobody sees this yet");
     let report = unbound
         .reconcile(fixture.request(1, document, None), &NoEgress)
         .await

@@ -673,8 +673,7 @@ pub struct RebornRuntime {
     /// The runtime's reply publication service (present exactly when the
     /// delivery coordinator is). Shutdown hands its leases back so another
     /// publisher can resume open replies at once.
-    pub(crate) reply_publication:
-        Option<Arc<ironclaw_assistant::reply_publication::ReplyPublicationService>>,
+    pub(crate) reply_publication: Option<Arc<ironclaw_assistant::ReplyPublicationService>>,
     pub(crate) channel_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
@@ -1185,9 +1184,7 @@ impl RebornRuntime {
     /// The reply publication service the runtime's channel host runs. A
     /// caller that wires its own run-delivery observer shares it so one
     /// publication owns each run's answer.
-    pub fn reply_publication(
-        &self,
-    ) -> Option<Arc<ironclaw_assistant::reply_publication::ReplyPublicationService>> {
+    pub fn reply_publication(&self) -> Option<Arc<ironclaw_assistant::ReplyPublicationService>> {
         self.reply_publication.clone()
     }
 
@@ -1257,7 +1254,7 @@ impl RebornRuntime {
                     run_delivery_settings,
                     admin_users,
                     reply_projection: Arc::new(
-                        ironclaw_assistant::reply_projection::ReplyProjection::new(),
+                        ironclaw_assistant::projection::reply::ReplyProjection::new(),
                     ),
                     session_reply_channel: self.session_reply_channel.clone(),
                 },
@@ -3542,7 +3539,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     );
     // One safe reply projection per runtime: the milestone sink composes
     // every run's document into it, reply publication reads from it.
-    let reply_projection = Arc::new(ironclaw_assistant::reply_projection::ReplyProjection::new());
+    let reply_projection = Arc::new(ironclaw_assistant::projection::reply::ReplyProjection::new());
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
     }
@@ -3603,7 +3600,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // authenticated-session channel's projection reply sink renders each
     // revision as live projection items — the same path every channel uses.
     let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
-        ironclaw_assistant::reply_projection::ReplyProjectionMilestoneSink::new(
+        ironclaw_assistant::projection::reply::ReplyProjectionMilestoneSink::new(
             durable_milestone_sink,
             Arc::clone(&reply_projection),
         ),
@@ -4413,9 +4410,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     if let Some(reply_publication) = reply_publication_service.clone() {
         processes
             .subscribe_process_observer(Arc::new(
-                ironclaw_assistant::reply_publication::ReplyPublicationCommitObserver::new(
-                    reply_publication,
-                ),
+                ironclaw_assistant::ReplyPublicationCommitObserver::new(reply_publication),
             ))
             .map_err(|error| RebornRuntimeError::MalformedConfig {
                 reason: format!("reply publication observer wiring failed: {error}"),

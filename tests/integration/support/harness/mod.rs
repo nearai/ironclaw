@@ -790,6 +790,7 @@ impl HostRuntimeCapabilityHarness {
             fixture_extension_dirs,
             native_extension_factories,
             channel_extension_bindings,
+            session_reply_channel,
             extra_first_party_bundles,
             recording_network_egress,
             google_oauth_backend_for_test,
@@ -888,7 +889,9 @@ impl HostRuntimeCapabilityHarness {
             input = input.with_native_extension_factories(native_extension_factories);
         }
         if !channel_extension_bindings.is_empty() {
-            input = input.with_channel_extension_bindings(channel_extension_bindings);
+            input = input
+                .with_channel_extension_bindings(channel_extension_bindings)
+                .with_session_reply_channel(session_reply_channel);
         }
         if has_fixture_extensions {
             // Fixture packages model HOST-BUNDLED extensions (overview §8), so

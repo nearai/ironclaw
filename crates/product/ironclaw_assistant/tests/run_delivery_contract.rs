@@ -87,8 +87,7 @@ use ironclaw_product_contracts::prompt_source::{
 };
 use ironclaw_threads::{
     AppendFinalizedAssistantMessageRequest, AttachmentKind, AttachmentRef, EnsureThreadRequest,
-    FinalizedAssistantMessageByRunRequest, InMemorySessionThreadService, MessageContent,
-    SessionThreadService, ThreadScope,
+    InMemorySessionThreadService, MessageContent, SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
@@ -586,13 +585,6 @@ impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
         request: ironclaw_outbound::ClaimReplyPublicationLeaseRequest,
     ) -> Result<ironclaw_outbound::ReplyPublicationClaim, OutboundError> {
         self.inner.claim_reply_publication_lease(request).await
-    }
-
-    async fn renew_reply_publication_lease(
-        &self,
-        request: ironclaw_outbound::RenewReplyPublicationLeaseRequest,
-    ) -> Result<bool, OutboundError> {
-        self.inner.renew_reply_publication_lease(request).await
     }
 
     async fn advance_reply_publication(
@@ -5720,73 +5712,79 @@ async fn notify_user_isolates_one_failing_target_and_still_delivers_the_rest() {
     );
 }
 
-/// Terminal facts for the observer tests: the status is the scripted
-/// coordinator's LAST state (read without consuming a scripted call, so the
-/// observer's poll script is untouched) and the answer is the finalized
-/// transcript row the test appended.
-struct ScriptedTerminalFacts {
+/// The turn-kernel view reply publication reads for terminal facts: the
+/// scripted coordinator's LAST state, served without consuming a scripted
+/// poll call so the observer's script is untouched. Cancels are forwarded
+/// to the scripted coordinator; everything else is unreachable from the
+/// publication lane.
+struct PublicationKernelView {
     turns: Arc<ScriptedTurnCoordinator>,
-    threads: Arc<InMemorySessionThreadService>,
 }
 
 #[async_trait]
-impl ironclaw_assistant::reply_publication::TerminalReplyFactSource for ScriptedTerminalFacts {
-    async fn terminal_reply_facts(
-        &self,
-        scope: &TurnScope,
-        actor: &TurnActor,
-        run_id: TurnRunId,
-    ) -> Result<
-        ironclaw_assistant::reply_projection::TerminalReplyFacts,
-        ironclaw_assistant::reply_publication::ReplyPublicationError,
-    > {
-        let last = self.turns.last_state();
-        let mut facts = ironclaw_assistant::reply_projection::TerminalReplyFacts {
-            actor: Some(actor.clone()),
-            status: last.status,
-            nothing_to_report: last.execution_outcome
-                == Some(ironclaw_turns::TurnExecutionOutcome::NothingToReport),
-            answer: None,
-            attachments: Vec::new(),
-            failure_summary: None,
-        };
-        if last.status == TurnStatus::Completed
-            && !facts.nothing_to_report
-            && let Some(agent_id) = scope.agent_id.clone()
-        {
-            let message = self
-                .threads
-                .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
-                    scope: ThreadScope {
-                        tenant_id: scope.tenant_id.clone(),
-                        agent_id,
-                        project_id: scope.project_id.clone(),
-                        owner_user_id: Some(actor.user_id.clone()),
-                        mission_id: None,
-                    },
-                    thread_id: scope.thread_id.clone(),
-                    turn_run_id: run_id.to_string(),
-                })
-                .await
-                .map_err(|error| {
-                    ironclaw_assistant::reply_publication::ReplyPublicationError::TerminalFactsUnavailable {
-                        reason: error.to_string(),
-                    }
-                })?;
-            if let Some(message) = message {
-                facts.answer = message.content;
-                facts.attachments = message.attachments;
-            }
-        }
-        Ok(facts)
+impl TurnCoordinator for PublicationKernelView {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
     }
-}
 
-struct NoStopRequests;
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "publication kernel view".to_string(),
+        })
+    }
 
-#[async_trait]
-impl ironclaw_assistant::reply_publication::ReplyStopRequester for NoStopRequests {
-    async fn request_stop(&self, _scope: &TurnScope, _actor: &TurnActor, _run_id: TurnRunId) {}
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "publication kernel view".to_string(),
+        })
+    }
+
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "publication kernel view".to_string(),
+        })
+    }
+
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        self.turns.cancel_run(request).await
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        let scripted = self.turns.last_state();
+        Ok(TurnRunState {
+            scope: request.scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id: request.run_id,
+            status: scripted.status,
+            accepted_message_ref: AcceptedMessageRef::new("msg:scripted").expect("ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            allow_steering: true,
+            resolved_model_route: None,
+            model_usage: None,
+            execution_outcome: scripted.execution_outcome,
+            output_contract: ironclaw_host_api::output::OutputContract::AssistantMessage,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: scripted.gate_ref,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: scripted.failure,
+            event_cursor: EventCursor(1),
+            product_context: None,
+            resume_disposition: None,
+        })
+    }
 }
 
 /// The production publication service over the test's coordinator, with
@@ -5796,19 +5794,19 @@ fn test_reply_publication(
     turns: &Arc<ScriptedTurnCoordinator>,
     threads: &Arc<InMemorySessionThreadService>,
     project_files: &Arc<ScriptedProjectFilesystemReader>,
-) -> Arc<ironclaw_assistant::reply_publication::ReplyPublicationService> {
-    use ironclaw_assistant::reply_publication::{
+) -> Arc<ironclaw_assistant::ReplyPublicationService> {
+    use ironclaw_assistant::{
         ReplyPublicationDeps, ReplyPublicationService, ReplyPublicationSettings,
     };
     ReplyPublicationService::start(ReplyPublicationDeps {
         coordinator: Arc::clone(coordinator),
-        projection: Arc::new(ironclaw_assistant::reply_projection::ReplyProjection::new()),
-        terminal_facts: Arc::new(ScriptedTerminalFacts {
+        projection: Arc::new(ironclaw_assistant::projection::reply::ReplyProjection::new()),
+        turn_coordinator: Arc::new(PublicationKernelView {
             turns: Arc::clone(turns),
-            threads: Arc::clone(threads),
         }),
-        stop_requests: Arc::new(NoStopRequests),
-        attention: None,
+        thread_service: Arc::clone(threads) as Arc<dyn ironclaw_threads::SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
         project_filesystem: Arc::clone(project_files)
             as Arc<dyn ironclaw_assistant::ProjectFilesystemReader>,
         session_channel: None,

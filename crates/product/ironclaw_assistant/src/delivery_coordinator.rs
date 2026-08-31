@@ -57,6 +57,7 @@ use crate::outbound_delivery::{
 };
 use crate::{ProjectFilesystemReader, ProjectFsEntryKind, ProjectFsError};
 
+pub(crate) mod publication;
 mod reply_publication;
 
 pub(crate) use reply_publication::OpenReplyPublication;

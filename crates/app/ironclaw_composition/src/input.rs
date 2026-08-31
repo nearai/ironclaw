@@ -204,6 +204,14 @@ pub struct RebornHostBindings {
     /// channel host assembly consumes the extras. Composition never names a
     /// concrete extension crate.
     pub(crate) channel_extension_bindings: Vec<ChannelExtensionBinding>,
+    /// The channel whose `[channel.reply]` is the deployment's session
+    /// stream (the browser's SSE/WebSocket tail). Its reply sink is
+    /// product-tier, so the binary cannot construct it: composition builds
+    /// one product projection sink and attaches it to the named binding's
+    /// `surfaces.reply` — the same generic slot every package-bound sink
+    /// uses. A named binding that already carries its own reply is refused.
+    /// `None` for a deployment without a session channel.
+    pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
     /// Binary-assembled first-party capability handler registrars (GSuite,
     /// web tooling): composition runs each once against the shared registry so
     /// the concrete executors live in the binary, not composition.
@@ -254,15 +262,6 @@ pub struct ChannelExtensionBinding {
     /// its manifest does not declare (or omits one it does) fails there
     /// rather than at first send.
     pub surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces,
-    /// The channel's `[channel.reply]` is served by the host, not the
-    /// package: the deployment's authenticated-session channel answers a run
-    /// through the product projection stream (its SSE/WebSocket tail is the
-    /// edge), and that sink is product-tier, so the binary cannot construct
-    /// it. Composition owns one such sink and binds it as this channel's
-    /// reply half before activation checks the bound halves against the
-    /// manifest. A binding that also carries its own reply is refused.
-    #[doc(alias = "projection_reply_sink")]
-    pub host_owned_reply: bool,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec: Option<
@@ -851,6 +850,17 @@ impl RebornHostBindings {
         self
     }
 
+    /// Name the channel whose reply is the deployment's session stream (see
+    /// the field doc): composition attaches the product projection sink to
+    /// that binding's `surfaces.reply`.
+    pub fn with_session_reply_channel(
+        mut self,
+        extension_id: Option<ironclaw_host_api::ids::ExtensionId>,
+    ) -> Self {
+        self.session_reply_channel = extension_id;
+        self
+    }
+
     /// Binary-assembled account-setup descriptors (see the field doc).
     pub fn with_account_setup_descriptors(
         mut self,
@@ -984,6 +994,7 @@ impl RebornHostBindings {
             product_auth_ports: None,
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
+            session_reply_channel: None,
             first_party_registrars: Vec::new(),
             credential_account_visibility_policy: None,
             memory_binding_policy: None,

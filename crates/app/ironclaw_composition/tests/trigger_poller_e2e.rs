@@ -755,7 +755,6 @@ async fn build_runtime_with_slack_delivery(
     .with_network_http_egress_for_test(slack_provider)
     .with_channel_extension_bindings(vec![ChannelExtensionBinding {
         extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted("slack".to_string()),
-        host_owned_reply: false,
         surfaces: {
             let adapter = Arc::new(ironclaw_slack_extension::SlackChannelAdapter);
             ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()

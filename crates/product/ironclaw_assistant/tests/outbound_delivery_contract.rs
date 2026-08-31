@@ -2697,13 +2697,6 @@ impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
         self.inner.claim_reply_publication_lease(request).await
     }
 
-    async fn renew_reply_publication_lease(
-        &self,
-        request: ironclaw_outbound::RenewReplyPublicationLeaseRequest,
-    ) -> Result<bool, OutboundError> {
-        self.inner.renew_reply_publication_lease(request).await
-    }
-
     async fn advance_reply_publication(
         &self,
         request: ironclaw_outbound::AdvanceReplyPublicationRequest,

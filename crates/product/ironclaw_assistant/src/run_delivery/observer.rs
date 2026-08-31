@@ -41,7 +41,7 @@ use ironclaw_product_contracts::inbound::{
 };
 use ironclaw_threads::ThreadScope;
 
-use crate::reply_publication::ReplyTargetRegistration;
+use crate::ReplyTargetRegistration;
 use ironclaw_turns::{
     GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnErrorCategory, TurnRunId,
     TurnRunState, TurnScope, TurnStatus,

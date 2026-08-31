@@ -9,10 +9,9 @@ use crate::{
     ClaimReplyPublicationLeaseRequest, LoadSubscriptionCursorRequest, OpenReplyPublicationRequest,
     OutboundDeliveryAttempt, OutboundDeliveryId, OutboundError, OutboundPushCandidate,
     OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest, ProjectionSubscriptionRecord,
-    RecoverInterruptedDeliveryRequest, ReleaseReplyPublicationLeaseRequest,
-    RenewReplyPublicationLeaseRequest, ReplyPublicationClaim, ReplyPublicationRecord,
-    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, SettleReplyPublicationRequest,
-    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    RecoverInterruptedDeliveryRequest, ReleaseReplyPublicationLeaseRequest, ReplyPublicationClaim,
+    ReplyPublicationRecord, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
+    SettleReplyPublicationRequest, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
@@ -93,8 +92,8 @@ pub trait OutboundStateStorePort: Send + Sync {
     ///
     /// An attempt carrying a reply publication substate is never an
     /// interrupted one-shot send: recovery returns `Ok(false)` and leaves the
-    /// row untouched. Publications recover through lease expiry and takeover
-    /// ([`Self::claim_reply_publication_lease`]), never by being marked
+    /// row untouched. Publications recover through the publisher re-resolving
+    /// open records on the run's terminal signal, never by being marked
     /// `Unknown`.
     async fn recover_interrupted_delivery_attempt(
         &self,
@@ -131,6 +130,8 @@ pub trait OutboundStateStorePort: Send + Sync {
     // Every operation below is one compare-and-swap on the attempt row. The
     // publication substate is invisible through the attempt operations above
     // except that `recover_interrupted_delivery_attempt` skips such rows.
+    // The operations are host-internal: only the delivery coordinator's
+    // publication lane calls them, never a channel adapter or product caller.
 
     /// Open a publication on a `Prepared` attempt, creating the row with the
     /// substate (`fence 0`, no lease, revisions `0`, `Active`) when absent.
@@ -144,32 +145,27 @@ pub trait OutboundStateStorePort: Send + Sync {
         request: OpenReplyPublicationRequest,
     ) -> Result<ReplyPublicationRecord, OutboundError>;
 
-    /// Acquire the publication lease. A settled publication returns
-    /// [`ReplyPublicationClaim::Settled`]; a live lease held by another owner
-    /// [`ReplyPublicationClaim::Held`]; a live lease held by the same owner is
-    /// re-entered with the same fence and an extended expiry. Otherwise (no
-    /// lease, or an expired one) the lease is set to `now + ttl`, the fence
-    /// is bumped, and the attempt moves `Prepared -> Sending` if it is still
-    /// `Prepared` (a `Sending` attempt is left alone). A row without a
-    /// substate is [`OutboundError::ReplyPublicationNotFound`]; a zero `ttl`
-    /// is [`OutboundError::InvalidRequest`].
+    /// Acquire (or re-enter) the publication claim — the atomic ownership a
+    /// publisher must hold before any provider egress. A settled publication
+    /// returns [`ReplyPublicationClaim::Settled`]; a live lease held by
+    /// another owner [`ReplyPublicationClaim::Held`]; a live lease held by
+    /// the same owner is re-entered with the same fence and an extended
+    /// expiry (re-entry is also the heartbeat — there is no separate renew).
+    /// Otherwise (no lease, or an expired one) the lease is set to
+    /// `now + ttl`, the fence is bumped, and the attempt moves
+    /// `Prepared -> Sending` if it is still `Prepared` (a `Sending` attempt
+    /// is left alone). A row without a substate is
+    /// [`OutboundError::ReplyPublicationNotFound`]; a zero `ttl` is
+    /// [`OutboundError::InvalidRequest`].
     async fn claim_reply_publication_lease(
         &self,
         request: ClaimReplyPublicationLeaseRequest,
     ) -> Result<ReplyPublicationClaim, OutboundError>;
 
-    /// Heartbeat. `Ok(true)` only when a lease exists whose owner and fence
-    /// both match — the expiry is then extended (never shortened). Any other
-    /// state, including a stale fence or a settled publication, is `Ok(false)`
-    /// rather than an error; only a missing publication errors.
-    async fn renew_reply_publication_lease(
-        &self,
-        request: RenewReplyPublicationLeaseRequest,
-    ) -> Result<bool, OutboundError>;
-
     /// Record progress. Refused once settled
     /// ([`OutboundError::ReplyPublicationSettled`]), on a stale fence
-    /// ([`OutboundError::StaleReplyPublisher`]), or without a lease
+    /// ([`OutboundError::StaleReplyPublisher`] — how a worker that lost a
+    /// takeover is rejected), or without a lease
     /// ([`OutboundError::ReplyPublicationLeaseRequired`]). Revisions are
     /// monotonic — `desired_revision` and `published_revision` never move
     /// backwards and `published_revision <= desired_revision`

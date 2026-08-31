@@ -64,8 +64,6 @@ mod product_surface_inbound;
 mod project_create_capability;
 pub mod projection;
 mod reborn_services;
-pub mod reply_projection;
-pub mod reply_publication;
 mod run_delivery;
 
 /// Test-only access to the stable Inbox identity used by production run
@@ -89,6 +87,11 @@ mod unbound_turn;
 mod workflow;
 
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
+
+pub use delivery_coordinator::publication::{
+    ReplyPublicationCommitObserver, ReplyPublicationDeps, ReplyPublicationError,
+    ReplyPublicationService, ReplyPublicationSettings, ReplyTargetRegistration,
+};
 
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
 pub use admin_user_directory::{

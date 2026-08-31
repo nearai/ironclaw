@@ -379,7 +379,7 @@ async fn model_text_phases_concatenate_under_one_live_id_and_the_transcript_row_
     fixture.sink.projection.apply_terminal_facts(
         &scope,
         run_id,
-        crate::reply_projection::TerminalReplyFacts {
+        crate::projection::reply::TerminalReplyFacts {
             actor: Some(TurnActor::new(fixture.user_id.clone())),
             status: ironclaw_host_api::turn::TurnStatus::Completed,
             nothing_to_report: false,
@@ -496,7 +496,7 @@ async fn provider_cadence_text_updates_are_not_visibly_batched() {
 
 // Coalescing of a text microburst is reply publication's job now (the
 // worker publishes the latest snapshot per target under its pacing):
-// `crate::reply_publication::tests::a_text_microburst_coalesces_and_the_latest_text_precedes_tool_activity`.
+// `crate::delivery_coordinator::publication::tests::a_text_microburst_coalesces_and_the_latest_text_precedes_tool_activity`.
 
 // The post-run skill-learning notifier publishes a learned-skill bubble
 // through a `LiveProjectionPublisher` that shares the runtime's live update

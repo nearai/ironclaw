@@ -329,7 +329,9 @@ pub struct OpenReplyPublicationRequest {
     pub now: DateTime<Utc>,
 }
 
-/// Acquire the publication lease for `owner` until `now + ttl`.
+/// Acquire (or re-enter) the publication lease for `owner` until
+/// `now + ttl`. Same-owner re-entry keeps the fence and extends the expiry —
+/// it doubles as the heartbeat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimReplyPublicationLeaseRequest {
     pub delivery_id: OutboundDeliveryId,
@@ -352,18 +354,6 @@ pub enum ReplyPublicationClaim {
     },
     /// The publication already settled; nothing is left to publish.
     Settled(ReplyPublicationRecord),
-}
-
-/// Heartbeat: extend the lease held by `owner` under `fence`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenewReplyPublicationLeaseRequest {
-    pub delivery_id: OutboundDeliveryId,
-    pub scope: TurnScope,
-    pub owner: PublisherId,
-    pub fence: u64,
-    /// Must be positive.
-    pub ttl: Duration,
-    pub now: DateTime<Utc>,
 }
 
 /// Record progress under `fence`: revisions move forward only, the terminal

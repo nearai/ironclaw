@@ -1211,7 +1211,7 @@ impl RebornIntegrationHarness {
     /// document into (see `GroupSharedStorage::reply_projection`).
     pub(crate) fn reply_projection_for_test(
         &self,
-    ) -> Arc<ironclaw_assistant::reply_projection::ReplyProjection> {
+    ) -> Arc<ironclaw_assistant::projection::reply::ReplyProjection> {
         Arc::clone(&self._shared.reply_projection)
     }
 
@@ -1225,10 +1225,9 @@ impl RebornIntegrationHarness {
     pub(crate) fn reply_publication_for_test(
         &self,
         services: &ironclaw_composition::RebornRuntime,
-    ) -> Arc<ironclaw_assistant::reply_publication::ReplyPublicationService> {
-        use ironclaw_assistant::reply_publication::{
-            KernelTerminalReplyFacts, ReplyPublicationDeps, ReplyPublicationService,
-            ReplyPublicationSettings, TurnCoordinatorStopRequester,
+    ) -> Arc<ironclaw_assistant::ReplyPublicationService> {
+        use ironclaw_assistant::{
+            ReplyPublicationDeps, ReplyPublicationService, ReplyPublicationSettings,
         };
         let coordinator = services
             .delivery_coordinator()
@@ -1239,14 +1238,10 @@ impl RebornIntegrationHarness {
         ReplyPublicationService::start(ReplyPublicationDeps {
             coordinator,
             projection: self.reply_projection_for_test(),
-            terminal_facts: Arc::new(KernelTerminalReplyFacts::new(
-                self.turn_coordinator_for_test(),
-                thread_service,
-            )),
-            stop_requests: Arc::new(TurnCoordinatorStopRequester::new(
-                self.turn_coordinator_for_test(),
-            )),
-            attention: None,
+            turn_coordinator: self.turn_coordinator_for_test(),
+            thread_service,
+            approval_context: None,
+            blocked_auth_prompts: None,
             project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
             session_channel: None,
             settings: ReplyPublicationSettings::default(),

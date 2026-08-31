@@ -1,21 +1,21 @@
 //! The per-target reconcile loop.
 //!
 //! Desired state is the projection's newest document; the worker converges
-//! the sink toward it under a lease, coalescing naturally (it always
-//! publishes the *latest* snapshot, so intermediate replaceable revisions
-//! collapse) while never skipping a control-critical or terminal point.
-//! Every store write goes through the coordinator with the fence the lease
-//! claim handed back, so a worker that lost its lease to another node is
+//! the sink toward it under the publication claim, coalescing naturally (it
+//! always publishes the *latest* snapshot, so intermediate replaceable
+//! revisions collapse) while never skipping a control-critical or terminal
+//! point. Every store write goes through the coordinator with the fence the
+//! claim handed back, so a worker that lost its claim to another node is
 //! rejected at the store, not trusted.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::channel_adapter::ChannelError;
 use ironclaw_extension_contracts::reply::{
-    ReplyAttentionKind, ReplyContextBytes, ReplyId, ReplyReconcilePoint, ReplyReconcileRequest,
-    ReplyRevision, ReplySinkOutcome, ReplySinkReport, ReplyTarget,
+    ReplyAttentionKind, ReplyContextBytes, ReplyOutcomeReason, ReplyReconcilePoint,
+    ReplyReconcileRequest, ReplyRevision, ReplySinkCheckpoint, ReplySinkOutcome, ReplySinkReport,
+    ReplyTarget,
 };
 use ironclaw_host_api::attachment::WorkspaceFile;
 use ironclaw_outbound::{
@@ -25,11 +25,11 @@ use ironclaw_outbound::{
 use ironclaw_product_contracts::delivery::ResolvedChannelDelivery;
 use ironclaw_threads::ThreadScope;
 
-use super::{Inner, RunKey, TargetState};
+use super::{Inner, RunKey, TargetState, kernel_ports};
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, materialize_workspace_files, workspace_materialization_failure_kind,
 };
-use crate::reply_projection::{ReplySnapshot, disclose_for_audience};
+use crate::projection::reply::{ReplySnapshot, disclose_for_audience};
 
 const LOG_TARGET: &str = "ironclaw::reborn::reply_publication";
 
@@ -129,7 +129,8 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
                 continue;
             }
         }
-        // 3. Own the publication.
+        // 3. Own the publication — the atomic claim every provider egress
+        // sits behind. Re-entry doubles as the heartbeat.
         let record = match inner
             .coordinator
             .claim_reply_publication(
@@ -155,7 +156,7 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
             }
             Ok(ReplyPublicationClaim::Settled(_)) => return,
             Err(error) => {
-                tracing::debug!(target: LOG_TARGET, %error, "reply publication lease claim failed; retrying");
+                tracing::debug!(target: LOG_TARGET, %error, "reply publication claim failed; retrying");
                 tokio::time::sleep(inner.settings.retry_backoff).await;
                 continue;
             }
@@ -190,7 +191,7 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
                     })
                     .await;
                 if let Err(error) = advanced {
-                    tracing::debug!(target: LOG_TARGET, %error, "reply publication advance refused; the lease was lost or the publication settled");
+                    tracing::debug!(target: LOG_TARGET, %error, "reply publication advance refused; the claim was lost or the publication settled");
                     if is_fenced_out(&error) {
                         return;
                     }
@@ -223,13 +224,15 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
                 record_outcome(
                     &inner,
                     &target,
-                    &run_key,
-                    &snapshot,
-                    &record,
-                    fence,
-                    reason.clone(),
-                    generation,
-                    checkpoint,
+                    OutcomeWrite {
+                        run_key: &run_key,
+                        snapshot: &snapshot,
+                        record: &record,
+                        fence,
+                        last_outcome: reason.clone(),
+                        generation,
+                        checkpoint,
+                    },
                 )
                 .await;
                 if terminal && attempts >= inner.settings.terminal_attempt_budget {
@@ -261,13 +264,15 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
                 record_outcome(
                     &inner,
                     &target,
-                    &run_key,
-                    &snapshot,
-                    &record,
-                    fence,
-                    Some(reason),
-                    generation,
-                    checkpoint,
+                    OutcomeWrite {
+                        run_key: &run_key,
+                        snapshot: &snapshot,
+                        record: &record,
+                        fence,
+                        last_outcome: Some(reason),
+                        generation,
+                        checkpoint,
+                    },
                 )
                 .await;
                 if terminal && attempts >= inner.settings.terminal_attempt_budget {
@@ -291,13 +296,15 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
                 record_outcome(
                     &inner,
                     &target,
-                    &run_key,
-                    &snapshot,
-                    &record,
-                    fence,
-                    Some(reason),
-                    generation,
-                    None,
+                    OutcomeWrite {
+                        run_key: &run_key,
+                        snapshot: &snapshot,
+                        record: &record,
+                        fence,
+                        last_outcome: Some(reason),
+                        generation,
+                        checkpoint: None,
+                    },
                 )
                 .await;
                 settle(
@@ -314,23 +321,24 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
                 record_outcome(
                     &inner,
                     &target,
-                    &run_key,
-                    &snapshot,
-                    &record,
-                    fence,
-                    Some(
-                        ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(
-                            "stopped by user",
-                        ),
-                    ),
-                    generation,
-                    None,
+                    OutcomeWrite {
+                        run_key: &run_key,
+                        snapshot: &snapshot,
+                        record: &record,
+                        fence,
+                        last_outcome: Some(ReplyOutcomeReason::new("stopped by user")),
+                        generation,
+                        checkpoint: None,
+                    },
                 )
                 .await;
-                inner
-                    .stop_requests
-                    .request_stop(&run_key.scope, &target.registration.actor, run_key.run_id)
-                    .await;
+                kernel_ports::request_stop(
+                    inner.turn_coordinator.as_ref(),
+                    &run_key.scope,
+                    &target.registration.actor,
+                    run_key.run_id,
+                )
+                .await;
                 // The run's terminal commit brings the terminal revision.
                 target.wake.notified().await;
             }
@@ -350,21 +358,21 @@ enum Step {
         generation: u64,
     },
     Retry {
-        reason: Option<ironclaw_extension_contracts::reply::ReplyOutcomeReason>,
+        reason: Option<ReplyOutcomeReason>,
         retry_after: Option<Duration>,
         generation: u64,
         /// A sink may hand back its checkpoint with a retry (it opened a
         /// provider stream before the rate limit hit); it is persisted so the
         /// retry resumes that presentation instead of opening another.
-        checkpoint: Option<ironclaw_extension_contracts::reply::ReplySinkCheckpoint>,
+        checkpoint: Option<ReplySinkCheckpoint>,
     },
     Ambiguous {
-        reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason,
+        reason: ReplyOutcomeReason,
         generation: u64,
-        checkpoint: Option<ironclaw_extension_contracts::reply::ReplySinkCheckpoint>,
+        checkpoint: Option<ReplySinkCheckpoint>,
     },
     Permanent {
-        reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason,
+        reason: ReplyOutcomeReason,
         kind: DeliveryFailureKind,
         generation: u64,
     },
@@ -397,9 +405,7 @@ async fn reconcile_once(
     };
     let Some(sink) = channel.reply.clone() else {
         return Step::Permanent {
-            reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(
-                "channel no longer binds a reply sink",
-            ),
+            reason: ReplyOutcomeReason::new("channel no longer binds a reply sink"),
             kind: DeliveryFailureKind::Rejected,
             generation: channel.generation,
         };
@@ -432,10 +438,15 @@ async fn reconcile_once(
         audience: registration.audience,
     };
     let mut document = disclose_for_audience(&snapshot.document, registration.audience);
-    if document.attention.is_some()
-        && let Some(enricher) = inner.attention.as_ref()
-    {
-        enricher.enrich(&reply_target, &mut document).await;
+    if document.attention.is_some() {
+        kernel_ports::enrich_attention(
+            inner.approval_context.as_ref(),
+            inner.blocked_auth_prompts.as_ref(),
+            inner.turn_coordinator.as_ref(),
+            &reply_target,
+            &mut document,
+        )
+        .await;
         // Disclosure has the last word even over enrichment.
         document = disclose_for_audience(&document, registration.audience);
     }
@@ -450,7 +461,6 @@ async fn reconcile_once(
         };
     let request = ReplyReconcileRequest {
         revision: ReplyRevision {
-            reply_id: ReplyId::for_run(&registration.run_id),
             revision: snapshot.revision,
             document,
         },
@@ -498,9 +508,7 @@ async fn reconcile_once(
         },
         Ok(Err(error)) => channel_error_step(error, generation),
         Err(_elapsed) => Step::Ambiguous {
-            reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(
-                "reply sink reconcile timed out",
-            ),
+            reason: ReplyOutcomeReason::new("reply sink reconcile timed out"),
             generation,
             checkpoint: None,
         },
@@ -510,7 +518,7 @@ async fn reconcile_once(
 /// A sink error is the adapter's own failure. Rendering/configuration faults
 /// do not heal by retrying; transfer faults say whether they might.
 fn channel_error_step(error: ChannelError, generation: u64) -> Step {
-    let reason = ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(error.to_string());
+    let reason = ReplyOutcomeReason::new(error.to_string());
     match error {
         ChannelError::AttachmentTransfer {
             retryable: true, ..
@@ -541,9 +549,7 @@ async fn materialize(
 ) -> Result<Vec<WorkspaceFile>, Step> {
     let Some(agent_id) = run_key.scope.agent_id.clone() else {
         return Err(Step::Permanent {
-            reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(
-                "reply attachments need an agent-scoped run",
-            ),
+            reason: ReplyOutcomeReason::new("reply attachments need an agent-scoped run"),
             kind: DeliveryFailureKind::Rejected,
             generation: channel.generation,
         });
@@ -562,8 +568,7 @@ async fn materialize(
         Ok(files) => Ok(files),
         Err(error) => {
             let kind = workspace_materialization_failure_kind(&error);
-            let reason =
-                ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(error.to_string());
+            let reason = ReplyOutcomeReason::new(error.to_string());
             Err(match kind {
                 DeliveryFailureKind::TransportUnavailable => Step::Retry {
                     reason: Some(reason),
@@ -609,42 +614,48 @@ fn attention_signature(snapshot: &ReplySnapshot) -> Option<(ReplyAttentionKind, 
     })
 }
 
-#[allow(clippy::too_many_arguments)] // arch-exempt: too_many_args, worker bookkeeping bundle pending a `PublicationWrite` struct, plan #8007
-async fn record_outcome(
-    inner: &Arc<Inner>,
-    target: &TargetState,
-    run_key: &RunKey,
-    snapshot: &ReplySnapshot,
-    record: &ReplyPublicationRecord,
+/// One non-applied outcome's durable write: evidence and (when handed back)
+/// the checkpoint, under the worker's fence.
+struct OutcomeWrite<'a> {
+    run_key: &'a RunKey,
+    snapshot: &'a ReplySnapshot,
+    record: &'a ReplyPublicationRecord,
     fence: u64,
-    last_outcome: Option<ironclaw_extension_contracts::reply::ReplyOutcomeReason>,
+    last_outcome: Option<ReplyOutcomeReason>,
     generation: u64,
-    checkpoint: Option<ironclaw_extension_contracts::reply::ReplySinkCheckpoint>,
-) {
-    let terminal = snapshot.document.is_terminal();
+    checkpoint: Option<ReplySinkCheckpoint>,
+}
+
+async fn record_outcome(inner: &Arc<Inner>, target: &TargetState, write: OutcomeWrite<'_>) {
+    let terminal = write.snapshot.document.is_terminal();
     let evidence = ReplyPublicationEvidence {
-        provider_refs: record.publication.evidence.provider_refs.clone(),
-        read_back_verified: record.publication.evidence.read_back_verified,
-        last_outcome,
-        generation_changed: record
+        provider_refs: write.record.publication.evidence.provider_refs.clone(),
+        read_back_verified: write.record.publication.evidence.read_back_verified,
+        last_outcome: write.last_outcome,
+        generation_changed: write
+            .record
             .publication
             .generation
-            .is_some_and(|previous| previous != generation),
+            .is_some_and(|previous| previous != write.generation),
     };
     if let Err(error) = inner
         .coordinator
         .advance_reply_publication(AdvanceReplyPublicationRequest {
             delivery_id: target.delivery_id,
-            scope: run_key.scope.clone(),
-            fence,
-            desired_revision: snapshot.revision.max(record.publication.desired_revision),
-            published_revision: record.publication.published_revision,
-            terminal_revision: record
+            scope: write.run_key.scope.clone(),
+            fence: write.fence,
+            desired_revision: write
+                .snapshot
+                .revision
+                .max(write.record.publication.desired_revision),
+            published_revision: write.record.publication.published_revision,
+            terminal_revision: write
+                .record
                 .publication
                 .terminal_revision
-                .or(terminal.then_some(snapshot.revision)),
-            generation: Some(generation),
-            checkpoint,
+                .or(terminal.then_some(write.snapshot.revision)),
+            generation: Some(write.generation),
+            checkpoint: write.checkpoint,
             evidence,
             now: chrono::Utc::now(),
         })
@@ -685,14 +696,4 @@ fn is_fenced_out(error: &CoordinatedDeliveryError) -> bool {
                 | ironclaw_outbound::OutboundError::ReplyPublicationNotFound
         )
     )
-}
-
-// Keep the transport vocabulary in the worker's signature space so a future
-// cadence variant is a compile error here rather than a silent no-op.
-#[allow(dead_code)]
-fn cadence(transport: ReplyTransport) -> &'static str {
-    match transport {
-        ReplyTransport::Stream => "stream",
-        ReplyTransport::Message => "message",
-    }
 }

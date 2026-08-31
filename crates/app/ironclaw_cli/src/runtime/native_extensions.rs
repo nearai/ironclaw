@@ -33,6 +33,9 @@ pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensio
 /// The binary-assembled channel extension set.
 pub(crate) struct BundledChannelExtensions {
     pub(crate) bindings: Vec<ChannelExtensionBinding>,
+    /// The channel whose reply is the deployment's session stream;
+    /// composition attaches the product projection sink to its binding.
+    pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
 }
 
 /// Deployment channel-adapter bindings. These are independent of native tool
@@ -45,7 +48,6 @@ pub(crate) fn bundled_channel_extensions(
     let bindings = vec![
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("slack".to_string()),
-            host_owned_reply: false,
             // Every half: a webhook ingress, a message reply, a message
             // delivery. One vendor mechanism serves both output axes, which
             // is why the distinction stayed invisible until web-app existed.
@@ -65,7 +67,6 @@ pub(crate) fn bundled_channel_extensions(
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("telegram".to_string()),
-            host_owned_reply: false,
             surfaces: {
                 let adapter = Arc::new(TelegramChannelAdapter::default());
                 ChannelSurfaces::default()
@@ -80,12 +81,12 @@ pub(crate) fn bundled_channel_extensions(
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("web-app".to_string()),
-            // The manifest's `transport = "stream"` reply is host-served:
-            // the browser's SSE/WebSocket tail is this channel's edge,
-            // reconciled from the same reply document every other channel
-            // publishes from, and the sink behind it is product-tier, so
-            // composition binds it (the binary only marks the channel).
-            host_owned_reply: true,
+            // No reply half here: web-app is the deployment's session-reply
+            // channel (`session_reply_channel` below), so composition
+            // attaches the product-tier projection sink to this binding's
+            // ordinary `surfaces.reply` slot — the browser's SSE/WebSocket
+            // tail is the edge, reconciled from the same reply document
+            // every other channel publishes from.
             // No ingress half, and that absence is load-bearing: input
             // arrives on the authenticated session door, whose actor
             // authority an adapter may never mint. Delivery is the web-push
@@ -105,7 +106,10 @@ pub(crate) fn bundled_channel_extensions(
             registration_document_path: Some("/web-push/subscriptions.json".to_string()),
         },
     ];
-    BundledChannelExtensions { bindings }
+    BundledChannelExtensions {
+        bindings,
+        session_reply_channel: Some(ExtensionId::from_trusted("web-app".to_string())),
+    }
 }
 
 /// Bindings-only view (tests and callers that do not wire composition).

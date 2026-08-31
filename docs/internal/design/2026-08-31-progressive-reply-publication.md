@@ -71,19 +71,21 @@ consumer of durable reply events, never a replacement") and
 
 | Concern | Owner | Status |
 | --- | --- | --- |
-| Provider-neutral reply vocabulary: `ReplyDocument`, `ReplyChange`, `ReplyRevision`, `ReplyTarget`, `ReplySink`, bounded newtypes, checkpoint/evidence/report types, `ReplyTransport::reconciles_at` | `ironclaw_extension_contracts::reply` (+ `channel`) | implemented |
-| `[channel.reply]` binding rule: a declared reply transport requires a real bound `ReplySink`; no fake bridge half satisfies it | `ironclaw_extension_host::entrypoint::check_channel_halves`, `generic_host.rs` | planned (in this branch) |
-| The reply projection: milestones → safe changes → document; rebuild from durable facts; disclosure policy | `ironclaw_assistant::reply_projection` (consolidates `projection/live_progress.rs`) | planned |
-| Publication: per-target worker, coalescing, lease/fence, retries, heartbeat, terminal settlement, sink/egress resolution | `ironclaw_assistant::delivery_coordinator` (a `reply_publication` submodule of the same owner) | planned |
-| Publication state persistence: guarded CAS operations on the attempt aggregate | `ironclaw_outbound::OutboundStateStorePort` / `OutboundStateStore` | planned |
-| WebUI edge: revision → live projection items over the existing `LiveProjectionPublisher`; durable facets reach the browser through the existing turn-event/runtime projection | `ironclaw_assistant::projection::reply_sink::ProjectionReplySink` | partially implemented (live facets: answer, reasoning, activity, status) |
-| Slack edge: native Agent session/stream/task rendering, error and rate-limit mapping, read-back | `crates/extensions/packages/slack/src/reply_sink.rs` | planned |
-| Telegram edge: terminal materialization (answer + attachments, failure/cancel copy) | `crates/extensions/packages/telegram` | planned |
+| Provider-neutral reply vocabulary: `ReplyDocument` (evolved only through its bounded semantic mutators), `ReplyRevision`, `ReplyTarget`, `ReplySink`, bounded newtypes, checkpoint/evidence/report types, `ReplyTransport::reconciles_at` | `ironclaw_extension_contracts::reply` (+ `channel`) | implemented |
+| `[channel.reply]` binding rule: a declared reply transport requires a real bound `ReplySink`; no fake bridge half satisfies it | `ironclaw_extension_host::entrypoint::check_channel_halves`, `generic_host.rs` | implemented |
+| The reply projection: milestones → bounded document mutations; rebuild from durable facts; disclosure policy | `ironclaw_assistant::projection::reply` — a submodule of the existing projection owner (it replaced `projection/live_progress.rs`'s reducer) | implemented |
+| Publication: per-target worker, coalescing, the atomic claim (lease/fence), retries, heartbeat, terminal settlement, sink/egress resolution | `ironclaw_assistant::delivery_coordinator::publication` — a submodule of the delivery coordinator with one small public face (register / run-terminal / await-settled / shutdown) | implemented |
+| Publication state persistence: guarded CAS operations on the attempt aggregate | `ironclaw_outbound::OutboundStateStorePort` / `OutboundStateStore` | implemented |
+| WebUI edge: revision → live projection items over the existing `LiveProjectionPublisher`; durable facets reach the browser through the existing turn-event/runtime projection | `ironclaw_assistant::projection::reply_sink::ProjectionReplySink` | implemented (live facets: answer, reasoning, activity, status) |
+| Slack edge: native Agent session/stream/task rendering, error and rate-limit mapping, read-back | `crates/extensions/packages/slack/src/reply_sink/` | implemented |
+| Telegram edge: terminal materialization (answer + attachments, failure/cancel copy) | `crates/extensions/packages/telegram/src/reply.rs` | implemented |
 | Generation resolution, mediated egress, bounded `Retry-After` hint | `ironclaw_extension_host` (`SnapshotChannelDeliveryResolver`, `channel_egress.rs`) | hint field implemented; host parsing planned |
-| Wiring only: session-channel target, sink binding, worker supervision | `ironclaw_composition`, the `ironclaw` binary | partially implemented (`ProjectionReplySink` bound + publisher slot) |
+| Wiring only: session-channel target, sink binding, worker supervision | `ironclaw_composition`, the `ironclaw` binary | implemented |
 
-Composition names no extension. The binary binds `ProjectionReplySink` to the
-web-app extension exactly as it binds Slack's adapter to `slack`.
+Composition names no extension. The binary names the session-reply channel
+(`with_session_reply_channel`) beside the same trusted table that binds
+Slack's adapter to `slack`; composition attaches the sink to that binding's
+ordinary `surfaces.reply` slot.
 
 ## 3. Canonical history — the durable source of every document field
 
@@ -106,19 +108,20 @@ always reconstructable — finalized answer, attachments, gate state, outcome
 LLM data is deleted: the transcript, turn events, runtime events, and
 approval/auth records are retained exactly as today.
 
-## 4. The reply projection *(implemented — `ironclaw_assistant::reply_projection`)*
+## 4. The reply projection *(implemented — `ironclaw_assistant::projection::reply`)*
 
 ```text
 durable turn/runtime fact  ─┐
-live milestone             ─┼─► apply disclosure/safety policy ─► ReplyChange ─► ReplyDocument::apply ─► ReplyRevision
+live milestone             ─┼─► apply disclosure/safety policy ─► ReplyDocument mutators ─► ReplyRevision
 approval/auth context      ─┘
 ```
 
-- One module (`ironclaw_assistant::reply_projection`) holds the composer
-  (milestone/fact → `ReplyChange`, reusing `sanitize_model_visible_text`,
-  `LoopSafeSummary`, `CapabilityDisplayPreviewSource`, and the existing gate
-  prompt composition), the reducer (`ReplyDocument::apply`, in contracts), and
-  `rebuild(scope, run)` from the durable sources in §3.
+- One module (`ironclaw_assistant::projection::reply`, inside the existing
+  projection owner) folds milestones and durable facts into the document by
+  calling `ReplyDocument`'s bounded semantic mutators directly (reusing
+  `sanitize_model_visible_text`, `LoopSafeSummary`, and the existing gate
+  prompt composition). There is no separate change language on the seam:
+  the mutators are the reducer, and only this module produces mutations.
 - The `LoopHostMilestoneSink` decorator position formerly held by
   `LiveProgressMilestoneSink` feeds this module; skill-activation live items
   stay on `LiveProjectionPublisher` unchanged.
@@ -130,23 +133,25 @@ approval/auth context      ─┘
 - Item identities: activity id = invocation uuid, attachment id = attachment
   id, answer = one row per run; so every edge can upsert rather than
   duplicate.
-- As built: `ReplyProjection::observe_milestone` composes; `ModelTextDelta`
+- As built: `ReplyProjection::observe_milestone` folds; `ModelTextDelta`
   is the *cumulative* text of the current model call, so the projection
-  tracks finished-call text per run and emits `AnswerAppended` for growth
-  and `AnswerRewritten` for anything else (the contract gained
-  `AnswerRewritten`, `ReasoningAppended` — the open reasoning segment a
-  `ReasoningSummary` closes — a `work: ReplyStatusKind` hint on
-  `StatusSummary`, and `ReplyActivityProvenance` on finished activities so
-  the WebUI keeps provider/runtime/output-size badges). Terminal facts come
-  only from `apply_terminal_facts` (durable transcript row + committed run
-  status; `nothing_to_report` publishes an empty terminal revision).
+  tracks finished-call text per run and calls `append_answer` for growth
+  and `rewrite_answer` for anything else (the document carries
+  `append_reasoning`/`close_reasoning` — the open reasoning segment a close
+  seals — a `work: ReplyStatusKind` hint on `set_status`, and
+  `ReplyActivityProvenance` on finished activities so the WebUI keeps
+  provider/runtime/output-size badges). A revision's reconcile point is
+  classified from what actually changed (attention transitions and the
+  finalized answer are control-critical). Terminal facts come only from
+  `apply_terminal_facts` (durable transcript row + committed run status;
+  `nothing_to_report` publishes an empty terminal revision).
   `raise_revision_floor` lets a publisher that resumes a run on another node
   number the rebuilt terminal revision above what the store already saw.
   `ReplyProjectionMilestoneSink` is the decorator (`LiveProgressMilestoneSink`
   and its text coalescer are deleted); `disclose_for_audience` is applied to
   the copy each target receives.
 
-## 5. Publication on the attempt aggregate *(implemented — `ironclaw_outbound::reply_publication`, `DeliveryCoordinator` ops, `ironclaw_assistant::reply_publication`)*
+## 5. Publication on the attempt aggregate *(implemented — `ironclaw_outbound::reply_publication`, `DeliveryCoordinator` ops, `ironclaw_assistant::delivery_coordinator::publication`)*
 
 `OutboundDeliveryAttempt` today models a one-shot send (`Prepared → Sending`
 claimed once; a `Sending` row found after a crash becomes `Unknown`;
@@ -170,10 +175,12 @@ ReplyPublicationState {
 Operations (all CAS on the row; each rejects a stale fence):
 `open_reply_publication` (idempotent by reply + exact target; a different
 target under the same id is a conflict) · `claim_reply_publication_lease`
-(acquire when unleased/expired, bump fence, `Prepared → Sending` once) ·
-`renew_reply_publication_lease` · `advance_reply_publication` (published
+(the atomic claim before any provider egress: acquire when
+unleased/expired, bump fence, `Prepared → Sending` once; same-owner
+re-entry extends the expiry and doubles as the heartbeat — there is no
+separate renew) · `advance_reply_publication` (published
 revision monotonic and ≤ desired; checkpoint/evidence/generation recorded;
-refused once settled) · `settle_reply_publication` (`Delivered` only when the
+refused once settled or under a stale fence) · `settle_reply_publication` (`Delivered` only when the
 terminal revision was applied; `Unknown` for an unverifiable terminal
 reconcile; `Failed(kind)` for permanent/unauthorized/abandoned). Crash
 recovery: `recover_interrupted_delivery_attempt` leaves publication rows
@@ -275,15 +282,18 @@ regardless of route; the coordinator is transport-blind.
   facts.
 - Delivery evidence for browser replies is the same attempt row + publication
   substate as any channel.
-- Binding: the web-app package binds no reply sink itself; the binary marks
-  its binding `host_owned_reply` and composition
-  (`bind_host_owned_reply_sinks`) attaches the product-tier
-  `ProjectionReplySink` before activation checks the halves against the
-  manifest — the binary never depends on `ironclaw_assistant`. Composition
-  records that channel as the runtime's `session_reply_channel`, and the
-  publication service registers it as a target for every run at its first
-  revision (private audience), so WebUI live progress is the same
-  publication path Slack uses.
+- Binding: the web-app package binds no reply sink itself; the binary names
+  the deployment's session-reply channel
+  (`with_session_reply_channel("web-app")` beside its binding table) and
+  composition attaches the product-tier `ProjectionReplySink` to that
+  binding's ordinary `surfaces.reply` slot — the same generic mechanism
+  every package-bound sink uses, with no marker flag and nothing downstream
+  distinguishing host-supplied from package-supplied sinks — before
+  activation checks the halves against the manifest (the binary never
+  depends on `ironclaw_assistant`). The publication service registers that
+  channel as a target for every run at its first revision (private
+  audience), so WebUI live progress is the same publication path Slack
+  uses.
 - The projection checkpoint fingerprints the answer text (a same-length
   rewrite republishes) and maps `ReplyStatusKind` and activity provenance
   back onto the live item fields the browser already renders.
@@ -337,9 +347,9 @@ regardless of route; the coordinator is transport-blind.
 | Claim | Evidence | Command |
 | --- | --- | --- |
 | Reply vocabulary is bounded by construction, reducer deterministic, cadence rule, single sink seam | `crates/contracts/ironclaw_extension_contracts/tests/reply_contract.rs` (21) | `cargo test -p ironclaw_extension_contracts --all-features` |
-| Publication substate: open/claim/renew/advance/settle/release guards, lease takeover with fence bump, pre-change rows unchanged, libSQL parity | `crates/domains/ironclaw_outbound/tests/outbound_state_store_contract.rs` | `cargo test -p ironclaw_outbound` |
-| Projection composes bounded, redacted documents; terminal from durable facts; phases; disclosure; capacity | `crates/product/ironclaw_assistant/src/reply_projection/tests.rs` (10) | `cargo test -p ironclaw_assistant --lib -- reply_projection` |
-| Publication worker: stream vs message cadence, session target, disclosure, retry/ambiguous/permanent/unauthorized/stop, another-node resume with persisted checkpoint and generation change, held lease, heartbeat, retry checkpoint, microburst coalescing, attachments | `crates/product/ironclaw_assistant/src/reply_publication/tests.rs` (17) | `cargo test -p ironclaw_assistant --lib -- reply_publication` |
+| Publication substate: open/claim/advance/settle/release guards (claim re-entry doubles as renew), lease takeover with fence bump, stale-fence rejection, pre-change rows unchanged, libSQL parity | `crates/domains/ironclaw_outbound/tests/outbound_state_store_contract.rs` | `cargo test -p ironclaw_outbound` |
+| Projection composes bounded, redacted documents; terminal from durable facts; phases; disclosure; capacity | `crates/product/ironclaw_assistant/src/projection/reply/tests.rs` | `cargo test -p ironclaw_assistant --lib -- projection::reply` |
+| Publication worker: stream vs message cadence, session target, disclosure, retry/ambiguous/permanent/unauthorized/stop, another-node resume with persisted checkpoint and generation change, held lease, heartbeat, retry checkpoint, microburst coalescing, attachments | `crates/product/ironclaw_assistant/src/delivery_coordinator/publication/tests.rs` (17) | `cargo test -p ironclaw_assistant --lib -- publication` |
 | Observer cutover: answer via the sink, notices/prompts via the delivery half, nothing-to-report, attachments, resolution-ack dedupe, working indicator retraction after settlement | `crates/product/ironclaw_assistant/tests/run_delivery_contract.rs` (79), `tests/outbound_delivery_contract.rs` (35) | `cargo test -p ironclaw_assistant` |
 | WebUI live items from the projection sink; cursor rebasing; text phases under one id; tool failure redaction | `crates/product/ironclaw_assistant/src/projection/tests/{reply_sink,live_progress_stream,runtime_stream}.rs` | `cargo test -p ironclaw_assistant --lib -- projection` |
 | Telegram terminal-only sink; Slack Agent sink against a stateful fake Agent API; manifest lockstep | `crates/extensions/packages/telegram/src/tests/reply.rs`, `crates/extensions/packages/slack/tests/{reply_sink_agent_api,agent_app_manifest_lockstep}.rs` | `cargo test -p ironclaw_telegram_extension`, `cargo test -p ironclaw_slack_extension` |

@@ -696,6 +696,29 @@ async fn assert_delivered_attempt(services: &RebornRuntime, scope: &TurnScope) {
     );
 }
 
+/// The journey-evidence citation for `slack_channel_inbound_real_turn_reply`
+/// (`tests/e2e/journey_cases.py`): the run's reply reaches the exact source
+/// channel thread exactly once. On the Agent surface the destination-opening
+/// mutation is `chat.startStream`, so the exact-destination/exact-count claim
+/// is asserted over every captured stream open.
+fn assert_slack_thread_delivery_evidence(stream_opens: &[serde_json::Value]) {
+    let expected_conversation_id = "C777";
+    let expected_thread_anchor = Some("1710000200.000050");
+    let expected_count = 1;
+    let matching = stream_opens.iter().filter(|body| {
+        body["channel"] == expected_conversation_id
+            && body.get("thread_ts").and_then(serde_json::Value::as_str) == expected_thread_anchor
+            && body["recipient_user_id"] == "U777"
+            && body["recipient_team_id"] == "T-A"
+    });
+    assert_eq!(
+        matching.count(),
+        expected_count,
+        "the published Slack reply must open its Agent stream in the exact \
+         channel thread once: {stream_opens:?}"
+    );
+}
+
 fn assert_telegram_topic_delivery_evidence(messages: &[serde_json::Value]) {
     let expected_conversation_id = "-1008675309";
     let expected_thread_anchor = Some(77);
@@ -1458,21 +1481,14 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     let start_stream = &requests[start_position];
-    let started: serde_json::Value =
-        serde_json::from_slice(&start_stream.body).expect("chat.startStream body is JSON");
-    assert_eq!(
-        started["channel"], "C777",
-        "the stream opens in the source channel"
-    );
-    assert_eq!(
-        started["thread_ts"], "1710000200.000050",
-        "the stored reply context's thread anchors the stream"
-    );
-    assert_eq!(
-        started["recipient_user_id"], "U777",
-        "a channel stream names its recipient from the stored reply context"
-    );
-    assert_eq!(started["recipient_team_id"], "T-A");
+    let stream_opens: Vec<serde_json::Value> = requests
+        .iter()
+        .filter(|request| request.url.ends_with("/api/chat.startStream"))
+        .map(|request| {
+            serde_json::from_slice(&request.body).expect("chat.startStream body is JSON")
+        })
+        .collect();
+    assert_slack_thread_delivery_evidence(&stream_opens);
     let streamed: String = requests
         .iter()
         .filter(|request| {

@@ -3,10 +3,9 @@
 //!
 //! What a reply sink may ever see is a bounded, typed desired-state document:
 //! these tests pin the bounds (by construction, including through serde), the
-//! reducer semantics every producer and sink rely on, the change classes the
-//! publication worker keys coalescing on, the cadence each transport admits,
-//! the wire stability of the change vocabulary, and the single-seam binding
-//! shape (`ChannelSurfaces.reply` is one `ReplySink`, whatever the transport).
+//! document's mutator semantics every producer and sink rely on, the cadence
+//! each transport admits, and the single-seam binding shape
+//! (`ChannelSurfaces.reply` is one `ReplySink`, whatever the transport).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,12 +19,12 @@ use ironclaw_extension_contracts::reply::{
     REPLY_DISPLAY_TEXT_MAX_BYTES, REPLY_MAX_ACTIVITIES, REPLY_MAX_PROVIDER_REFS,
     REPLY_OUTCOME_REASON_MAX_BYTES, REPLY_REASONING_SEGMENT_MAX_BYTES,
     REPLY_SINK_CHECKPOINT_MAX_BYTES, REPLY_THREAD_ANCHOR_MAX_BYTES, ReplyActivityState,
-    ReplyAnswerText, ReplyAttention, ReplyAttentionKind, ReplyAudience, ReplyChange,
-    ReplyChangeClass, ReplyContextBytes, ReplyContractError, ReplyDisplayPreview, ReplyDisplayText,
-    ReplyDocument, ReplyId, ReplyItemId, ReplyOutcome, ReplyOutcomeReason, ReplyPhase,
-    ReplyProviderRef, ReplyProviderRefs, ReplyReasoningText, ReplyReconcilePoint,
-    ReplyReconcileRequest, ReplyRevision, ReplySink, ReplySinkCheckpoint, ReplySinkEvidence,
-    ReplySinkOutcome, ReplySinkReport, ReplyTarget, ReplyThreadAnchor,
+    ReplyAnswerText, ReplyAttention, ReplyAttentionKind, ReplyAudience, ReplyContextBytes,
+    ReplyContractError, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument, ReplyItemId,
+    ReplyOutcome, ReplyOutcomeReason, ReplyPhase, ReplyProviderRef, ReplyProviderRefs,
+    ReplyReasoningText, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink,
+    ReplySinkCheckpoint, ReplySinkEvidence, ReplySinkOutcome, ReplySinkReport, ReplyTarget,
+    ReplyThreadAnchor,
 };
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
@@ -112,8 +111,6 @@ fn item_ids_follow_the_bounded_identifier_grammar() {
     assert!(ReplyItemId::new("").is_err());
     assert!(ReplyItemId::new("a".repeat(129)).is_err());
     assert!(ReplyItemId::new("has space").is_err());
-    let run_id = TurnRunId::new();
-    assert_eq!(ReplyId::for_run(&run_id).as_str(), run_id.to_string());
 }
 
 #[test]
@@ -187,40 +184,31 @@ fn sink_checkpoints_are_bounded_through_construction_and_deserialization() {
     assert_eq!(round_trip, checkpoint);
 }
 
-// ── The reducer: deterministic desired state from changes ─────────────────
+// ── The document mutators: deterministic desired state ────────────────────
 
 #[test]
-fn reducer_folds_the_documented_facets() {
+fn mutators_fold_the_documented_facets() {
     let mut document = ReplyDocument::default();
     assert_eq!(document.phase, ReplyPhase::Preparing);
 
-    document.apply(&ReplyChange::PhaseChanged {
-        phase: ReplyPhase::Thinking,
-    });
-    document.apply(&ReplyChange::ReasoningSummary {
-        text: ReplyReasoningText::new("Checking live Slack access first.").expect("reasoning"),
-    });
-    document.apply(&ReplyChange::AnswerAppended {
-        text: answer("Here is "),
-    });
-    document.apply(&ReplyChange::AnswerAppended {
-        text: answer("what I found."),
-    });
-    document.apply(&ReplyChange::ActivityStarted {
-        id: item("act:1"),
-        title: text("slack.get_conversation_history"),
-        detail: Some(ReplyDisplayPreview::new("channel: #private-inference").expect("preview")),
-    });
-    document.apply(&ReplyChange::StatusSummary {
-        text: text("Reading the last 50 messages"),
-        work: None,
-    });
-    document.apply(&ReplyChange::ActivityFinished {
-        id: item("act:1"),
-        state: ReplyActivityState::Completed,
-        output_preview: Some(ReplyDisplayPreview::new("50 messages").expect("preview")),
-        provenance: None,
-    });
+    assert!(document.note_phase(ReplyPhase::Thinking));
+    assert!(document.close_reasoning(
+        ReplyReasoningText::new("Checking live Slack access first.").expect("reasoning")
+    ));
+    assert!(document.append_answer("Here is "));
+    assert!(document.append_answer("what I found."));
+    assert!(document.activity_started(
+        item("act:1"),
+        text("slack.get_conversation_history"),
+        Some(ReplyDisplayPreview::new("channel: #private-inference").expect("preview")),
+    ));
+    assert!(document.set_status(text("Reading the last 50 messages"), None));
+    assert!(document.activity_finished(
+        item("act:1"),
+        ReplyActivityState::Completed,
+        Some(ReplyDisplayPreview::new("50 messages").expect("preview")),
+        None,
+    ));
 
     assert_eq!(document.phase, ReplyPhase::Working);
     assert_eq!(document.answer.text.as_str(), "Here is what I found.");
@@ -249,34 +237,30 @@ fn reducer_folds_the_documented_facets() {
 #[test]
 fn attention_moves_the_phase_and_clears_back_to_working() {
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::PhaseChanged {
-        phase: ReplyPhase::Working,
-    });
-    document.apply(&ReplyChange::AttentionRequired {
-        attention: ReplyAttention {
-            kind: ReplyAttentionKind::Approval,
-            headline: text("Approve running `git push`?"),
-            body: None,
-            action_url: None,
-            gate_ref: Some(text("gate:approval:1")),
-        },
-    });
+    document.note_phase(ReplyPhase::Working);
+    assert!(document.require_attention(ReplyAttention {
+        kind: ReplyAttentionKind::Approval,
+        headline: text("Approve running `git push`?"),
+        body: None,
+        action_url: None,
+        gate_ref: Some(text("gate:approval:1")),
+    }));
     assert_eq!(document.phase, ReplyPhase::WaitingForInput);
     assert!(document.attention.is_some());
-    document.apply(&ReplyChange::AttentionCleared);
+    // Attention owns the phase while present.
+    assert!(!document.note_phase(ReplyPhase::Thinking));
+    assert_eq!(document.phase, ReplyPhase::WaitingForInput);
+    assert!(document.clear_attention());
     assert_eq!(document.phase, ReplyPhase::Working);
     assert!(document.attention.is_none());
+    assert!(!document.clear_attention(), "nothing left to clear");
 }
 
 #[test]
-fn the_first_terminal_outcome_wins_and_later_replaceable_changes_are_ignored() {
+fn the_first_terminal_outcome_wins_and_later_mutations_are_ignored() {
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::AnswerAppended {
-        text: answer("partial"),
-    });
-    document.apply(&ReplyChange::Failed {
-        summary: text("The model provider timed out."),
-    });
+    assert!(document.append_answer("partial"));
+    assert!(document.fail(text("The model provider timed out.")));
     assert!(document.is_terminal());
     assert_eq!(document.phase, ReplyPhase::Failed);
     assert!(matches!(
@@ -284,13 +268,9 @@ fn the_first_terminal_outcome_wins_and_later_replaceable_changes_are_ignored() {
         Some(ReplyOutcome::Failed { .. })
     ));
 
-    document.apply(&ReplyChange::Completed);
-    document.apply(&ReplyChange::AnswerAppended {
-        text: answer(" more"),
-    });
-    document.apply(&ReplyChange::PhaseChanged {
-        phase: ReplyPhase::Working,
-    });
+    assert!(!document.complete());
+    assert!(!document.append_answer(" more"));
+    assert!(!document.note_phase(ReplyPhase::Working));
     assert_eq!(
         document.phase,
         ReplyPhase::Failed,
@@ -306,14 +286,9 @@ fn the_first_terminal_outcome_wins_and_later_replaceable_changes_are_ignored() {
 #[test]
 fn the_canonical_finalized_answer_replaces_progressive_text_even_after_terminal() {
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::AnswerAppended {
-        text: answer("draft that will be superseded"),
-    });
-    document.apply(&ReplyChange::Completed);
-    document.apply(&ReplyChange::AnswerFinalized {
-        text: answer("canonical transcript text"),
-        attachments: Vec::new(),
-    });
+    document.append_answer("draft that will be superseded");
+    document.complete();
+    assert!(document.finalize_answer(answer("canonical transcript text"), Vec::new()));
     assert!(document.answer.finalized);
     assert_eq!(document.answer.text.as_str(), "canonical transcript text");
     assert_eq!(document.phase, ReplyPhase::Completed);
@@ -322,12 +297,8 @@ fn the_canonical_finalized_answer_replaces_progressive_text_even_after_terminal(
 #[test]
 fn answer_growth_is_capped_and_marked_truncated_instead_of_overflowing() {
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::AnswerAppended {
-        text: answer(&"a".repeat(REPLY_ANSWER_MAX_BYTES - 2)),
-    });
-    document.apply(&ReplyChange::AnswerAppended {
-        text: answer("ééé"),
-    });
+    document.append_answer(&"a".repeat(REPLY_ANSWER_MAX_BYTES - 2));
+    document.append_answer("ééé");
     assert!(document.answer.text.as_str().len() <= REPLY_ANSWER_MAX_BYTES);
     assert!(
         document
@@ -340,27 +311,35 @@ fn answer_growth_is_capped_and_marked_truncated_instead_of_overflowing() {
 }
 
 #[test]
+fn raw_answer_paths_strip_control_characters_by_construction() {
+    let mut document = ReplyDocument::default();
+    document.append_answer("keep\nlines\tand text\u{1b}[31m but not escapes\u{7}");
+    assert_eq!(
+        document.answer.text.as_str(),
+        "keep\nlines\tand text[31m but not escapes"
+    );
+    document.rewrite_answer("clean\u{0} rewrite");
+    assert_eq!(document.answer.text.as_str(), "clean rewrite");
+}
+
+#[test]
 fn activity_fan_out_is_bounded_and_unknown_finishes_are_recorded_not_dropped() {
     let mut document = ReplyDocument::default();
     for index in 0..REPLY_MAX_ACTIVITIES + 5 {
-        document.apply(&ReplyChange::ActivityStarted {
-            id: item(&format!("act:{index}")),
-            title: text("tool"),
-            detail: None,
-        });
+        document.activity_started(item(&format!("act:{index}")), text("tool"), None);
     }
     assert_eq!(document.activities.len(), REPLY_MAX_ACTIVITIES);
     assert!(document.activities_truncated);
 
     let mut sparse = ReplyDocument::default();
-    sparse.apply(&ReplyChange::ActivityFinished {
-        id: item("late:1"),
-        state: ReplyActivityState::Failed {
+    assert!(sparse.activity_finished(
+        item("late:1"),
+        ReplyActivityState::Failed {
             kind: text("gate_declined"),
         },
-        output_preview: None,
-        provenance: None,
-    });
+        None,
+        None,
+    ));
     assert_eq!(
         sparse.activities.len(),
         1,
@@ -370,104 +349,28 @@ fn activity_fan_out_is_bounded_and_unknown_finishes_are_recorded_not_dropped() {
         sparse.activities[0].state,
         ReplyActivityState::Failed { .. }
     ));
+    assert!(
+        !sparse.activity_progress(&item("never-seen"), None),
+        "progress on an unknown row folds nothing"
+    );
 }
 
 #[test]
-fn change_classes_separate_what_a_publisher_may_coalesce_from_what_it_may_not() {
-    let critical = [
-        ReplyChange::AttentionRequired {
-            attention: ReplyAttention {
-                kind: ReplyAttentionKind::Auth,
-                headline: text("Connect GitHub to continue"),
-                body: None,
-                action_url: None,
-                gate_ref: None,
-            },
-        },
-        ReplyChange::AttentionCleared,
-        ReplyChange::AnswerFinalized {
-            text: answer("done"),
-            attachments: Vec::new(),
-        },
-    ];
-    for change in &critical {
-        assert_eq!(
-            change.class(),
-            ReplyChangeClass::ControlCritical,
-            "{}",
-            change.kind_name()
-        );
-        assert!(change.is_control_critical());
-        assert!(!change.is_terminal());
-    }
-    let terminal = [
-        ReplyChange::Completed,
-        ReplyChange::Failed {
-            summary: text("failed"),
-        },
-        ReplyChange::Cancelled,
-    ];
-    for change in &terminal {
-        assert_eq!(
-            change.class(),
-            ReplyChangeClass::Terminal,
-            "{}",
-            change.kind_name()
-        );
-        assert!(change.is_control_critical());
-        assert!(change.is_terminal());
-    }
-    let replaceable = [
-        ReplyChange::AnswerAppended {
-            text: answer("token"),
-        },
-        ReplyChange::ReasoningSummary {
-            text: ReplyReasoningText::new("thinking").expect("reasoning"),
-        },
-        ReplyChange::PhaseChanged {
-            phase: ReplyPhase::Thinking,
-        },
-        ReplyChange::StatusSummary {
-            text: text("planning"),
-            work: None,
-        },
-        ReplyChange::ActivityStarted {
-            id: item("a"),
-            title: text("tool"),
-            detail: None,
-        },
-    ];
-    for change in &replaceable {
-        assert_eq!(
-            change.class(),
-            ReplyChangeClass::Replaceable,
-            "{}",
-            change.kind_name()
-        );
-        assert!(!change.is_control_critical());
-    }
-}
-
-#[test]
-fn the_change_vocabulary_is_wire_stable_snake_case() {
-    let change = ReplyChange::ActivityFinished {
-        id: item("act:1"),
-        state: ReplyActivityState::Failed {
+fn the_document_is_wire_stable_snake_case() {
+    let mut document = ReplyDocument::default();
+    document.activity_started(item("act:1"), text("tool"), None);
+    document.activity_finished(
+        item("act:1"),
+        ReplyActivityState::Failed {
             kind: text("timeout"),
         },
-        output_preview: None,
-        provenance: None,
-    };
-    let json = serde_json::to_value(&change).expect("serialize");
-    assert_eq!(json["kind"], "activity_finished");
-    assert_eq!(json["state"]["failed"]["kind"], "timeout");
-    let round_trip: ReplyChange = serde_json::from_value(json).expect("deserialize");
-    assert_eq!(round_trip, change);
-
-    let mut document = ReplyDocument::default();
-    document.apply(&change);
-    let document_json = serde_json::to_string(&document).expect("document serializes");
-    let restored: ReplyDocument = serde_json::from_str(&document_json).expect("document restores");
+        None,
+        None,
+    );
+    let json = serde_json::to_value(&document).expect("serialize");
+    assert_eq!(json["phase"], "working");
+    assert_eq!(json["activities"][0]["state"]["failed"]["kind"], "timeout");
+    let restored: ReplyDocument = serde_json::from_value(json).expect("document restores");
     assert_eq!(restored, document);
 }
 
@@ -557,12 +460,9 @@ fn a_sink_receives_a_desired_revision_and_returns_evidence_plus_a_checkpoint() {
         calls: std::sync::atomic::AtomicUsize::new(0),
     };
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::AnswerAppended {
-        text: answer("hello"),
-    });
+    document.append_answer("hello");
     let request = ReplyReconcileRequest {
         revision: ReplyRevision {
-            reply_id: ReplyId::for_run(&TurnRunId::new()),
             revision: 3,
             document,
         },
@@ -667,14 +567,10 @@ signed_payload = [
 }
 
 #[test]
-fn reasoning_appended_grows_the_open_segment_until_a_summary_closes_it() {
+fn reasoning_appends_grow_the_open_segment_until_a_summary_closes_it() {
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::ReasoningAppended {
-        text: ReplyReasoningText::new("Looking at ").unwrap(),
-    });
-    document.apply(&ReplyChange::ReasoningAppended {
-        text: ReplyReasoningText::new("the workspace").unwrap(),
-    });
+    assert!(document.append_reasoning(&ReplyReasoningText::new("Looking at ").unwrap()));
+    assert!(document.append_reasoning(&ReplyReasoningText::new("the workspace").unwrap()));
     assert_eq!(document.reasoning.len(), 1, "appends grow one open segment");
     assert_eq!(document.reasoning[0].as_str(), "Looking at the workspace");
     assert!(
@@ -689,9 +585,10 @@ fn reasoning_appended_grows_the_open_segment_until_a_summary_closes_it() {
 
     // The boundary summary carries the segment's final text: it replaces
     // the open segment (no duplicate) and closes it.
-    document.apply(&ReplyChange::ReasoningSummary {
-        text: ReplyReasoningText::new("Looking at the workspace first.").unwrap(),
-    });
+    assert!(
+        document
+            .close_reasoning(ReplyReasoningText::new("Looking at the workspace first.").unwrap())
+    );
     assert_eq!(document.reasoning.len(), 1);
     assert_eq!(
         document.reasoning[0].as_str(),
@@ -700,20 +597,18 @@ fn reasoning_appended_grows_the_open_segment_until_a_summary_closes_it() {
     assert!(!document.reasoning_open);
 
     // A later append opens a NEW segment rather than reopening the closed one.
-    document.apply(&ReplyChange::ReasoningAppended {
-        text: ReplyReasoningText::new("Now the tests").unwrap(),
-    });
+    assert!(document.append_reasoning(&ReplyReasoningText::new("Now the tests").unwrap()));
     assert_eq!(document.reasoning.len(), 2);
     assert!(document.reasoning_open);
 
     // Growth past the per-segment bound is dropped, never split or panicked.
     let big = "é".repeat(REPLY_REASONING_SEGMENT_MAX_BYTES);
-    document.apply(&ReplyChange::ReasoningAppended {
-        text: ReplyReasoningText::new(&big[..REPLY_REASONING_SEGMENT_MAX_BYTES / 2]).unwrap(),
-    });
-    document.apply(&ReplyChange::ReasoningAppended {
-        text: ReplyReasoningText::new(&big[..REPLY_REASONING_SEGMENT_MAX_BYTES / 2]).unwrap(),
-    });
+    document.append_reasoning(
+        &ReplyReasoningText::new(&big[..REPLY_REASONING_SEGMENT_MAX_BYTES / 2]).unwrap(),
+    );
+    document.append_reasoning(
+        &ReplyReasoningText::new(&big[..REPLY_REASONING_SEGMENT_MAX_BYTES / 2]).unwrap(),
+    );
     assert!(document.reasoning[1].as_str().len() <= REPLY_REASONING_SEGMENT_MAX_BYTES);
     assert!(
         document.reasoning[1]
@@ -722,10 +617,8 @@ fn reasoning_appended_grows_the_open_segment_until_a_summary_closes_it() {
     );
 
     // Terminal documents ignore late reasoning.
-    document.apply(&ReplyChange::Completed);
-    document.apply(&ReplyChange::ReasoningAppended {
-        text: ReplyReasoningText::new("too late").unwrap(),
-    });
+    document.complete();
+    assert!(!document.append_reasoning(&ReplyReasoningText::new("too late").unwrap()));
     assert_eq!(document.reasoning.len(), 2);
     assert!(!document.reasoning[1].as_str().ends_with("too late"));
 }
@@ -733,29 +626,13 @@ fn reasoning_appended_grows_the_open_segment_until_a_summary_closes_it() {
 #[test]
 fn a_rewritten_answer_replaces_the_progressive_text_but_never_the_finalized_row() {
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::AnswerAppended {
-        text: ReplyAnswerText::new("first draft").unwrap(),
-    });
-    document.apply(&ReplyChange::AnswerRewritten {
-        text: ReplyAnswerText::new("second draft").unwrap(),
-    });
+    document.append_answer("first draft");
+    assert!(document.rewrite_answer("second draft"));
     assert_eq!(document.answer.text.as_str(), "second draft");
     assert!(!document.answer.finalized);
-    assert_eq!(
-        ReplyChange::AnswerRewritten {
-            text: ReplyAnswerText::new("x").unwrap()
-        }
-        .class(),
-        ReplyChangeClass::Replaceable
-    );
 
-    document.apply(&ReplyChange::AnswerFinalized {
-        text: ReplyAnswerText::new("the transcript row").unwrap(),
-        attachments: Vec::new(),
-    });
-    document.apply(&ReplyChange::AnswerRewritten {
-        text: ReplyAnswerText::new("too late").unwrap(),
-    });
+    document.finalize_answer(answer("the transcript row"), Vec::new());
+    assert!(!document.rewrite_answer("too late"));
     assert_eq!(
         document.answer.text.as_str(),
         "the transcript row",

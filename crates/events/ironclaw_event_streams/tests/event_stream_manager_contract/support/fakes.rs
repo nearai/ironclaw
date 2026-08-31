@@ -813,13 +813,6 @@ impl OutboundStateStorePort for FailingOutboundStore {
         Err(self.error())
     }
 
-    async fn renew_reply_publication_lease(
-        &self,
-        _request: ironclaw_outbound::RenewReplyPublicationLeaseRequest,
-    ) -> Result<bool, OutboundError> {
-        Err(self.error())
-    }
-
     async fn advance_reply_publication(
         &self,
         _request: ironclaw_outbound::AdvanceReplyPublicationRequest,

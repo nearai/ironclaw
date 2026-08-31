@@ -31,11 +31,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
-use ironclaw_assistant::reply_projection::ReplyProjection;
-use ironclaw_assistant::reply_publication::{
-    GateAttentionEnricher, KernelTerminalReplyFacts, ReplyPublicationDeps, ReplyPublicationService,
-    ReplyPublicationSettings, TurnCoordinatorStopRequester,
-};
+use ironclaw_assistant::projection::reply::ReplyProjection;
 use ironclaw_assistant::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
@@ -46,6 +42,7 @@ use ironclaw_assistant::{
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, RunDeliveryServices,
     RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
+use ironclaw_assistant::{ReplyPublicationDeps, ReplyPublicationService, ReplyPublicationSettings};
 use ironclaw_extension_contracts::channel::ChannelConnectionStrategy;
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -6753,10 +6750,10 @@ async fn ssl_check_form_gets_empty_200_without_admission() {
 
 /// The reply publication service every delivery graph now owns: the run's
 /// answer is published through it rather than sent by the observer, so these
-/// host tests wire the same kernel-backed ports production wires (the turn
+/// host tests wire the same kernel deps production wires (the turn
 /// coordinator for terminal facts and stop requests, the shared reply
-/// projection, and the gate attention enricher over the same prompt sources
-/// the observer consults) instead of a double.
+/// projection, and the same blocked-auth prompt source the observer
+/// consults) instead of a double.
 fn test_reply_publication(
     delivery_coordinator: &Arc<DeliveryCoordinator>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
@@ -6767,18 +6764,10 @@ fn test_reply_publication(
     ReplyPublicationService::start(ReplyPublicationDeps {
         coordinator: Arc::clone(delivery_coordinator),
         projection,
-        terminal_facts: Arc::new(KernelTerminalReplyFacts::new(
-            Arc::clone(&turn_coordinator),
-            thread_service,
-        )),
-        stop_requests: Arc::new(TurnCoordinatorStopRequester::new(Arc::clone(
-            &turn_coordinator,
-        ))),
-        attention: Some(Arc::new(GateAttentionEnricher::new(
-            None,
-            blocked_auth_prompts,
-            turn_coordinator,
-        ))),
+        turn_coordinator,
+        thread_service,
+        approval_context: None,
+        blocked_auth_prompts,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         session_channel: None,
         settings: ReplyPublicationSettings::default(),

@@ -32,7 +32,8 @@ only through its own policy service.
 - Progressive reply publication (`reply_publication`): the serde-defaulted
   `ReplyPublicationState` substate on the persisted attempt row plus the
   guarded `OutboundStateStorePort` operations `open_reply_publication` /
-  `claim_reply_publication_lease` / `renew_reply_publication_lease` /
+  `claim_reply_publication_lease` (same-owner re-entry extends the lease —
+  there is no separate renew) /
   `advance_reply_publication` / `settle_reply_publication` /
   `release_reply_publication_lease` / `load_reply_publication` /
   `list_reply_publications` (design

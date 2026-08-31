@@ -100,7 +100,7 @@ pub struct ChannelWorkflowIdentity {
 pub struct ChannelWorkflowDeliveryServices {
     pub coordinator: Arc<DeliveryCoordinator>,
     /// The reply publication service every run's answer goes through.
-    pub reply_publication: Arc<crate::reply_publication::ReplyPublicationService>,
+    pub reply_publication: Arc<crate::ReplyPublicationService>,
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,

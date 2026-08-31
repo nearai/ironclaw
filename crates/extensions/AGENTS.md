@@ -33,7 +33,7 @@ follows here is family-specific and has no root-file counterpart:
 
 | Concern | Home |
 |---|---|
-| Surface/adapter *vocabulary*: `ChannelIngress`, `ChannelDelivery`, the `ReplySink` reply seam and its `ReplyDocument`/`ReplyChange` vocabulary (`reply.rs`), `ToolAdapter`, `CapabilitySurfaceKind`, the exported conformance suite | `crates/contracts/ironclaw_extension_contracts` — outside this family, so every layer shares one vocabulary |
+| Surface/adapter *vocabulary*: `ChannelIngress`, `ChannelDelivery`, the `ReplySink` reply seam and its `ReplyDocument` vocabulary (`reply.rs`), `ToolAdapter`, `CapabilitySurfaceKind`, the exported conformance suite | `crates/contracts/ironclaw_extension_contracts` — outside this family, so every layer shares one vocabulary |
 | Manifest schema + durable installation/membership/credential-binding/definition records | `ironclaw_extension_registry` |
 | Generic hosting: lifecycle authority, loaders, activation, the vendor-blind ingress verifier, egress, hosted-MCP registration | `ironclaw_extension_host` |
 | Product face: catalog UX, lifecycle commands/capabilities, credential views, the extension hub | `ironclaw_extension_manager` |

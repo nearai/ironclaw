@@ -148,7 +148,7 @@ pub struct RunDeliveryServices {
     /// Owns the run's answer: the observer registers the originating
     /// conversation as a publication target and never sends the reply
     /// itself (design doc §6–§7).
-    pub reply_publication: Arc<crate::reply_publication::ReplyPublicationService>,
+    pub reply_publication: Arc<crate::ReplyPublicationService>,
     /// The channel extension whose surface these components serve (the
     /// coordinator resolves the adapter + egress from the active snapshot by
     /// this id). Configured, not derived from envelopes: the envelope's

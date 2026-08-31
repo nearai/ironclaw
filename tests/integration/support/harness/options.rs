@@ -90,6 +90,9 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// extensions (`RebornHostBindings::with_channel_extension_bindings` — the
     /// same seam the binary uses for Slack's WASM-runtime package).
     pub(crate) channel_extension_bindings: Vec<ironclaw_composition::ChannelExtensionBinding>,
+    /// The channel whose reply is the deployment's session stream, when the
+    /// scenario wires one (`with_web_app_channel_extension`).
+    pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
     /// Extra first-party manifest bundles appended AFTER the
     /// `extension_support` inventory — the harness mirror of the bundles the
     /// BINARY adds in `ironclaw_cli::first_party::bundles` (web-app ships
@@ -168,6 +171,7 @@ impl HostRuntimeHarnessOptions {
             fixture_extension_dirs: Vec::new(),
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
+            session_reply_channel: None,
             extra_first_party_bundles: Vec::new(),
             recording_network_egress: None,
             project_service_fault_injection: false,
@@ -337,7 +341,6 @@ impl HostRuntimeHarnessOptions {
                 extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted(
                     ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
                 ),
-                host_owned_reply: true,
                 surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
                     .with_delivery(std::sync::Arc::new(
                         ironclaw_web_app_extension::WebAppChannelAdapter::new(),
@@ -351,6 +354,9 @@ impl HostRuntimeHarnessOptions {
                 first_party_initializer: Some(test_web_app_channel_initializer()),
                 registration_document_path: Some("/web-push/subscriptions.json".to_string()),
             });
+        self.session_reply_channel = Some(ironclaw_host_api::ids::ExtensionId::from_trusted(
+            ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
+        ));
         self.extra_first_party_bundles
             .push(ironclaw_extension_host::FirstPartyPackageBundle {
                 id: ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),

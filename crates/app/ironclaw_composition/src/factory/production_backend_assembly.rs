@@ -352,6 +352,7 @@ pub(super) async fn build_backend_production(
         nearai_mcp_bootstrap_config,
         native_extension_factories,
         channel_extension_bindings,
+        session_reply_channel: input_session_reply_channel,
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
@@ -487,13 +488,17 @@ pub(super) async fn build_backend_production(
     let outbound_delivery_targets =
         Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
     // arch-exempt: large_file, channel assembly stays co-located pending factory decomposition, plan #7477
-    // The authenticated-session channel's `[channel.reply]` is host-served:
-    // its edge is the product projection stream, so the sink is product-tier
-    // and only composition can construct it. Bind it before the bindings are
-    // loaded, so activation checks it like any package-bound half.
+    // The session channel's `[channel.reply]` sink is product-tier, so only
+    // composition can construct it. It lands in the named binding's ordinary
+    // `surfaces.reply` slot before the bindings are loaded, so activation
+    // checks it like any package-bound half — downstream nothing
+    // distinguishes it from a package-bound sink.
     let mut channel_extension_bindings = channel_extension_bindings;
-    let (projection_reply_sink, session_reply_channel) =
-        bind_host_owned_reply_sinks(&mut channel_extension_bindings)?;
+    let session_reply_channel = input_session_reply_channel.clone();
+    let projection_reply_sink = bind_session_reply_sink(
+        &mut channel_extension_bindings,
+        session_reply_channel.as_ref(),
+    )?;
     // Extension-owned catalog providers arrive opaquely on channel bindings (e.g.
     // web-app's constant per-user entry); register by extension id.
     for binding in &channel_extension_bindings {
@@ -1694,52 +1699,39 @@ pub(super) async fn build_postgres_production(
     .await
 }
 
-/// Bind one product projection reply sink as the reply half of every channel
-/// binding the binary marked `host_owned_reply`. Returns the sink so the
-/// runtime can attach the live projection publisher once the projection graph
-/// exists; `None` when no binding asked for it (composition paths without a
-/// session channel). A binding that carries its own reply *and* asks for the
-/// host-owned one is a wiring bug and fails the build rather than silently
-/// picking one.
-fn bind_host_owned_reply_sinks(
+/// Attach the product projection reply sink to the binding the deployment
+/// names as its session-reply channel, through the same `surfaces.reply`
+/// slot every package-bound sink uses. Returns the sink so the runtime can
+/// attach the live projection publisher once the projection graph exists;
+/// `None` when no session channel is named (composition paths without one).
+/// A named binding that already carries its own reply — or that does not
+/// exist — is a wiring bug and fails the build rather than silently picking
+/// one.
+fn bind_session_reply_sink(
     bindings: &mut [crate::input::ChannelExtensionBinding],
+    session_reply_channel: Option<&ironclaw_host_api::ids::ExtensionId>,
 ) -> Result<
-    (
-        Option<Arc<ironclaw_assistant::projection::reply_sink::ProjectionReplySink>>,
-        Option<ironclaw_host_api::ids::ExtensionId>,
-    ),
+    Option<Arc<ironclaw_assistant::projection::reply_sink::ProjectionReplySink>>,
     RebornBuildError,
 > {
-    let mut sink: Option<Arc<ironclaw_assistant::projection::reply_sink::ProjectionReplySink>> =
-        None;
-    let mut session_channel: Option<ironclaw_host_api::ids::ExtensionId> = None;
-    for binding in bindings
+    let Some(session) = session_reply_channel else {
+        return Ok(None);
+    };
+    let Some(binding) = bindings
         .iter_mut()
-        .filter(|binding| binding.host_owned_reply)
-    {
-        if let Some(existing) = &session_channel {
-            return Err(RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "two channel bindings ({existing} and {}) declare a host-owned reply; a deployment has one session channel",
-                    binding.extension_id
-                ),
-            });
-        }
-        session_channel = Some(binding.extension_id.clone());
-        if binding.surfaces.reply.is_some() {
-            return Err(RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "channel binding for {} declares a host-owned reply but also binds its own reply sink",
-                    binding.extension_id
-                ),
-            });
-        }
-        let shared = sink.get_or_insert_with(|| {
-            Arc::new(ironclaw_assistant::projection::reply_sink::ProjectionReplySink::new())
+        .find(|binding| &binding.extension_id == session)
+    else {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: format!("session reply channel {session} has no channel binding"),
         });
-        binding.surfaces = std::mem::take(&mut binding.surfaces).with_reply(
-            Arc::clone(shared) as Arc<dyn ironclaw_extension_contracts::reply::ReplySink>
-        );
+    };
+    if binding.surfaces.reply.is_some() {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: format!("session reply channel {session} already binds its own reply sink",),
+        });
     }
-    Ok((sink, session_channel))
+    let sink = Arc::new(ironclaw_assistant::projection::reply_sink::ProjectionReplySink::new());
+    binding.surfaces = std::mem::take(&mut binding.surfaces)
+        .with_reply(Arc::clone(&sink) as Arc<dyn ironclaw_extension_contracts::reply::ReplySink>);
+    Ok(Some(sink))
 }

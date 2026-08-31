@@ -368,7 +368,7 @@ impl RebornRuntimeStores {
                 run_delivery_settings: wiring.run_delivery_settings,
                 admin_users,
                 reply_projection: Arc::new(
-                    ironclaw_assistant::reply_projection::ReplyProjection::new(),
+                    ironclaw_assistant::projection::reply::ReplyProjection::new(),
                 ),
                 session_reply_channel: self.session_reply_channel.clone(),
             },

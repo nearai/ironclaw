@@ -849,22 +849,22 @@ mod tests {
 
     #[test]
     fn an_oversized_task_map_is_evicted_behind_the_floor() {
-        use ironclaw_extension_contracts::reply::{ReplyChange, ReplyDisplayText, ReplyItemId};
+        use ironclaw_extension_contracts::reply::{ReplyDisplayText, ReplyItemId};
         let mut document = ReplyDocument::default();
         let mut checkpoint = SlackReplyCheckpoint::default();
         for index in 0..256u32 {
             let id = format!("{index:0>120}");
-            document.apply(&ReplyChange::ActivityStarted {
-                id: ReplyItemId::new(&id).expect("id"),
-                title: ReplyDisplayText::new("t").expect("title"),
-                detail: None,
-            });
-            document.apply(&ReplyChange::ActivityFinished {
-                id: ReplyItemId::new(&id).expect("id"),
-                state: ReplyActivityState::Completed,
-                output_preview: None,
-                provenance: None,
-            });
+            document.activity_started(
+                ReplyItemId::new(&id).expect("id"),
+                ReplyDisplayText::new("t").expect("title"),
+                None,
+            );
+            document.activity_finished(
+                ReplyItemId::new(&id).expect("id"),
+                ReplyActivityState::Completed,
+                None,
+                None,
+            );
         }
         for activity in &document.activities {
             checkpoint

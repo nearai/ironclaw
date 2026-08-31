@@ -1,4 +1,8 @@
-//! The assistant-owned safe reply projection (design doc §4).
+//! The reply projection: the one semantic reducer from run facts to the
+//! channel-neutral [`ReplyDocument`] (design doc §4). It lives inside the
+//! projection owner because it *is* the projection's live half — the same
+//! module family that projects durable turn events and runtime activity for
+//! the WebUI projects the in-flight reply for every reply-capable channel.
 //!
 //! One rebuildable [`ReplyDocument`] per run. While the run is live it is
 //! composed from the loop's host milestones — already model-visible
@@ -16,9 +20,10 @@
 //! [`disclose_for_audience`], before publication hands a copy to any sink.
 //!
 //! This module holds no publication state: which targets have seen which
-//! revision lives on the outbound attempt aggregate, driven by reply
-//! publication. Runs are cache entries here — the durable facts stay where
-//! they are, and [`ReplyProjection::evict`] only frees memory.
+//! revision lives on the outbound attempt aggregate, driven by the delivery
+//! coordinator's publication lane. Runs are cache entries here — the durable
+//! facts stay where they are, and [`ReplyProjection::evict`] only frees
+//! memory.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
@@ -28,8 +33,8 @@ use ironclaw_extension_contracts::reply::{
     REPLY_ANSWER_MAX_BYTES, REPLY_DISPLAY_PREVIEW_MAX_BYTES, REPLY_DISPLAY_TEXT_MAX_BYTES,
     REPLY_MAX_ATTACHMENTS, REPLY_REASONING_SEGMENT_MAX_BYTES, ReplyActivityProvenance,
     ReplyActivityState, ReplyAnswerText, ReplyAttachmentRef, ReplyAttention, ReplyAttentionKind,
-    ReplyAudience, ReplyChange, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument, ReplyItemId,
-    ReplyPhase, ReplyReasoningText, ReplyReconcilePoint, ReplyStatusKind,
+    ReplyAudience, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument, ReplyItemId,
+    ReplyReasoningText, ReplyReconcilePoint,
 };
 use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_loop_contracts::{
@@ -60,7 +65,7 @@ pub enum ReplyProjectionEvent {
     TerminalPending,
 }
 
-/// Something that reacts to the projection moving (reply publication).
+/// Something that reacts to the projection moving (the publication lane).
 pub trait ReplyProjectionObserver: Send + Sync {
     fn reply_projection_event(
         &self,
@@ -110,6 +115,29 @@ struct RunKey {
     run_id: TurnRunId,
 }
 
+/// What one fold of milestones did to the document — the classification the
+/// revision point is derived from.
+#[derive(Default)]
+struct Folded {
+    changed: bool,
+    /// An input-required transition or the canonical answer landed: the
+    /// revision must be reconciled on its own, never coalesced across.
+    control_critical: bool,
+    /// The document reached its terminal outcome in this fold.
+    terminal: bool,
+}
+
+impl Folded {
+    fn note(&mut self, changed: bool) {
+        self.changed |= changed;
+    }
+
+    fn note_control_critical(&mut self, changed: bool) {
+        self.changed |= changed;
+        self.control_critical |= changed;
+    }
+}
+
 struct RunReply {
     actor: Option<TurnActor>,
     document: ReplyDocument,
@@ -132,10 +160,10 @@ impl RunReply {
         }
     }
 
-    /// The change that moves the answer to `finished phases + current`: an
-    /// append when the new text extends what is shown, a rewrite otherwise
-    /// (a model call that restarted its text, or a rewrite under the stream).
-    fn answer_change(&self, current_phase_text: &str) -> Option<ReplyChange> {
+    /// Move the answer to `finished phases + current`: an append when the new
+    /// text extends what is shown, a rewrite otherwise (a model call that
+    /// restarted its text, or a rewrite under the stream).
+    fn fold_answer(&mut self, current_phase_text: &str, folded: &mut Folded) {
         let shown = self.document.answer.text.as_str();
         let mut wanted = self.finished_phases_text.clone();
         if !wanted.is_empty()
@@ -146,24 +174,31 @@ impl RunReply {
         }
         wanted.push_str(current_phase_text);
         if wanted == shown {
-            return None;
+            return;
         }
         if let Some(suffix) = wanted.strip_prefix(shown)
             && !self.document.answer.truncated
         {
-            return Some(ReplyChange::AnswerAppended {
-                text: answer_text(suffix)?,
-            });
+            folded.note(self.document.append_answer(suffix));
+        } else {
+            folded.note(self.document.rewrite_answer(&wanted));
         }
-        Some(ReplyChange::AnswerRewritten {
-            text: answer_text(&wanted)?,
-        })
     }
 
     /// A model call ended (or another began): whatever the answer shows is
     /// now finished text; the next call's cumulative text lands after it.
     fn close_text_phase(&mut self) {
         self.finished_phases_text = self.document.answer.text.as_str().to_string();
+    }
+
+    /// Anything that is not more reasoning ends the open reasoning segment:
+    /// its final text is the segment as it stands.
+    fn close_open_reasoning(&mut self, folded: &mut Folded) {
+        if self.document.reasoning_open
+            && let Some(open) = self.document.reasoning.last().cloned()
+        {
+            folded.note(self.document.close_reasoning(open));
+        }
     }
 
     fn snapshot(&self, key: &RunKey) -> ReplySnapshot {
@@ -177,31 +212,19 @@ impl RunReply {
         }
     }
 
-    /// Apply a change set as one revision. Returns the reconcile point the
-    /// revision sits on, or `None` when nothing was applied (a change the
-    /// reducer ignored, e.g. after terminal).
-    fn apply(&mut self, changes: &[ReplyChange]) -> Option<ReplyReconcilePoint> {
-        if changes.is_empty() {
-            return None;
-        }
-        let before = self.document.applied_changes;
-        let mut control_critical = false;
-        let mut terminal = false;
-        for change in changes {
-            self.document.apply(change);
-            control_critical |= change.is_control_critical();
-            terminal |= change.is_terminal();
-        }
-        if self.document.applied_changes == before {
+    /// Seal one fold as a revision. Returns the reconcile point the revision
+    /// sits on, or `None` when the fold changed nothing.
+    fn seal(&mut self, folded: &Folded) -> Option<ReplyReconcilePoint> {
+        if !folded.changed {
             return None;
         }
         let opened = self.revision == 0;
         self.revision = self.revision.saturating_add(1);
-        Some(if terminal && self.document.is_terminal() {
+        Some(if folded.terminal && self.document.is_terminal() {
             ReplyReconcilePoint::Terminal
         } else if opened {
             ReplyReconcilePoint::Opened
-        } else if control_critical {
+        } else if folded.control_critical {
             ReplyReconcilePoint::ControlCritical
         } else {
             ReplyReconcilePoint::Progress
@@ -251,15 +274,15 @@ impl ReplyProjection {
             .push(observer);
     }
 
-    /// Compose one host milestone into the run's document.
+    /// Fold one host milestone into the run's document.
     pub fn observe_milestone(&self, milestone: &LoopHostMilestone) {
         let key = RunKey {
             scope: milestone.scope.clone(),
             run_id: milestone.run_id,
         };
-        let Some(composed) = compose(&milestone.kind) else {
+        if !milestone_is_projected(&milestone.kind) {
             return;
-        };
+        }
         let events = {
             let mut runs = self.lock_runs();
             let run = match runs.get_mut(&key) {
@@ -280,63 +303,13 @@ impl ReplyProjection {
             if run.actor.is_none() {
                 run.actor = milestone.actor.clone();
             }
-            let mut changes = composed.changes;
-            // A finish for a row this document never saw start (the invoke
-            // milestone was lost, or only the terminal one reached us) still
-            // needs its title: the capability id, not the activity id.
-            if let LoopHostMilestoneKind::CapabilityCompleted {
-                activity_id,
-                capability_id,
-                ..
-            }
-            | LoopHostMilestoneKind::CapabilityFailed {
-                activity_id,
-                capability_id,
-                ..
-            } = &milestone.kind
-                && !run
-                    .document
-                    .activities
-                    .iter()
-                    .any(|row| row.id.as_str() == activity_id.to_string())
-                && let Some(id) = item_id(&activity_id.to_string())
-                && let Some(title) = display_text(capability_id.as_str())
-            {
-                changes.insert(
-                    0,
-                    ReplyChange::ActivityStarted {
-                        id,
-                        title,
-                        detail: None,
-                    },
-                );
-            }
-            match &milestone.kind {
-                // Cumulative text of the current model call → append or
-                // rewrite relative to what the document already shows.
-                LoopHostMilestoneKind::ModelTextDelta { safe_text } => {
-                    let text = sanitize_model_visible_text(safe_text.as_str());
-                    if let Some(change) = run.answer_change(&text) {
-                        changes.push(change);
-                    }
-                }
-                LoopHostMilestoneKind::ModelStarted { .. }
-                | LoopHostMilestoneKind::ModelCompleted { .. } => run.close_text_phase(),
-                _ => {}
-            }
-            // Anything that is not more reasoning ends the open reasoning
-            // segment: its final text is the segment as it stands.
-            if composed.closes_reasoning
-                && run.document.reasoning_open
-                && let Some(open) = run.document.reasoning.last().cloned()
-            {
-                changes.insert(0, ReplyChange::ReasoningSummary { text: open });
-            }
+            let mut folded = Folded::default();
+            let terminal_pending = fold_milestone(run, &milestone.kind, &mut folded);
             let mut events = Vec::with_capacity(2);
-            if let Some(point) = run.apply(&changes) {
+            if let Some(point) = run.seal(&folded) {
                 events.push(ReplyProjectionEvent::Revised(point));
             }
-            if composed.terminal_pending && !run.document.is_terminal() {
+            if terminal_pending && !run.document.is_terminal() {
                 run.terminal_pending = true;
                 events.push(ReplyProjectionEvent::TerminalPending);
             }
@@ -360,7 +333,6 @@ impl ReplyProjection {
             scope: scope.clone(),
             run_id,
         };
-        let changes = terminal_changes(&facts);
         let (snapshot, event) = {
             let mut runs = self.lock_runs();
             let run = runs
@@ -369,15 +341,12 @@ impl ReplyProjection {
             if run.actor.is_none() {
                 run.actor = facts.actor.clone();
             }
-            let event = if changes.is_empty() {
-                None
-            } else {
-                let point = run.apply(&changes);
-                if run.document.is_terminal() {
-                    run.terminal_pending = false;
-                }
-                point.map(ReplyProjectionEvent::Revised)
-            };
+            let mut folded = Folded::default();
+            fold_terminal_facts(run, &facts, &mut folded);
+            let event = run.seal(&folded).map(ReplyProjectionEvent::Revised);
+            if run.document.is_terminal() {
+                run.terminal_pending = false;
+            }
             (run.snapshot(&key), event)
         };
         if let Some(event) = event {
@@ -482,140 +451,163 @@ impl LoopHostMilestoneSink for ReplyProjectionMilestoneSink {
 
 // ── Composition ──────────────────────────────────────────────────────────
 
-/// What one milestone means for the document.
-struct Composed {
-    changes: Vec<ReplyChange>,
-    /// The milestone ends any open reasoning segment.
-    closes_reasoning: bool,
-    /// The loop finished; the terminal facts are now worth fetching.
-    terminal_pending: bool,
+/// Whether a milestone says anything user-visible. Prompt bundles,
+/// checkpoints, hooks, compaction bookkeeping, and batch counters do not.
+fn milestone_is_projected(kind: &LoopHostMilestoneKind) -> bool {
+    !matches!(
+        kind,
+        LoopHostMilestoneKind::PromptBundleBuilt { .. }
+            | LoopHostMilestoneKind::FailureRecovered { .. }
+            | LoopHostMilestoneKind::CapabilityBatchStarted { .. }
+            | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
+            | LoopHostMilestoneKind::CheckpointCreated { .. }
+            | LoopHostMilestoneKind::CompactionStarted { .. }
+            | LoopHostMilestoneKind::CompactionCompleted { .. }
+            | LoopHostMilestoneKind::CompactionFailed { .. }
+            | LoopHostMilestoneKind::CompactionLeakDetected { .. }
+            | LoopHostMilestoneKind::AssistantReplyFinalized { .. }
+            | LoopHostMilestoneKind::HookDispatched { .. }
+            | LoopHostMilestoneKind::HookDecisionEmitted { .. }
+            | LoopHostMilestoneKind::HookFailed { .. }
+    )
 }
 
-impl Composed {
-    fn changes(changes: Vec<ReplyChange>) -> Self {
-        Self {
-            changes,
-            closes_reasoning: true,
-            terminal_pending: false,
-        }
+/// Fold one milestone into the run's document via the document's bounded
+/// mutators. Returns whether the loop finished (the terminal facts are now
+/// worth fetching); everything else is recorded on `folded`.
+fn fold_milestone(run: &mut RunReply, kind: &LoopHostMilestoneKind, folded: &mut Folded) -> bool {
+    // More reasoning keeps the open segment growing; anything else closes it.
+    if !matches!(kind, LoopHostMilestoneKind::ModelReasoningDelta { .. }) {
+        run.close_open_reasoning(folded);
     }
-}
-
-/// The document changes one milestone means. `None` for milestones that say
-/// nothing user-visible (prompt bundles, checkpoints, hooks, compaction
-/// bookkeeping, batch counters).
-fn compose(kind: &LoopHostMilestoneKind) -> Option<Composed> {
-    let changes = match kind {
+    match kind {
         LoopHostMilestoneKind::IterationStarted { iteration } => {
             if *iteration <= 1 {
-                vec![ReplyChange::PhaseChanged {
-                    phase: ReplyPhase::Preparing,
-                }]
+                folded.note(
+                    run.document
+                        .note_phase(ironclaw_extension_contracts::reply::ReplyPhase::Preparing),
+                );
             } else {
                 // A later iteration means the loop resumed: whatever it was
                 // parked on has been answered.
-                vec![ReplyChange::AttentionCleared]
+                folded.note_control_critical(run.document.clear_attention());
             }
         }
-        LoopHostMilestoneKind::ModelStarted { .. } => vec![
-            ReplyChange::AttentionCleared,
-            ReplyChange::PhaseChanged {
-                phase: ReplyPhase::Thinking,
-            },
-        ],
+        LoopHostMilestoneKind::ModelStarted { .. } => {
+            folded.note_control_critical(run.document.clear_attention());
+            folded.note(
+                run.document
+                    .note_phase(ironclaw_extension_contracts::reply::ReplyPhase::Thinking),
+            );
+            run.close_text_phase();
+        }
         LoopHostMilestoneKind::ModelReasoningDelta { safe_delta } => {
             let text = sanitize_model_visible_text(safe_delta.as_str());
-            return Some(Composed {
-                changes: vec![ReplyChange::ReasoningAppended {
-                    text: reasoning_text(&text)?,
-                }],
-                closes_reasoning: false,
-                terminal_pending: false,
-            });
+            if let Some(text) = reasoning_text(&text) {
+                folded.note(run.document.append_reasoning(&text));
+            }
         }
-        // The answer change depends on what the document already shows;
-        // `observe_milestone` computes it with the run's state.
-        LoopHostMilestoneKind::ModelTextDelta { .. } => Vec::new(),
-        LoopHostMilestoneKind::ModelCompleted { .. } => Vec::new(),
-        LoopHostMilestoneKind::ModelFailed { .. } => Vec::new(),
+        // Cumulative text of the current model call → append or rewrite
+        // relative to what the document already shows.
+        LoopHostMilestoneKind::ModelTextDelta { safe_text } => {
+            let text = sanitize_model_visible_text(safe_text.as_str());
+            let stripped = strip_control(&text);
+            run.fold_answer(&stripped, folded);
+        }
+        LoopHostMilestoneKind::ModelCompleted { .. } => run.close_text_phase(),
+        LoopHostMilestoneKind::ModelFailed { .. } => {}
         LoopHostMilestoneKind::CapabilityInvoked {
             activity_id,
             capability_id,
-        } => vec![ReplyChange::ActivityStarted {
-            id: item_id(&activity_id.to_string())?,
-            title: display_text(capability_id.as_str())?,
-            detail: None,
-        }],
+        } => {
+            if let Some((id, title)) =
+                item_id(&activity_id.to_string()).zip(display_text(capability_id.as_str()))
+            {
+                folded.note(run.document.activity_started(id, title, None));
+            }
+        }
         LoopHostMilestoneKind::CapabilityCompleted {
             activity_id,
+            capability_id,
             provider,
             runtime,
             output_bytes,
-            ..
-        } => vec![ReplyChange::ActivityFinished {
-            id: item_id(&activity_id.to_string())?,
-            state: ReplyActivityState::Completed,
-            output_preview: None,
-            provenance: Some(ReplyActivityProvenance {
-                provider: display_text(provider.as_str()),
-                runtime: display_text(runtime.as_str()),
-                output_bytes: Some(*output_bytes),
-            }),
-        }],
+        } => {
+            let Some(id) = item_id(&activity_id.to_string()) else {
+                return false;
+            };
+            ensure_activity_title(run, &id, capability_id.as_str(), folded);
+            folded.note(run.document.activity_finished(
+                id,
+                ReplyActivityState::Completed,
+                None,
+                Some(ReplyActivityProvenance {
+                    provider: display_text(provider.as_str()),
+                    runtime: display_text(runtime.as_str()),
+                    output_bytes: Some(*output_bytes),
+                }),
+            ));
+        }
         LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
+            capability_id,
             provider,
             runtime,
             reason_kind,
             safe_summary,
-            ..
-        } => vec![ReplyChange::ActivityFinished {
-            id: item_id(&activity_id.to_string())?,
-            state: ReplyActivityState::Failed {
-                kind: display_text(reason_kind.as_str())?,
-            },
-            output_preview: safe_summary
-                .as_ref()
-                .and_then(|summary| ironclaw_event_log::sanitize_error_summary(summary.as_str()))
-                .and_then(|summary| display_preview(&summary)),
-            provenance: Some(ReplyActivityProvenance {
-                provider: provider
-                    .as_ref()
-                    .and_then(|provider| display_text(provider.as_str())),
-                runtime: runtime.and_then(|runtime| display_text(runtime.as_str())),
-                output_bytes: None,
-            }),
-        }],
+        } => {
+            let Some(id) = item_id(&activity_id.to_string()) else {
+                return false;
+            };
+            let Some(kind) = display_text(reason_kind.as_str()) else {
+                return false;
+            };
+            ensure_activity_title(run, &id, capability_id.as_str(), folded);
+            folded.note(
+                run.document.activity_finished(
+                    id,
+                    ReplyActivityState::Failed { kind },
+                    safe_summary
+                        .as_ref()
+                        .and_then(|summary| {
+                            ironclaw_event_log::sanitize_error_summary(summary.as_str())
+                        })
+                        .and_then(|summary| display_preview(&summary)),
+                    Some(ReplyActivityProvenance {
+                        provider: provider
+                            .as_ref()
+                            .and_then(|provider| display_text(provider.as_str())),
+                        runtime: runtime.and_then(|runtime| display_text(runtime.as_str())),
+                        output_bytes: None,
+                    }),
+                ),
+            );
+        }
         LoopHostMilestoneKind::DriverNote { kind, safe_summary } => {
             let text = sanitize_model_visible_text(safe_summary.as_str());
-            if text.trim().is_empty() {
-                return None;
+            if !text.trim().is_empty()
+                && let Some(text) = display_text(&text)
+            {
+                folded.note(run.document.set_status(text, Some(status_kind(*kind))));
             }
-            vec![ReplyChange::StatusSummary {
-                text: display_text(&text)?,
-                work: Some(status_kind(*kind)),
-            }]
         }
         LoopHostMilestoneKind::GateBlocked { gate_kind, .. } => {
-            vec![ReplyChange::AttentionRequired {
-                attention: attention_for_gate(*gate_kind, None)?,
-            }]
+            if let Some(attention) = attention_for_gate(*gate_kind, None) {
+                folded.note_control_critical(run.document.require_attention(attention));
+            }
         }
         LoopHostMilestoneKind::Blocked { gate_ref, .. } => {
             // The gate ref arrives one milestone after the kind; carry it onto
             // the attention the publisher enriches at publish time. The kind
             // is re-derived from the ref's own prefix when the loop did not
             // announce it separately.
-            vec![ReplyChange::AttentionRequired {
-                attention: attention_for_gate_ref(gate_ref.as_str())?,
-            }]
+            if let Some(attention) = attention_for_gate_ref(gate_ref.as_str()) {
+                folded.note_control_critical(run.document.require_attention(attention));
+            }
         }
         LoopHostMilestoneKind::Completed { .. } | LoopHostMilestoneKind::Failed { .. } => {
-            return Some(Composed {
-                changes: vec![ReplyChange::AttentionCleared],
-                closes_reasoning: true,
-                terminal_pending: true,
-            });
+            folded.note_control_critical(run.document.clear_attention());
+            return true;
         }
         LoopHostMilestoneKind::PromptBundleBuilt { .. }
         | LoopHostMilestoneKind::FailureRecovered { .. }
@@ -629,36 +621,62 @@ fn compose(kind: &LoopHostMilestoneKind) -> Option<Composed> {
         | LoopHostMilestoneKind::AssistantReplyFinalized { .. }
         | LoopHostMilestoneKind::HookDispatched { .. }
         | LoopHostMilestoneKind::HookDecisionEmitted { .. }
-        | LoopHostMilestoneKind::HookFailed { .. } => return None,
-    };
-    Some(Composed::changes(changes))
+        | LoopHostMilestoneKind::HookFailed { .. } => {}
+    }
+    false
 }
 
-/// The terminal changes durable facts mean. Empty when the run is not
-/// terminal yet (facts fetched too early).
-fn terminal_changes(facts: &TerminalReplyFacts) -> Vec<ReplyChange> {
-    let mut changes = vec![ReplyChange::AttentionCleared];
+/// A finish for a row this document never saw start (the invoke milestone was
+/// lost, or only the terminal one reached us) still needs its title: the
+/// capability id, not the activity id.
+fn ensure_activity_title(
+    run: &mut RunReply,
+    id: &ReplyItemId,
+    capability: &str,
+    folded: &mut Folded,
+) {
+    if run
+        .document
+        .activities
+        .iter()
+        .any(|row| row.id.as_str() == id.as_str())
+    {
+        return;
+    }
+    if let Some(title) = display_text(capability) {
+        folded.note(run.document.activity_started(id.clone(), title, None));
+    }
+}
+
+/// The mutations durable terminal facts mean. A not-yet-terminal status
+/// (facts fetched too early) folds nothing.
+fn fold_terminal_facts(run: &mut RunReply, facts: &TerminalReplyFacts, folded: &mut Folded) {
     match facts.status {
         TurnStatus::Completed => {
+            folded.note_control_critical(run.document.clear_attention());
             let text = facts
                 .answer
                 .as_deref()
                 .map(sanitize_model_visible_text)
                 .unwrap_or_default();
             if let Some(text) = answer_text(&text).or_else(|| answer_text("")) {
-                changes.push(ReplyChange::AnswerFinalized {
-                    text,
-                    attachments: facts
-                        .attachments
-                        .iter()
-                        .filter_map(attachment_ref)
-                        .take(REPLY_MAX_ATTACHMENTS)
-                        .collect(),
-                });
+                folded.note_control_critical(
+                    run.document.finalize_answer(
+                        text,
+                        facts
+                            .attachments
+                            .iter()
+                            .filter_map(attachment_ref)
+                            .take(REPLY_MAX_ATTACHMENTS)
+                            .collect(),
+                    ),
+                );
             }
-            changes.push(ReplyChange::Completed);
+            folded.note(run.document.complete());
+            folded.terminal = true;
         }
         TurnStatus::Failed | TurnStatus::RecoveryRequired => {
+            folded.note_control_critical(run.document.clear_attention());
             let summary = facts
                 .failure_summary
                 .as_deref()
@@ -668,15 +686,20 @@ fn terminal_changes(facts: &TerminalReplyFacts) -> Vec<ReplyChange> {
             if let Some(summary) =
                 display_text(&summary).or_else(|| display_text(RUN_FAILED_MESSAGE))
             {
-                changes.push(ReplyChange::Failed { summary });
+                folded.note(run.document.fail(summary));
             } else {
                 // Unreachable in practice (the neutral copy is valid display
                 // text); a total function still needs an outcome, and a
                 // cancel is the honest one for "ended without a summary".
-                changes.push(ReplyChange::Cancelled);
+                folded.note(run.document.cancel());
             }
+            folded.terminal = true;
         }
-        TurnStatus::Cancelled => changes.push(ReplyChange::Cancelled),
+        TurnStatus::Cancelled => {
+            folded.note_control_critical(run.document.clear_attention());
+            folded.note(run.document.cancel());
+            folded.terminal = true;
+        }
         TurnStatus::Queued
         | TurnStatus::Running
         | TurnStatus::BlockedApproval
@@ -684,12 +707,12 @@ fn terminal_changes(facts: &TerminalReplyFacts) -> Vec<ReplyChange> {
         | TurnStatus::BlockedResource
         | TurnStatus::BlockedDependentRun
         | TurnStatus::BlockedExternalTool
-        | TurnStatus::CancelRequested => return Vec::new(),
+        | TurnStatus::CancelRequested => {}
     }
-    changes
 }
 
-fn status_kind(kind: LoopDriverNoteKind) -> ReplyStatusKind {
+fn status_kind(kind: LoopDriverNoteKind) -> ironclaw_extension_contracts::reply::ReplyStatusKind {
+    use ironclaw_extension_contracts::reply::ReplyStatusKind;
     match kind {
         LoopDriverNoteKind::Planning => ReplyStatusKind::Planning,
         LoopDriverNoteKind::Waiting => ReplyStatusKind::Waiting,
@@ -755,7 +778,7 @@ fn char_boundary_prefix(text: &str, max_bytes: usize) -> &str {
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    &text[..end]
+    &text[..end] // safety: `end` walked back to a char boundary above.
 }
 
 fn strip_control(value: &str) -> String {

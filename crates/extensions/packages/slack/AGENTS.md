@@ -10,10 +10,12 @@
 - Read `src/lib.rs` first, then:
   - `channel.rs` — the `SlackChannelAdapter` implementations of
     `ChannelIngress` and `ChannelDelivery`.
-  - `reply_sink.rs` — the `ReplySink` half: the run's answer on Slack's
+  - `reply_sink/` — the `ReplySink` half: the run's answer on Slack's
     native Agent surface (`agents.sessions.setStatus`, `chat.startStream` /
     `appendStream` / `stopStream`, task cards, read-back after ambiguity).
-    Checkpoint version and shape live at the top of the file.
+    `mod.rs` is the reconciler; `plan.rs` the chunk planner; `checkpoint.rs`
+    the checkpoint version and shape; `agent_api.rs` the request/outcome
+    mapping.
   - `reply_context.rs` — the reply context ingress stamps on every message
     (recipient ids + session thread) and the sink reads at reply time.
   - `api.rs` — the one inventory of Slack Web API endpoints the package
@@ -33,7 +35,7 @@
   - `docs/internal/design/2026-08-31-progressive-reply-publication.md` §6
     (the sink seam) and §9 (the Slack native Agent plan this package
     implements). Verified Slack facts are quoted at the top of
-    `src/reply_sink.rs`; re-fetch the docs.slack.dev pages before changing
+    `src/reply_sink/mod.rs`; re-fetch the docs.slack.dev pages before changing
     a request shape.
 
 ## What This Crate Owns

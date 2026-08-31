@@ -3218,23 +3218,6 @@ fn claim_request(
     }
 }
 
-fn renew_request(
-    delivery_id: OutboundDeliveryId,
-    scope: &TurnScope,
-    owner: &str,
-    fence: u64,
-    now: ironclaw_host_api::Timestamp,
-) -> RenewReplyPublicationLeaseRequest {
-    RenewReplyPublicationLeaseRequest {
-        delivery_id,
-        scope: scope.clone(),
-        owner: publisher(owner),
-        fence,
-        ttl: LEASE_TTL,
-        now,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn advance_request(
     delivery_id: OutboundDeliveryId,
@@ -3330,7 +3313,6 @@ async fn open_and_claim(
 async fn run_reply_publication_contract(store: &impl OutboundStateStorePort) {
     reply_publication_open_is_idempotent_and_rejects_a_different_target(store).await;
     reply_publication_lease_claim_holds_reenters_and_takes_over_after_expiry(store).await;
-    reply_publication_lease_renewal_requires_owner_and_fence(store).await;
     reply_publication_advance_is_monotonic_fenced_and_lease_bound(store).await;
     reply_publication_settlement_is_guarded_and_one_way(store).await;
     reply_publication_rows_are_left_alone_by_crash_recovery(store).await;
@@ -3783,159 +3765,6 @@ async fn reply_publication_lease_claim_holds_reenters_and_takes_over_after_expir
         Err(OutboundError::SubscriptionScopeMismatch | OutboundError::ReplyPublicationNotFound)
     ));
 }
-
-async fn reply_publication_lease_renewal_requires_owner_and_fence(
-    store: &impl OutboundStateStorePort,
-) {
-    let scope = turn_scope();
-    let run_id = TurnRunId::new();
-    let t0 = now();
-    let held = open_and_claim(
-        store,
-        &scope,
-        "reply-publication-renew",
-        run_id,
-        "worker-a",
-        t0,
-    )
-    .await;
-    let delivery_id = held.attempt.delivery_id;
-    assert_eq!(held.publication.fence, 1);
-
-    assert!(
-        store
-            .renew_reply_publication_lease(renew_request(
-                delivery_id,
-                &scope,
-                "worker-a",
-                1,
-                t0 + seconds(5),
-            ))
-            .await
-            .unwrap(),
-        "the owner renews with its fence"
-    );
-    let renewed = store
-        .load_reply_publication(scope.clone(), delivery_id)
-        .await
-        .unwrap()
-        .expect("publication persisted");
-    assert_eq!(renewed.publication.fence, 1);
-    assert_eq!(
-        renewed.publication.lease,
-        Some(ReplyPublicationLease {
-            owner: publisher("worker-a"),
-            expires_at: t0 + seconds(35),
-        })
-    );
-    assert_eq!(renewed.publication.updated_at, t0 + seconds(5));
-
-    for (owner, fence) in [("worker-b", 1), ("worker-a", 0), ("worker-a", 2)] {
-        assert!(
-            !store
-                .renew_reply_publication_lease(renew_request(
-                    delivery_id,
-                    &scope,
-                    owner,
-                    fence,
-                    t0 + seconds(6),
-                ))
-                .await
-                .unwrap(),
-            "renewal by {owner} with fence {fence} must be refused"
-        );
-    }
-    assert_eq!(
-        store
-            .load_reply_publication(scope.clone(), delivery_id)
-            .await
-            .unwrap(),
-        Some(renewed),
-        "refused renewals leave the lease untouched"
-    );
-
-    // A missing publication is an error; a stale fence never is.
-    let missing = store
-        .renew_reply_publication_lease(renew_request(
-            OutboundDeliveryId::new(),
-            &scope,
-            "worker-a",
-            1,
-            t0,
-        ))
-        .await;
-    assert!(matches!(
-        missing,
-        Err(OutboundError::ReplyPublicationNotFound)
-    ));
-
-    // After an expiry takeover the old owner's renewals are refused and the
-    // new owner's accepted; the fence — not the clock — is the guard, so the
-    // holder can still renew a lease that lapsed without a takeover.
-    let taken = acquired(
-        store
-            .claim_reply_publication_lease(claim_request(
-                delivery_id,
-                &scope,
-                "worker-b",
-                t0 + seconds(36),
-            ))
-            .await
-            .unwrap(),
-    );
-    assert_eq!(taken.publication.fence, 2);
-    assert!(
-        !store
-            .renew_reply_publication_lease(renew_request(
-                delivery_id,
-                &scope,
-                "worker-a",
-                1,
-                t0 + seconds(37),
-            ))
-            .await
-            .unwrap()
-    );
-    assert!(
-        store
-            .renew_reply_publication_lease(renew_request(
-                delivery_id,
-                &scope,
-                "worker-b",
-                2,
-                t0 + seconds(37),
-            ))
-            .await
-            .unwrap()
-    );
-    assert!(
-        store
-            .renew_reply_publication_lease(renew_request(
-                delivery_id,
-                &scope,
-                "worker-b",
-                2,
-                t0 + seconds(500),
-            ))
-            .await
-            .unwrap(),
-        "a lapsed lease nobody took over still belongs to the fenced owner"
-    );
-    assert_eq!(
-        store
-            .load_reply_publication(scope, delivery_id)
-            .await
-            .unwrap()
-            .expect("publication persisted")
-            .publication
-            .lease,
-        Some(ReplyPublicationLease {
-            owner: publisher("worker-b"),
-            expires_at: t0 + seconds(530),
-        })
-    );
-}
-
 async fn reply_publication_advance_is_monotonic_fenced_and_lease_bound(
     store: &impl OutboundStateStorePort,
 ) {
@@ -4414,18 +4243,6 @@ async fn reply_publication_settlement_is_guarded_and_one_way(store: &impl Outbou
             .unwrap();
         assert_eq!(claim, ReplyPublicationClaim::Settled(delivered.clone()));
     }
-    assert!(
-        !store
-            .renew_reply_publication_lease(renew_request(
-                delivered_id,
-                &scope,
-                "worker-a",
-                1,
-                t0 + seconds(4),
-            ))
-            .await
-            .unwrap()
-    );
     assert_eq!(
         store
             .load_reply_publication(scope.clone(), delivered_id)
@@ -4650,13 +4467,6 @@ async fn pre_publication_attempt_rows_keep_the_one_shot_lifecycle(
             .unwrap()
             .is_empty()
     );
-    let renew = store
-        .renew_reply_publication_lease(renew_request(delivery_id, &scope, "worker-a", 0, t0))
-        .await;
-    assert!(matches!(
-        renew,
-        Err(OutboundError::ReplyPublicationNotFound)
-    ));
     let settle = store
         .settle_reply_publication(settle_request(
             delivery_id,

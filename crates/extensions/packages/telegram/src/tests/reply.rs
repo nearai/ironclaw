@@ -7,9 +7,9 @@ use std::time::Duration;
 use ironclaw_extension_contracts::channel_adapter::ChannelError;
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::reply::{
-    ReplyAnswerText, ReplyAudience, ReplyChange, ReplyDisplayText, ReplyDocument, ReplyId,
-    ReplyProviderRef, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink,
-    ReplySinkCheckpoint, ReplySinkOutcome, ReplyTarget, ReplyThreadAnchor,
+    ReplyAnswerText, ReplyAudience, ReplyDisplayText, ReplyDocument, ReplyProviderRef,
+    ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink, ReplySinkCheckpoint,
+    ReplySinkOutcome, ReplyTarget, ReplyThreadAnchor,
 };
 use ironclaw_extension_contracts::tool_adapter::{RestrictedEgressError, RestrictedEgressResponse};
 use ironclaw_host_api::attachment::WorkspaceFile;
@@ -28,17 +28,17 @@ enum Terminal {
 
 fn terminal_document(answer: &str, terminal: Terminal) -> ReplyDocument {
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::AnswerFinalized {
-        text: ReplyAnswerText::new(answer).expect("answer text"),
-        attachments: Vec::new(),
-    });
+    document.finalize_answer(
+        ReplyAnswerText::new(answer).expect("answer text"),
+        Vec::new(),
+    );
     match terminal {
-        Terminal::Completed => document.apply(&ReplyChange::Completed),
-        Terminal::Failed(summary) => document.apply(&ReplyChange::Failed {
-            summary: ReplyDisplayText::new(summary).expect("summary"),
-        }),
-        Terminal::Cancelled => document.apply(&ReplyChange::Cancelled),
-    }
+        Terminal::Completed => document.complete(),
+        Terminal::Failed(summary) => {
+            document.fail(ReplyDisplayText::new(summary).expect("summary"))
+        }
+        Terminal::Cancelled => document.cancel(),
+    };
     document
 }
 
@@ -52,7 +52,6 @@ fn request(
     let user = || UserId::new("reply-user").expect("user id");
     ReplyReconcileRequest {
         revision: ReplyRevision {
-            reply_id: ReplyId::for_run(&run_id),
             revision: 2,
             document,
         },
@@ -472,9 +471,7 @@ async fn a_target_without_a_vendor_conversation_is_permanent() {
 #[tokio::test]
 async fn a_terminal_point_without_a_terminal_outcome_is_a_render_error() {
     let mut document = ReplyDocument::default();
-    document.apply(&ReplyChange::AnswerAppended {
-        text: ReplyAnswerText::new("still going").expect("answer"),
-    });
+    document.append_answer("still going");
     let egress = ScriptedEgress::new(vec![sent(47)]);
     let error = TelegramChannelAdapter::default()
         .reconcile(terminal_request(document), &egress)

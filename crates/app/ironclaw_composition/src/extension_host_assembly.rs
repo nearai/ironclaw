@@ -412,7 +412,7 @@ pub(crate) struct ChannelHostAssemblyWiring {
     /// The process-wide safe reply projection every run's document lives in;
     /// the publication service built here reads it, the runtime's milestone
     /// sink writes it.
-    pub(crate) reply_projection: Arc<ironclaw_assistant::reply_projection::ReplyProjection>,
+    pub(crate) reply_projection: Arc<ironclaw_assistant::projection::reply::ReplyProjection>,
     /// The deployment's authenticated-session channel (host-owned reply), if
     /// any: registered as a publication target for every run.
     pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
@@ -431,7 +431,7 @@ pub(crate) struct RuntimeExtensionHostAssemblyWiring<'a> {
     pub(crate) auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     pub(crate) outbound_delivery_targets: Option<&'a Arc<MutableOutboundDeliveryTargetRegistry>>,
     pub(crate) local_runtime: Option<&'a RebornRuntimeStores>,
-    pub(crate) reply_projection: Arc<ironclaw_assistant::reply_projection::ReplyProjection>,
+    pub(crate) reply_projection: Arc<ironclaw_assistant::projection::reply::ReplyProjection>,
 }
 
 pub(crate) struct ChannelHostAssemblySource {
@@ -534,8 +534,7 @@ pub(crate) struct StartedChannelHost {
     /// The reply publication service, present exactly when a delivery
     /// coordinator exists (channel egress is configured). The runtime hooks
     /// it to the process journal so terminal commits resume publications.
-    pub(crate) reply_publication:
-        Option<Arc<ironclaw_assistant::reply_publication::ReplyPublicationService>>,
+    pub(crate) reply_publication: Option<Arc<ironclaw_assistant::ReplyPublicationService>>,
 }
 
 pub(crate) fn start_channel_host(
@@ -587,25 +586,16 @@ pub(crate) fn start_channel_host(
     // request becomes an ordinary cancel; gate attention is enriched from
     // the approval and auth prompt sources every other channel surface uses.
     let reply_publication = delivery_coordinator.clone().map(|coordinator| {
-        use ironclaw_assistant::reply_publication::{
-            GateAttentionEnricher, KernelTerminalReplyFacts, ReplyPublicationDeps,
-            ReplyPublicationService, ReplyPublicationSettings, TurnCoordinatorStopRequester,
+        use ironclaw_assistant::{
+            ReplyPublicationDeps, ReplyPublicationService, ReplyPublicationSettings,
         };
         ReplyPublicationService::start(ReplyPublicationDeps {
             coordinator,
             projection: Arc::clone(&reply_projection),
-            terminal_facts: Arc::new(KernelTerminalReplyFacts::new(
-                Arc::clone(&turn_coordinator),
-                Arc::clone(&thread_service),
-            )),
-            stop_requests: Arc::new(TurnCoordinatorStopRequester::new(Arc::clone(
-                &turn_coordinator,
-            ))),
-            attention: Some(Arc::new(GateAttentionEnricher::new(
-                approval_context.clone(),
-                blocked_auth_prompts.clone(),
-                Arc::clone(&turn_coordinator),
-            ))),
+            turn_coordinator: Arc::clone(&turn_coordinator),
+            thread_service: Arc::clone(&thread_service),
+            approval_context: approval_context.clone(),
+            blocked_auth_prompts: blocked_auth_prompts.clone(),
             project_filesystem: Arc::clone(project_filesystem),
             session_channel: session_reply_channel,
             settings: ReplyPublicationSettings::default(),

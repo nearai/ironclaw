@@ -57,6 +57,7 @@ use uuid::Uuid;
 
 pub mod display_preview;
 pub mod live_progress;
+pub mod reply;
 pub mod reply_sink;
 pub mod runtime_replay;
 pub mod turn_events;
