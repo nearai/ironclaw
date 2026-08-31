@@ -6388,14 +6388,10 @@ async fn runtime_replay_resolves_historical_terminal_approval_notification() {
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
     };
-    #[allow(clippy::disallowed_methods)]
-    let seeded_inbox = ironclaw_notifications::NotificationInboxStore::new(
-        crate::wrap_scoped(Arc::clone(&filesystem)),
-        ironclaw_notifications::NOTIFICATION_INBOX_MAX_RECORDS,
-    );
-    ironclaw_notifications::NotificationInboxStorePort::publish(
-        &seeded_inbox,
-        ironclaw_notifications::PublishNotificationRequest {
+    let seeded_inbox =
+        crate::notification_store_assembly::build_notification_inbox(Arc::clone(&filesystem));
+    seeded_inbox
+        .publish(ironclaw_notifications::PublishNotificationRequest {
             id: ironclaw_notifications::NotificationId::new("runtime-approval-replay-notification")
                 .expect("notification id"),
             recipient: recipient.clone(),
@@ -6415,10 +6411,9 @@ async fn runtime_replay_resolves_historical_terminal_approval_notification() {
             },
             initial_state: ironclaw_notifications::NotificationInitialState::Open,
             occurred_at: Utc::now(),
-        },
-    )
-    .await
-    .expect("seed unresolved approval notification");
+        })
+        .await
+        .expect("seed unresolved approval notification");
 
     let process_store = ironclaw_processes::ProcessJournalStore::new(
         crate::wrap_process_journal_scoped(Arc::clone(&filesystem)),
@@ -6493,17 +6488,15 @@ async fn runtime_replay_resolves_historical_terminal_approval_notification() {
     )
     .await
     .expect("seed historical terminal process commit");
-    let unresolved = ironclaw_notifications::NotificationInboxStorePort::list(
-        &seeded_inbox,
-        ironclaw_notifications::ListNotificationsRequest {
+    let unresolved = seeded_inbox
+        .list(ironclaw_notifications::ListNotificationsRequest {
             recipient: recipient.clone(),
             limit: 10,
             cursor: None,
             include_archived: true,
-        },
-    )
-    .await
-    .expect("list seeded approval notification");
+        })
+        .await
+        .expect("list seeded approval notification");
     assert_eq!(unresolved.notifications.len(), 1);
     assert!(unresolved.notifications[0].resolved_at.is_none());
     drop(process_store);

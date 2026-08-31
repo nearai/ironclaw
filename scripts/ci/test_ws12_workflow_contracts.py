@@ -1179,13 +1179,21 @@ class WorkflowContractSabotageTests(unittest.TestCase):
         decoys = (
             (
                 "commented",
-                "# timeout --signal=INT --kill-after=30s 25m cargo test\n"
-                + f"          cargo test {backslash}",
+                "\n".join(
+                    (
+                        "# timeout --signal=INT --kill-after=30s 25m cargo test",
+                        f"          cargo test {backslash}",
+                    )
+                ),
             ),
             (
                 "unrelated",
-                "timeout --signal=INT --kill-after=30s 25m echo cargo test\n"
-                + f"          timeout --signal=INT --kill-after=30s 15m {backslash}",
+                "\n".join(
+                    (
+                        "timeout --signal=INT --kill-after=30s 25m echo cargo test",
+                        f"          timeout --signal=INT --kill-after=30s 15m {backslash}",
+                    )
+                ),
             ),
         )
         for name, replacement in decoys:
