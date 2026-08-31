@@ -86,13 +86,7 @@ impl RunCompletionStreamHub {
             .notices
             .list_after(owner, after_sequence, replay_limit)
             .await?;
-        let mut events = Vec::with_capacity(replayed.len());
-        for notice in &replayed {
-            events.push(SequencedCompletionEvent {
-                sequence: notice.sequence,
-                event: RunCompletionStreamEvent::Notice(self.notice_event(owner, notice).await),
-            });
-        }
+        let events = self.project_batch(owner, &replayed).await;
         Ok((events, receiver))
     }
 
@@ -102,14 +96,60 @@ impl RunCompletionStreamHub {
         owner: &RunCompletionOwner,
     ) -> Result<Vec<SequencedCompletionEvent>, RunCompletionStoreError> {
         let unread = self.notices.unread_snapshot(owner).await?;
-        let mut events = Vec::with_capacity(unread.len());
-        for notice in &unread {
+        Ok(self.project_batch(owner, &unread).await)
+    }
+
+    /// Project a batch of notices, querying each distinct thread's unread
+    /// count once — the count is identical for every notice of a thread, and
+    /// per-notice queries would make a 250-notice replay issue 250 ordered
+    /// index scans.
+    async fn project_batch(
+        &self,
+        owner: &RunCompletionOwner,
+        notices: &[RunCompletionNotice],
+    ) -> Vec<SequencedCompletionEvent> {
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut events = Vec::with_capacity(notices.len());
+        for notice in notices {
+            let unread_count = match counts.get(&notice.thread_id) {
+                Some(count) => *count,
+                None => {
+                    let count = match self
+                        .notices
+                        .unread_for_thread(owner, &notice.thread_id, 99)
+                        .await
+                    {
+                        Ok(thread_notices) => thread_notices.len(),
+                        Err(error) => {
+                            // silent-ok: grouped-copy count only; logged.
+                            tracing::debug!(
+                                target: "ironclaw::reborn::run_completions",
+                                %error,
+                                "per-thread unread count unavailable; using notice-local floor",
+                            );
+                            usize::from(!notice.is_read())
+                        }
+                    };
+                    counts.insert(notice.thread_id.clone(), count);
+                    count
+                }
+            };
             events.push(SequencedCompletionEvent {
                 sequence: notice.sequence,
-                event: RunCompletionStreamEvent::Notice(self.notice_event(owner, notice).await),
+                event: RunCompletionStreamEvent::Notice(RunCompletionNoticeEvent {
+                    schema: RUN_COMPLETION_NOTICE_SCHEMA.to_string(),
+                    sequence: notice.sequence.to_string(),
+                    notice_id: notice.notice_id.clone(),
+                    run_id: notice.run_id.clone(),
+                    thread_id: notice.thread_id.clone(),
+                    thread_tag: notice.thread_tag.clone(),
+                    completed_at: notice.completed_at.to_rfc3339(),
+                    read: notice.is_read(),
+                    unread_count_for_thread: u16::try_from(unread_count).unwrap_or(u16::MAX),
+                }),
             });
         }
-        Ok(events)
+        events
     }
 
     /// Project one durable notice into its wire event, joining the bounded
@@ -119,12 +159,24 @@ impl RunCompletionStreamHub {
         owner: &RunCompletionOwner,
         notice: &RunCompletionNotice,
     ) -> RunCompletionNoticeEvent {
-        let unread_count = self
+        let unread_count = match self
             .notices
             .unread_for_thread(owner, &notice.thread_id, 99)
             .await
-            .map(|notices| notices.len())
-            .unwrap_or(usize::from(!notice.is_read()));
+        {
+            Ok(notices) => notices.len(),
+            Err(error) => {
+                // silent-ok: the count only feeds grouped badge copy; the
+                // notice itself still delivers. Logged so a wrong badge has
+                // a server-side trace.
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_completions",
+                    %error,
+                    "per-thread unread count unavailable; using notice-local floor",
+                );
+                usize::from(!notice.is_read())
+            }
+        };
         RunCompletionNoticeEvent {
             schema: RUN_COMPLETION_NOTICE_SCHEMA.to_string(),
             sequence: notice.sequence.to_string(),
@@ -202,5 +254,177 @@ impl RunCompletionStreamHub {
                 read_at,
             }),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_completions::records::{
+        CompletionDeliveryState, CompletionReadEvidence, CompletionReadState, CompletionSurface,
+        RUN_COMPLETION_NOTICE_VERSION,
+    };
+    use crate::run_completions::store::{NewRunCompletionNotice, RunCompletionNoticeStore};
+
+    use chrono::{Duration as ChronoDuration, Utc};
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::ids::{TenantId, UserId};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_host_api::resource::ResourceScope;
+
+    fn hub() -> (RunCompletionStreamHub, Arc<dyn RunCompletionNotices>) {
+        let store = Arc::new(RunCompletionNoticeStore::new(Arc::new(
+            ScopedFilesystem::new(Arc::new(InMemoryBackend::new()), |scope: &ResourceScope| {
+                MountView::new(vec![
+                    MountGrant::new(
+                        MountAlias::new(crate::run_completions::store::RUN_NOTICES_MOUNT_ALIAS)?,
+                        VirtualPath::new(format!(
+                            "/tenants/{}/users/{}/run-notices",
+                            scope.tenant_id, scope.user_id
+                        ))?,
+                        MountPermissions::read_write_list_delete(),
+                    ),
+                    MountGrant::new(
+                        MountAlias::new("/tenant-shared")?,
+                        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id))?,
+                        MountPermissions::read_write(),
+                    ),
+                ])
+            }),
+        ))) as Arc<dyn RunCompletionNotices>;
+        (RunCompletionStreamHub::new(Arc::clone(&store)), store)
+    }
+
+    /// Seed one durable notice so the ordered indexes exist before the
+    /// subscription replay queries them (create_notice owns ensure_index).
+    async fn seed(store: &Arc<dyn RunCompletionNotices>) {
+        store
+            .create_notice(
+                &owner(),
+                NewRunCompletionNotice {
+                    notice_id: "rcn-seed".to_string(),
+                    run_id: "run-seed".to_string(),
+                    thread_id: "thread-seed".to_string(),
+                    agent_id: Some("agent-alpha".to_string()),
+                    project_id: None,
+                    thread_tag: "rct-seed".to_string(),
+                    terminal_projection_ref: "run-completion/rcn-seed".to_string(),
+                    completed_at: Utc::now(),
+                    arbitration_closes_at: Utc::now() + ChronoDuration::seconds(1),
+                },
+            )
+            .await
+            .expect("seed notice");
+    }
+
+    fn owner() -> RunCompletionOwner {
+        RunCompletionOwner {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            user_id: UserId::new("user-alpha").expect("user"),
+        }
+    }
+
+    fn granted_notice(surface: CompletionSurface) -> RunCompletionNotice {
+        RunCompletionNotice {
+            version: RUN_COMPLETION_NOTICE_VERSION,
+            notice_id: "rcn-hub".to_string(),
+            sequence: 7,
+            tenant_id: "tenant-alpha".to_string(),
+            owner_user_id: "user-alpha".to_string(),
+            run_id: "run-hub".to_string(),
+            thread_id: "thread-hub".to_string(),
+            agent_id: Some("agent-alpha".to_string()),
+            project_id: None,
+            thread_tag: "rct-hub".to_string(),
+            terminal_projection_ref: "run-completion/rcn-hub".to_string(),
+            completed_at: Utc::now(),
+            delivery: CompletionDeliveryState::Granted {
+                grant_id: "rcg-1".to_string(),
+                browser_instance_id: "browser-a".to_string(),
+                surface,
+                state_revision: 3,
+                expires_at: Utc::now() + ChronoDuration::seconds(2),
+                grants_issued: 1,
+            },
+            read: CompletionReadState::Unread,
+            intents: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_grant_emits_only_for_browser_surfaces() {
+        let (hub, store) = hub();
+        let owner = owner();
+        seed(&store).await;
+        let (_replay, mut receiver) = hub.subscribe(&owner, None, 10).await.expect("subscribe");
+
+        hub.publish_grant(&owner, &granted_notice(CompletionSurface::InApp));
+        let event = receiver.recv().await.expect("grant delivered");
+        match event.event {
+            RunCompletionStreamEvent::Grant(grant) => {
+                assert_eq!(grant.grant_id, "rcg-1");
+                assert_eq!(grant.browser_instance_id, "browser-a");
+                assert_eq!(
+                    grant.surface,
+                    ironclaw_product_contracts::run_completions::RunCompletionGrantSurface::InApp
+                );
+            }
+            other => panic!("expected a grant event, got {other:?}"),
+        }
+
+        // A push-owned surface is never a browser grant (§5.6): nothing to
+        // apply client-side, so nothing is published.
+        hub.publish_grant(&owner, &granted_notice(CompletionSurface::WebAppPush));
+        // A non-granted state publishes nothing either.
+        let mut pending = granted_notice(CompletionSurface::InApp);
+        pending.delivery = CompletionDeliveryState::NoExternalTarget {
+            settled_at: Utc::now(),
+        };
+        hub.publish_grant(&owner, &pending);
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "no grant frame may be emitted for push-owned or settled states"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_clear_emits_only_for_read_notices() {
+        let (hub, store) = hub();
+        let owner = owner();
+        seed(&store).await;
+        let (_replay, mut receiver) = hub.subscribe(&owner, None, 10).await.expect("subscribe");
+
+        let mut unread = granted_notice(CompletionSurface::InApp);
+        hub.publish_clear(&owner, &unread);
+        let _ = &unread;
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "an unread notice never clears"
+        );
+
+        unread.read = CompletionReadState::Read {
+            read_at: Utc::now(),
+            evidence: CompletionReadEvidence::ReplyRendered {
+                browser_instance_id: "browser-a".to_string(),
+            },
+        };
+        hub.publish_clear(&owner, &unread);
+        let event = receiver.recv().await.expect("clear delivered");
+        match event.event {
+            RunCompletionStreamEvent::Clear(clear) => {
+                assert_eq!(clear.notice_id, "rcn-hub");
+                assert_eq!(clear.thread_tag, "rct-hub");
+            }
+            other => panic!("expected a clear event, got {other:?}"),
+        }
     }
 }

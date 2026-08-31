@@ -5813,7 +5813,13 @@ fn decode_product_surface_stream_request(
     match request.selector {
         ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id } => {
             let after_cursor = match request.after_cursor {
-                Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|_| {
+                Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|error| {
+                    // Sanitized for the client; cause retained server-side.
+                    tracing::debug!(
+                        target: "ironclaw::reborn::product_surface",
+                        %error,
+                        "thread stream cursor rejected",
+                    );
                     ProductSurfaceError::from_status(
                         ProductSurfaceErrorCode::InvalidRequest,
                         400,
@@ -5949,7 +5955,15 @@ where
                     Err(_) => return,
                 },
             };
-            match live.recv().await {
+            let received = tokio::select! {
+                // A dropped receiver (browser disconnect) must free this
+                // forwarder immediately — run completions are rare, so a
+                // task parked solely on `recv()` would otherwise hold its
+                // broadcast receiver and permit indefinitely.
+                _ = sender.closed() => return,
+                received = live.recv() => received,
+            };
+            match received {
                 Ok(item) => {
                     let response = run_completion_stream_envelope(&item).map(|envelope| {
                         ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {

@@ -926,7 +926,7 @@ async fn authenticate_request(
 /// authenticates with a single-use socket ticket instead of a bearer.
 pub(crate) fn is_session_websocket_request(request: &Request) -> bool {
     request.method() == axum::http::Method::GET
-        && request.uri().path() == "/api/webchat/v2/session/websocket"
+        && request.uri().path() == crate::webui_v2::WEBUI_V2_PATTERN_SESSION_WEBSOCKET
 }
 
 /// Authenticate a session-socket upgrade by atomically consuming its

@@ -276,12 +276,16 @@ async fn one_session_socket_carries_two_threads_independently() {
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let mut final_a: Option<String> = None;
     let mut final_b: Option<String> = None;
+    let mut admitted = 0;
     while final_a.is_none() || final_b.is_none() {
         let frame = next_frame(&mut socket, deadline).await;
         assert_ne!(
             frame["type"], "subscription_error",
             "both selectors must authorize: {frame}"
         );
+        if frame["type"] == "subscribed" {
+            admitted += 1;
+        }
         if frame["type"] != "event" {
             continue;
         }
@@ -321,6 +325,10 @@ async fn one_session_socket_carries_two_threads_independently() {
             }
         }
     }
+    assert_eq!(
+        admitted, 2,
+        "both subscriptions must be explicitly admitted before their replay completes"
+    );
     assert_eq!(final_a.as_deref(), Some("alpha thread final reply"));
     assert_eq!(final_b.as_deref(), Some("beta thread final reply"));
 

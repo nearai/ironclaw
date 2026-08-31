@@ -135,3 +135,38 @@ fn product_stream_continuation_debug_and_identity_are_stable() {
         "ProductSurfaceEventSubscription { .. }"
     );
 }
+
+#[test]
+fn run_completions_selector_and_event_wire_tags_are_pinned() {
+    // The browser codec and session client match on these exact strings; a
+    // silent rename would strand every subscription.
+    let selector = ironclaw_product_contracts::surface::ProductStreamSelector::RunCompletions;
+    assert_eq!(
+        serde_json::to_value(&selector).expect("selector serializes"),
+        serde_json::json!({"kind": "run_completions"}),
+    );
+    let decoded: ironclaw_product_contracts::surface::ProductStreamSelector =
+        serde_json::from_value(serde_json::json!({"kind": "run_completions"}))
+            .expect("selector deserializes");
+    assert_eq!(decoded, selector);
+
+    let event = ironclaw_product_contracts::surface::ProductStreamEvent::RunCompletion(
+        ironclaw_product_contracts::run_completions::RunCompletionStreamEvent::Clear(
+            ironclaw_product_contracts::run_completions::RunCompletionClearEvent {
+                schema: ironclaw_product_contracts::run_completions::RUN_COMPLETION_CLEAR_SCHEMA
+                    .to_string(),
+                sequence: "7".to_string(),
+                notice_id: "rcn-a".to_string(),
+                thread_id: "thread-a".to_string(),
+                thread_tag: "rct-a".to_string(),
+                read_at: "2026-08-31T00:00:00Z".to_string(),
+            },
+        ),
+    );
+    let encoded = serde_json::to_value(&event).expect("event serializes");
+    assert_eq!(encoded["kind"], "run_completion");
+    assert_eq!(encoded["payload"]["type"], "clear");
+    let round: ironclaw_product_contracts::surface::ProductStreamEvent =
+        serde_json::from_value(encoded).expect("event deserializes");
+    assert_eq!(round, event);
+}

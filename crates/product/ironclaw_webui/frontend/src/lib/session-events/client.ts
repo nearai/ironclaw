@@ -20,7 +20,7 @@
 // This module is dynamically imported by its hooks so the ~4 KB it costs
 // stays out of the eager /chat closure (bundle budget).
 
-import { apiFetch } from "../api";
+import { mintSessionSocketTicket } from "../api";
 import {
   type SessionSelector,
   type SessionServerFrame,
@@ -38,6 +38,9 @@ const LIVENESS_DEADLINE_MS = 45_000;
 // Consecutive mint/upgrade failures with zero frames received before the
 // client degrades to the SSE fallback for the rest of the page's life.
 const MAX_CONSECUTIVE_CONNECT_FAILURES = 3;
+// Delay before resubscribing a selector the server failed retryably, so a
+// persistent condition cannot become a subscribe/error spin loop.
+const SUBSCRIPTION_RETRY_DELAY_MS = 2_000;
 
 export type SessionSubscriptionEvent = {
   cursor: string | null;
@@ -97,7 +100,8 @@ export class SessionEventClient {
     private readonly openSocket: (url: string) => WebSocket = (url) =>
       new WebSocket(url),
     private readonly mintTicket: () => Promise<MintResponse> = () =>
-      apiFetch(`/session/websocket-ticket`, { method: "POST" }),
+      mintSessionSocketTicket(),
+    private readonly subscriptionRetryDelayMs: number = SUBSCRIPTION_RETRY_DELAY_MS,
   ) {
     if (typeof window !== "undefined") {
       window.addEventListener("online", this.handleOnline);
@@ -226,6 +230,13 @@ export class SessionEventClient {
     } catch (_) {
       this.connecting = false;
       this.recordConnectFailure();
+      return;
+    }
+    if (this.disposed || this.degraded || this.registrations.size === 0) {
+      // Torn down (e.g. sign-out) while the mint was in flight: never open a
+      // socket with a ticket minted for a session the page has abandoned.
+      // The unconsumed ticket expires server-side.
+      this.connecting = false;
       return;
     }
     let socket: WebSocket;
@@ -377,25 +388,35 @@ export class SessionEventClient {
         if (typeof frame.last_cursor === "string") {
           registration.cursor = frame.last_cursor;
         }
+        const retryable = frame.retryable !== false;
         registration.handlers.onError?.({
           error: String(frame.error ?? "unavailable"),
           kind: String(frame.kind ?? "service_unavailable"),
-          retryable: frame.retryable !== false,
+          retryable,
           lastCursor:
             typeof frame.last_cursor === "string" ? frame.last_cursor : null,
         });
-        // Re-admit after a short delay through the ordinary connect path:
-        // the socket is still healthy, so just resubscribe this selector.
-        const socket = this.socket;
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(
-            subscribeFrame(
-              registration.subscriptionId,
-              registration.selector,
-              registration.cursor,
-            ),
-          );
+        if (!retryable) {
+          // The server says this selector cannot be admitted (revoked or
+          // foreign): stop resubscribing. The owner decides whether to
+          // rebase and register a fresh subscription.
+          this.registrations.delete(registration.subscriptionId);
+          if (this.registrations.size === 0) this.teardownSocket();
+          return;
         }
+        // Retryable: re-admit after a short delay so a persistently failing
+        // selector cannot spin subscribe/subscription_error at frame rate.
+        const subscriptionId = registration.subscriptionId;
+        setTimeout(() => {
+          const current = this.registrations.get(subscriptionId);
+          const socket = this.socket;
+          if (!current || !socket || socket.readyState !== WebSocket.OPEN) {
+            return;
+          }
+          socket.send(
+            subscribeFrame(subscriptionId, current.selector, current.cursor),
+          );
+        }, this.subscriptionRetryDelayMs);
         return;
       }
       case "reconnect_hint": {

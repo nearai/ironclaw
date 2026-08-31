@@ -44,6 +44,29 @@ pub enum CompletionSurface {
     WebAppPush,
 }
 
+/// Discriminant of [`CompletionDeliveryState`], for partition scans that
+/// select by state KIND without fabricating meaningless field values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionDeliveryStateKind {
+    PendingArbitration,
+    Granted,
+    Presented,
+    PushOwned,
+    NoExternalTarget,
+}
+
+impl CompletionDeliveryState {
+    pub fn kind(&self) -> CompletionDeliveryStateKind {
+        match self {
+            Self::PendingArbitration { .. } => CompletionDeliveryStateKind::PendingArbitration,
+            Self::Granted { .. } => CompletionDeliveryStateKind::Granted,
+            Self::Presented { .. } => CompletionDeliveryStateKind::Presented,
+            Self::PushOwned { .. } => CompletionDeliveryStateKind::PushOwned,
+            Self::NoExternalTarget { .. } => CompletionDeliveryStateKind::NoExternalTarget,
+        }
+    }
+}
+
 /// The delivery half of the notice state machine (§5.3). Every transition
 /// is a bounded CAS update; only a `PendingArbitration` record can become
 /// `PushOwned`, and only one replica can win that CAS.

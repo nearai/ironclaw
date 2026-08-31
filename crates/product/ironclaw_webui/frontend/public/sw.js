@@ -38,11 +38,15 @@ function openLedger() {
       return;
     }
     try {
-      const request = self.indexedDB.open(LEDGER_DB, 1);
+      // v2 adds the presentedAt index used for oldest-first pruning.
+      const request = self.indexedDB.open(LEDGER_DB, 2);
       request.onupgradeneeded = () => {
         const db = request.result;
-        if (!db.objectStoreNames.contains(LEDGER_STORE)) {
-          db.createObjectStore(LEDGER_STORE, { keyPath: "noticeId" });
+        const store = db.objectStoreNames.contains(LEDGER_STORE)
+          ? request.transaction.objectStore(LEDGER_STORE)
+          : db.createObjectStore(LEDGER_STORE, { keyPath: "noticeId" });
+        if (!store.indexNames.contains("presentedAt")) {
+          store.createIndex("presentedAt", "presentedAt");
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -100,7 +104,9 @@ function pruneLedger(store) {
     const count = store.count();
     count.onsuccess = () => {
       if (count.result <= LEDGER_LIMIT) return;
-      const cursor = store.openCursor();
+      // Oldest-presented first: primary-key order is the opaque noticeId,
+      // which would evict arbitrary (possibly recent) presentations.
+      const cursor = store.index("presentedAt").openCursor();
       let toDrop = count.result - LEDGER_LIMIT;
       cursor.onsuccess = () => {
         const current = cursor.result;

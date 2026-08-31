@@ -148,7 +148,6 @@ struct SubscriptionEntry {
     generation: u64,
     receiver: mpsc::Receiver<SubscriptionEmit>,
     task: tokio::task::JoinHandle<()>,
-    admitted: bool,
 }
 
 impl SubscriptionEntry {
@@ -166,19 +165,32 @@ async fn run_subscription(
     initial_cursor: Option<ProjectionCursor>,
     sender: mpsc::Sender<SubscriptionEmit>,
 ) {
+    // The admission ack confirms the RESUME POINT the subscription was
+    // admitted at — never the end of the first replayed batch. The batch's
+    // events queue after the ack, so a client that adopted a batch-end ack
+    // cursor and lost the socket before draining the queue would resume past
+    // events it never received.
+    let admitted_cursor = initial_cursor
+        .as_ref()
+        .and_then(|cursor| serde_json::to_string(cursor).ok());
     let mut driver = ProductStreamDriver::new(surface, selector, initial_cursor);
+    // Resume floor for fail-loud reporting: the last cursor the client has
+    // actually been handed (see `forward_stream_event`).
+    let mut last_forwarded = admitted_cursor.clone();
     match driver.open().await {
         Err(error) => {
-            let last_cursor = cursor_token_of(driver.last_cursor());
             let _ = sender
-                .send(SubscriptionEmit::Failed { error, last_cursor })
+                .send(SubscriptionEmit::Failed {
+                    error,
+                    last_cursor: last_forwarded,
+                })
                 .await;
             return;
         }
         Ok(first_events) => {
             if sender
                 .send(SubscriptionEmit::Admitted {
-                    cursor: cursor_token_of(driver.last_cursor()),
+                    cursor: admitted_cursor,
                 })
                 .await
                 .is_err()
@@ -186,7 +198,7 @@ async fn run_subscription(
                 return;
             }
             for envelope in first_events {
-                if !forward_stream_event(&sender, envelope).await {
+                if !forward_stream_event(&sender, envelope, &mut last_forwarded).await {
                     return;
                 }
             }
@@ -196,7 +208,7 @@ async fn run_subscription(
         match driver.next_step().await {
             DriverStep::Events(events) => {
                 for envelope in events {
-                    if !forward_stream_event(&sender, envelope).await {
+                    if !forward_stream_event(&sender, envelope, &mut last_forwarded).await {
                         return;
                     }
                 }
@@ -205,9 +217,11 @@ async fn run_subscription(
             // need no server frame.
             DriverStep::Idle => {}
             DriverStep::ServiceError(error) => {
-                let last_cursor = cursor_token_of(driver.last_cursor());
                 let _ = sender
-                    .send(SubscriptionEmit::Failed { error, last_cursor })
+                    .send(SubscriptionEmit::Failed {
+                        error,
+                        last_cursor: last_forwarded,
+                    })
                     .await;
                 return;
             }
@@ -219,11 +233,10 @@ async fn run_subscription(
                 // The per-subscription budget outlived the socket's own
                 // lifetime frame; report a retryable interruption so the
                 // client resumes from its cursor on the next socket.
-                let last_cursor = cursor_token_of(driver.last_cursor());
                 let _ = sender
                     .send(SubscriptionEmit::Failed {
                         error: ProductSurfaceError::unavailable(true),
-                        last_cursor,
+                        last_cursor: last_forwarded,
                     })
                     .await;
                 return;
@@ -232,38 +245,45 @@ async fn run_subscription(
     }
 }
 
-fn cursor_token_of(cursor: Option<&ProjectionCursor>) -> Option<String> {
-    cursor.and_then(|cursor| serde_json::to_string(cursor).ok())
-}
-
-/// Render one typed event through the shared browser codec and queue it.
-/// Returns `false` when the socket side hung up.
+/// Render one typed event through the shared browser codec and queue it,
+/// advancing `last_forwarded` on success. Returns `false` when the socket
+/// side hung up.
+///
+/// A codec failure fails LOUD: the driver's cursor has already advanced past
+/// the event, so silently continuing would hand the client later cursors and
+/// make the dropped event unrecoverable on resume. Reporting `Failed` with
+/// the last cursor the client actually received makes the client resubscribe
+/// from a position that re-renders the event (or surfaces a persistent
+/// serialization defect instead of hiding it).
 async fn forward_stream_event(
     sender: &mpsc::Sender<SubscriptionEmit>,
     envelope: ironclaw_product_contracts::surface::ProductStreamEventEnvelope,
+    last_forwarded: &mut Option<String>,
 ) -> bool {
-    let Some(browser) = codec::browser_frame(envelope) else {
+    let rendered = codec::browser_frame(envelope).and_then(|browser| {
+        let cursor = browser.cursor_token.clone();
+        browser.event_body().ok().map(|body| (cursor, body))
+    });
+    let Some((cursor, body)) = rendered else {
         tracing::debug!(
             target: "ironclaw_webui_v2::session_socket",
-            "failed to serialize session event body",
+            "session event body failed to serialize; failing the subscription",
         );
-        return true;
+        let _ = sender
+            .send(SubscriptionEmit::Failed {
+                error: ProductSurfaceError::unavailable(true),
+                last_cursor: last_forwarded.clone(),
+            })
+            .await;
+        return false;
     };
-    let cursor = browser.cursor_token.clone();
-    match browser.event_body() {
-        Ok(body) => sender
-            .send(SubscriptionEmit::Event { cursor, body })
-            .await
-            .is_ok(),
-        Err(error) => {
-            tracing::debug!(
-                target: "ironclaw_webui_v2::session_socket",
-                error = %error,
-                "failed to serialize session event body",
-            );
-            true
-        }
+    if let Some(cursor) = cursor.clone() {
+        *last_forwarded = Some(cursor);
     }
+    sender
+        .send(SubscriptionEmit::Event { cursor, body })
+        .await
+        .is_ok()
 }
 
 /// Poll every subscription queue in rotation order, active before pending,
@@ -438,7 +458,6 @@ async fn session_socket_loop(
                             generation: next_generation,
                             receiver,
                             task,
-                            admitted: false,
                         };
                         // A replacement authorizes first: it stages in
                         // `pending` and swaps in only on `Admitted`, so an
@@ -488,10 +507,9 @@ async fn session_socket_loop(
                             // generations. The displaced entry's queued
                             // frames drop with its receiver, so a stale
                             // generation can never deliver after the swap.
-                            let Some(mut entry) = pending.remove(&subscription_id) else {
+                            let Some(entry) = pending.remove(&subscription_id) else {
                                 continue;
                             };
-                            entry.admitted = true;
                             if let Some(stale) = active.insert(subscription_id.clone(), entry) {
                                 stale.cancel();
                             }
@@ -532,16 +550,9 @@ async fn session_socket_loop(
                     }
                 } else {
                     match emit {
-                        SubscriptionEmit::Admitted { cursor } => {
-                            if let Some(entry) = active.get_mut(&subscription_id) {
-                                entry.admitted = true;
-                            }
-                            Some(SessionServerFrame::subscribed(
-                                subscription_id,
-                                generation,
-                                cursor,
-                            ))
-                        }
+                        SubscriptionEmit::Admitted { cursor } => Some(
+                            SessionServerFrame::subscribed(subscription_id, generation, cursor),
+                        ),
                         SubscriptionEmit::Event { cursor, body } => Some(
                             SessionServerFrame::event(subscription_id, generation, cursor, body),
                         ),

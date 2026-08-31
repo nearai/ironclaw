@@ -49,6 +49,7 @@ import {
   maxSequenceForThread,
   noticeForRun,
   rebaseFromSnapshot,
+  resetRunCompletionStore,
   runCompletionSnapshot,
   unreadForThread,
 } from "./store";
@@ -85,6 +86,11 @@ export function stopRunCompletions() {
   stopCoordinationFn?.();
   stopCoordinationFn = null;
   watchingGrants = new Map();
+  // The badge cache is per-signed-in-owner state: clear it so a following
+  // sign-in never briefly renders the previous account's notices, and so a
+  // stale boot()/rebase() resolving after stop repopulates nothing visible
+  // (the next start rebases from the durable snapshot anyway).
+  resetRunCompletionStore();
 }
 
 async function boot() {

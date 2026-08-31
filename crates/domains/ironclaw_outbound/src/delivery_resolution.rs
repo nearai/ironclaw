@@ -306,6 +306,10 @@ mod tests {
             OutboundPushKind::FinalReply
         );
         assert_eq!(
+            RunNotificationEventKind::RunCompleted.delivery_kind(),
+            OutboundPushKind::RunCompletion
+        );
+        assert_eq!(
             RunNotificationEventKind::ProgressUpdate.delivery_kind(),
             OutboundPushKind::Progress
         );

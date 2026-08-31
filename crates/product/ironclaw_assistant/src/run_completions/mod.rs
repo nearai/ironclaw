@@ -141,10 +141,33 @@ impl RunCompletionSurfaceServices {
         owners
             .iter()
             .filter_map(|(tenant, user)| {
-                Some(RunCompletionOwner {
-                    tenant_id: ironclaw_host_api::ids::TenantId::new(tenant.clone()).ok()?,
-                    user_id: ironclaw_host_api::ids::UserId::new(user.clone()).ok()?,
-                })
+                let tenant_id = match ironclaw_host_api::ids::TenantId::new(tenant.clone()) {
+                    Ok(tenant_id) => tenant_id,
+                    Err(error) => {
+                        // Unreachable by construction: every entry was
+                        // inserted FROM typed ids in `wake_owner`. Logged
+                        // rather than silently skipped so a future
+                        // constructor change cannot hide dropped owners.
+                        tracing::debug!(
+                            target: "ironclaw::reborn::run_completions",
+                            %error,
+                            "tracked owner tenant id failed re-validation; skipping",
+                        );
+                        return None;
+                    }
+                };
+                let user_id = match ironclaw_host_api::ids::UserId::new(user.clone()) {
+                    Ok(user_id) => user_id,
+                    Err(error) => {
+                        tracing::debug!(
+                            target: "ironclaw::reborn::run_completions",
+                            %error,
+                            "tracked owner user id failed re-validation; skipping",
+                        );
+                        return None;
+                    }
+                };
+                Some(RunCompletionOwner { tenant_id, user_id })
             })
             .collect()
     }

@@ -65,8 +65,16 @@ pub(crate) fn parse_client_frame(
     if text.len() > MAX_CLIENT_FRAME_BYTES {
         return Err(SessionProtocolViolation::FrameTooLarge);
     }
-    let frame: SessionClientFrame =
-        serde_json::from_str(text).map_err(|_| SessionProtocolViolation::MalformedFrame)?;
+    let frame: SessionClientFrame = serde_json::from_str(text).map_err(|error| {
+        // Cause retained server-side (never the frame text — client
+        // input); the client only learns the sanitized violation.
+        tracing::debug!(
+            target: "ironclaw_webui_v2::session_socket",
+            error = %error,
+            "malformed session frame",
+        );
+        SessionProtocolViolation::MalformedFrame
+    })?;
     match &frame {
         SessionClientFrame::Subscribe {
             subscription_id,

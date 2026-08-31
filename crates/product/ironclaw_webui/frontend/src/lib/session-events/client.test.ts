@@ -66,6 +66,7 @@ function harness(options: { failMint?: boolean } = {}) {
         socket_path: "/api/webchat/v2/session/websocket",
       };
     },
+    0,
   );
   return { client, sockets, mintCount: () => mints };
 }
@@ -178,9 +179,40 @@ describe("SessionEventClient", () => {
     });
 
     expect(errors).toHaveLength(1);
+    // The retryable resubscribe is delayed (spin-loop protection); with the
+    // test harness's zero delay it lands on the next macrotask.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const resubscribe = JSON.parse(socket.sent[socket.sent.length - 1]);
     expect(resubscribe.type).toBe("subscribe");
     expect(resubscribe.after_cursor).toBe('"safe-cursor"');
+  });
+
+  it("drops a subscription the server rejects as non-retryable", async () => {
+    const { client, sockets } = harness();
+    const errors: Array<{ retryable: boolean }> = [];
+    client.subscribe(
+      { kind: "thread", thread_id: "thread-a" },
+      { onEvent: () => {}, onError: (error) => errors.push(error) },
+    );
+    await settle();
+    const socket = sockets[0];
+    socket.open();
+    const subId = JSON.parse(socket.sent[0]).subscription_id as string;
+    socket.receive({ type: "subscribed", subscription_id: subId, generation: 1 });
+    const sentBefore = socket.sent.length;
+    socket.receive({
+      type: "subscription_error",
+      subscription_id: subId,
+      generation: 1,
+      error: "forbidden",
+      kind: "unauthorized",
+      retryable: false,
+      last_cursor: null,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(errors).toHaveLength(1);
+    expect(errors[0].retryable).toBe(false);
+    expect(socket.sent.length).toBe(sentBefore);
   });
 
   it("reconnects on lifetime expiry and resumes each cursor", async () => {

@@ -81,12 +81,22 @@ export function useRunCompletions({ enabled = true, activeThreadId = null } = {}
         id: `run-completion:${notice.notice_id}`,
         runId: notice.run_id,
         href: `/chat/${encodeURIComponent(notice.thread_id)}`,
+        // The panel renders title/body/timeLabel; completion rows carry the
+        // fixed generic copy only (no generated content).
         title:
           notice.unread_count_for_thread > 1
             ? t("runCompletions.listItemMany", {
                 count: notice.unread_count_for_thread,
               })
             : t("runCompletions.listItemOne"),
+        body: t("runCompletions.toastOne"),
+        timeLabel: notice.completed_at
+          ? new Date(notice.completed_at).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : null,
+        read: false,
         timestamp: notice.completed_at || null,
         kind: "run-completion",
       })),

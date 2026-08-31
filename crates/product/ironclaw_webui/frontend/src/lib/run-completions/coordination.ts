@@ -235,7 +235,12 @@ export function profileIntentFor(notice: RunCompletionNotice): ProfileIntentDeci
 export function claimOnce(key: string): boolean {
   const fullKey = `${LEDGER_PREFIX}${key}`;
   try {
-    if (window.localStorage.getItem(fullKey)) return false;
+    const existing = Number(window.localStorage.getItem(fullKey) ?? Number.NaN);
+    // An expired claim no longer blocks: prune-on-write alone would let one
+    // stale key reject the same retry forever.
+    if (Number.isFinite(existing) && existing >= nowMs() - LEDGER_TTL_MS) {
+      return false;
+    }
     window.localStorage.setItem(fullKey, String(nowMs()));
     pruneLedger();
     return true;

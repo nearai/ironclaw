@@ -151,7 +151,17 @@ pub async fn acknowledge(
     let notice = owned_notice(services, &owner, &request.notice_id).await?;
     match request.outcome {
         RunCompletionAcknowledgeOutcome::ReplyRendered => {
-            let browser_instance_id = granted_browser(&notice, &request.grant_id);
+            // Read evidence must name the browser the grant was issued to; a
+            // stale or foreign grant id cannot mint evidence with a forged
+            // empty identity. The acknowledger falls back to the
+            // reply-observed intent path, which carries its own identity.
+            let Some(browser_instance_id) = granted_browser(&notice, &request.grant_id) else {
+                return Err(ProductSurfaceError::from_status(
+                    ironclaw_product_contracts::surface::ProductSurfaceErrorCode::Conflict,
+                    409,
+                    true,
+                ));
+            };
             let read = services
                 .notices
                 .mark_read(
@@ -207,14 +217,16 @@ pub async fn acknowledge(
     }
 }
 
-fn granted_browser(notice: &RunCompletionNotice, grant_id: &str) -> String {
+/// The browser the outstanding grant names, or `None` when `grant_id` does
+/// not match the outstanding grant (stale, replaced, or foreign).
+fn granted_browser(notice: &RunCompletionNotice, grant_id: &str) -> Option<String> {
     match &notice.delivery {
         super::records::CompletionDeliveryState::Granted {
             grant_id: outstanding,
             browser_instance_id,
             ..
-        } if outstanding == grant_id => browser_instance_id.clone(),
-        _ => String::new(),
+        } if outstanding == grant_id => Some(browser_instance_id.clone()),
+        _ => None,
     }
 }
 
@@ -285,11 +297,17 @@ pub async fn unread_view(
         .await
         .map_err(surface_error)?;
     let mut notices = Vec::with_capacity(unread.len());
-    let mut resume_sequence = 0_u64;
     for notice in &unread {
-        resume_sequence = resume_sequence.max(notice.sequence);
         notices.push(services.hub.notice_event(&owner, notice).await);
     }
+    // The owner's stream head, not the unread maximum: resuming from an
+    // unread-only maximum would replay newer already-read notices, and an
+    // empty snapshot would reset the subscription to origin.
+    let resume_sequence = services
+        .notices
+        .head_sequence(&owner)
+        .await
+        .map_err(surface_error)?;
     Ok(RunCompletionUnreadResponse {
         notices,
         resume_sequence: resume_sequence.to_string(),

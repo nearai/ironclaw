@@ -329,13 +329,24 @@ impl CompletionPushFallback for RunCompletionExternalDelivery {
             Err(error) => return Err(error),
         }
         // Grouped copy count: bounded scan, floor of 1 (this notice).
-        let unread_count_for_thread = self
+        let unread_count_for_thread = match self
             .notices
             .unread_for_thread(owner, &notice.thread_id, UNREAD_COUNT_SCAN_LIMIT)
             .await
-            .map(|unread| unread.len().min(usize::from(u16::MAX)) as u16)
-            .unwrap_or(1)
-            .max(1);
+        {
+            Ok(unread) => u16::try_from(unread.len()).unwrap_or(u16::MAX).max(1),
+            Err(error) => {
+                // silent-ok: the count only shapes grouped push copy; the
+                // push itself still goes out. Logged for the wrong-badge
+                // trace.
+                tracing::debug!(
+                    target: TRACE_TARGET,
+                    %error,
+                    "unread count unavailable for push copy; using 1",
+                );
+                1
+            }
+        };
         // Ownership is durable; ordinary outbound attempt semantics decide
         // delivered/failed/unknown from here (§5.3). A late browser intent
         // cannot recall possible provider egress.

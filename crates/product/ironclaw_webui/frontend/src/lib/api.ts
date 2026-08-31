@@ -740,14 +740,14 @@ export function eventStreamRequest({ threadId, connectionId } = {}) {
 // long-lived bearer never appears in a WebSocket URL, browser history,
 // or proxy access log.
 export async function mintSessionSocketTicket() {
-  return apiFetch(`/session/websocket-ticket`, { method: "POST" });
+  return apiFetch(`${V2_BASE}/session/websocket-ticket`, { method: "POST" });
 }
 
 // --- Run-completion notifications (authenticated HTTP mutations; the
 // session socket only ever carries the read-only event stream) ---
 
 export async function fetchUnreadRunCompletions() {
-  return apiFetch(`/run-completions/unread`);
+  return apiFetch(`${V2_BASE}/run-completions/unread`);
 }
 
 export async function submitRunCompletionIntent({
@@ -758,7 +758,7 @@ export async function submitRunCompletionIntent({
   focusEpoch,
   intent,
 }) {
-  return apiFetch(`/run-completions/intent`, {
+  return apiFetch(`${V2_BASE}/run-completions/intent`, {
     method: "POST",
     body: JSON.stringify({
       notice_id: noticeId,
@@ -777,7 +777,7 @@ export async function acknowledgeRunCompletion({
   stateRevision,
   outcome,
 }) {
-  return apiFetch(`/run-completions/acknowledge`, {
+  return apiFetch(`${V2_BASE}/run-completions/acknowledge`, {
     method: "POST",
     body: JSON.stringify({
       notice_id: noticeId,
@@ -793,7 +793,7 @@ export async function reportRunCompletionThreadRead({
   throughSequence,
   browserInstanceId,
 }) {
-  return apiFetch(`/run-completions/thread-read`, {
+  return apiFetch(`${V2_BASE}/run-completions/thread-read`, {
     method: "POST",
     body: JSON.stringify({
       thread_id: threadId,

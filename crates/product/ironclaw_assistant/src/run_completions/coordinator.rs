@@ -25,7 +25,8 @@ use tokio::sync::{Notify, watch};
 use super::RunCompletionSurfaceServices;
 use super::ingest::ARBITRATION_WINDOW_MS;
 use super::records::{
-    CompletionDeliveryState, CompletionIntentRecord, CompletionSurface, RunCompletionNotice,
+    CompletionDeliveryState, CompletionDeliveryStateKind, CompletionIntentRecord,
+    CompletionSurface, RunCompletionNotice,
 };
 use super::store::{RunCompletionOwner, RunCompletionStoreError};
 
@@ -169,18 +170,17 @@ impl RunCompletionCoordinator {
             }
         };
 
+        let mut saturated = false;
         let pending = self
             .services
             .notices
             .in_delivery_state(
                 owner,
-                &CompletionDeliveryState::PendingArbitration {
-                    closes_at: now,
-                    grants_issued: 0,
-                },
+                CompletionDeliveryStateKind::PendingArbitration,
                 DUE_SCAN_LIMIT,
             )
             .await?;
+        saturated |= pending.len() >= DUE_SCAN_LIMIT;
         for notice in pending {
             let CompletionDeliveryState::PendingArbitration { closes_at, .. } = notice.delivery
             else {
@@ -199,19 +199,9 @@ impl RunCompletionCoordinator {
         let granted = self
             .services
             .notices
-            .in_delivery_state(
-                owner,
-                &CompletionDeliveryState::Granted {
-                    grant_id: String::new(),
-                    browser_instance_id: String::new(),
-                    surface: CompletionSurface::InApp,
-                    state_revision: 0,
-                    expires_at: now,
-                    grants_issued: 0,
-                },
-                DUE_SCAN_LIMIT,
-            )
+            .in_delivery_state(owner, CompletionDeliveryStateKind::Granted, DUE_SCAN_LIMIT)
             .await?;
+        saturated |= granted.len() >= DUE_SCAN_LIMIT;
         for notice in granted {
             let CompletionDeliveryState::Granted {
                 grant_id,
@@ -265,6 +255,15 @@ impl RunCompletionCoordinator {
                     Err(error) => return Err(error),
                 }
             }
+        }
+        if saturated {
+            // A full page means the scan may not have seen every due record.
+            // Report immediate residual work so the owner stays tracked (and
+            // its durable due entry stays) and the next tick drains more —
+            // otherwise a >DUE_SCAN_LIMIT backlog whose first page settled
+            // without future deadlines would be untracked with the surplus
+            // stranded until an unrelated wake.
+            return Ok(Some(now));
         }
         Ok(next)
     }

@@ -4783,27 +4783,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
             Arc::new(ironclaw_assistant::run_completions::coordinator::DenyLocalOsIntents) as _,
         ),
     };
-    let run_completion_coordinator_handle = Some(
-        ironclaw_assistant::run_completions::coordinator::spawn_run_completion_coordinator(
-            Arc::new(
-                ironclaw_assistant::run_completions::coordinator::RunCompletionCoordinator::new(
-                    Arc::clone(&run_completions),
-                    run_completion_push_fallback,
-                    run_completion_local_os,
-                ),
-            ),
-            Arc::clone(&run_completions.wake),
-            // Boot reconciliation reads this deployment tenant's durable
-            // due-owner registry (§5.4); the user half only addresses the
-            // tenant-shared mount.
-            Some(
-                ironclaw_assistant::run_completions::store::RunCompletionOwner {
-                    tenant_id: validated_identity.tenant_id.clone(),
-                    user_id: actor_user_id.clone(),
-                },
-            ),
-        ),
-    );
 
     let ironhub_link_state = Arc::clone(&services.ironhub_link_state);
     let ironhub_link_service = match ironhub_agent_shared_key {
@@ -4833,6 +4812,30 @@ pub(crate) async fn build_runtime_with_resource_governor(
         }
         None => None,
     };
+
+    // Spawned after the last fallible assembly step: a build error must not
+    // leave an orphaned coordinator whose handle nobody will shut down.
+    let run_completion_coordinator_handle = Some(
+        ironclaw_assistant::run_completions::coordinator::spawn_run_completion_coordinator(
+            Arc::new(
+                ironclaw_assistant::run_completions::coordinator::RunCompletionCoordinator::new(
+                    Arc::clone(&run_completions),
+                    run_completion_push_fallback,
+                    run_completion_local_os,
+                ),
+            ),
+            Arc::clone(&run_completions.wake),
+            // Boot reconciliation reads this deployment tenant's durable
+            // due-owner registry (§5.4); the user half only addresses the
+            // tenant-shared mount.
+            Some(
+                ironclaw_assistant::run_completions::store::RunCompletionOwner {
+                    tenant_id: validated_identity.tenant_id.clone(),
+                    user_id: actor_user_id.clone(),
+                },
+            ),
+        ),
+    );
 
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),

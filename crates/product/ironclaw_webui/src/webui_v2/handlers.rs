@@ -1597,8 +1597,19 @@ fn build_sse_stream(
             match step {
                 DriverStep::Events(events) => {
                     for envelope in events {
-                        if let Some(event) = sse_event_from_stream(envelope) {
-                            yield Ok(event);
+                        // Fail loud on a codec failure: the driver's cursor
+                        // has advanced past the event, so silently skipping
+                        // would make it unrecoverable on resume. The browser
+                        // reconnects from its last received `id:` and the
+                        // event re-renders (or the defect surfaces).
+                        match sse_event_from_stream(envelope) {
+                            Some(event) => yield Ok(event),
+                            None => {
+                                yield Ok(sse_error_event(
+                                    ProductSurfaceError::unavailable(true),
+                                ));
+                                return;
+                            }
                         }
                     }
                 }

@@ -81,11 +81,6 @@ impl ProductStreamDriver {
         }
     }
 
-    /// The cursor of the last delivered event, if any batch carried one.
-    pub(crate) fn last_cursor(&self) -> Option<&ProjectionCursor> {
-        self.after_cursor.as_ref()
-    }
-
     fn remaining(&self) -> Duration {
         self.lifetime.saturating_sub(self.started_at.elapsed())
     }

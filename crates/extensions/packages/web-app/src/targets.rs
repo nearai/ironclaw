@@ -128,6 +128,10 @@ mod tests {
         assert!(entry.capabilities.notifications);
         assert!(entry.capabilities.gate_prompts);
         assert!(entry.capabilities.auth_prompts);
+        assert!(
+            entry.capabilities.run_completions,
+            "the web app is the ONLY run-completion push target (§7.9)"
+        );
         assert!(!entry.capabilities.progress);
         let (tenant, user) =
             decode_web_app_target_ref(entry.destination.as_str()).expect("decodes");

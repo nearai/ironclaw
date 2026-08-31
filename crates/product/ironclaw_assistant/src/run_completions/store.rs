@@ -25,8 +25,9 @@ use ironclaw_product_contracts::run_completions::{
 };
 
 use super::records::{
-    CompletionDeliveryState, CompletionIntentRecord, CompletionReadEvidence, CompletionReadState,
-    CompletionSurface, RUN_COMPLETION_NOTICE_VERSION, RunCompletionNotice,
+    CompletionDeliveryState, CompletionDeliveryStateKind, CompletionIntentRecord,
+    CompletionReadEvidence, CompletionReadState, CompletionSurface, RUN_COMPLETION_NOTICE_VERSION,
+    RunCompletionNotice,
 };
 
 /// The per-user mount alias this store lives under. Registered by
@@ -216,13 +217,13 @@ where
         format!("{}\u{1f}{}", owner.owner_key(), u8::from(unread))
     }
 
-    fn state_partition(owner: &RunCompletionOwner, state: &CompletionDeliveryState) -> String {
+    fn state_partition(owner: &RunCompletionOwner, state: CompletionDeliveryStateKind) -> String {
         let state_kind = match state {
-            CompletionDeliveryState::PendingArbitration { .. } => "pending",
-            CompletionDeliveryState::Granted { .. } => "granted",
-            CompletionDeliveryState::Presented { .. } => "presented",
-            CompletionDeliveryState::PushOwned { .. } => "push_owned",
-            CompletionDeliveryState::NoExternalTarget { .. } => "no_external_target",
+            CompletionDeliveryStateKind::PendingArbitration => "pending",
+            CompletionDeliveryStateKind::Granted => "granted",
+            CompletionDeliveryStateKind::Presented => "presented",
+            CompletionDeliveryStateKind::PushOwned => "push_owned",
+            CompletionDeliveryStateKind::NoExternalTarget => "no_external_target",
         };
         format!("{}\u{1f}{state_kind}", owner.owner_key())
     }
@@ -257,7 +258,7 @@ where
             )
             .with_indexed(
                 Self::index_key(STATE_PARTITION_KEY)?,
-                IndexValue::Text(Self::state_partition(owner, &notice.delivery)),
+                IndexValue::Text(Self::state_partition(owner, notice.delivery.kind())),
             )
             .with_indexed(
                 Self::index_key(THREAD_PARTITION_KEY)?,
@@ -481,6 +482,31 @@ where
         Ok(owners)
     }
 
+    /// The owner's current stream head: the greatest allocated sequence, or
+    /// 0 when no notice was ever created. The unread view returns this as
+    /// `resume_sequence` so a subscription resumes strictly after everything
+    /// the snapshot could have reflected — an unread-only maximum would
+    /// replay newer already-read notices, and an empty snapshot would reset
+    /// to origin.
+    pub async fn head_sequence(
+        &self,
+        owner: &RunCompletionOwner,
+    ) -> Result<u64, RunCompletionStoreError> {
+        let scope = owner.resource_scope();
+        let path = Self::sequence_path()?;
+        let Some(entry) = self
+            .filesystem
+            .get(&scope, &path)
+            .await
+            .map_err(|error| RunCompletionStoreError::backend("sequence read", error))?
+        else {
+            return Ok(0);
+        };
+        let document: SequenceDocument = serde_json::from_slice(&entry.entry.body)
+            .map_err(|error| RunCompletionStoreError::backend("sequence decode", error))?;
+        Ok(document.next.saturating_sub(1))
+    }
+
     /// Idempotently create one notice. Duplicate journal delivery (or a
     /// racing replica) observes the existing record and rewrites nothing.
     pub async fn create_notice(
@@ -688,6 +714,9 @@ where
 
     /// Pending → Granted (§5.3). Fails `Conflict` from any other state so
     /// racing coordinators observe exactly one issued grant.
+    // allow-exemption: grant issuance names every §5.3 grant field once at
+    // the single transition seam; bundling them into a struct would add a
+    // mirror of `CompletionDeliveryState::Granted` with no second caller.
     #[allow(clippy::too_many_arguments)]
     pub async fn issue_grant(
         &self,
@@ -960,7 +989,7 @@ where
     pub async fn in_delivery_state(
         &self,
         owner: &RunCompletionOwner,
-        state: &CompletionDeliveryState,
+        state: CompletionDeliveryStateKind,
         limit: usize,
     ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
         self.query_partition(
@@ -1007,6 +1036,8 @@ pub trait RunCompletionNotices: Send + Sync {
         read_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError>;
 
+    // allow-exemption: trait mirror of the grant-issuance seam above; the
+    // same single-call-site rationale applies.
     #[allow(clippy::too_many_arguments)]
     async fn issue_grant(
         &self,
@@ -1072,7 +1103,7 @@ pub trait RunCompletionNotices: Send + Sync {
     async fn in_delivery_state(
         &self,
         owner: &RunCompletionOwner,
-        state: &CompletionDeliveryState,
+        state: CompletionDeliveryStateKind,
         limit: usize,
     ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError>;
 
@@ -1094,6 +1125,13 @@ pub trait RunCompletionNotices: Send + Sync {
         &self,
         scope_owner: &RunCompletionOwner,
     ) -> Result<Vec<RunCompletionOwner>, RunCompletionStoreError>;
+
+    /// The owner's current stream head (greatest allocated sequence; 0 when
+    /// none), for `resume_sequence` in the unread view.
+    async fn head_sequence(
+        &self,
+        owner: &RunCompletionOwner,
+    ) -> Result<u64, RunCompletionStoreError>;
 }
 
 #[async_trait::async_trait]
@@ -1234,7 +1272,7 @@ where
     async fn in_delivery_state(
         &self,
         owner: &RunCompletionOwner,
-        state: &CompletionDeliveryState,
+        state: CompletionDeliveryStateKind,
         limit: usize,
     ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
         RunCompletionNoticeStore::in_delivery_state(self, owner, state, limit).await
@@ -1259,6 +1297,13 @@ where
         scope_owner: &RunCompletionOwner,
     ) -> Result<Vec<RunCompletionOwner>, RunCompletionStoreError> {
         RunCompletionNoticeStore::due_owners(self, scope_owner).await
+    }
+
+    async fn head_sequence(
+        &self,
+        owner: &RunCompletionOwner,
+    ) -> Result<u64, RunCompletionStoreError> {
+        RunCompletionNoticeStore::head_sequence(self, owner).await
     }
 }
 
@@ -1535,10 +1580,7 @@ mod tests {
         let pending = store
             .in_delivery_state(
                 &owner_a,
-                &CompletionDeliveryState::PendingArbitration {
-                    closes_at: Utc::now(),
-                    grants_issued: 0,
-                },
+                CompletionDeliveryStateKind::PendingArbitration,
                 250,
             )
             .await

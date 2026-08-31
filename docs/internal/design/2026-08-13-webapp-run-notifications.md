@@ -541,7 +541,7 @@ means the chosen browser profile has a usable host-owned delivery registration.
 
 ### 7.1 Transport decision
 
-Do not add `/notifications/run-completions/events`, another route-specific SSE
+Do not add `/api/webchat/v2/run-completions/events`, another route-specific SSE
 hook, or another string convention inside `stream_id`. Add one authenticated,
 app-wide transport:
 
@@ -827,9 +827,9 @@ All writes use authenticated HTTP handlers that adapt to
 WebSocket frames:
 
 ```text
-POST /api/webchat/v2/notifications/run-completions/intents
-POST /api/webchat/v2/notifications/run-completions/acknowledgements
-POST /api/webchat/v2/notifications/run-completions/thread-read
+POST /api/webchat/v2/run-completions/intent
+POST /api/webchat/v2/run-completions/acknowledge
+POST /api/webchat/v2/run-completions/thread-read
 ```
 
 The product operation IDs remain:
@@ -1332,7 +1332,7 @@ arbitration:
 
 | Shape | Advantages | Costs / decision |
 |---|---|---|
-| Keep thread SSE and add `/notifications/run-completions/events` | Smallest immediate diff | Repeats route, hook, connection, cursor, and retry machinery; preserves the shallow string selector; rejected |
+| Keep thread SSE and add `/api/webchat/v2/run-completions/events` | Smallest immediate diff | Repeats route, hook, connection, cursor, and retry machinery; preserves the shallow string selector; rejected |
 | One session SSE carrying every event | Server-to-client semantics fit events | Dynamic thread subscriptions require reconnect/query mutation or over-delivery; independent stream failures become awkward; rejected |
 | Read-only session WebSocket with typed logical subscriptions | One connection per page, dynamic selectors, independent cursors, shared thread/notification transport | Requires a bounded control protocol and staged migration; selected |
 

@@ -137,8 +137,11 @@ export function maxSequenceForThread(threadId: string): string | null {
   return max;
 }
 
-export function resetRunCompletionStoreForTests() {
+/** Clear all cached notices (sign-out / orchestrator stop, and tests). */
+export function resetRunCompletionStore() {
   noticesById = new Map();
   resumeSequence = "0";
   rebuildSnapshot();
 }
+
+export const resetRunCompletionStoreForTests = resetRunCompletionStore;

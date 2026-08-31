@@ -732,3 +732,43 @@ async fn deliver_rejects_oversized_workspace_file_before_egress() {
     ));
     assert!(egress.requests.lock().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn run_completion_parts_are_reported_unsupported_not_rendered() {
+    // §7.9: completion pushes are exclusive to the web-app channel; a typed
+    // completion part reaching a vendor adapter is a coordinator bug and is
+    // reported honestly instead of being rendered as text.
+    let egress = ScriptedEgress::new(vec![]);
+    let report = TelegramChannelAdapter::default()
+        .deliver(
+            envelope(
+                vec![OutboundPart::RunCompletion(Box::new(
+                    ironclaw_extension_contracts::channel_adapter::RunCompletionNoticeView {
+                        notice_id: "rcn-test".to_string(),
+                        thread_id: ironclaw_host_api::ids::ThreadId::new("thread-rc")
+                            .expect("thread id"),
+                        opaque_thread_tag: "rct-test".to_string(),
+                        unread_count_for_thread: 1,
+                    },
+                ))],
+                None,
+            ),
+            &egress,
+        )
+        .await
+        .expect("deliver reports");
+    assert_eq!(report.parts.len(), 1);
+    assert!(
+        matches!(
+            &report.parts[0],
+            PartDeliveryOutcome::Permanent { reason }
+                if reason.contains("not supported")
+        ),
+        "unexpected outcome: {:?}",
+        report.parts[0]
+    );
+    assert!(
+        egress.requests.lock().unwrap().is_empty(),
+        "no vendor call may be attempted for an unsupported part"
+    );
+}

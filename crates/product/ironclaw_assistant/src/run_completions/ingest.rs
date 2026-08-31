@@ -184,8 +184,11 @@ impl RunCompletionIngest {
                     retryable: true,
                     reason,
                 },
+                // A shape rejection cannot heal by replay; advancing with a
+                // sanitized anomaly beats wedging the shared cursor, same as
+                // `create_notice` below.
                 other => CompletionIngestError {
-                    retryable: true,
+                    retryable: false,
                     reason: other.to_string(),
                 },
             })?;
@@ -240,5 +243,173 @@ impl RunCompletionIngest {
                 Ok(CompletionIngestOutcome::AlreadyRecorded)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_completions::RunCompletionSurfaceServices;
+    use crate::run_completions::store::{RunCompletionNoticeStore, RunCompletionNotices};
+    use crate::run_completions::stream::RunCompletionStreamHub;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::ids::{AgentId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_host_api::resource::ResourceScope;
+    use ironclaw_threads::{
+        AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
+        MessageContent,
+    };
+
+    fn services() -> Arc<RunCompletionSurfaceServices> {
+        let store = Arc::new(RunCompletionNoticeStore::new(Arc::new(
+            ScopedFilesystem::new(Arc::new(InMemoryBackend::new()), |scope: &ResourceScope| {
+                MountView::new(vec![
+                    MountGrant::new(
+                        MountAlias::new(crate::run_completions::store::RUN_NOTICES_MOUNT_ALIAS)?,
+                        VirtualPath::new(format!(
+                            "/tenants/{}/users/{}/run-notices",
+                            scope.tenant_id, scope.user_id
+                        ))?,
+                        MountPermissions::read_write_list_delete(),
+                    ),
+                    MountGrant::new(
+                        MountAlias::new("/tenant-shared")?,
+                        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id))?,
+                        MountPermissions::read_write(),
+                    ),
+                ])
+            }),
+        ))) as Arc<dyn RunCompletionNotices>;
+        let hub = Arc::new(RunCompletionStreamHub::new(Arc::clone(&store)));
+        Arc::new(RunCompletionSurfaceServices::new(store, hub))
+    }
+
+    fn scope(thread_id: &ThreadId) -> TurnScope {
+        TurnScope::new_with_owner(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            Some(AgentId::new("agent-alpha").expect("agent")),
+            None,
+            thread_id.clone(),
+            Some(UserId::new("user-alpha").expect("user")),
+        )
+    }
+
+    fn observation(run_id: TurnRunId, thread_id: &ThreadId) -> CompletionObservation {
+        CompletionObservation {
+            run_id,
+            scope: scope(thread_id),
+            owner_user_id: UserId::new("user-alpha").expect("user"),
+            completed_at: Utc::now(),
+        }
+    }
+
+    async fn seeded_thread(
+        threads: &InMemorySessionThreadService,
+        thread_id: &str,
+    ) -> (ThreadId, ThreadScope) {
+        let thread_id = ThreadId::new(thread_id).expect("thread id");
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            agent_id: AgentId::new("agent-alpha").expect("agent"),
+            project_id: None,
+            owner_user_id: Some(UserId::new("user-alpha").expect("user")),
+            mission_id: None,
+        };
+        threads
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "user-alpha".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread ensured");
+        (thread_id, thread_scope)
+    }
+
+    #[tokio::test]
+    async fn eligible_completion_creates_one_notice_and_replay_is_idempotent() {
+        let services = services();
+        let threads = InMemorySessionThreadService::default();
+        let (thread_id, thread_scope) = seeded_thread(&threads, "thread-ingest").await;
+        let run_id = TurnRunId::from_uuid(uuid::Uuid::new_v4());
+        threads
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                scope: thread_scope,
+                thread_id: thread_id.clone(),
+                turn_run_id: run_id.to_string(),
+                content: MessageContent::text("final reply"),
+            })
+            .await
+            .expect("finalized reply appended");
+        let ingest = RunCompletionIngest::new(Arc::clone(&services), Arc::new(threads));
+
+        let first = ingest
+            .ingest(observation(run_id, &thread_id))
+            .await
+            .expect("ingest succeeds");
+        assert_eq!(first, CompletionIngestOutcome::NoticeCreated);
+        // Duplicate journal delivery converges on the same record.
+        let replay = ingest
+            .ingest(observation(run_id, &thread_id))
+            .await
+            .expect("replay succeeds");
+        assert_eq!(replay, CompletionIngestOutcome::AlreadyRecorded);
+        let owner = RunCompletionOwner {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            user_id: UserId::new("user-alpha").expect("user"),
+        };
+        let unread = services
+            .notices
+            .unread_snapshot(&owner)
+            .await
+            .expect("snapshot");
+        assert_eq!(unread.len(), 1, "exactly one notice per run");
+        assert_eq!(unread[0].run_id, run_id.to_string());
+        assert_eq!(
+            unread[0].agent_id.as_deref(),
+            Some("agent-alpha"),
+            "the push fallback needs the typed scope halves"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_thread_is_ineligible_not_an_error() {
+        let services = services();
+        let threads = InMemorySessionThreadService::default();
+        let ingest = RunCompletionIngest::new(Arc::clone(&services), Arc::new(threads));
+        let thread_id = ThreadId::new("thread-none").expect("thread id");
+        let outcome = ingest
+            .ingest(observation(
+                TurnRunId::from_uuid(uuid::Uuid::new_v4()),
+                &thread_id,
+            ))
+            .await
+            .expect("ingest resolves");
+        assert_eq!(
+            outcome,
+            CompletionIngestOutcome::Ineligible,
+            "a thread the owner cannot see never notifies"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_run_without_finalized_reply_records_anomaly_and_advances() {
+        let services = services();
+        let threads = InMemorySessionThreadService::default();
+        let (thread_id, _thread_scope) = seeded_thread(&threads, "thread-noreply").await;
+        let ingest = RunCompletionIngest::new(Arc::clone(&services), Arc::new(threads));
+        let outcome = ingest
+            .ingest(observation(
+                TurnRunId::from_uuid(uuid::Uuid::new_v4()),
+                &thread_id,
+            ))
+            .await
+            .expect("ingest resolves");
+        assert_eq!(outcome, CompletionIngestOutcome::NoFinalReply);
+        assert_eq!(ingest.anomaly_count(), 1, "sanitized anomaly is counted");
     }
 }

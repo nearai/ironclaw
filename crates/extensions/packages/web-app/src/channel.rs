@@ -163,6 +163,22 @@ impl ChannelDelivery for WebAppChannelAdapter {
             }
         }
 
+        // §7.10: a typed run-completion push is a complete, fixed-copy
+        // payload. Mixing it with free-text parts would send ONE push and
+        // then report `Sent` for text the push service never accepted —
+        // forged delivery evidence. Reject the mixed shape outright.
+        if run_completion.is_some() && lines.iter().any(|line| !line.is_empty()) {
+            return Ok(DeliveryReport::from_parts(
+                envelope
+                    .parts
+                    .iter()
+                    .map(|_| PartDeliveryOutcome::Permanent {
+                        reason: "run-completion pushes cannot be mixed with other parts"
+                            .to_string(),
+                    })
+                    .collect(),
+            ));
+        }
         let has_deliverable = part_supported.iter().any(Result::is_ok);
         if !has_deliverable {
             return Ok(DeliveryReport::from_parts(
@@ -369,5 +385,117 @@ fn fold_tally(tally: &FanOutTally) -> PartDeliveryOutcome {
     }
     PartDeliveryOutcome::Permanent {
         reason: "no push delivery was attempted".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_extension_contracts::channel_adapter::{
+        OutboundEnvelope, OutboundTarget, OutboundVisibility, RunCompletionNoticeView,
+    };
+    use ironclaw_extension_contracts::external::ExternalConversationRef;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct ScriptedEgress {
+        requests: Mutex<Vec<RestrictedEgressRequest>>,
+    }
+
+    #[async_trait]
+    impl RestrictedEgress for ScriptedEgress {
+        async fn send(
+            &self,
+            request: RestrictedEgressRequest,
+        ) -> Result<
+            ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
+            RestrictedEgressError,
+        > {
+            self.requests.lock().expect("lock").push(request);
+            Ok(
+                ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                    status: 201,
+                    body: Vec::new(),
+                },
+            )
+        }
+    }
+
+    fn envelope(parts: Vec<OutboundPart>) -> OutboundEnvelope {
+        OutboundEnvelope {
+            target: OutboundTarget {
+                conversation: ExternalConversationRef::new(None, "web-app", None, None)
+                    .expect("conversation"),
+                thread_anchor: None,
+            },
+            parts,
+            reply_context: None,
+            registrations: Vec::new(),
+            visibility: OutboundVisibility::Public,
+        }
+    }
+
+    fn completion_part() -> OutboundPart {
+        OutboundPart::RunCompletion(Box::new(RunCompletionNoticeView {
+            notice_id: "rcn-test".to_string(),
+            thread_id: ironclaw_host_api::ids::ThreadId::new("thread-rc").expect("thread id"),
+            opaque_thread_tag: "rct-test".to_string(),
+            unread_count_for_thread: 2,
+        }))
+    }
+
+    #[tokio::test]
+    async fn mixed_completion_and_text_envelopes_are_rejected_wholesale() {
+        // §7.10: one push per envelope. Reporting `Sent` for a text part the
+        // push service never separately accepted would forge delivery
+        // evidence, so the mixed shape fails as Permanent for every part.
+        let egress = ScriptedEgress::default();
+        let report = WebAppChannelAdapter::new()
+            .deliver(
+                envelope(vec![
+                    completion_part(),
+                    OutboundPart::Text("free text".to_string()),
+                ]),
+                &egress,
+            )
+            .await
+            .expect("deliver reports");
+        assert_eq!(report.parts.len(), 2);
+        for part in &report.parts {
+            assert!(
+                matches!(
+                    part,
+                    PartDeliveryOutcome::Permanent { reason }
+                        if reason.contains("cannot be mixed")
+                ),
+                "unexpected outcome: {part:?}"
+            );
+        }
+        assert!(
+            egress.requests.lock().expect("lock").is_empty(),
+            "no push may be attempted for a rejected mixed envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_part_alone_reports_no_enrollment_without_forged_send() {
+        // With zero registrations the honest outcome is Permanent
+        // ("no clients enrolled"), never a fabricated Sent.
+        let egress = ScriptedEgress::default();
+        let report = WebAppChannelAdapter::new()
+            .deliver(envelope(vec![completion_part()]), &egress)
+            .await
+            .expect("deliver reports");
+        assert_eq!(report.parts.len(), 1);
+        assert!(
+            matches!(
+                &report.parts[0],
+                PartDeliveryOutcome::Permanent { reason }
+                    if reason.contains("enrolled")
+            ),
+            "unexpected outcome: {:?}",
+            report.parts[0]
+        );
+        assert!(egress.requests.lock().expect("lock").is_empty());
     }
 }
