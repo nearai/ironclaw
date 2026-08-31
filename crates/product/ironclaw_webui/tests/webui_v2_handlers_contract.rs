@@ -7087,7 +7087,8 @@ async fn user_model_routes_expose_only_the_safe_catalog_and_replace_policy() {
         serde_json::json!({
             "selection_enabled": true,
             "workspace_default": "model-a",
-            "models": ["model-a", "model-b"]
+            "models": ["model-a", "model-b"],
+            "model_entries": []
         })
     );
 
@@ -7136,7 +7137,8 @@ async fn user_model_routes_expose_only_the_safe_catalog_and_replace_policy() {
         invoke_calls[0].1,
         serde_json::json!({
             "workspace_default": "model-b",
-            "allowed_models": ["model-a", "model-b"]
+            "allowed_models": ["model-a", "model-b"],
+            "model_entries": []
         })
     );
 }
