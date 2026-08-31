@@ -36,6 +36,8 @@ mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod learning_candidate_store;
+pub mod learning_review;
 mod memory_context;
 mod model_capability_view;
 mod model_gateway;
@@ -117,8 +119,8 @@ pub use input_queue::{
 };
 pub use ironclaw_loop_contracts::PromptContextTokenBudget;
 pub use model_gateway::{
-    LlmModelProfilePolicy, LlmProviderModelGateway, ModelRouteProviderPool,
-    REBORN_COLLAPSE_REPEATED_FAILURES_ENV, RoutedLlmProviderModelGateway,
+    LearningInferenceAdapter, LlmModelProfilePolicy, LlmProviderModelGateway,
+    ModelRouteProviderPool, REBORN_COLLAPSE_REPEATED_FAILURES_ENV, RoutedLlmProviderModelGateway,
     StaticModelRouteProviderPool, ThreadBackedLoopModelGateway,
 };
 pub use model_routes::{

@@ -22,11 +22,12 @@ use ironclaw_product_contracts::lifecycle_service::{
     LifecycleProductContext, LifecycleProductService, LifecycleProductSurfaceContext,
 };
 use ironclaw_product_contracts::operator_llm::{
-    ActiveModelReader, CodexLoginStart, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID,
-    LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID, LlmConfigService, LlmConfigServiceError,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
-    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW,
-    USER_MODEL_PREFERENCE_VIEW, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
+    ActiveModelReader, CodexLoginStart, LEARNING_SETTINGS_SET_CAPABILITY_ID,
+    LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
+    UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::operator_service::{
     OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,

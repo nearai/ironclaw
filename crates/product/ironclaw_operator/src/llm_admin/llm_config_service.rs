@@ -29,13 +29,14 @@ use ironclaw_llm::{
     NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
 };
 use ironclaw_product_contracts::operator_llm::{
-    CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    ModelSelectionPolicy, ModelSelectionPolicyStore, ModelSelectionPolicyStoreError,
-    NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    SetActiveLlmRequest, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
-    UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference, UserModelPreferenceStore,
-    UserModelPreferenceStoreError,
+    CodexLoginStart, LearningRuntimeController, LearningSettings, LearningSettingsStore,
+    LearningSettingsStoreError, LearningSnapshot, LearningStatus, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, ModelSelectionPolicy, ModelSelectionPolicyStore,
+    ModelSelectionPolicyStoreError, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, SetActiveLlmRequest, SetLearningSettingsRequest,
+    SetUserModelPolicyRequest, SetUserModelPreferenceRequest, UpsertLlmProviderRequest,
+    UserModelCatalog, UserModelPreference, UserModelPreferenceStore, UserModelPreferenceStoreError,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use secrecy::{ExposeSecret as _, SecretString};
@@ -193,6 +194,23 @@ pub trait LlmReloadTrigger: Send + Sync {
     /// Re-resolve and hot-swap the active provider. The error string is for
     /// logging only and must stay free of secrets / backend internals.
     async fn reload(&self) -> Result<(), String>;
+
+    /// Return model ids from the currently active provider. Providers without
+    /// a discovery endpoint return an empty list; callers then validate against
+    /// the provider's configured model.
+    async fn active_model_catalog(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LearningFailureKind {
+    InvalidModel,
+    ModelCatalogUnavailable,
+}
+
+struct LearningEvaluation {
+    snapshot: LearningSnapshot,
+    failure: Option<LearningFailureKind>,
 }
 
 /// Operator-wide LLM configuration service backing the webui2 settings surface.
@@ -202,6 +220,8 @@ pub struct RebornLlmConfigService {
     keys: LlmKeyStore,
     model_policy_store: Option<Arc<dyn ModelSelectionPolicyStore>>,
     user_model_preference_store: Option<Arc<dyn UserModelPreferenceStore>>,
+    learning_store: Option<Arc<dyn LearningSettingsStore>>,
+    learning_controller: Option<Arc<dyn LearningRuntimeController>>,
     reload: Option<Arc<dyn LlmReloadTrigger>>,
     /// The runtime's NEAR AI session manager — the same instance the live
     /// provider reads its token from, so a completed login takes effect on
@@ -210,7 +230,6 @@ pub struct RebornLlmConfigService {
     nearai_login_states: Arc<NearAiLoginStateStore>,
     codex_login_attempts: Arc<tokio::sync::Mutex<HashMap<String, CodexLoginAttempt>>>,
 }
-
 impl RebornLlmConfigService {
     pub fn new(boot: RebornBootConfig, keys: LlmKeyStore) -> Self {
         let repo = ProviderRepo::new(boot.home().providers_file_path());
@@ -220,6 +239,8 @@ impl RebornLlmConfigService {
             keys,
             model_policy_store: None,
             user_model_preference_store: None,
+            learning_store: None,
+            learning_controller: None,
             reload: None,
             nearai_session: None,
             nearai_login_states: Arc::new(NearAiLoginStateStore::new()),
@@ -239,6 +260,21 @@ impl RebornLlmConfigService {
         store: Arc<dyn UserModelPreferenceStore>,
     ) -> Self {
         self.user_model_preference_store = Some(store);
+        self
+    }
+
+    /// Attach deployment-wide learning persistence.
+    pub fn with_learning_store(mut self, store: Arc<dyn LearningSettingsStore>) -> Self {
+        self.learning_store = Some(store);
+        self
+    }
+
+    /// Attach the live runtime learning controller.
+    pub fn with_learning_controller(
+        mut self,
+        controller: Arc<dyn LearningRuntimeController>,
+    ) -> Self {
+        self.learning_controller = Some(controller);
         self
     }
 
@@ -274,14 +310,12 @@ impl RebornLlmConfigService {
     /// provider's active model instead of the model selected at boot.
     async fn refresh_running_provider(&self) {
         let Some(reload) = self.reload.as_ref() else {
-            // Cold boot: no LLM was configured at startup, so there is no live
-            // provider to swap into. Don't fail silently — tell the operator the
-            // saved config needs a restart to take effect.
             tracing::warn!(
                 "LLM configuration saved, but no live LLM provider was configured at startup \
                  (no config.toml or provider env creds), so it cannot be applied to the running \
                  process. Restart the server to use the new configuration."
             );
+            self.reconcile_learning_controller().await;
             return;
         };
         if let Err(reason) = reload.reload().await {
@@ -290,6 +324,7 @@ impl RebornLlmConfigService {
                 "LLM config persisted but live provider reload failed; change applies on restart"
             );
         }
+        self.reconcile_learning_controller().await;
     }
 
     async fn build_provider_snapshot(&self) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
@@ -345,6 +380,7 @@ impl RebornLlmConfigService {
             providers,
             active,
             user_model_policy: None,
+            learning: LearningSnapshot::disabled(),
         })
     }
 
@@ -392,6 +428,198 @@ impl RebornLlmConfigService {
         ))
     }
 
+    async fn read_learning_settings(&self) -> Result<LearningSettings, LlmConfigServiceError> {
+        let Some(store) = self.learning_store.as_ref() else {
+            return Ok(LearningSettings::default());
+        };
+        store
+            .read()
+            .await
+            .map(|settings| settings.unwrap_or_default())
+            .map_err(map_learning_store_error)
+    }
+
+    async fn evaluate_learning_settings(
+        &self,
+        settings: LearningSettings,
+        provider_snapshot: Option<&LlmConfigSnapshot>,
+    ) -> LearningEvaluation {
+        if !settings.enabled {
+            return LearningEvaluation {
+                snapshot: LearningSnapshot {
+                    enabled: false,
+                    model: settings.model,
+                    memory_write_policy: settings.memory_write_policy,
+                    status: LearningStatus::Disabled,
+                    reason: None,
+                },
+                failure: None,
+            };
+        }
+
+        let Some(model) = settings.model.as_deref() else {
+            return invalid_learning_evaluation(
+                settings,
+                "a model is required when learning is enabled",
+                LearningFailureKind::InvalidModel,
+            );
+        };
+        let Some(provider_snapshot) = provider_snapshot else {
+            return invalid_learning_evaluation(
+                settings,
+                "the active provider is unavailable",
+                LearningFailureKind::InvalidModel,
+            );
+        };
+        let Some(active) = provider_snapshot.active.as_ref() else {
+            return invalid_learning_evaluation(
+                settings,
+                "an active provider is required when learning is enabled",
+                LearningFailureKind::InvalidModel,
+            );
+        };
+        let Some(provider) = provider_snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == active.provider_id)
+        else {
+            return invalid_learning_evaluation(
+                settings,
+                "the active provider is unavailable",
+                LearningFailureKind::InvalidModel,
+            );
+        };
+
+        let available = match self.active_model_catalog().await {
+            Ok(models) => models,
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "learning: active provider model catalog unavailable"
+                );
+                return invalid_learning_evaluation(
+                    settings,
+                    "the active provider model catalog is unavailable",
+                    LearningFailureKind::ModelCatalogUnavailable,
+                );
+            }
+        };
+        let valid = if available.is_empty() {
+            provider.default_model == model || active.model.as_deref() == Some(model)
+        } else {
+            available.iter().any(|available| available == model)
+        };
+        if !valid {
+            return invalid_learning_evaluation(
+                settings,
+                "the selected model is not available from the active provider",
+                LearningFailureKind::InvalidModel,
+            );
+        }
+        LearningEvaluation {
+            snapshot: LearningSnapshot {
+                enabled: true,
+                model: settings.model,
+                memory_write_policy: settings.memory_write_policy,
+                status: LearningStatus::Ready,
+                reason: None,
+            },
+            failure: None,
+        }
+    }
+    async fn evaluate_learning_snapshot(
+        &self,
+        provider_snapshot: &LlmConfigSnapshot,
+    ) -> Result<LearningSnapshot, LlmConfigServiceError> {
+        let settings = self.read_learning_settings().await?;
+        Ok(self
+            .evaluate_learning_settings(settings, Some(provider_snapshot))
+            .await
+            .snapshot)
+    }
+
+    async fn active_model_catalog(&self) -> Result<Vec<String>, LlmConfigServiceError> {
+        let Some(reload) = self.reload.as_ref() else {
+            return Ok(Vec::new());
+        };
+        reload.active_model_catalog().await.map_err(|error| {
+            tracing::debug!(%error, "learning: active provider model catalog request failed");
+            LlmConfigServiceError::Unavailable
+        })
+    }
+
+    async fn validate_learning_settings(
+        &self,
+        settings: &LearningSettings,
+    ) -> Result<(), LlmConfigServiceError> {
+        if let Some(model) = settings.model.as_deref() {
+            validated_model_id("model", model)?;
+        }
+        if !settings.enabled {
+            return Ok(());
+        }
+        let provider_snapshot = self.build_provider_snapshot().await?;
+        let evaluated = self
+            .evaluate_learning_settings(settings.clone(), Some(&provider_snapshot))
+            .await;
+        match evaluated.failure {
+            Some(LearningFailureKind::ModelCatalogUnavailable) => {
+                Err(LlmConfigServiceError::Unavailable)
+            }
+            Some(LearningFailureKind::InvalidModel) => Err(invalid_model(
+                evaluated
+                    .snapshot
+                    .reason
+                    .as_deref()
+                    .unwrap_or("learning settings are invalid"),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    async fn reconcile_learning_controller(&self) {
+        let Some(controller) = self.learning_controller.as_ref() else {
+            return;
+        };
+        let settings = match self.read_learning_settings().await {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    "learning settings unavailable; keeping learning disabled"
+                );
+                controller.apply(LearningSettings::default());
+                return;
+            }
+        };
+        let provider_snapshot = if settings.enabled {
+            match self.build_provider_snapshot().await {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    tracing::debug!(?error, "learning provider snapshot unavailable");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let evaluated = self
+            .evaluate_learning_settings(settings, provider_snapshot.as_ref())
+            .await;
+        let evaluated = evaluated.snapshot;
+        controller.apply(LearningSettings {
+            enabled: evaluated.enabled && evaluated.status == LearningStatus::Ready,
+            model: evaluated.model,
+            memory_write_policy: evaluated.memory_write_policy,
+        });
+    }
+
+    /// Hydrate the live learning gate from persisted settings during composition
+    /// boot. All validation stays in this operator-owned evaluator.
+    pub async fn hydrate_learning_controller(&self) {
+        self.reconcile_learning_controller().await;
+    }
+
     async fn build_snapshot(
         &self,
         caller: &ProductSurfaceCaller,
@@ -400,6 +628,15 @@ impl RebornLlmConfigService {
         let stored = self.read_model_policy(caller).await?;
         snapshot.user_model_policy = stored
             .and_then(|policy| matching_active_model_policy(policy, snapshot.active.as_ref()));
+        let learning = self.evaluate_learning_snapshot(&snapshot).await?;
+        if let Some(controller) = self.learning_controller.as_ref() {
+            controller.apply(LearningSettings {
+                enabled: learning.enabled && matches!(learning.status, LearningStatus::Ready),
+                model: learning.model.clone(),
+                memory_write_policy: learning.memory_write_policy,
+            });
+        }
+        snapshot.learning = learning;
         Ok(snapshot)
     }
 
@@ -755,6 +992,40 @@ impl LlmConfigService for RebornLlmConfigService {
             .await
             .map_err(map_admin_error)?;
         self.refresh_running_provider().await;
+        self.snapshot(caller).await
+    }
+
+    async fn set_learning(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: SetLearningSettingsRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        if !caller.operator_config {
+            return Err(LlmConfigServiceError::InvalidRequest {
+                field: None,
+                reason: "operator configuration access is required".to_string(),
+            });
+        }
+        let settings = LearningSettings {
+            enabled: request.enabled,
+            model: request
+                .model
+                .filter(|model| !model.trim().is_empty())
+                .map(|model| model.trim().to_string()),
+            memory_write_policy: request.memory_write_policy,
+        };
+        self.validate_learning_settings(&settings).await?;
+        let store = self
+            .learning_store
+            .as_ref()
+            .ok_or(LlmConfigServiceError::Unavailable)?;
+        store
+            .write(&settings)
+            .await
+            .map_err(map_learning_store_error)?;
+        if let Some(controller) = self.learning_controller.as_ref() {
+            controller.apply(settings);
+        }
         self.snapshot(caller).await
     }
 
@@ -1491,6 +1762,32 @@ fn is_masked_sentinel(value: &SecretString) -> bool {
     value.expose_secret().chars().all(|c| c == '\u{2022}')
 }
 
+fn invalid_learning_snapshot(settings: LearningSettings, reason: &'static str) -> LearningSnapshot {
+    LearningSnapshot {
+        enabled: settings.enabled,
+        model: settings.model,
+        memory_write_policy: settings.memory_write_policy,
+        status: LearningStatus::Invalid,
+        reason: Some(reason.to_string()),
+    }
+}
+fn invalid_learning_evaluation(
+    settings: LearningSettings,
+    reason: &'static str,
+    failure: LearningFailureKind,
+) -> LearningEvaluation {
+    LearningEvaluation {
+        snapshot: invalid_learning_snapshot(settings, reason),
+        failure: Some(failure),
+    }
+}
+
+fn map_learning_store_error(error: LearningSettingsStoreError) -> LlmConfigServiceError {
+    match error {
+        LearningSettingsStoreError::Unavailable => LlmConfigServiceError::Unavailable,
+        LearningSettingsStoreError::InvalidData => LlmConfigServiceError::Internal,
+    }
+}
 fn validate_provider_id(id: &str) -> Result<String, LlmConfigServiceError> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
@@ -1578,8 +1875,11 @@ fn invalid_policy_field(field: &'static str, reason: &'static str) -> LlmConfigS
     }
 }
 
-fn invalid_model(reason: &'static str) -> LlmConfigServiceError {
-    invalid_policy_field("model", reason)
+fn invalid_model(reason: &str) -> LlmConfigServiceError {
+    LlmConfigServiceError::InvalidRequest {
+        field: Some("model".to_string()),
+        reason: reason.to_string(),
+    }
 }
 
 fn catalog_from_policy(policy: ModelSelectionPolicy) -> UserModelCatalog {
@@ -1628,6 +1928,8 @@ mod tests {
     use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_product_contracts::operator_llm::{
+        LearningRuntimeController, LearningSettings, LearningSettingsStore,
+        LearningSettingsStoreError, MemoryWritePolicy, SetLearningSettingsRequest,
         SetUserModelPreferenceRequest, UserModelPreference, UserModelPreferenceStore,
         UserModelPreferenceStoreError,
     };
@@ -1779,6 +2081,104 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct InMemoryLearningStore {
+        settings: std::sync::Mutex<Option<LearningSettings>>,
+    }
+
+    #[async_trait]
+    impl LearningSettingsStore for InMemoryLearningStore {
+        async fn read(&self) -> Result<Option<LearningSettings>, LearningSettingsStoreError> {
+            Ok(self.settings.lock().expect("settings lock").clone())
+        }
+
+        async fn write(
+            &self,
+            settings: &LearningSettings,
+        ) -> Result<(), LearningSettingsStoreError> {
+            *self.settings.lock().expect("settings lock") = Some(settings.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingLearningController {
+        applied: std::sync::Mutex<Vec<LearningSettings>>,
+    }
+
+    impl LearningRuntimeController for RecordingLearningController {
+        fn apply(&self, settings: LearningSettings) {
+            self.applied.lock().expect("controller lock").push(settings);
+        }
+    }
+    struct TestReload {
+        catalog: Result<Vec<String>, String>,
+    }
+
+    #[async_trait]
+    impl LlmReloadTrigger for TestReload {
+        async fn reload(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn active_model_catalog(&self) -> Result<Vec<String>, String> {
+            self.catalog.clone()
+        }
+    }
+
+    fn reload_with_catalog(models: &[&str]) -> Arc<TestReload> {
+        Arc::new(TestReload {
+            catalog: Ok(models.iter().map(|model| (*model).to_string()).collect()),
+        })
+    }
+
+    fn unavailable_reload() -> Arc<TestReload> {
+        Arc::new(TestReload {
+            catalog: Err("catalog unavailable".to_string()),
+        })
+    }
+    fn unavailable_reload_with_reason(reason: &str) -> Arc<TestReload> {
+        Arc::new(TestReload {
+            catalog: Err(reason.to_string()),
+        })
+    }
+
+    #[tokio::test]
+    async fn unavailable_model_catalog_classification_is_independent_of_prose() {
+        let (_temp, service) = service_with_active_provider("nearai", "model-a");
+        let store = Arc::new(InMemoryLearningStore::default());
+        let settings = LearningSettings {
+            enabled: true,
+            model: Some("model-a".to_string()),
+            memory_write_policy: MemoryWritePolicy::Automatic,
+        };
+        let service = service
+            .with_learning_store(Arc::clone(&store) as Arc<dyn LearningSettingsStore>)
+            .with_reload_trigger(unavailable_reload_with_reason(
+                "a transport-specific catalog failure",
+            ));
+        let provider_snapshot = service
+            .build_provider_snapshot()
+            .await
+            .expect("provider snapshot");
+
+        let evaluated = service
+            .evaluate_learning_settings(settings.clone(), Some(&provider_snapshot))
+            .await;
+        assert_eq!(
+            evaluated.failure,
+            Some(LearningFailureKind::ModelCatalogUnavailable)
+        );
+        assert_eq!(
+            evaluated.snapshot.reason.as_deref(),
+            Some("the active provider model catalog is unavailable")
+        );
+        assert!(matches!(
+            service.validate_learning_settings(&settings).await,
+            Err(LlmConfigServiceError::Unavailable)
+        ));
+    }
+
     fn policy_request(default: &str, models: &[&str]) -> SetUserModelPolicyRequest {
         SetUserModelPolicyRequest {
             workspace_default: default.to_string(),
@@ -1801,6 +2201,169 @@ mod tests {
                 Arc::new(InMemoryUserModelPreferenceStore::default()),
             );
         (temp, service)
+    }
+    #[tokio::test]
+    async fn boot_hydration_uses_operator_learning_evaluator() {
+        let (_temp, service) = service_with_active_provider("nearai", "model-a");
+        let store = Arc::new(InMemoryLearningStore::default());
+        store
+            .write(&LearningSettings {
+                enabled: true,
+                model: Some("model-a".to_string()),
+                memory_write_policy: MemoryWritePolicy::Automatic,
+            })
+            .await
+            .expect("persist learning settings");
+        let controller = Arc::new(RecordingLearningController::default());
+        let service = service
+            .with_learning_store(Arc::clone(&store) as Arc<dyn LearningSettingsStore>)
+            .with_learning_controller(Arc::clone(&controller) as Arc<dyn LearningRuntimeController>)
+            .with_reload_trigger(reload_with_catalog(&["model-a"]));
+
+        service.hydrate_learning_controller().await;
+
+        assert_eq!(
+            controller.applied.lock().expect("controller lock").last(),
+            Some(&LearningSettings {
+                enabled: true,
+                model: Some("model-a".to_string()),
+                memory_write_policy: MemoryWritePolicy::Automatic,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_model_catalog_invalidates_snapshot_and_live_gate() {
+        let (_temp, service) = service_with_active_provider("nearai", "model-a");
+        let store = Arc::new(InMemoryLearningStore::default());
+        store
+            .write(&LearningSettings {
+                enabled: true,
+                model: Some("model-a".to_string()),
+                memory_write_policy: MemoryWritePolicy::Automatic,
+            })
+            .await
+            .expect("persist learning settings");
+        let controller = Arc::new(RecordingLearningController::default());
+        let service = service
+            .with_learning_store(Arc::clone(&store) as Arc<dyn LearningSettingsStore>)
+            .with_learning_controller(Arc::clone(&controller) as Arc<dyn LearningRuntimeController>)
+            .with_reload_trigger(unavailable_reload());
+
+        let snapshot = service.snapshot(caller()).await.expect("learning snapshot");
+
+        assert_eq!(snapshot.learning.status, LearningStatus::Invalid);
+        assert_eq!(snapshot.learning.model.as_deref(), Some("model-a"));
+        assert_eq!(
+            controller.applied.lock().expect("controller lock").last(),
+            Some(&LearningSettings {
+                enabled: false,
+                model: Some("model-a".to_string()),
+                memory_write_policy: MemoryWritePolicy::Automatic,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn learning_settings_validate_authorization_and_apply_live() {
+        let (_temp, service) = service_with_active_provider("nearai", "model-a");
+        let store = Arc::new(InMemoryLearningStore::default());
+        let controller = Arc::new(RecordingLearningController::default());
+        let service =
+            service
+                .with_learning_store(Arc::clone(&store) as Arc<dyn LearningSettingsStore>)
+                .with_learning_controller(
+                    Arc::clone(&controller) as Arc<dyn LearningRuntimeController>
+                );
+
+        assert!(matches!(
+            service
+                .set_learning(
+                    caller(),
+                    SetLearningSettingsRequest {
+                        enabled: false,
+                        model: Some("later-model".to_string()),
+                        memory_write_policy: MemoryWritePolicy::Staged,
+                    },
+                )
+                .await,
+            Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+
+        let admin = caller().with_operator_config(true);
+        let disabled = service
+            .set_learning(
+                admin.clone(),
+                SetLearningSettingsRequest {
+                    enabled: false,
+                    model: Some("later-model".to_string()),
+                    memory_write_policy: MemoryWritePolicy::Staged,
+                },
+            )
+            .await
+            .expect("disabled settings");
+        assert_eq!(disabled.learning.status, LearningStatus::Disabled);
+        assert_eq!(disabled.learning.model.as_deref(), Some("later-model"));
+
+        let ready = service
+            .set_learning(
+                admin,
+                SetLearningSettingsRequest {
+                    enabled: true,
+                    model: Some("model-a".to_string()),
+                    memory_write_policy: MemoryWritePolicy::Automatic,
+                },
+            )
+            .await
+            .expect("enabled settings");
+        assert_eq!(ready.learning.status, LearningStatus::Ready);
+        assert_eq!(
+            controller.applied.lock().expect("controller lock").last(),
+            Some(&LearningSettings {
+                enabled: true,
+                model: Some("model-a".to_string()),
+                memory_write_policy: MemoryWritePolicy::Automatic,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn active_provider_change_disables_an_invalid_learning_binding() {
+        let (_temp, service) = service_with_active_provider("nearai", "model-a");
+        let store = Arc::new(InMemoryLearningStore::default());
+        let controller = Arc::new(RecordingLearningController::default());
+        let service =
+            service
+                .with_learning_store(Arc::clone(&store) as Arc<dyn LearningSettingsStore>)
+                .with_learning_controller(
+                    Arc::clone(&controller) as Arc<dyn LearningRuntimeController>
+                );
+        service
+            .set_learning(
+                caller().with_operator_config(true),
+                SetLearningSettingsRequest {
+                    enabled: true,
+                    model: Some("model-a".to_string()),
+                    memory_write_policy: MemoryWritePolicy::Automatic,
+                },
+            )
+            .await
+            .expect("initial learning settings");
+
+        RebornProviderAdmin::new(service.boot.clone())
+            .set_provider("nearai", Some("model-b"))
+            .expect("change active model");
+        service.reconcile_learning_controller().await;
+
+        assert_eq!(
+            controller.applied.lock().expect("controller lock").last(),
+            Some(&LearningSettings {
+                enabled: false,
+                model: Some("model-a".to_string()),
+                memory_write_policy: MemoryWritePolicy::Automatic,
+            }),
+            "an invalid retained model must not keep extraction live"
+        );
     }
 
     #[tokio::test]

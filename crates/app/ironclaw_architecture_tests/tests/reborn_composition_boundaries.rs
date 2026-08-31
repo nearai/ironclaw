@@ -555,6 +555,7 @@ const EXTENSION_HOST_MOVED_MODULES: &[&str] = &[
     "extension_lifecycle_capabilities",
     "extension_lifecycle_capabilities_auth_tests",
     "lifecycle",
+    "learning_review",
     "skill_learning",
     "skill_listing",
     "webui_extension_credentials",

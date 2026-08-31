@@ -75,6 +75,58 @@ use crate::{
         ModelRouteResolver, ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
     },
 };
+/// Uses the active provider with the model selected in Learning settings.
+pub struct LearningInferenceAdapter {
+    provider: Arc<dyn LlmProvider>,
+    controller: Arc<crate::learning_review::LearningRuntimeControllerImpl>,
+}
+
+impl LearningInferenceAdapter {
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        controller: Arc<crate::learning_review::LearningRuntimeControllerImpl>,
+    ) -> Self {
+        Self {
+            provider,
+            controller,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::learning_review::LearningInferencePort for LearningInferenceAdapter {
+    async fn infer(
+        &self,
+        system: &str,
+        user: &str,
+    ) -> Result<String, crate::learning_review::LearningInferenceError> {
+        if !self.controller.enabled() {
+            return Err(crate::learning_review::LearningInferenceError::new(
+                "learning is disabled",
+            ));
+        }
+        let model = self.controller.current_model().ok_or_else(|| {
+            crate::learning_review::LearningInferenceError::new("learning has no selected model")
+        })?;
+        let request =
+            CompletionRequest::new(vec![ChatMessage::system(system), ChatMessage::user(user)])
+                .with_model(model)
+                .with_max_tokens(crate::learning_review::LEARNING_REVIEW_MAX_TOKENS);
+        self.provider
+            .complete(request)
+            .await
+            .map(|response| response.content)
+            .map_err(|error| {
+                let mapped = map_provider_error_without_logging(error);
+                let safe_detail = mapped.detail.as_deref().unwrap_or(&mapped.safe_summary);
+                debug!(
+                    error = %ironclaw_common::truncate_for_preview(safe_detail, 512),
+                    "learning model inference failed"
+                );
+                crate::learning_review::LearningInferenceError::new("learning inference failed")
+            })
+    }
+}
 
 /// The runner's `failure_categories` alias for this reason kind stayed behind
 /// with the drivers that also use it; the gateway now names the contract
@@ -2668,11 +2720,18 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error = %ironclaw_common::truncate_for_preview(&safe_log_detail, 512),
         "reborn model provider error mapped to safe summary"
     );
-    // Tier 2b: carry the provider's real message (status line + body snippet)
-    // on the model-visible detail channel so the failure explainer can describe
-    // the actual fault. `safe_with_detail` scrubs credential-looking tokens
-    // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
-    // summary stays a fixed host-authored category string.
+    map_provider_error_with_detail(error, provider_detail)
+}
+
+fn map_provider_error_without_logging(error: LlmError) -> HostManagedModelError {
+    let provider_detail = error.to_string();
+    map_provider_error_with_detail(error, provider_detail)
+}
+
+fn map_provider_error_with_detail(
+    error: LlmError,
+    provider_detail: String,
+) -> HostManagedModelError {
     if is_unconfigured_provider_error(&error) {
         // No provider is configured at all: a configuration fault, not an
         // availability fault. CredentialUnavailable is unclassified in the
@@ -2847,6 +2906,7 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tracing_test::traced_test;
 
     #[derive(Default)]
     struct StopSequenceRecordingProvider {
@@ -2888,6 +2948,80 @@ mod tests {
         ) -> Result<ToolCompletionResponse, LlmError> {
             unreachable!("the stop-sequence test has no tool surface")
         }
+    }
+    struct FailingLearningInferenceProvider {
+        reason: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FailingLearningInferenceProvider {
+        fn model_name(&self) -> &str {
+            "learning-inference-test-model"
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            Default::default()
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(request_failed(&self.reason))
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("the learning inference test has no tool surface")
+        }
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn learning_inference_scrubs_provider_credentials_from_logs_and_errors() {
+        use crate::learning_review::LearningInferencePort;
+        use ironclaw_product_contracts::operator_llm::LearningSettings;
+
+        let secret = ["sk-", "test-secret"].concat();
+        let provider = Arc::new(FailingLearningInferenceProvider {
+            reason: format!("provider rejected credential {secret}"),
+        });
+        let controller = Arc::new(crate::learning_review::LearningRuntimeControllerImpl::new(
+            LearningSettings {
+                enabled: true,
+                model: Some("learning-inference-test-model".to_string()),
+                memory_write_policy: Default::default(),
+            },
+        ));
+        let adapter = LearningInferenceAdapter::new(provider, controller);
+
+        let error = adapter
+            .infer("learning system", "learning user")
+            .await
+            .expect_err("provider failure should be returned");
+
+        assert_eq!(error.to_string(), "learning inference failed");
+        logs_assert(|lines: &[&str]| {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("learning model inference failed")),
+                "adapter failure should be logged"
+            );
+            assert!(
+                lines.iter().all(|line| !line.contains(&secret)),
+                "raw provider credentials must not appear in logs: {lines:?}"
+            );
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| !line.contains("reborn model provider error mapped")),
+                "background Learning must not emit the shared warning log: {lines:?}"
+            );
+            Ok(())
+        });
     }
 
     #[tokio::test]

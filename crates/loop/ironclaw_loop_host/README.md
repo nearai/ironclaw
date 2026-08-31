@@ -37,19 +37,23 @@ and the loop tier's system-prompt content assets.
 - `system_prompt_assets.rs` + `prompts/*.md` — the system-prompt *content*
   (composition keeps assembly and on-disk `SYSTEM.md` seeding, never the
   text).
+- Learning review (`learning_review.rs`, `prompts/learning_review.md`) —
+  completed-turn candidate routing, scoped filesystem persistence, and the
+  runtime enable/model gate. The concrete provider adapter remains in
+  `model_gateway.rs`.
 
 ## Depends on / consumed by
 
-- **Normal workspace deps (17):** contracts (`ironclaw_common`,
-  `ironclaw_host_api`, `ironclaw_loop_contracts`), kernel services the
-  adapters wrap (`ironclaw_capabilities`, `ironclaw_host_runtime`,
-  `ironclaw_turns`, `ironclaw_processes`, `ironclaw_approvals`,
-  `ironclaw_resources`), domains/substrates the context builders need
-  (`ironclaw_filesystem`, `ironclaw_memory`, `ironclaw_observability`,
-  `ironclaw_outbound`, `ironclaw_safety`, `ironclaw_skills`,
-  `ironclaw_threads`) — and `ironclaw_llm` (`default-features = false`) **for
-  the model-gateway adapter alone**, an exception by charter (PROPOSAL
-  §6.7.2), not drift.
+ - **Normal workspace deps (18):** contracts (`ironclaw_common`,
+  `ironclaw_host_api`, `ironclaw_loop_contracts`, `ironclaw_product_contracts`),
+  kernel services the adapters wrap (`ironclaw_capabilities`,
+  `ironclaw_host_runtime`, `ironclaw_turns`, `ironclaw_processes`,
+  `ironclaw_approvals`, `ironclaw_resources`), domains/substrates the context
+  builders need (`ironclaw_filesystem`, `ironclaw_memory`,
+  `ironclaw_observability`, `ironclaw_outbound`, `ironclaw_safety`,
+  `ironclaw_skills`, `ironclaw_threads`) — and `ironclaw_llm`
+  (`default-features = false`) **for the model-gateway and learning inference
+  adapters alone**, exceptions by charter (PROPOSAL §6.7.2), not drift.
 - **Consumed by (4):** `ironclaw_turn_runner` (composes the base adapters into
   each claimed run's host), `ironclaw_composition` (assembly),
   `ironclaw_extension_host`, and `ironclaw_assistant` — the last is the

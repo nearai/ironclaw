@@ -18,6 +18,7 @@ mod support;
 
 mod scenario_always_on_memory_recall_libsql;
 mod scenario_disabled_binding_offers_no_memory_tools;
+mod scenario_learning_review_caller;
 mod scenario_lifecycle_gates_host_memory_calls;
 mod scenario_memory_curation_below_threshold_never_fires;
 mod scenario_memory_curation_rewrites_standing_document;
@@ -136,6 +137,17 @@ async fn memory_group_e2e() {
     report.record(
         "memory_curation_below_threshold_never_fires",
         scenario_memory_curation_below_threshold_never_fires::run().await,
+    );
+
+    // Scenario 12: a completed turn saves one review candidate when learning
+    // is enabled, while the disabled case saves nothing.
+    report.record(
+        "learning_enabled_persists_candidate",
+        scenario_learning_review_caller::enabled_persists_one_sealed_candidate().await,
+    );
+    report.record(
+        "learning_disabled_no_inference",
+        scenario_learning_review_caller::disabled_does_not_infer_or_persist().await,
     );
 
     report.assert_all_passed();

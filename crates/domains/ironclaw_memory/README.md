@@ -28,6 +28,10 @@ point.
 - Prompt-write-safety vocabulary (`safety`): operation, source, severity,
   reason codes, policy trait, event sink — the *shape* of what a provider must
   enforce; the enforcement engine lives in the providers.
+- Learning review vocabulary (`learning`): bounded provider-neutral memory
+  proposals, skill-routing decisions, sealed scopes, candidate records, and the
+  durable candidate-store port. Candidate admission and provider writes remain
+  outside this crate.
 - Metadata + hashing helpers (`metadata`, `hash`); significant-event/audit
   contracts (`events`).
 - `test_support` — the shared conformance suite every provider wires against.

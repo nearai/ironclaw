@@ -44,6 +44,7 @@ ironclaw_resources = { path = "../../kernel/ironclaw_resources", version = "0.1.
 ironclaw_safety = { path = "../../substrates/ironclaw_safety", version = "0.2.2" }
 ironclaw_skills = { path = "../../domains/ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_memory = { path = "../../domains/ironclaw_memory", version = "0.1.0" }
+ironclaw_product_contracts = { path = "../../contracts/ironclaw_product_contracts", version = "0.1.0" }
 ironclaw_threads = { path = "../../domains/ironclaw_threads", version = "0.1.0" }
 ironclaw_loop_contracts = { path = "../../contracts/ironclaw_loop_contracts", version = "0.1.0" }
 ironclaw_turns = { path = "../../kernel/ironclaw_turns", version = "0.1.0" }
@@ -69,3 +70,6 @@ rust_decimal_macros = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
+
+[[test]]
+name = "learning_review_store_contract"

@@ -10,11 +10,12 @@ pub use ironclaw_product_contracts::operator_llm::{
     RebornProviderStatus, RebornProviderWriteOutcome, RebornV1State,
 };
 pub use llm_admin::{
-    FilesystemModelSelectionPolicyStore, FilesystemUserModelPreferenceStore, LlmKeyStore,
-    LlmKeyStoreError, LlmReloadTrigger, ProviderActiveModelReader, ProviderProbeOutcome,
-    ProviderRepo, ProviderRepoError, RebornLlmConfigService, RebornLlmReloadAdapter,
-    RebornProviderAdmin, RebornProviderAdminError, RebornProviderFactory, ResolvedRebornLlm,
-    apply_stored_api_key, nearai_login_callback_mount, resolve_reborn_runtime_llm,
+    FilesystemLearningSettingsStore, FilesystemModelSelectionPolicyStore,
+    FilesystemUserModelPreferenceStore, LlmKeyStore, LlmKeyStoreError, LlmReloadTrigger,
+    ProviderActiveModelReader, ProviderProbeOutcome, ProviderRepo, ProviderRepoError,
+    RebornLlmConfigService, RebornLlmReloadAdapter, RebornProviderAdmin, RebornProviderAdminError,
+    RebornProviderFactory, ResolvedRebornLlm, apply_stored_api_key, nearai_login_callback_mount,
+    resolve_reborn_runtime_llm,
 };
 pub use operator_logs::{OperatorLogLayer, capture_tracing_log, operator_log_buffer};
 pub use operator_service_lifecycle::OperatorServiceLifecycle;

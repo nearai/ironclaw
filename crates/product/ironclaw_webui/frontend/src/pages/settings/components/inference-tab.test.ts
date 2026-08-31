@@ -45,6 +45,7 @@ function renderInferenceModule() {
     ProviderManagement: component("ProviderManagement"),
     ModelSelectionPolicyEditor: component("ModelSelectionPolicyEditor"),
     UserModelPreferenceSelector: component("UserModelPreferenceSelector"),
+    LearningSection: component("LearningSection"),
     SettingsGroup: component("SettingsGroup"),
     SettingsSearchEmpty: component("SettingsSearchEmpty"),
     html,
@@ -96,6 +97,54 @@ test("Inference tab omits unsupported operator-config fields", () => {
     1,
     "admins need a UI to enable the tenant model allowlist"
   );
+  assert.equal(
+    findComponentNodes(rendered, context.LearningSection).length,
+    1,
+    "admins need a UI to control deployment-wide learning"
+  );
+});
+test("Inference tab search isolates learning settings and hides them for unrelated terms", () => {
+  const { context, exports } = renderInferenceModule();
+  const learningSearch = exports.InferenceTab({
+    isAdmin: true,
+    settings: {},
+    gatewayStatus: null,
+    onSave: () => {},
+    savedKeys: {},
+    isLoading: false,
+    searchQuery: "learning",
+  });
+
+  assert.equal(
+    findComponentNodes(learningSearch, context.LearningSection).length,
+    1,
+    "learning searches should show the learning controls"
+  );
+  assert.equal(
+    findComponentNodes(learningSearch, context.ProviderManagement).length,
+    0,
+    "learning searches should not show unrelated provider management"
+  );
+
+  const unrelatedSearch = exports.InferenceTab({
+    isAdmin: true,
+    settings: {},
+    gatewayStatus: null,
+    onSave: () => {},
+    savedKeys: {},
+    isLoading: false,
+    searchQuery: "temperature",
+  });
+  assert.equal(
+    findComponentNodes(unrelatedSearch, context.LearningSection).length,
+    0,
+    "unrelated searches should hide learning controls"
+  );
+  assert.equal(
+    findComponentNodes(unrelatedSearch, context.SettingsSearchEmpty).length,
+    1,
+    "unrelated searches should render the empty state"
+  );
 });
 
 test("Inference tab gives non-admin users model preference without provider controls", () => {
@@ -124,5 +173,10 @@ test("Inference tab gives non-admin users model preference without provider cont
     findComponentNodes(rendered, context.ModelSelectionPolicyEditor).length,
     0,
     "ordinary users must not receive tenant policy controls"
+  );
+  assert.equal(
+    findComponentNodes(rendered, context.LearningSection).length,
+    0,
+    "ordinary users must not receive learning controls"
   );
 });

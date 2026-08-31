@@ -81,8 +81,10 @@ use ironclaw_loop_host::{
     JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits, ZeroCostTable,
 };
 use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
+use ironclaw_memory::{LearningCandidateStore, LearningScope};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::binding::ResolvedBinding;
+use ironclaw_product_contracts::operator_llm::{LearningSettings, MemoryWritePolicy};
 use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
 use ironclaw_resources::{
     BudgetEventSink, BudgetGateStorePort, InMemoryBudgetEventSink, InMemoryResourceGovernor,
@@ -291,6 +293,12 @@ pub(crate) struct GroupSharedStorage {
     /// diagnostic_store()` reads exactly what the loop actually recorded,
     /// instead of a second throwaway instance nothing observes.
     pub(crate) diagnostic_store: Arc<ironclaw_assistant::inspector_store::InMemoryDiagnosticStore>,
+    /// Production-shaped learning review support, present only for the
+    /// caller-level learning scenarios.
+    pub(crate) learning_candidate_store: Option<Arc<dyn LearningCandidateStore>>,
+    pub(crate) learning_scope: Option<LearningScope>,
+    pub(crate) learning_tasks:
+        Option<Arc<ironclaw_loop_host::learning_review::LearningReviewTasks>>,
 }
 
 impl GroupSharedStorage {
@@ -515,6 +523,7 @@ impl RebornIntegrationGroup {
             real_gate_dispatch_services: false,
             channel_connection: None,
             bound_memory: None,
+            learning: None,
         }
     }
 
@@ -859,6 +868,12 @@ impl GroupBaseData {
     }
 }
 
+#[derive(Clone)]
+struct LearningReviewConfig {
+    inference: Arc<dyn ironclaw_loop_host::learning_review::LearningInferencePort>,
+    settings: LearningSettings,
+}
+
 /// Builder for `RebornIntegrationGroup` with optional storage mode selection.
 /// Obtain via [`RebornIntegrationGroup::builder`]; defaults to
 /// `StorageMode::InMemory`.
@@ -947,9 +962,31 @@ pub struct RebornIntegrationGroupBuilder {
         Arc<dyn ironclaw_memory::MemoryService>,
         ironclaw_extension_contracts::memory::MemoryDescriptor,
     )>,
+    /// Optional caller-level learning review wiring. Production composition
+    /// owns the factory; tests inject only the provider-neutral inference port.
+    learning: Option<LearningReviewConfig>,
 }
 
 impl RebornIntegrationGroupBuilder {
+    /// Enable caller-level learning review coverage over the real completed
+    /// turn-event sink. Inference remains injected at the provider-neutral port
+    /// because the ordinary harness model override has no reload/provider handle.
+    pub fn with_learning_review_for_test(
+        mut self,
+        inference: Arc<dyn ironclaw_loop_host::learning_review::LearningInferencePort>,
+        enabled: bool,
+    ) -> Self {
+        self.learning = Some(LearningReviewConfig {
+            inference,
+            settings: LearningSettings {
+                enabled,
+                model: Some("learning-test-model".to_string()),
+                memory_write_policy: MemoryWritePolicy::Staged,
+            },
+        });
+        self
+    }
+
     /// Shared setup for every group constructor: hermetic env, the product
     /// workflow harness over the fixed itest scope, the per-group `TempDir`, and
     /// the thread/turn composite. Returns [`GroupBaseData`] so each constructor
@@ -1145,6 +1182,31 @@ impl RebornIntegrationGroupBuilder {
         }
         let loop_exit_evidence: Arc<dyn LoopExitEvidencePort> = Arc::new(evidence);
 
+        let learning_support = self.learning.as_ref().map(|config| {
+            let learning_scope = LearningScope::new(
+                base.canonical_binding.tenant_id.clone(),
+                base.canonical_binding.actor_user_id.clone(),
+                base.canonical_binding
+                    .agent_id
+                    .clone()
+                    .expect("group learning requires an agent-scoped canonical binding"),
+                base.canonical_binding.project_id.clone(),
+            );
+            let storage_scope = group_thread_scope
+                .to_resource_scope()
+                .tenant_shared_managed_scope();
+            (
+                learning_scope,
+                ironclaw_composition::test_support::learning_review_turn_event_sink_for_test(
+                    group_thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+                    Arc::clone(&base.composite),
+                    storage_scope,
+                    Arc::clone(&config.inference),
+                    config.settings.clone(),
+                ),
+            )
+        });
+
         // --- trace capture (enabler (c), C-TRACECAP) ------------------------
         // The PRODUCTION TraceCaptureTurnEventSink over the group's thread
         // service, seeded with the runtime owner's trace scope — the same
@@ -1175,6 +1237,9 @@ impl RebornIntegrationGroupBuilder {
         }
         if let Some((sink, _)) = &trace_capture {
             turn_event_sinks.push(Arc::clone(sink));
+        }
+        if let Some((_, support)) = &learning_support {
+            turn_event_sinks.push(Arc::clone(&support.sink));
         }
         let composed_turn_event_sink: Option<Arc<dyn TurnEventSink>> = match turn_event_sinks.len()
         {
@@ -1521,6 +1586,13 @@ impl RebornIntegrationGroupBuilder {
                 real_gate_dispatch_services: self.real_gate_dispatch_services,
                 channel_connection: self.channel_connection,
                 diagnostic_store,
+                learning_candidate_store: learning_support
+                    .as_ref()
+                    .map(|(_, support)| Arc::clone(&support.candidate_store)),
+                learning_scope: learning_support.as_ref().map(|(scope, _)| scope.clone()),
+                learning_tasks: learning_support
+                    .as_ref()
+                    .map(|(_, support)| Arc::clone(&support.tasks)),
             }),
         })
     }

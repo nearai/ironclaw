@@ -22,10 +22,6 @@ test-support = [
     "ironclaw_host_api/test-support",
     "ironclaw_processes/test-support",
 ]
-# Dormant marker for the two moved test modules that still require composition
-# runtime-substrate fixtures. Keep disabled until those tests are rewritten over
-# extension-host-local fakes.
-composition-substrate-tests = []
 
 [dependencies]
 async-trait = "0.1"
@@ -50,7 +46,6 @@ ironclaw_host_ingress = { path = "../../product/ironclaw_host_ingress" }
 ironclaw_extension_registry = { path = "../ironclaw_extension_registry" }
 ironclaw_extension_support = { path = "../ironclaw_extension_support" }
 ironclaw_host_runtime = { path = "../../kernel/ironclaw_host_runtime" }
-ironclaw_llm = { path = "../../domains/ironclaw_llm", default-features = false }
 ironclaw_loop_host = { path = "../../loop/ironclaw_loop_host" }
 ironclaw_mcp = { path = "../../lanes/ironclaw_mcp" }
 ironclaw_network = { path = "../../substrates/ironclaw_network" }

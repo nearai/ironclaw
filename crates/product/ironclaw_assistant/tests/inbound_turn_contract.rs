@@ -49,7 +49,7 @@ use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult,
     LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
-    UpsertLlmProviderRequest,
+    SetLearningSettingsRequest, UpsertLlmProviderRequest,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use ironclaw_threads::{
@@ -200,6 +200,14 @@ impl LlmConfigService for MutableModelResolver {
         &self,
         _caller: ProductSurfaceCaller,
         _request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        Err(LlmConfigServiceError::Unavailable)
+    }
+
+    async fn set_learning(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: SetLearningSettingsRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         Err(LlmConfigServiceError::Unavailable)
     }

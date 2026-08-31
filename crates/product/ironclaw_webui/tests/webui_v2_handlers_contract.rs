@@ -126,13 +126,12 @@ use ironclaw_product_contracts::notification_inbox::{
     ProductNotificationMutationResponse, ProductNotificationSeverity,
 };
 use ironclaw_product_contracts::operator_llm::{
-    CodexLoginStart, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, UserModelCatalog, UserModelPreference,
-};
-use ironclaw_product_contracts::operator_llm::{
-    LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID, LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID,
-    USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
+    CodexLoginStart, LEARNING_SETTINGS_SET_CAPABILITY_ID, LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID,
+    LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID, LearningSnapshot, LlmActiveSelection,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
+    NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
+    SetLearningSettingsRequest, USER_MODEL_CATALOG_VIEW, USER_MODEL_PREFERENCE_VIEW,
+    UserModelCatalog, UserModelPreference,
 };
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityStatusView, CapabilityActivityView, FinalReplyView, ProductOutboundEnvelope,
@@ -2315,7 +2314,6 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
         active_hold: None,
     }
 }
-
 fn llm_snapshot(provider_id: &str) -> LlmConfigSnapshot {
     LlmConfigSnapshot {
         providers: vec![LlmProviderView {
@@ -2337,6 +2335,7 @@ fn llm_snapshot(provider_id: &str) -> LlmConfigSnapshot {
             model: Some("model-a".to_string()),
         }),
         user_model_policy: None,
+        learning: LearningSnapshot::disabled(),
     }
 }
 
@@ -7473,6 +7472,77 @@ async fn llm_provider_routes_keep_key_bearing_mutations_on_typed_surface() {
 }
 
 #[tokio::test]
+async fn set_learning_route_forwards_typed_settings_without_losing_memory_policy() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/llm/learning")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"enabled":true,"model":"gpt-5","memory_write_policy":"automatic"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0.as_str(), LEARNING_SETTINGS_SET_CAPABILITY_ID);
+    let request: SetLearningSettingsRequest =
+        serde_json::from_value(calls[0].1.clone()).expect("typed learning input");
+    assert_eq!(
+        request,
+        SetLearningSettingsRequest {
+            enabled: true,
+            model: Some("gpt-5".to_string()),
+            memory_write_policy:
+                ironclaw_product_contracts::operator_llm::MemoryWritePolicy::Automatic,
+        }
+    );
+}
+
+#[tokio::test]
+async fn set_learning_route_rejects_malformed_json_before_product_surface() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/llm/learning")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":"yes"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "malformed learning input must fail at JSON deserialization"
+    );
+}
+
+#[tokio::test]
 async fn llm_provider_routes_require_operator_capability() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(services.clone(), WebUiV2Capabilities::default());
@@ -7492,6 +7562,11 @@ async fn llm_provider_routes_require_operator_capability() {
         ("POST", "/api/webchat/v2/llm/providers", Some(upsert_body)),
         ("POST", "/api/webchat/v2/llm/providers/acme/delete", None),
         ("POST", "/api/webchat/v2/llm/active", Some(active_body)),
+        (
+            "PUT",
+            "/api/webchat/v2/llm/learning",
+            Some(r#"{"enabled":true,"model":"gpt-5","memory_write_policy":"automatic"}"#),
+        ),
         (
             "POST",
             "/api/webchat/v2/llm/test-connection",

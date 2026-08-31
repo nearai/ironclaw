@@ -81,6 +81,7 @@ const INVERTED_PORTS: &[(&str, &str)] = &[
     ("ActiveModelReader", OPERATOR),
     ("LlmConfigService", OPERATOR),
     ("OperatorLogsService", OPERATOR),
+    ("LearningSettingsStore", OPERATOR),
     // WS3's secrets tightening. Implemented by COMPOSITION for the same reason
     // `OperatorStatusService` is: assembly is the only layer that may name both
     // the products-tier port and the `ironclaw_secrets` substrate behind it,
@@ -107,6 +108,7 @@ const INVERTED_PORT_DTOS: &[&str] = &[
     "LlmProbeRequest",
     "LlmProbeResult",
     "LlmProviderView",
+    "MemoryWritePolicy",
     "NearAiAuthProvider",
     "NearAiLoginRequest",
     "NearAiLoginStart",
@@ -125,9 +127,13 @@ const INVERTED_PORT_DTOS: &[&str] = &[
     "RebornServiceLifecycleResponse",
     "RebornServiceLifecycleState",
     "SetActiveLlmRequest",
+    "SetLearningSettingsRequest",
+    "LearningSettings",
+    "LearningSettingsStoreError",
+    "LearningSnapshot",
+    "LearningStatus",
     "UpsertLlmProviderRequest",
 ];
-
 fn crate_src(root: &Path, name: &str) -> PathBuf {
     // Inventory-resolved, not `crates/<name>/src`: the family move
     // (PROPOSAL §5) makes the flat join miss every crate at once (WS10).

@@ -93,6 +93,7 @@ pub const WEBUI_V2_ROUTE_GET_LLM_CONFIG: &str = "webui.v2.get_llm_config";
 pub const WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER: &str = "webui.v2.upsert_llm_provider";
 pub const WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER: &str = "webui.v2.delete_llm_provider";
 pub const WEBUI_V2_ROUTE_SET_ACTIVE_LLM: &str = "webui.v2.set_active_llm";
+pub const WEBUI_V2_ROUTE_SET_LEARNING: &str = "webui.v2.set_learning";
 pub const WEBUI_V2_ROUTE_GET_USER_MODEL_CATALOG: &str = "webui.v2.get_user_model_catalog";
 pub const WEBUI_V2_ROUTE_SET_USER_MODEL_POLICY: &str = "webui.v2.set_user_model_policy";
 pub const WEBUI_V2_ROUTE_GET_USER_MODEL_PREFERENCE: &str = "webui.v2.get_user_model_preference";
@@ -248,6 +249,7 @@ pub const WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER: &str = "/api/webchat/v2/llm/prov
 pub const WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER: &str =
     "/api/webchat/v2/llm/providers/{provider_id}/delete";
 pub const WEBUI_V2_PATTERN_SET_ACTIVE_LLM: &str = "/api/webchat/v2/llm/active";
+pub const WEBUI_V2_PATTERN_SET_LEARNING: &str = "/api/webchat/v2/llm/learning";
 pub const WEBUI_V2_PATTERN_USER_MODEL_CATALOG: &str = "/api/webchat/v2/llm/models";
 pub const WEBUI_V2_PATTERN_USER_MODEL_POLICY: &str = "/api/webchat/v2/llm/model-policy";
 pub const WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE: &str = "/api/webchat/v2/llm/model-preference";
@@ -393,6 +395,7 @@ pub fn webui_v2_routes_with_artifact_flags(
         upsert_llm_provider_descriptor(),
         delete_llm_provider_descriptor(),
         set_active_llm_descriptor(),
+        set_learning_descriptor(),
         get_user_model_catalog_descriptor(),
         get_user_model_preference_descriptor(),
         set_user_model_preference_descriptor(),
@@ -465,6 +468,7 @@ pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
             | WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER
             | WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER
             | WEBUI_V2_ROUTE_SET_ACTIVE_LLM
+            | WEBUI_V2_ROUTE_SET_LEARNING
             | WEBUI_V2_ROUTE_SET_USER_MODEL_POLICY
             | WEBUI_V2_ROUTE_TEST_LLM_CONNECTION
             | WEBUI_V2_ROUTE_LIST_LLM_MODELS
@@ -1765,6 +1769,20 @@ fn set_active_llm_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductSurface,
+        ),
+    )
+}
+
+fn set_learning_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_SET_LEARNING,
+        NetworkMethod::Put,
+        WEBUI_V2_PATTERN_SET_LEARNING,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),

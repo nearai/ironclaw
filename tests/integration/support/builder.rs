@@ -46,6 +46,7 @@ use ironclaw_loop_contracts::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
 use ironclaw_loop_host::ToolDisclosureMode;
+use ironclaw_memory::LearningReviewRecord;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
 use ironclaw_product_contracts::binding::{
@@ -968,6 +969,53 @@ impl RebornIntegrationHarness {
         let run_id = self.submit_turn_async(text).await?;
         self.wait_for_status(run_id, TurnStatus::Completed).await?;
         Ok(run_id)
+    }
+    /// Read candidate records produced by the production-shaped learning
+    /// sink. Returns an error when the harness was not built with learning.
+    pub async fn learning_candidates_for_test(&self) -> HarnessResult<Vec<LearningReviewRecord>> {
+        let store = self
+            ._shared
+            .learning_candidate_store
+            .as_ref()
+            .ok_or("learning review is not wired on this harness")?;
+        let scope = self
+            ._shared
+            .learning_scope
+            .as_ref()
+            .ok_or("learning review scope is not wired on this harness")?;
+        Ok(store.list_unresolved(scope).await?)
+    }
+    /// Stop and await every learning-review task spawned by this harness.
+    ///
+    /// Learning review runs asynchronously from the completed-turn event sink
+    /// and borrows the harness group's stores. Call this before dropping the
+    /// harness or its group so no task can outlive those resources.
+    pub async fn shutdown_learning_review_for_test(&self) -> HarnessResult<()> {
+        let tasks = self
+            ._shared
+            .learning_tasks
+            .as_ref()
+            .ok_or("learning review is not wired on this harness")?;
+        tasks.shutdown().await;
+        Ok(())
+    }
+
+    /// Wait until the completed-turn learning sink persists at least one
+    /// candidate, preserving the event fan-out's asynchronous task boundary.
+    pub async fn wait_for_learning_candidate_for_test(
+        &self,
+    ) -> HarnessResult<Vec<LearningReviewRecord>> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let records = self.learning_candidates_for_test().await?;
+            if !records.is_empty() {
+                return Ok(records);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("timed out waiting for learning candidate".into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     /// Enqueue additional scripted replies AFTER the harness is built — for a

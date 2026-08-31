@@ -335,35 +335,55 @@ pub(crate) fn build_llm_config_service(
         .map(|service| service as _)
 }
 
-pub(crate) fn compose_llm_config_service(
+pub(crate) async fn compose_llm_config_service(
     boot: Option<&RebornBootConfig>,
     keys: ironclaw_operator::LlmKeyStore,
     scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     llm_reload: Option<&RebornLlmReloadParts>,
-) -> Option<Arc<ironclaw_operator::RebornLlmConfigService>> {
+    learning_scope: ResourceScope,
+) -> Option<(
+    Arc<ironclaw_operator::RebornLlmConfigService>,
+    Arc<ironclaw_loop_host::learning_review::LearningRuntimeControllerImpl>,
+)> {
     let boot = boot?;
+    let learning_store = Arc::new(ironclaw_operator::FilesystemLearningSettingsStore::new(
+        Arc::clone(&scoped_filesystem),
+        learning_scope,
+    ));
+    let controller =
+        Arc::new(ironclaw_loop_host::learning_review::LearningRuntimeControllerImpl::default());
     let model_policy_store = Arc::new(ironclaw_operator::FilesystemModelSelectionPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
     let user_model_preference_store = Arc::new(
         ironclaw_operator::FilesystemUserModelPreferenceStore::new(scoped_filesystem),
     );
+    let controller_port: Arc<
+        dyn ironclaw_product_contracts::operator_llm::LearningRuntimeController,
+    > = controller.clone();
     let mut llm_config = ironclaw_operator::RebornLlmConfigService::new(boot.clone(), keys.clone())
         .with_model_policy_store(model_policy_store)
-        .with_user_model_preference_store(user_model_preference_store);
+        .with_user_model_preference_store(user_model_preference_store)
+        .with_learning_store(learning_store)
+        .with_learning_controller(controller_port);
     if let Some(parts) = llm_reload {
         let reload = Arc::new(ironclaw_operator::RebornLlmReloadAdapter::new(
             boot.clone(),
             Arc::clone(&parts.reload_handle),
             Arc::clone(&parts.session),
             keys.clone(),
+            Arc::clone(&parts.provider),
         ));
         llm_config = llm_config
             .with_reload_trigger(reload)
             .with_nearai_session(Arc::clone(&parts.session))
             .with_nearai_login_states(Arc::clone(&parts.nearai_login_states));
     }
-    Some(Arc::new(llm_config))
+    if llm_reload.is_some() {
+        llm_config.hydrate_learning_controller().await;
+    }
+    let llm_config = Arc::new(llm_config);
+    Some((llm_config, controller))
 }
 
 struct ReadinessOperatorStatusService {

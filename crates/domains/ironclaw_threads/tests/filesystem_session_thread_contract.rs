@@ -31,14 +31,15 @@ use ironclaw_host_api::{
     },
     mount::{MountGrant, MountPermissions, MountView},
     path::{HostPath, MountAlias, ScopedPath, VirtualPath},
+    turn::TurnRunId,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest,
+    AcceptInboundMessageRequest, AcceptSubagentResultRequest, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
     AppendToolResultReferenceRequest, AttachmentKind, AttachmentRef,
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
+    FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest, FramedSubagentText,
     InboundMessageReplayMetadata, ListThreadsForScopeRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
     PREPARED_CONTEXT_METADATA_MARKER_KEY, ProviderToolCallReferenceEnvelope,
@@ -3148,8 +3149,8 @@ async fn filesystem_thread_create_declares_indexes_once_per_mount() {
     create("ddl-000").await;
     let after_first = backend.count(FilesystemOperation::EnsureIndex);
     assert_eq!(
-        after_first, 9,
-        "a mount's first thread declares four transcript specs and five message lookup specs"
+        after_first, 11,
+        "a mount's first thread declares six transcript specs and five message lookup specs"
     );
 
     for index in 1..5 {
@@ -3490,7 +3491,7 @@ async fn filesystem_transcript_migration_retries_writer_admission_contention() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v3.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3549,7 +3550,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v3.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -3573,7 +3574,7 @@ async fn filesystem_transcript_migration_retries_a_lost_cas_race() {
     let marker_writes = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .filter(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .filter(|path| path.as_str().contains("transcript-index-v3.complete"))
         .count();
     assert_eq!(
         marker_writes, 2,
@@ -3612,7 +3613,7 @@ async fn filesystem_transcript_migration_conflict_retries_are_bounded() {
     let marker = backend
         .recorded_paths(FilesystemOperation::WriteFile)
         .into_iter()
-        .find(|path| path.as_str().contains("transcript-index-v2.complete"))
+        .find(|path| path.as_str().contains("transcript-index-v3.complete"))
         .expect("seeding wrote the transcript migration marker");
     backend.delete(&marker).await.unwrap();
 
@@ -5945,7 +5946,7 @@ async fn wait_for_thread_index_projection_repair<F>(
 
 fn transcript_index_migration_marker_path_for_test(scope: &ThreadScope) -> ScopedPath {
     ScopedPath::new(format!(
-        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v2.complete",
+        "/threads/agents/{}/projects/{}/owners/{}/index-migrations/transcript-index-v3.complete",
         scope.agent_id.as_str(),
         scope
             .project_id
@@ -8107,4 +8108,134 @@ async fn filesystem_accept_prepared_context_replays_without_orphans() {
         matches!(missing, Err(SessionThreadError::UnknownThread { .. })),
         "cross-scope reads must stay non-enumerating, got {missing:?}"
     );
+}
+
+#[tokio::test]
+async fn filesystem_completed_run_messages_are_exact_and_bounded() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let service = FilesystemSessionThreadService::new(scoped_threads_fs_at(
+        backend,
+        "tenant-completed-run",
+        "alice",
+    ));
+    let scope = scope("completed-run");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-completed-run").unwrap()),
+            created_by_actor_id: "actor".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let run = TurnRunId::new();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: run.to_string(),
+            content: MessageContent::text("target"),
+        })
+        .await
+        .unwrap();
+    service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: TurnRunId::new().to_string(),
+            content: MessageContent::text("later"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_subagent_result(AcceptSubagentResultRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            source_binding_id: format!("subagent-result:{run}"),
+            external_event_id: "child-event".into(),
+            content: FramedSubagentText::frame("trusted child"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "user".into(),
+            source_binding_id: Some(format!("subagent-result:{run}")),
+            reply_target_binding_id: None,
+            external_event_id: Some("user-event".into()),
+            content: MessageContent::text("hostile collision"),
+        })
+        .await
+        .unwrap();
+    // Fill more than one unfiltered descending page after the delayed child.
+    // The run-aware index must still return the older target and child rows.
+    for index in 0..12 {
+        service
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: TurnRunId::new().to_string(),
+                content: MessageContent::text(format!("later-{index}")),
+            })
+            .await
+            .unwrap();
+    }
+    let result = service
+        .list_completed_run_messages_bounded(ironclaw_threads::CompletedRunMessagesRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: run,
+            max_messages: 10,
+            max_bytes: 100_000,
+        })
+        .await
+        .unwrap();
+    let messages = match result {
+        ironclaw_threads::CompletedRunMessages::Complete(m) => m,
+        _ => panic!("unexpected limit"),
+    };
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].content.as_deref(), Some("target"));
+    assert_eq!(messages[1].kind, MessageKind::System);
+    assert_eq!(messages[1].status, MessageStatus::Finalized);
+    assert!(
+        messages[1]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("trusted child"))
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.content.as_deref() != Some("hostile collision"))
+    );
+    assert!(matches!(
+        service
+            .list_completed_run_messages_bounded(ironclaw_threads::CompletedRunMessagesRequest {
+                scope: scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                turn_run_id: run,
+                max_messages: 0,
+                max_bytes: 100_000
+            })
+            .await
+            .unwrap(),
+        ironclaw_threads::CompletedRunMessages::LimitExceeded
+    ));
+    assert!(matches!(
+        service
+            .list_completed_run_messages_bounded(ironclaw_threads::CompletedRunMessagesRequest {
+                scope,
+                thread_id: thread.thread_id,
+                turn_run_id: run,
+                max_messages: 10,
+                max_bytes: 1
+            })
+            .await
+            .unwrap(),
+        ironclaw_threads::CompletedRunMessages::LimitExceeded
+    ));
 }

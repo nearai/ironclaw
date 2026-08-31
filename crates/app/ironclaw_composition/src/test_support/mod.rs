@@ -114,6 +114,7 @@ mod capability_io;
 #[path = "channel_connection_tests.rs"]
 mod channel_connection;
 mod durable;
+mod learning_review;
 mod libsql_host_bindings;
 mod oauth_product_auth;
 mod outbound_delivery;
@@ -154,6 +155,8 @@ pub use durable::{
     open_standalone_outbound_preferences_store_for_test,
     open_standalone_trigger_repository_for_test,
 };
+#[cfg(feature = "test-support")]
+pub use learning_review::{LearningReviewTestSupport, learning_review_turn_event_sink_for_test};
 pub use libsql_host_bindings::{
     libsql_host_bindings_for_test, libsql_host_bindings_from_runtime_for_test,
     libsql_host_bindings_with_resolved_secret_master_key_for_test,

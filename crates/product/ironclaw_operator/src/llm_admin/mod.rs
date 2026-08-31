@@ -1,4 +1,5 @@
 pub mod active_model;
+mod learning_settings_store;
 pub mod llm_catalog;
 pub mod llm_config_service;
 pub mod llm_key_store;
@@ -17,6 +18,7 @@ pub use ironclaw_product_contracts::operator_llm::{
     RebornModelRoutesState, RebornProviderInfo, RebornProviderList, RebornProviderMetadata,
     RebornProviderSelection, RebornProviderStatus, RebornProviderWriteOutcome, RebornV1State,
 };
+pub use learning_settings_store::FilesystemLearningSettingsStore;
 pub use llm_catalog::{apply_stored_api_key, resolve_reborn_runtime_llm};
 pub use llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
 pub use llm_key_store::{LlmKeyStore, LlmKeyStoreError};

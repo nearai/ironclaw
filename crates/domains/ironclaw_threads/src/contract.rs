@@ -718,6 +718,24 @@ pub struct BoundedThreadMessagesRequest {
     pub max_bytes: usize,
 }
 
+/// Bounded transcript read for one completed turn run. The service filters by
+/// run identity before materializing message content, so later runs cannot be
+/// attributed to this run and oversized histories fail closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedRunMessagesRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub turn_run_id: TurnRunId,
+    pub max_messages: usize,
+    pub max_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletedRunMessages {
+    Complete(Vec<ThreadMessageRecord>),
+    LimitExceeded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMessageRangeRequest {
     pub scope: ThreadScope,

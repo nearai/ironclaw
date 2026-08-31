@@ -418,6 +418,29 @@ test("locale packs include automation action failure copy", () => {
     assert.notEqual(pack[key].trim(), "", `${locale} has empty ${key}`);
   }
 });
+test("locale packs include learning settings copy", () => {
+  const keys = [
+    "llm.learningTitle",
+    "llm.learningDesc",
+    "llm.learningToggleLabel",
+    "llm.learningModelLabel",
+    "llm.learningModelRequired",
+    "llm.learningNoActiveProvider",
+    "llm.learningSaving",
+    "llm.learningSaveFailed",
+    "llm.learningEnabledStatus",
+    "llm.learningDisabledStatus",
+    "llm.learningInvalidNotice",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of keys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} has empty ${key}`);
+    }
+  }
+});
 
 test("locale packs localize every builtin outbound-delivery tool description", () => {
   // `builtin.notification_channels_set` is a registered operator tool

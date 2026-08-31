@@ -11,6 +11,7 @@
 mod context;
 mod events;
 mod hash;
+mod learning;
 mod metadata;
 mod path;
 mod safety;
@@ -27,6 +28,14 @@ pub use events::{
     MemorySignificantEventSink, MemorySignificantEventSource, MemorySignificantEventStatus,
 };
 pub use hash::{content_bytes_sha256, content_sha256};
+pub use learning::{
+    LearningAction, LearningCandidateInsert, LearningCandidateStatus, LearningCandidateStore,
+    LearningCandidateStoreError, LearningDecision, LearningExplicitness, LearningIdempotencyKey,
+    LearningReview, LearningReviewRecord, LearningReviewValidationError, LearningScope,
+    MAX_LEARNING_MEMORY_PROPOSALS, MAX_LEARNING_PROPOSAL_BYTES, MAX_LEARNING_SKILL_REASON_BYTES,
+    MAX_LEARNING_SOURCE_REFERENCES, MAX_LEARNING_UNRESOLVED_PROPOSALS, MemoryLearningProposal,
+    MemoryLearningProposalKind,
+};
 pub use metadata::{CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata};
 pub use path::{
     MemoryDocumentPath, MemoryDocumentScope, validated_memory_relative_path,

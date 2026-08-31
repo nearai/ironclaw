@@ -397,6 +397,7 @@ pub(super) enum ProductCapabilityHandler {
     LlmProviderUpsert,
     LlmProviderDelete,
     LlmActiveSet,
+    LlmLearningSet,
     LlmUserModelPolicySet,
     LlmUserModelPreferenceSet,
     ExtensionRegisterHostedMcp,
@@ -428,6 +429,7 @@ impl ProductCapabilityHandler {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID => Some(Self::LlmProviderUpsert),
             LLM_PROVIDER_DELETE_CAPABILITY_ID => Some(Self::LlmProviderDelete),
             LLM_ACTIVE_SET_CAPABILITY_ID => Some(Self::LlmActiveSet),
+            LEARNING_SETTINGS_SET_CAPABILITY_ID => Some(Self::LlmLearningSet),
             LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID => Some(Self::LlmUserModelPolicySet),
             LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID => Some(Self::LlmUserModelPreferenceSet),
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID => Some(Self::ExtensionRegisterHostedMcp),
@@ -460,6 +462,7 @@ impl ProductCapabilityHandler {
             Self::LlmProviderUpsert => "llm provider updated",
             Self::LlmProviderDelete => "llm provider deleted",
             Self::LlmActiveSet => "llm active provider updated",
+            Self::LlmLearningSet => "llm learning updated",
             Self::LlmUserModelPolicySet => "user model policy updated",
             Self::LlmUserModelPreferenceSet => "user model preference updated",
             Self::ExtensionRegisterHostedMcp => "hosted MCP registration accepted",
@@ -504,6 +507,7 @@ impl ProductCapabilityHandler {
             }
             Self::LlmProviderDelete => services.invoke_llm_provider_delete(caller, input).await,
             Self::LlmActiveSet => services.invoke_llm_active_set(caller, input).await,
+            Self::LlmLearningSet => services.invoke_llm_learning_set(caller, input).await,
             Self::LlmUserModelPolicySet => {
                 services.invoke_user_model_policy_set(caller, input).await
             }
@@ -714,6 +718,7 @@ mod tests {
             LLM_PROVIDER_UPSERT_CAPABILITY_ID,
             LLM_PROVIDER_DELETE_CAPABILITY_ID,
             LLM_ACTIVE_SET_CAPABILITY_ID,
+            LEARNING_SETTINGS_SET_CAPABILITY_ID,
             LLM_USER_MODEL_POLICY_SET_CAPABILITY_ID,
             LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID,
             EXTENSION_REGISTER_HOSTED_MCP_CAPABILITY_ID,

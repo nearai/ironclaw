@@ -10,6 +10,7 @@ import { SettingsSearchEmpty } from "./settings-search-empty";
 import { useLlmProviders } from "../hooks/useLlmProviders";
 import { UserModelPreferenceSelector } from "./user-model-preference-selector";
 import { ModelSelectionPolicyEditor } from "./model-selection-policy-editor";
+import { LearningSection } from "./learning-section";
 
 export function InferenceTab({
   isAdmin = false,
@@ -64,8 +65,23 @@ export function InferenceTab({
     "ollama",
     "near",
   ]);
+  const showLearningSection = matchesSearch(searchQuery, [
+    t("llm.learningTitle"),
+    t("llm.learningDesc"),
+    t("llm.learningToggleLabel"),
+    t("llm.learningModelLabel"),
+    t("llm.learningMemoryPolicyLabel"),
+    t("llm.learningMemoryPolicyHelp"),
+    "learning",
+  ]);
 
-  if (isAdmin && !showProviderSummary && !showProviderManagement && sections.length === 0) {
+  if (
+    isAdmin &&
+    !showProviderSummary &&
+    !showProviderManagement &&
+    !showLearningSection &&
+    sections.length === 0
+  ) {
     return (<SettingsSearchEmpty query={searchQuery} />);
   }
 
@@ -74,6 +90,8 @@ export function InferenceTab({
       {isAdmin && <ModelSelectionPolicyEditor providerState={providerState} />}
 
       <UserModelPreferenceSelector />
+
+      {isAdmin && showLearningSection && <LearningSection providerState={providerState} />}
 
       {isAdmin && showProviderSummary &&
       (

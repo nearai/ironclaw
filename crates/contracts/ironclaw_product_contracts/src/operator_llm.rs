@@ -40,10 +40,23 @@ pub const LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID: &str =
     "builtin.llm_user_model_preference_set";
 pub const LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(LLM_USER_MODEL_PREFERENCE_SET_CAPABILITY_ID);
+pub const LEARNING_SETTINGS_SET_CAPABILITY_ID: &str = "builtin.llm_learning_set";
+pub const LEARNING_SETTINGS_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LEARNING_SETTINGS_SET_CAPABILITY_ID);
 pub const USER_MODEL_CATALOG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "user_model_catalog",
     paginated: false,
 };
+
+/// Live runtime control for deployment-wide learning.
+///
+/// The implementation owns the in-memory gate and selected model used by the
+/// turn-event sink. The operator service calls this only after durable
+/// persistence succeeds, so a failed write can never leave the process in a
+/// state that is not recoverable after restart.
+pub trait LearningRuntimeController: Send + Sync {
+    fn apply(&self, settings: LearningSettings);
+}
 pub const USER_MODEL_PREFERENCE_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "user_model_preference",
     paginated: false,
@@ -99,6 +112,13 @@ pub trait LlmConfigService: Send + Sync {
         &self,
         caller: ProductSurfaceCaller,
         request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
+
+    /// Replace deployment-wide learning settings and apply them live.
+    async fn set_learning(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: SetLearningSettingsRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError>;
 
     /// Probe a provider's credentials/endpoint without persisting anything.
@@ -423,6 +443,74 @@ pub struct LlmConfigSnapshot {
     /// ordinary users receive [`UserModelCatalog`] instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_model_policy: Option<ModelSelectionPolicy>,
+    #[serde(default)]
+    pub learning: LearningSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryWritePolicy {
+    #[default]
+    Staged,
+    Automatic,
+}
+
+/// Durable deployment-wide learning settings. Missing fields deserialize
+/// to the disabled default so records written before this feature remain valid.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearningSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub memory_write_policy: MemoryWritePolicy,
+}
+
+/// Runtime/read-back state for learning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearningSnapshot {
+    pub enabled: bool,
+    pub model: Option<String>,
+    pub memory_write_policy: MemoryWritePolicy,
+    pub status: LearningStatus,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LearningStatus {
+    Disabled,
+    Ready,
+    Invalid,
+}
+
+impl LearningSnapshot {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            model: None,
+            memory_write_policy: MemoryWritePolicy::Staged,
+            status: LearningStatus::Disabled,
+            reason: None,
+        }
+    }
+}
+
+impl Default for LearningSnapshot {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+/// Mutation request for deployment-wide learning settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetLearningSettingsRequest {
+    pub enabled: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub memory_write_policy: MemoryWritePolicy,
 }
 
 /// One provider in the merged catalog, annotated for the settings UI.
@@ -573,6 +661,21 @@ pub struct SetUserModelPreferenceRequest {
     pub model: Option<String>,
 }
 
+/// Persistence port for deployment-wide learning settings.
+#[async_trait]
+pub trait LearningSettingsStore: Send + Sync {
+    async fn read(&self) -> Result<Option<LearningSettings>, LearningSettingsStoreError>;
+
+    async fn write(&self, settings: &LearningSettings) -> Result<(), LearningSettingsStoreError>;
+}
+
+/// Opaque learning settings-store failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearningSettingsStoreError {
+    Unavailable,
+    InvalidData,
+}
+
 /// Persistence port for tenant-scoped model policies.
 ///
 /// The filesystem-backed implementation belongs to composition, which owns
@@ -701,6 +804,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn learning_status_uses_snake_case_wire_convention() {
+        for (status, wire) in [
+            (LearningStatus::Disabled, "disabled"),
+            (LearningStatus::Ready, "ready"),
+            (LearningStatus::Invalid, "invalid"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).expect("serialize learning status"),
+                serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<LearningStatus>(serde_json::json!(wire))
+                    .expect("deserialize learning status"),
+                status
+            );
+        }
+    }
+
     /// `as_path` is spliced into the NEAR AI auth URL (`/v1/auth/<segment>`).
     /// A wrong or URL-unsafe segment does not fail here — it fails as a broken
     /// SSO redirect at login time, so the segments are pinned literally.
@@ -763,6 +885,7 @@ mod tests {
                     model: None,
                 }),
                 user_model_policy: None,
+                learning: LearningSnapshot::disabled(),
             })
         }
 
@@ -789,6 +912,7 @@ mod tests {
                 }],
                 active: None,
                 user_model_policy: None,
+                learning: LearningSnapshot::disabled(),
             })
         }
 
@@ -815,7 +939,16 @@ mod tests {
                     model: request.model,
                 }),
                 user_model_policy: None,
+                learning: LearningSnapshot::disabled(),
             })
+        }
+
+        async fn set_learning(
+            &self,
+            _caller: ProductSurfaceCaller,
+            _request: SetLearningSettingsRequest,
+        ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+            Err(LlmConfigServiceError::Unavailable)
         }
 
         async fn test_connection(

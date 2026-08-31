@@ -4248,7 +4248,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_ingress",
  "ironclaw_host_runtime",
- "ironclaw_llm",
  "ironclaw_loop_contracts",
  "ironclaw_loop_host",
  "ironclaw_mcp",
@@ -4773,6 +4772,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_outbound",
  "ironclaw_processes",
+ "ironclaw_product_contracts",
  "ironclaw_resources",
  "ironclaw_safety",
  "ironclaw_sandbox",
@@ -4824,6 +4824,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]

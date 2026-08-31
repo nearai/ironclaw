@@ -301,7 +301,7 @@ fn decode_product_outbound_events(
 mod tests {
     use super::*;
     use ironclaw_product_contracts::operator_llm::{
-        LlmActiveSelection, LlmConfigSnapshot, LlmProviderView,
+        LearningSnapshot, LlmActiveSelection, LlmConfigSnapshot, LlmProviderView,
     };
 
     fn provider_view(
@@ -340,6 +340,7 @@ mod tests {
                 model: Some("gpt-4o".to_string()),
             }),
             user_model_policy: None,
+            learning: LearningSnapshot::disabled(),
         };
 
         let entries = model_entries_from_snapshot(&snapshot);
@@ -357,6 +358,7 @@ mod tests {
             providers: vec![provider_view("anthropic", "claude-opus-4", false, None)],
             active: None,
             user_model_policy: None,
+            learning: LearningSnapshot::disabled(),
         };
 
         let entries = model_entries_from_snapshot(&snapshot);

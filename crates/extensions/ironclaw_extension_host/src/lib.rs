@@ -81,7 +81,6 @@ pub mod reply_contexts;
 pub mod resolver;
 pub mod run_delivery_ports;
 pub mod session_ingress;
-pub mod skill_learning;
 pub mod skill_listing;
 pub mod store;
 

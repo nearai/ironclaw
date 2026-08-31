@@ -233,7 +233,7 @@ where
             .put(
                 &scope.to_resource_scope(),
                 &marker,
-                Entry::bytes(b"transcript-index-v2".to_vec()),
+                Entry::bytes(b"transcript-index-v3".to_vec()),
                 CasExpectation::Any,
             )
             .await?;
@@ -255,7 +255,7 @@ fn transcript_index_migration_marker_path(
     scope: &ThreadScope,
 ) -> Result<ScopedPath, SessionThreadError> {
     scoped_path(&format!(
-        "{}/index-migrations/transcript-index-v2.complete",
+        "{}/index-migrations/transcript-index-v3.complete",
         scope_axes_string(scope)
     ))
 }

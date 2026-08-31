@@ -19,6 +19,7 @@ pub struct RebornLlmReloadAdapter {
     reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
     session: Arc<ironclaw_llm::SessionManager>,
     keys: LlmKeyStore,
+    provider: Arc<dyn ironclaw_llm::LlmProvider>,
 }
 
 impl RebornLlmReloadAdapter {
@@ -27,12 +28,14 @@ impl RebornLlmReloadAdapter {
         reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
         session: Arc<ironclaw_llm::SessionManager>,
         keys: LlmKeyStore,
+        provider: Arc<dyn ironclaw_llm::LlmProvider>,
     ) -> Self {
         Self {
             boot,
             reload_handle,
             session,
             keys,
+            provider,
         }
     }
 
@@ -120,5 +123,11 @@ impl LlmReloadTrigger for RebornLlmReloadAdapter {
             "LLM reload applied to the live provider"
         );
         result
+    }
+
+    async fn active_model_catalog(&self) -> Result<Vec<String>, String> {
+        ironclaw_llm::LlmProvider::list_models(self.provider.as_ref())
+            .await
+            .map_err(|error| error.to_string())
     }
 }

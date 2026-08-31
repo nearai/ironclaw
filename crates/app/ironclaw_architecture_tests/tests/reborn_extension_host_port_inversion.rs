@@ -18,10 +18,11 @@
 //!   the same update-never-relax shape as the extension-specificity allowlist.
 //! - **The inverted ports are pinned where they landed.** Each port this row
 //!   moved is asserted to be defined in `ironclaw_product_contracts` and
-//!   implemented in `ironclaw_extension_host`, so a revert is loud rather than
-//!   a silent re-inversion. (`reborn_product_contract_location_scan.rs` already
-//!   pins that no *other* crate defines or re-exports them; this pins that the
-//!   implementation stayed below the contract, which that scan cannot see.)
+//!   implemented in its named below-product owner, so a revert is loud rather
+//!   than a silent re-inversion. (`reborn_product_contract_location_scan.rs`
+//!   already pins that no *other* crate defines or re-exports them; this pins
+//!   that the implementation stayed below the contract, which that scan cannot
+//!   see.)
 //! - **The error vocabulary is pinned too** (WS2.2). A trait is not the only
 //!   way to depend upward: `ProductSurfaceFailure` was product's *internal*
 //!   workflow error and simultaneously the extension host's own lifecycle error
@@ -51,6 +52,7 @@ const PRODUCT: &str = "ironclaw_assistant";
 const PRODUCT_CONTRACTS: &str = "ironclaw_product_contracts";
 const EXTENSION_HOST: &str = "ironclaw_extension_host";
 const EXTENSION_MANAGER: &str = "ironclaw_extension_manager";
+const LOOP_HOST: &str = "ironclaw_loop_host";
 
 /// Product-declared traits `ironclaw_extension_host` still implements, each
 /// with the reason the WS2 port-inversion row could not move it and the slice
@@ -108,17 +110,16 @@ const PRODUCT_DEFINED_TRAITS_EXTENSION_HOST_STILL_IMPLEMENTS: &[(&str, &str)] = 
 /// implemented **below** product, paired with the crate that implements each.
 /// Enumerated so a rename or a relocation has to come through this file.
 ///
-/// **WS2.4 made the implementor explicit.** The list used to assert only that
-/// `ironclaw_extension_host` implements every inverted port, which was true
-/// while the extension host was one crate. The `ironclaw_extension_manager`
-/// split moved four implementations (the lifecycle product service, the admin
-/// configuration view provider, the channel-config product service, and — via
-/// the residue list above — the credential setup service) into the manager.
-/// Asserting "implemented in extension_host" would then have failed for a
-/// *correct* change, and the fix-it message the gate already carried says the
-/// right thing: "if the implementor moved, move this row with it rather than
-/// deleting the pin". That is what this pairing does. Both crates sit below
-/// the contract, which is the property the pin exists to protect.
+/// **WS2.4 made the implementor explicit.** The list initially assumed every
+/// inverted port stayed in `ironclaw_extension_host`, which was true while the
+/// extension host was one crate. The extension-manager split moved four
+/// implementations into the manager; later moves likewise repoint individual
+/// rows to their named below-product owner (for example,
+/// `LearningRuntimeController` now lives in `ironclaw_loop_host`).
+/// Asserting a single implementor would make a correct relocation look like a
+/// missing implementation, so the fix-it message names the row as the source
+/// of truth. All named owners sit below the contract, which is the property
+/// this pin exists to protect.
 const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
     ("AccountConnectionStatusSource", EXTENSION_HOST),
     ("ApprovalPromptContextSource", EXTENSION_HOST),
@@ -145,6 +146,7 @@ const INVERTED_PORT_IMPLEMENTORS: &[(&str, &str)] = &[
     // shared-route subject retirement (run-acts-as-invoker) reshaped it to
     // admission-only — same declaration home, same implementor.
     ("SharedConversationAdmission", EXTENSION_HOST),
+    ("LearningRuntimeController", LOOP_HOST),
     // WS2.4: the admin-configuration view provider is a credential/admin view.
     ("RebornViewProvider", EXTENSION_MANAGER),
 ];
@@ -436,6 +438,7 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
     let contract_traits = traits_defined_in(PRODUCT_CONTRACTS);
     let product_traits = traits_defined_in(PRODUCT);
     let host_impls = traits_implemented_by(EXTENSION_HOST, PRODUCT_CONTRACTS, 21);
+    let loop_impls = traits_implemented_by(LOOP_HOST, PRODUCT_CONTRACTS, 21);
     let manager_impls = traits_implemented_by(EXTENSION_MANAGER, PRODUCT_CONTRACTS, 10);
 
     let mut violations = Vec::new();
@@ -453,6 +456,7 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
         let implemented = match *implementor {
             EXTENSION_HOST => &host_impls,
             EXTENSION_MANAGER => &manager_impls,
+            LOOP_HOST => &loop_impls,
             other => panic!("{port} names an unknown implementor crate {other}"),
         };
         if !implemented.contains(*port) {
@@ -461,23 +465,24 @@ fn inverted_ports_are_declared_in_contracts_and_implemented_below_product() {
                  repoint this row rather than deleting the pin"
             ));
         }
-        // The pin is only meaningful if the port has exactly one home below the
-        // contract: a second implementation in the other crate would mean the
-        // WS2.4 split duplicated a surface rather than moving it.
-        let other = match *implementor {
-            EXTENSION_HOST => (&manager_impls, EXTENSION_MANAGER),
-            _ => (&host_impls, EXTENSION_HOST),
+        // The pin is only meaningful if the port has exactly one home among
+        // the below-product crates. A second implementation would mean a
+        // relocation duplicated a surface rather than moving it.
+        let duplicate = match *implementor {
+            EXTENSION_HOST => manager_impls.contains(*port) || loop_impls.contains(*port),
+            EXTENSION_MANAGER => host_impls.contains(*port) || loop_impls.contains(*port),
+            LOOP_HOST => host_impls.contains(*port) || manager_impls.contains(*port),
+            _ => false,
         };
-        // Scope note: "exactly one" is asserted between the two split crates
-        // only. Impls elsewhere (product's own Unsupported*/Unavailable*
-        // fallbacks, composition doubles) are legal downward edges this gate
-        // deliberately does not police.
-        if other.0.contains(*port) {
+        // Scope note: "exactly one" is asserted among the three below-product
+        // owners covered by this gate. Impls elsewhere (product's own
+        // Unsupported*/Unavailable* fallbacks, composition doubles) are legal
+        // downward edges this gate deliberately does not police.
+        if duplicate {
             violations.push(format!(
-                "{port} is implemented in both {implementor} and {} — within the split \
-                 pair a port has exactly one home; the split moves a surface, it does \
-                 not fork it",
-                other.1
+                "{port} is implemented in another below-product owner as well as \
+                 {implementor} — a moved port has exactly one home; the split moves a \
+                 surface, it does not fork it"
             ));
         }
     }

@@ -48,6 +48,9 @@ list. Stable anchors, by category:
   runtime). Text lives in `prompts/*.md`, never inline in Rust. Evicted from
   the composition root, which owns assembly and boot-time seeding of the
   on-disk `SYSTEM.md`, never the text (PROPOSAL §6.10.1).
+- `learning_review.rs` / `prompts/learning_review.md` — completed-turn
+  candidate review, scoped filesystem persistence, and the live learning gate;
+  its concrete provider adapter is in `model_gateway.rs`.
 
 Everything else in `src/` (budget/compaction accounting, subagent prompt/spawn
 ports, tool search, context-window caching, model-visible output scrubbing,
@@ -72,7 +75,8 @@ enumerated above — trust `ls src/`, not a stale list.
   exception, by charter rather than drift — PROPOSAL §6.7.2 assigns the
   model-gateway adapter here explicitly ("a host-port adapter by charter"),
   and `ironclaw_llm` (`default-features = false`) is a normal dependency for
-  that adapter alone. No other module may reach a provider client.
+  the gateway and learning inference adapter alone. No other module may reach
+  a provider client.
 
 ## Adding code
 

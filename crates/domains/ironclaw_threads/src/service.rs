@@ -8,8 +8,9 @@ use crate::{
     AcceptedInboundMessageReplay, AcceptedSubagentResult, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
     AppendToolResultReferenceRequest, BoundedThreadMessages, BoundedThreadMessagesRequest,
-    ContextMessages, ContextWindow, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
-    EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, InboundMessageReplayMetadata,
+    CompletedRunMessages, CompletedRunMessagesRequest, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    FinalizedAssistantMessageByRunRequest, InboundMessageReplayMetadata,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent,
     PublishStructuredFinalizationMessageRequest, PutStructuredFinalizationRequest,
@@ -330,6 +331,19 @@ pub trait SessionThreadService: Send + Sync {
     ) -> Result<BoundedThreadMessages, SessionThreadError> {
         Err(SessionThreadError::Backend(
             "bounded thread messages are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    /// Read only messages belonging to one completed run under a strict
+    /// materialization budget. Tool/subagent rows are matched by their durable
+    /// run binding before content is copied.
+    async fn list_completed_run_messages_bounded(
+        &self,
+        _request: CompletedRunMessagesRequest,
+    ) -> Result<CompletedRunMessages, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "bounded completed-run messages are not implemented by this SessionThreadService backend"
                 .to_string(),
         ))
     }
@@ -742,6 +756,15 @@ where
         request: BoundedThreadMessagesRequest,
     ) -> Result<BoundedThreadMessages, SessionThreadError> {
         self.as_ref().list_thread_messages_bounded(request).await
+    }
+
+    async fn list_completed_run_messages_bounded(
+        &self,
+        request: CompletedRunMessagesRequest,
+    ) -> Result<CompletedRunMessages, SessionThreadError> {
+        self.as_ref()
+            .list_completed_run_messages_bounded(request)
+            .await
     }
 
     async fn list_thread_messages_range(

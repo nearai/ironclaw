@@ -181,6 +181,16 @@ export function setUserModelPreference(model) {
     body: JSON.stringify({ model }),
   });
 }
+
+// Deployment-wide learning controls. The request body carries
+// `{ enabled, model, memory_write_policy }`; the response is the authoritative
+// LLM config snapshot with the applied `learning` field.
+export function setLearning(payload) {
+  return apiFetch("/api/webchat/v2/llm/learning", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
 export function upsertLlmProvider(payload) {
   const { clientActionId: callerClientActionId, ...request } = payload;
   return apiFetch("/api/webchat/v2/llm/providers", {
