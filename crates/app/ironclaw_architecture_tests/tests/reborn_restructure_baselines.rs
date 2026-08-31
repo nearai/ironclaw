@@ -214,7 +214,7 @@ const WS0_COMPOSITION_SHARE_BP: usize = 658;
 /// into #7875. Main contributes the resource-block observer wiring and #7875
 /// adds the durable auth notification observer wiring. Both lifecycle policies
 /// remain in `ironclaw_assistant`; composition only supplies dependencies.
-const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 42_935;
+const COMPOSITION_ABSOLUTE_SRC_LOC: usize = 43_568;
 
 /// Composition dispatch, from the same `--print` run: "composition dispatch:
 /// 827 Arc<dyn> (governed prod, excl slack/extension_host)".

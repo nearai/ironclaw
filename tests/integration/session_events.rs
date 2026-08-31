@@ -266,24 +266,22 @@ async fn one_session_socket_carries_two_threads_independently() {
 
     // Deadline caps WAITING only — passing runs finish in well under a
     // second locally; saturated CI partitions need the headroom.
+    //
+    // One order-independent loop: frames of DIFFERENT subscriptions carry no
+    // cross-ordering guarantee, so subscription B's admission ack may arrive
+    // before, between, or after subscription A's replayed events. Consuming
+    // admission acks in a separate first phase silently discarded whichever
+    // replay events interleaved with them, hanging the drain on a finalized
+    // reply that had already been delivered.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let mut admitted = 0;
-    while admitted < 2 {
+    let mut final_a: Option<String> = None;
+    let mut final_b: Option<String> = None;
+    while final_a.is_none() || final_b.is_none() {
         let frame = next_frame(&mut socket, deadline).await;
         assert_ne!(
             frame["type"], "subscription_error",
             "both selectors must authorize: {frame}"
         );
-        if frame["type"] == "subscribed" {
-            admitted += 1;
-        }
-    }
-
-    // Drain frames until each subscription produced its own finalized reply.
-    let mut final_a: Option<String> = None;
-    let mut final_b: Option<String> = None;
-    while final_a.is_none() || final_b.is_none() {
-        let frame = next_frame(&mut socket, deadline).await;
         if frame["type"] != "event" {
             continue;
         }
