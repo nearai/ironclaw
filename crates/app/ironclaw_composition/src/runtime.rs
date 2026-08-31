@@ -1958,6 +1958,8 @@ impl RebornRuntime {
                     // notification channel, mirroring the generic channel
                     // provider's `full_capabilities`.
                     notifications: true,
+                    // §7.9: run-completion pushes are exclusively web-app.
+                    run_completions: false,
                     modalities: Vec::new(),
                 },
                 reply_target_binding_ref,

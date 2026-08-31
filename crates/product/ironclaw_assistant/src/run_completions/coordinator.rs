@@ -175,12 +175,15 @@ impl RunCompletionCoordinator {
             .notices
             .in_delivery_state(
                 owner,
-                &CompletionDeliveryState::PendingArbitration { closes_at: now },
+                &CompletionDeliveryState::PendingArbitration {
+                    closes_at: now,
+                    grants_issued: 0,
+                },
                 DUE_SCAN_LIMIT,
             )
             .await?;
         for notice in pending {
-            let CompletionDeliveryState::PendingArbitration { closes_at } = notice.delivery
+            let CompletionDeliveryState::PendingArbitration { closes_at, .. } = notice.delivery
             else {
                 continue;
             };
@@ -242,7 +245,22 @@ impl RunCompletionCoordinator {
                     Err(error) => return Err(error),
                 }
             } else {
-                match self.fallback(owner, &notice, now).await {
+                // §5.4: the one re-arbitration is spent. Regress the expired
+                // grant to pending first — push claim and no-target
+                // settlement are pending-only CAS transitions (§5.3) — then
+                // fall back immediately from the regressed record.
+                let regressed = match self
+                    .services
+                    .notices
+                    .regress_expired_grant(owner, &notice.notice_id, grant_id, now)
+                    .await
+                {
+                    Ok(regressed) => regressed,
+                    Err(RunCompletionStoreError::Conflict { .. }) => continue,
+                    Err(error) => return Err(error),
+                };
+                self.services.record_stale_grant();
+                match self.fallback(owner, &regressed, now).await {
                     Ok(()) => {}
                     Err(RunCompletionStoreError::Conflict { .. }) => {}
                     Err(error) => return Err(error),
@@ -447,4 +465,415 @@ pub fn spawn_run_completion_coordinator(
         }
     });
     RunCompletionCoordinatorHandle { cancel, handle }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_completions::RunCompletionSurfaceServices;
+    use crate::run_completions::records::CompletionReadEvidence;
+    use crate::run_completions::store::{
+        NewRunCompletionNotice, NoticeCreateOutcome, RunCompletionNoticeStore,
+        RunCompletionNotices,
+    };
+    use crate::run_completions::stream::RunCompletionStreamHub;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::ids::{TenantId, UserId};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_host_api::resource::ResourceScope;
+    use ironclaw_product_contracts::run_completions::RunCompletionIntentKind;
+
+    fn services() -> Arc<RunCompletionSurfaceServices> {
+        let store = Arc::new(RunCompletionNoticeStore::new(Arc::new(
+            ScopedFilesystem::new(Arc::new(InMemoryBackend::new()), |scope: &ResourceScope| {
+                MountView::new(vec![
+                    MountGrant::new(
+                        MountAlias::new(crate::run_completions::store::RUN_NOTICES_MOUNT_ALIAS)?,
+                        VirtualPath::new(format!(
+                            "/tenants/{}/users/{}/run-notices",
+                            scope.tenant_id, scope.user_id
+                        ))?,
+                        MountPermissions::read_write_list_delete(),
+                    ),
+                    MountGrant::new(
+                        MountAlias::new("/tenant-shared")?,
+                        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id))?,
+                        MountPermissions::read_write(),
+                    ),
+                ])
+            }),
+        ))) as Arc<dyn RunCompletionNotices>;
+        let hub = Arc::new(RunCompletionStreamHub::new(Arc::clone(&store)));
+        Arc::new(RunCompletionSurfaceServices::new(store, hub))
+    }
+
+    fn owner() -> RunCompletionOwner {
+        RunCompletionOwner {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            user_id: UserId::new("user-alpha").expect("user"),
+        }
+    }
+
+    fn coordinator(
+        services: &Arc<RunCompletionSurfaceServices>,
+    ) -> RunCompletionCoordinator {
+        RunCompletionCoordinator::new(
+            Arc::clone(services),
+            Arc::new(NoPushFallback),
+            Arc::new(DenyLocalOsIntents),
+        )
+    }
+
+    struct AlwaysPush;
+
+    #[async_trait::async_trait]
+    impl CompletionPushFallback for AlwaysPush {
+        async fn attempt_push(
+            &self,
+            owner: &RunCompletionOwner,
+            notice: &RunCompletionNotice,
+        ) -> Result<bool, RunCompletionStoreError> {
+            // Mirrors the production facade's transition without delivering.
+            self_claim(owner, notice).await
+        }
+    }
+
+    async fn self_claim(
+        _owner: &RunCompletionOwner,
+        _notice: &RunCompletionNotice,
+    ) -> Result<bool, RunCompletionStoreError> {
+        Ok(true)
+    }
+
+    struct AllowLocalOs;
+
+    #[async_trait::async_trait]
+    impl LocalOsIntentPolicy for AllowLocalOs {
+        async fn allows_local_os(&self, _owner: &RunCompletionOwner, _id: &str) -> bool {
+            true
+        }
+    }
+
+    async fn seed_notice(
+        services: &Arc<RunCompletionSurfaceServices>,
+        suffix: &str,
+        closes_at: DateTime<Utc>,
+    ) -> RunCompletionNotice {
+        // Mirror ingest's ordering contract (§5.4): the owner lands in the
+        // durable due registry BEFORE the notice write.
+        services
+            .notices
+            .mark_owner_due(&owner())
+            .await
+            .expect("mark due");
+        let outcome = services
+            .notices
+            .create_notice(
+                &owner(),
+                NewRunCompletionNotice {
+                    notice_id: format!("rcn-{suffix}"),
+                    run_id: format!("11111111-2222-3333-4444-55555555555{}", suffix.len() % 10),
+                    thread_id: format!("thread-{suffix}"),
+                    agent_id: Some("agent-alpha".to_string()),
+                    project_id: None,
+                    thread_tag: format!("rct-{suffix}"),
+                    terminal_projection_ref: format!("run-completion/rcn-{suffix}"),
+                    completed_at: Utc::now(),
+                    arbitration_closes_at: closes_at,
+                },
+            )
+            .await
+            .expect("create notice");
+        services.wake_owner(&owner());
+        match outcome {
+            NoticeCreateOutcome::Created(notice) => notice,
+            NoticeCreateOutcome::AlreadyRecorded(notice) => notice,
+        }
+    }
+
+    fn intent(
+        browser: &str,
+        kind: RunCompletionIntentKind,
+        revision: u64,
+    ) -> CompletionIntentRecord {
+        CompletionIntentRecord {
+            browser_instance_id: browser.to_string(),
+            tab_id: format!("tab-{browser}"),
+            state_revision: revision,
+            focus_epoch: 1,
+            intent: kind,
+            offered_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn best_ranked_intent_wins_one_grant_at_window_close() {
+        let services = services();
+        let now = Utc::now();
+        let notice = seed_notice(&services, "grant", now - ChronoDuration::seconds(1)).await;
+        for record in [
+            intent("browser-b", RunCompletionIntentKind::LocalOs, 7),
+            intent("browser-a", RunCompletionIntentKind::InApp, 5),
+        ] {
+            services
+                .notices
+                .record_intent(&owner(), &notice.notice_id, record)
+                .await
+                .expect("record intent");
+        }
+        let deadline = coordinator(&services).tick_once(now).await;
+        let after = services
+            .notices
+            .get(&owner(), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        let CompletionDeliveryState::Granted {
+            browser_instance_id,
+            surface,
+            expires_at,
+            ..
+        } = &after.delivery
+        else {
+            panic!("expected a grant, got {:?}", after.delivery);
+        };
+        // in_app outranks local_os (§5.6); local_os was also policy-denied.
+        assert_eq!(browser_instance_id, "browser-a");
+        assert_eq!(*surface, CompletionSurface::InApp);
+        assert_eq!(
+            *expires_at,
+            now + ChronoDuration::milliseconds(GRANT_ACK_TIMEOUT_MS)
+        );
+        // The grant expiry becomes the next deadline the timer sleeps to.
+        assert_eq!(deadline, Some(*expires_at));
+    }
+
+    #[tokio::test]
+    async fn local_os_intent_needs_the_validation_policy() {
+        let services = services();
+        let now = Utc::now();
+        let notice = seed_notice(&services, "localos", now - ChronoDuration::seconds(1)).await;
+        services
+            .notices
+            .record_intent(
+                &owner(),
+                &notice.notice_id,
+                intent("browser-os", RunCompletionIntentKind::LocalOs, 3),
+            )
+            .await
+            .expect("record intent");
+        // Denied policy: the only intent is ineligible, no push target ->
+        // NoExternalTarget settle.
+        coordinator(&services).tick_once(now).await;
+        let denied = services
+            .notices
+            .get(&owner(), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert!(matches!(
+            denied.delivery,
+            CompletionDeliveryState::NoExternalTarget { .. }
+        ));
+
+        // Allowed policy on a fresh notice: the same intent wins a LocalOs
+        // grant.
+        let second = seed_notice(&services, "localos2", now - ChronoDuration::seconds(1)).await;
+        services
+            .notices
+            .record_intent(
+                &owner(),
+                &second.notice_id,
+                intent("browser-os", RunCompletionIntentKind::LocalOs, 3),
+            )
+            .await
+            .expect("record intent");
+        services.wake_owner(&owner());
+        let permissive = RunCompletionCoordinator::new(
+            Arc::clone(&services),
+            Arc::new(NoPushFallback),
+            Arc::new(AllowLocalOs),
+        );
+        permissive.tick_once(now).await;
+        let granted = services
+            .notices
+            .get(&owner(), &second.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert!(matches!(
+            granted.delivery,
+            CompletionDeliveryState::Granted {
+                surface: CompletionSurface::LocalOs,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn grant_expiry_re_arbitrates_once_then_falls_back() {
+        let services = services();
+        let start = Utc::now();
+        let notice = seed_notice(&services, "expiry", start - ChronoDuration::seconds(2)).await;
+        services
+            .notices
+            .record_intent(
+                &owner(),
+                &notice.notice_id,
+                intent("browser-a", RunCompletionIntentKind::InApp, 5),
+            )
+            .await
+            .expect("record intent");
+        let coordinator = coordinator(&services);
+
+        // Window closed -> grant issued.
+        coordinator.tick_once(start).await;
+        // Grant expires unacknowledged -> exactly one re-arbitration.
+        let after_expiry = start + ChronoDuration::milliseconds(GRANT_ACK_TIMEOUT_MS + 100);
+        coordinator.tick_once(after_expiry).await;
+        let regressed = services
+            .notices
+            .get(&owner(), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert!(
+            matches!(
+                regressed.delivery,
+                CompletionDeliveryState::PendingArbitration { .. }
+            ),
+            "first expiry re-arbitrates: {:?}",
+            regressed.delivery
+        );
+        assert_eq!(services.stale_grant_count(), 1);
+
+        // Second window closes with the stored intent still best -> second
+        // grant; its expiry goes straight to fallback (NoPushFallback ->
+        // in-app-unread settle).
+        let second_close = after_expiry + ChronoDuration::milliseconds(ARBITRATION_WINDOW_MS + 50);
+        coordinator.tick_once(second_close).await;
+        let regranted = services
+            .notices
+            .get(&owner(), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert!(matches!(
+            regranted.delivery,
+            CompletionDeliveryState::Granted { .. }
+        ));
+        let final_tick =
+            second_close + ChronoDuration::milliseconds(GRANT_ACK_TIMEOUT_MS + 100);
+        coordinator.tick_once(final_tick).await;
+        let settled = services
+            .notices
+            .get(&owner(), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert!(
+            matches!(
+                settled.delivery,
+                CompletionDeliveryState::NoExternalTarget { .. }
+            ),
+            "second expiry falls back: {:?}",
+            settled.delivery
+        );
+    }
+
+    #[tokio::test]
+    async fn read_notices_settle_without_grants_and_owner_untracks() {
+        let services = services();
+        let now = Utc::now();
+        let notice = seed_notice(&services, "read", now - ChronoDuration::seconds(1)).await;
+        services
+            .notices
+            .mark_read(
+                &owner(),
+                &notice.notice_id,
+                CompletionReadEvidence::ReplyRendered {
+                    browser_instance_id: "browser-a".to_string(),
+                },
+                now,
+            )
+            .await
+            .expect("mark read");
+        let deadline = coordinator(&services).tick_once(now).await;
+        assert_eq!(deadline, None, "no outstanding work");
+        assert!(
+            services.tracked_owners().is_empty(),
+            "settled owners fall out of tracking"
+        );
+        // The durable due registry cleared too (§5.4): a rebooted
+        // coordinator would find nothing to reconcile.
+        let due = services
+            .notices
+            .due_owners(&owner())
+            .await
+            .expect("due owners");
+        assert!(due.is_empty(), "due registry cleared: {due:?}");
+    }
+
+    #[tokio::test]
+    async fn boot_reconciliation_recovers_pending_work_from_the_due_registry() {
+        let services = services();
+        let now = Utc::now();
+        seed_notice(&services, "boot", now - ChronoDuration::seconds(1)).await;
+        // Simulate restart: in-memory tracking is gone, only durable state
+        // remains.
+        services.untrack_owner(&owner());
+        assert!(services.tracked_owners().is_empty());
+        let due = services
+            .notices
+            .due_owners(&owner())
+            .await
+            .expect("due owners");
+        assert_eq!(due.len(), 1, "ingest marked the owner due before the write");
+        // The boot pass (spawn_run_completion_coordinator) wakes each due
+        // owner; equivalently, wake + tick drains the recovered work.
+        for recovered in due {
+            services.wake_owner(&recovered);
+        }
+        coordinator(&services).tick_once(now).await;
+        let settled = services
+            .notices
+            .unread_snapshot(&owner())
+            .await
+            .expect("snapshot");
+        assert_eq!(settled.len(), 1, "notice survives, now settled unread");
+        assert!(matches!(
+            settled[0].delivery,
+            CompletionDeliveryState::NoExternalTarget { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn push_fallback_owns_the_no_presenter_path() {
+        let services = services();
+        let now = Utc::now();
+        let notice = seed_notice(&services, "push", now - ChronoDuration::seconds(1)).await;
+        let coordinator = RunCompletionCoordinator::new(
+            Arc::clone(&services),
+            Arc::new(AlwaysPush),
+            Arc::new(DenyLocalOsIntents),
+        );
+        coordinator.tick_once(now).await;
+        let after = services
+            .notices
+            .get(&owner(), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        // AlwaysPush reported the transition handled; the coordinator must
+        // NOT also settle NoExternalTarget over it.
+        assert!(
+            matches!(
+                after.delivery,
+                CompletionDeliveryState::PendingArbitration { .. }
+            ),
+            "fallback owned the transition (fake leaves state untouched): {:?}",
+            after.delivery
+        );
+    }
 }

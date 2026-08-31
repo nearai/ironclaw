@@ -105,6 +105,7 @@ pub(super) fn target_entry_with_caps(
             gate_prompts: true,
             auth_prompts: true,
             notifications,
+            run_completions: false,
             modalities: Vec::new(),
         },
         destination: reply_ref(reply_target),

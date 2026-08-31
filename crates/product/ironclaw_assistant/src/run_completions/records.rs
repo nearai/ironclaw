@@ -52,6 +52,12 @@ pub enum CompletionSurface {
 pub enum CompletionDeliveryState {
     PendingArbitration {
         closes_at: DateTime<Utc>,
+        /// Grants issued so far for this notice, carried through regress so
+        /// the "exactly one re-arbitration before fallback" bound (§5.4)
+        /// survives the Granted -> PendingArbitration transition. Serde
+        /// default keeps pre-existing records readable.
+        #[serde(default)]
+        grants_issued: u32,
     },
     Granted {
         grant_id: String,
@@ -200,11 +206,14 @@ mod tests {
             owner_user_id: "user-a".to_string(),
             run_id: "run-1".to_string(),
             thread_id: "thread-1".to_string(),
+            agent_id: Some("agent-a".to_string()),
+            project_id: None,
             thread_tag: "rct-def".to_string(),
             terminal_projection_ref: "run-completion/rcn-abc".to_string(),
             completed_at: Utc::now(),
             delivery: CompletionDeliveryState::PendingArbitration {
                 closes_at: Utc::now(),
+                grants_issued: 0,
             },
             read: CompletionReadState::Unread,
             intents: Vec::new(),

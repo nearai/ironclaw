@@ -522,6 +522,7 @@ where
             completed_at: new_notice.completed_at,
             delivery: CompletionDeliveryState::PendingArbitration {
                 closes_at: new_notice.arbitration_closes_at,
+                grants_issued: 0,
             },
             read: CompletionReadState::Unread,
             intents: Vec::new(),
@@ -706,7 +707,9 @@ where
         let (notice, ()) = self
             .transition(owner, notice_id, move |mut notice| {
                 let grants_issued = match &notice.delivery {
-                    CompletionDeliveryState::PendingArbitration { .. } => 0,
+                    CompletionDeliveryState::PendingArbitration { grants_issued, .. } => {
+                        *grants_issued
+                    }
                     CompletionDeliveryState::Granted { grants_issued, .. } => *grants_issued,
                     _ => {
                         return Err(RunCompletionStoreError::Conflict {
@@ -784,10 +787,14 @@ where
                 match &notice.delivery {
                     CompletionDeliveryState::Granted {
                         grant_id: outstanding,
+                        grants_issued,
                         ..
                     } if outstanding == grant_id => {
-                        notice.delivery =
-                            CompletionDeliveryState::PendingArbitration { closes_at };
+                        let grants_issued = *grants_issued;
+                        notice.delivery = CompletionDeliveryState::PendingArbitration {
+                            closes_at,
+                            grants_issued,
+                        };
                         Ok((notice, ()))
                     }
                     CompletionDeliveryState::PendingArbitration { .. } => Ok((notice, ())),
@@ -1542,6 +1549,7 @@ mod tests {
                 &owner_a,
                 &CompletionDeliveryState::PendingArbitration {
                     closes_at: Utc::now(),
+                    grants_issued: 0,
                 },
                 250,
             )
