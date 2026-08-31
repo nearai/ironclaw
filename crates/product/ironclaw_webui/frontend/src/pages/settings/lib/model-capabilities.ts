@@ -102,13 +102,17 @@ export function mergeModelEntries(
   return Array.from(byId.values());
 }
 
-export function capabilityLabels(entry: ModelCatalogEntry | null | undefined): string[] {
+export type ModelCapability = "text" | "image-input" | "image-output";
+
+export function modelCapabilities(
+  entry: ModelCatalogEntry | null | undefined,
+): ModelCapability[] {
   if (!entry) return [];
-  const labels: string[] = [];
+  const capabilities: ModelCapability[] = [];
   if (entry.input_modalities.includes("text") || entry.output_modalities.includes("text")) {
-    labels.push("Text");
+    capabilities.push("text");
   }
-  if (entry.input_modalities.includes("image")) labels.push("Image input");
-  if (entry.output_modalities.includes("image")) labels.push("Image output");
-  return labels;
+  if (entry.input_modalities.includes("image")) capabilities.push("image-input");
+  if (entry.output_modalities.includes("image")) capabilities.push("image-output");
+  return capabilities;
 }

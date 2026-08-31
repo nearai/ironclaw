@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { test } from "vitest";
 
 import { iconNames } from "../../../design-system/icons";
+import "../../../i18n/en";
 import { ModelCapabilityBadges } from "./model-capability-badges";
 
 test("model capabilities use compact semantic icon chips", () => {

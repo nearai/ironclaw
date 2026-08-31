@@ -1,23 +1,24 @@
 import { Icon } from "../../../design-system/icons";
+import { useT } from "../../../lib/i18n";
 import { cn } from "../../../utils/cn";
 import {
-  capabilityLabels,
+  modelCapabilities,
   type ModelCatalogEntry,
 } from "../lib/model-capabilities";
 
 const CAPABILITY_PRESENTATION = {
-  Text: {
-    id: "text",
+  text: {
+    labelKey: "llm.capabilityText",
     icon: "chat",
     className: "bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]",
   },
-  "Image input": {
-    id: "image-input",
+  "image-input": {
+    labelKey: "llm.capabilityImageInput",
     icon: "eye",
     className: "bg-[var(--v2-info-soft)] text-[var(--v2-info-text)]",
   },
-  "Image output": {
-    id: "image-output",
+  "image-output": {
+    labelKey: "llm.capabilityImageOutput",
     icon: "spark",
     className: "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]",
   },
@@ -30,25 +31,27 @@ export function ModelCapabilityBadges({
   entry?: ModelCatalogEntry | null;
   className?: string;
 }) {
-  const labels = capabilityLabels(entry);
-  if (labels.length === 0) return null;
+  const t = useT();
+  const capabilities = modelCapabilities(entry);
+  if (capabilities.length === 0) return null;
 
   return (
     <span
       className={cn("inline-flex min-w-0 flex-wrap items-center gap-1", className)}
       data-testid="model-capability-badges"
     >
-      {labels.map((label) => {
-        const presentation = CAPABILITY_PRESENTATION[label];
+      {capabilities.map((capability) => {
+        const presentation = CAPABILITY_PRESENTATION[capability];
+        const label = t(presentation.labelKey);
         return (
           <span
-            key={label}
+            key={capability}
             className={cn(
               "inline-flex h-5 w-5 shrink-0 cursor-help items-center justify-center rounded-md transition-colors",
               presentation.className,
             )}
             aria-label={label}
-            data-capability={presentation.id}
+            data-capability={capability}
             role="img"
             title={label}
           >

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import {
-  capabilityLabels,
+  modelCapabilities,
   modelEntryFor,
   normalizeModelCatalog,
 } from "./model-capabilities";
@@ -34,10 +34,10 @@ test("detailed entries preserve known directional modalities and ignore unknown 
       output_modalities: ["text", "image"],
     },
   ]);
-  assert.deepEqual(capabilityLabels(catalog.modelEntries[0]), [
-    "Text",
-    "Image input",
-    "Image output",
+  assert.deepEqual(modelCapabilities(catalog.modelEntries[0]), [
+    "text",
+    "image-input",
+    "image-output",
   ]);
   assert.equal(modelEntryFor(catalog.modelEntries, "vision-model")?.id, "vision-model");
 });

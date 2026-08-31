@@ -5,7 +5,7 @@ import { ApiError } from "../../../lib/api";
 import { useT } from "../../../lib/i18n";
 import { useUserModelPreference } from "../hooks/useUserModelPreference";
 import {
-  capabilityLabels,
+  modelCapabilities,
   modelEntryFor,
   normalizeModelCatalog,
 } from "../lib/model-capabilities";
@@ -31,7 +31,7 @@ export function UserModelPreferenceSelector() {
     catalog.workspace_default
   );
   const capabilityAdornment = (entry) =>
-    capabilityLabels(entry).length > 0
+    modelCapabilities(entry).length > 0
       ? <ModelCapabilityBadges entry={entry} />
       : undefined;
   const optionWithCapabilities = (value, label, entry) => {
