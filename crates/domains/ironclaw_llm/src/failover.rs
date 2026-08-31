@@ -1,3 +1,4 @@
+// arch-exempt: large_file, detailed model-catalog delegation stays with the existing failover decorator pending provider-adapter decomposition, plan #6175
 //! Multi-provider LLM failover.
 //!
 //! Wraps multiple LlmProvider instances and tries each in sequence
