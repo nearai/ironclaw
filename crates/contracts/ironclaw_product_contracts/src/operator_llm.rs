@@ -539,6 +539,9 @@ pub struct LlmModelCatalogEntry {
     pub output_modalities: Vec<LlmModelModality>,
 }
 
+/// Maximum serialized size accepted for a persisted model-selection policy.
+pub const MODEL_SELECTION_POLICY_MAX_BYTES: usize = 64 * 1024;
+
 /// Result of a model-listing probe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmModelsResult {
@@ -588,8 +591,10 @@ impl UserModelCatalog {
 pub struct SetUserModelPolicyRequest {
     pub workspace_default: String,
     pub allowed_models: Vec<String>,
-    #[serde(default)]
-    pub model_entries: Vec<LlmModelCatalogEntry>,
+    /// `None` preserves metadata supplied by an earlier detailed-catalog client.
+    /// An explicit empty list clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_entries: Option<Vec<LlmModelCatalogEntry>>,
 }
 
 /// Caller-scoped model preference. `None` follows the workspace default.

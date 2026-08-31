@@ -32,11 +32,11 @@ use ironclaw_llm::{
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelCatalogEntry, LlmModelModality, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, ModelSelectionPolicy, ModelSelectionPolicyStore,
-    ModelSelectionPolicyStoreError, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, SetActiveLlmRequest, SetUserModelPolicyRequest,
-    SetUserModelPreferenceRequest, UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference,
-    UserModelPreferenceStore, UserModelPreferenceStoreError,
+    LlmProbeResult, LlmProviderView, MODEL_SELECTION_POLICY_MAX_BYTES, ModelSelectionPolicy,
+    ModelSelectionPolicyStore, ModelSelectionPolicyStoreError, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
+    SetUserModelPolicyRequest, SetUserModelPreferenceRequest, UpsertLlmProviderRequest,
+    UserModelCatalog, UserModelPreference, UserModelPreferenceStore, UserModelPreferenceStoreError,
 };
 use ironclaw_product_contracts::surface::ProductSurfaceCaller;
 use secrecy::{ExposeSecret as _, SecretString};
@@ -858,7 +858,18 @@ impl LlmConfigService for RebornLlmConfigService {
             .ok_or(LlmConfigServiceError::Unavailable)?;
         let snapshot = self.build_provider_snapshot().await?;
         let active = snapshot.active.ok_or(LlmConfigServiceError::Unavailable)?;
-        let policy = validated_model_policy(active.provider_id, request)?;
+        let preserved_entries = if request.model_entries.is_none() {
+            store
+                .read(&caller)
+                .await
+                .map_err(map_model_policy_store_error)?
+                .filter(|policy| policy.provider_id == active.provider_id)
+                .map(|policy| policy.model_entries)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let policy = validated_model_policy(active.provider_id, request, preserved_entries)?;
         store
             .write(&caller, &policy)
             .await
@@ -1523,12 +1534,15 @@ fn validate_provider_id(id: &str) -> Result<String, LlmConfigServiceError> {
 fn validated_model_policy(
     provider_id: String,
     request: SetUserModelPolicyRequest,
+    preserved_entries: Vec<LlmModelCatalogEntry>,
 ) -> Result<ModelSelectionPolicy, LlmConfigServiceError> {
     let SetUserModelPolicyRequest {
         workspace_default,
         allowed_models: requested_models,
         model_entries: requested_entries,
     } = request;
+    let preserving_entries = requested_entries.is_none();
+    let requested_entries = requested_entries.unwrap_or(preserved_entries);
     if requested_models.is_empty() || requested_models.len() > USER_MODEL_POLICY_MAX_MODELS {
         return Err(invalid_policy_field(
             "allowed_models",
@@ -1566,6 +1580,9 @@ fn validated_model_policy(
     for mut entry in requested_entries {
         entry.id = validated_model_id("model_entries", &entry.id)?;
         if !seen.contains(&entry.id) {
+            if preserving_entries {
+                continue;
+            }
             return Err(invalid_policy_field(
                 "model_entries",
                 "model_entries may only describe allowed_models",
@@ -1578,12 +1595,22 @@ fn validated_model_policy(
         }
     }
 
-    Ok(ModelSelectionPolicy {
+    let policy = ModelSelectionPolicy {
         provider_id,
         workspace_default,
         allowed_models,
         model_entries,
-    })
+    };
+    let serialized_len = serde_json::to_vec(&policy)
+        .map_err(|_| invalid_policy_field("model_entries", "model policy is not serializable"))?
+        .len();
+    if serialized_len > MODEL_SELECTION_POLICY_MAX_BYTES {
+        return Err(invalid_policy_field(
+            "model_entries",
+            "model policy exceeds the 64 KiB storage limit",
+        ));
+    }
+    Ok(policy)
 }
 
 fn matching_active_model_policy(
@@ -1850,7 +1877,7 @@ mod tests {
         SetUserModelPolicyRequest {
             workspace_default: default.to_string(),
             allowed_models: models.iter().map(|model| (*model).to_string()).collect(),
-            model_entries: Vec::new(),
+            model_entries: Some(Vec::new()),
         }
     }
 
@@ -1944,7 +1971,7 @@ mod tests {
         let request = SetUserModelPolicyRequest {
             workspace_default: "model-a".to_string(),
             allowed_models: vec!["model-a".to_string(), "model-b".to_string()],
-            model_entries: vec![
+            model_entries: Some(vec![
                 LlmModelCatalogEntry {
                     id: "model-a".to_string(),
                     input_modalities: vec![
@@ -1959,7 +1986,7 @@ mod tests {
                     input_modalities: vec![LlmModelModality::Audio],
                     output_modalities: Vec::new(),
                 },
-            ],
+            ]),
         };
 
         let catalog = service
@@ -1978,17 +2005,129 @@ mod tests {
         let invalid = SetUserModelPolicyRequest {
             workspace_default: "model-a".to_string(),
             allowed_models: vec!["model-a".to_string()],
-            model_entries: vec![LlmModelCatalogEntry {
+            model_entries: Some(vec![LlmModelCatalogEntry {
                 id: "model-c".to_string(),
                 input_modalities: vec![LlmModelModality::Text],
                 output_modalities: Vec::new(),
-            }],
+            }]),
         };
         assert!(matches!(
             service
                 .set_user_model_policy(caller().with_operator_config(true), invalid)
                 .await,
             Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn legacy_policy_update_preserves_capabilities_for_remaining_models() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let admin = caller().with_operator_config(true);
+        service
+            .set_user_model_policy(
+                admin.clone(),
+                SetUserModelPolicyRequest {
+                    workspace_default: "model-a".to_string(),
+                    allowed_models: vec!["model-a".to_string(), "model-b".to_string()],
+                    model_entries: Some(vec![
+                        LlmModelCatalogEntry {
+                            id: "model-a".to_string(),
+                            input_modalities: vec![LlmModelModality::Text],
+                            output_modalities: vec![LlmModelModality::Text],
+                        },
+                        LlmModelCatalogEntry {
+                            id: "model-b".to_string(),
+                            input_modalities: vec![LlmModelModality::Text, LlmModelModality::Image],
+                            output_modalities: vec![LlmModelModality::Text],
+                        },
+                    ]),
+                },
+            )
+            .await
+            .expect("seed policy with capabilities");
+
+        let legacy_request: SetUserModelPolicyRequest = serde_json::from_value(serde_json::json!({
+            "workspace_default": "model-b",
+            "allowed_models": ["model-b"]
+        }))
+        .expect("legacy request without model_entries");
+        let catalog = service
+            .set_user_model_policy(admin, legacy_request)
+            .await
+            .expect("legacy policy update");
+
+        assert_eq!(catalog.models, ["model-b"]);
+        assert_eq!(catalog.model_entries.len(), 1);
+        assert_eq!(catalog.model_entries[0].id, "model-b");
+        assert_eq!(
+            catalog.model_entries[0].input_modalities,
+            [LlmModelModality::Text, LlmModelModality::Image]
+        );
+
+        let cleared = service
+            .set_user_model_policy(
+                caller().with_operator_config(true),
+                SetUserModelPolicyRequest {
+                    workspace_default: "model-b".to_string(),
+                    allowed_models: vec!["model-b".to_string()],
+                    model_entries: Some(Vec::new()),
+                },
+            )
+            .await
+            .expect("explicitly clear capability metadata");
+        assert!(cleared.model_entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_model_policy_is_rejected_before_persistence() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let model_ids: Vec<_> = (0..USER_MODEL_POLICY_MAX_MODELS)
+            .map(|index| {
+                let prefix = format!("model-{index:03}-");
+                format!(
+                    "{prefix}{}",
+                    "x".repeat(USER_MODEL_ID_MAX_BYTES - prefix.len())
+                )
+            })
+            .collect();
+        let model_entries = model_ids
+            .iter()
+            .map(|id| LlmModelCatalogEntry {
+                id: id.clone(),
+                input_modalities: vec![
+                    LlmModelModality::Text,
+                    LlmModelModality::Image,
+                    LlmModelModality::Audio,
+                    LlmModelModality::Video,
+                    LlmModelModality::Embedding,
+                ],
+                output_modalities: vec![
+                    LlmModelModality::Text,
+                    LlmModelModality::Image,
+                    LlmModelModality::Audio,
+                    LlmModelModality::Video,
+                    LlmModelModality::Embedding,
+                ],
+            })
+            .collect();
+
+        let result = service
+            .set_user_model_policy(
+                caller().with_operator_config(true),
+                SetUserModelPolicyRequest {
+                    workspace_default: model_ids[0].clone(),
+                    allowed_models: model_ids,
+                    model_entries: Some(model_entries),
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmConfigServiceError::InvalidRequest {
+                field: Some(field),
+                ..
+            }) if field == "model_entries"
         ));
     }
 

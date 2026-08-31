@@ -7137,8 +7137,7 @@ async fn user_model_routes_expose_only_the_safe_catalog_and_replace_policy() {
         invoke_calls[0].1,
         serde_json::json!({
             "workspace_default": "model-b",
-            "allowed_models": ["model-a", "model-b"],
-            "model_entries": []
+            "allowed_models": ["model-a", "model-b"]
         })
     );
 }

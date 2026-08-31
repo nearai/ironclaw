@@ -7,14 +7,13 @@ use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ids::InvocationId, path::ScopedPath, resource::ResourceScope};
 use ironclaw_product_contracts::{
     operator_llm::{
-        ModelSelectionPolicy, ModelSelectionPolicyStore, ModelSelectionPolicyStoreError,
+        MODEL_SELECTION_POLICY_MAX_BYTES, ModelSelectionPolicy, ModelSelectionPolicyStore,
+        ModelSelectionPolicyStoreError,
     },
     surface::ProductSurfaceCaller,
 };
 
 const POLICY_PATH: &str = "/tenant-shared/llm-user-model-policy.json";
-const POLICY_MAX_BYTES: usize = 64 * 1024;
-
 pub struct FilesystemModelSelectionPolicyStore<F: RootFilesystem + ?Sized> {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
@@ -54,7 +53,7 @@ impl<F: RootFilesystem + ?Sized> ModelSelectionPolicyStore
         let scope = Self::scope(caller);
         let bytes = match self
             .filesystem
-            .read_bytes_bounded(&scope, &path, POLICY_MAX_BYTES)
+            .read_bytes_bounded(&scope, &path, MODEL_SELECTION_POLICY_MAX_BYTES)
             .await
         {
             Ok(Some(bytes)) => bytes,
@@ -78,7 +77,7 @@ impl<F: RootFilesystem + ?Sized> ModelSelectionPolicyStore
     ) -> Result<(), ModelSelectionPolicyStoreError> {
         let bytes =
             serde_json::to_vec(policy).map_err(|_| ModelSelectionPolicyStoreError::InvalidData)?;
-        if bytes.len() > POLICY_MAX_BYTES {
+        if bytes.len() > MODEL_SELECTION_POLICY_MAX_BYTES {
             return Err(ModelSelectionPolicyStoreError::InvalidData);
         }
         let path = Self::path()?;
