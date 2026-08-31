@@ -107,7 +107,7 @@ export function Modal({
           "relative z-10 w-full",
           "bg-[var(--v2-card-bg)] border border-[var(--v2-panel-border)]",
           "shadow-[0_24px_60px_rgba(0,0,0,0.35)]",
-          "rounded-[1.5rem]",
+          "rounded-surface-lg",
           "flex flex-col max-h-[90dvh] overflow-hidden",
           SIZES[size] ?? SIZES.md,
           className
@@ -151,7 +151,7 @@ export function ModalHeader({
             type="button"
             onClick={onClose}
             aria-label={effectiveCloseLabel}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-[10px]
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-control-sm
               border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]
               text-[var(--v2-text-muted)]
               hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"

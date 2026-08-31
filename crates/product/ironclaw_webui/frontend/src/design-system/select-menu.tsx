@@ -426,7 +426,7 @@ export function SelectMenu({
           })}
         onKeyDown={handleKeyDown}
         className={cn(
-          "inline-flex w-full items-center justify-between gap-2 rounded-[8px] border",
+          "inline-flex w-full items-center justify-between gap-2 rounded-field border",
           "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
           "text-[var(--v2-text-strong)] shadow-none transition-colors",
           "hover:bg-[var(--v2-surface-muted)]",
@@ -453,7 +453,7 @@ export function SelectMenu({
       {open && (
         <div
           className={cn(
-            "absolute top-[calc(100%+0.35rem)] z-30 min-w-full overflow-hidden rounded-[10px]",
+            "absolute top-[calc(100%+0.35rem)] z-30 min-w-full overflow-hidden rounded-surface",
             "border border-[color-mix(in_srgb,var(--v2-text-strong)_16%,var(--v2-panel-border))]",
             "bg-[color-mix(in_srgb,var(--v2-canvas-strong)_92%,var(--v2-surface))] p-1",
             "shadow-[0_30px_72px_-18px_rgba(0,0,0,0.86),0_10px_24px_-18px_rgba(0,0,0,0.68)]",
@@ -477,7 +477,7 @@ export function SelectMenu({
               onChange={(event) => setSearchQuery(event.currentTarget.value)}
               onKeyDown={handleSearchKeyDown}
               className={cn(
-                "sticky top-0 z-10 mb-1 h-9 w-full rounded-[7px] border px-2.5",
+                "sticky top-0 z-10 mb-1 h-9 w-full rounded-chip border px-2.5",
                 "border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)]",
                 "text-[var(--v2-text-strong)] placeholder:text-[var(--v2-text-faint)]",
                 "focus-visible:outline-none focus-visible:ring-2",
@@ -501,7 +501,7 @@ export function SelectMenu({
                   onMouseEnter={() => !option.disabled && setActiveIndex(index)}
                   onClick={() => chooseOption(option)}
                   className={cn(
-                    "flex w-full items-center justify-between gap-3 rounded-[7px]",
+                    "flex w-full items-center justify-between gap-3 rounded-chip",
                     "text-left text-[var(--v2-text)] transition-colors",
                     "focus-visible:outline-none",
                     "focus-visible:ring-2 focus-visible:ring-[color-mix(in_srgb,var(--v2-accent)_30%,transparent)]",

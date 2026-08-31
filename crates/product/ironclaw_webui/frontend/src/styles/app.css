@@ -275,14 +275,16 @@
        surface    rounded-xl     ( 56 uses) cards, panels
        surface-lg rounded-2xl    ( 18 uses) modals, sheets
        pill       rounded-full   ( 47 uses) avatars, toggles, pills */
-  --v2-radius-chip:       0.25rem;
-  --v2-radius-field:      0.375rem;
-  --v2-radius-control-sm: 0.625rem;
-  --v2-radius-control:    0.875rem;
-  --v2-radius-control-lg: 1rem;
-  --v2-radius-control-xl: 1.125rem;
-  --v2-radius-surface:    0.75rem;
-  --v2-radius-surface-lg: 1rem;
+  --v2-radius-chip:       0.5rem;
+  --v2-radius-field:      0.75rem;
+  /* Controls are pills. The four slots stay distinct because they carry
+     different heights and paddings; at every height a pill is a pill. */
+  --v2-radius-control-sm: 9999px;
+  --v2-radius-control:    9999px;
+  --v2-radius-control-lg: 9999px;
+  --v2-radius-control-xl: 9999px;
+  --v2-radius-surface:    1rem;
+  --v2-radius-surface-lg: 1.75rem;
   --v2-radius-pill:       9999px;
 
   /* ── Spacing ──────────────────────────────────────────────────────
@@ -332,17 +334,15 @@
      as `button.tsx` hardcoded them so retheming the loudest control in
      the app stops meaning "edit a component".
 
-     Theme-INVARIANT on purpose: the literals they replace were shared by
-     light and dark, so splitting them per theme now would be a visual
-     change wearing a refactor's clothes. Phase 3a (#7781 WS3) decides
-     whether the M3X primary wants a per-theme value and moves these into
-     the `[data-theme]` stanzas if so. */
-  --v2-accent-gradient:
-    radial-gradient(ellipse 100% 100% at 50% 130%, #4ca7e6 0%, #2882c8 65%);
-  --v2-accent-gradient-hover:
-    radial-gradient(ellipse 200% 220% at 50% 110%, #5bbaf5 0%, #2882c8 60%);
-  --v2-accent-edge:  rgba(76, 167, 230, 0.72);
-  --v2-accent-glow:  0 24px 24px -20px rgba(76, 167, 230, 0.55);
+     #7831 left these theme-invariant and asked WS3 to decide whether the
+     primary wants a per-theme value. It does — but by REFERENCE rather than
+     by duplication: Gemini's primary is a flat tonal fill, so each of these
+     now resolves through `--v2-accent`, which is already per-theme. One
+     definition, two themes, no literals to keep in sync. */
+  --v2-accent-gradient:       var(--v2-accent);
+  --v2-accent-gradient-hover: var(--v2-accent-strong);
+  --v2-accent-edge:  transparent;
+  --v2-accent-glow:  0 0 #0000;
 
   /* ── Z-index ──────────────────────────────────────────────────────
      A stacking ORDER, not a set of magic numbers. The two four-digit

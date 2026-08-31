@@ -65,7 +65,7 @@ export function InlineNotice({
       role={role}
       data-tone={tone}
       className={cn(
-        "flex items-start gap-3 rounded-xl border px-4 py-3 text-sm",
+        "flex items-start gap-3 rounded-surface border px-4 py-3 text-sm",
         TONE_STYLES[tone],
         className,
       )}
@@ -81,7 +81,7 @@ export function InlineNotice({
           type="button"
           onClick={onDismiss}
           aria-label={dismissLabel}
-          className="shrink-0 self-center rounded-md p-1 opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current"
+          className="shrink-0 self-center rounded-chip p-1 opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-current"
         >
           <Icon name="close" className="h-3.5 w-3.5" />
         </button>

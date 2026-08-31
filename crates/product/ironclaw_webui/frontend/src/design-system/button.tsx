@@ -159,7 +159,7 @@ export function Button({
           sizeClass,
           fullClass,
           disabledAnchorClass,
-          "relative overflow-hidden text-white group",
+          "relative overflow-hidden text-[var(--v2-accent-on)] group",
           "hover:shadow-[var(--v2-accent-glow)]",
           className
         )}

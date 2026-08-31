@@ -47,9 +47,9 @@ const VARIANTS = {
 /* ─── Radius ──────────────────────────────────────────────────────── */
 
 const RADII = {
-  sm: "rounded-[14px]",
-  md: "rounded-[1.25rem] md:rounded-[1.5rem]",
-  lg: "rounded-[1.5rem]",
+  sm: "rounded-surface",
+  md: "rounded-surface md:rounded-surface-lg",
+  lg: "rounded-surface-lg",
 };
 
 /* ─── Padding ─────────────────────────────────────────────────────── */

@@ -44,7 +44,7 @@ export function SearchField({
         disabled={disabled}
         onChange={(event) => onChange(event.currentTarget.value)}
         className={cn(
-          "h-9 w-full rounded-[10px] border border-[var(--v2-panel-border)]",
+          "h-9 w-full rounded-control border border-[var(--v2-panel-border)]",
           "bg-[var(--v2-input-bg)] pl-9 text-sm text-[var(--v2-text-strong)] outline-none",
           "appearance-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]",
           "[&::-webkit-search-cancel-button]:hidden [&::-webkit-search-decoration]:hidden",
@@ -59,7 +59,7 @@ export function SearchField({
           disabled={disabled}
           onClick={onClear}
           className={cn(
-            "absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md",
+            "absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-chip",
             "text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
             "disabled:cursor-not-allowed disabled:opacity-50",
           )}
