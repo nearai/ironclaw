@@ -299,7 +299,7 @@ fn display_text(value: &str) -> Option<ReplyDisplayText> {
     while end > 0 && !stripped.is_char_boundary(end) {
         end -= 1;
     }
-    ReplyDisplayText::new(&stripped[..end]).ok()
+    ReplyDisplayText::new(&stripped[..end]).ok() // safety: `end` walked back to a char boundary above.
 }
 
 fn display_preview(value: &str) -> Option<ReplyDisplayPreview> {
@@ -311,7 +311,7 @@ fn display_preview(value: &str) -> Option<ReplyDisplayPreview> {
     while end > 0 && !stripped.is_char_boundary(end) {
         end -= 1;
     }
-    ReplyDisplayPreview::new(&stripped[..end]).ok()
+    ReplyDisplayPreview::new(&stripped[..end]).ok() // safety: `end` walked back to a char boundary above.
 }
 
 /// Resumes publications from the durable side: every terminal commit of a

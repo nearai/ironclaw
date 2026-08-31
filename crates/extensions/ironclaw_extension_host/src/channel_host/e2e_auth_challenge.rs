@@ -35,12 +35,8 @@ impl FakeAuthChallengeProvider {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        assert_eq!(
-            calls.len(),
-            expected,
-            "expected {expected} auth challenge provider call(s), got {}",
-            calls.len()
-        );
+        let observed = calls.len();
+        assert_eq!(observed, expected, "auth challenge provider calls"); // safety: test-only fake provider assertion.
         for (scope, owner_user_id, run_id, gate_ref, credential_requirements) in &calls {
             assert_eq!(scope.tenant_id.as_str(), TENANT); // safety: test-only fake provider assertion.
             assert_eq!(scope.agent_id.as_ref().map(AgentId::as_str), Some(AGENT)); // safety: test-only fake provider assertion.

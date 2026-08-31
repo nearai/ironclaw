@@ -12,7 +12,7 @@
 //!
 //! Idempotency rides the checkpoint, never the revision number. A terminal
 //! render the provider accepted in full is recorded as
-//! `{ "terminal_applied": true, "message_refs": [..] }` under
+//! `{ "terminal_applied": true, "message_refs": [ ... ] }` under
 //! [`TELEGRAM_REPLY_CHECKPOINT_VERSION`], and a repeated terminal reconcile
 //! carrying it answers `Applied` without a provider call. A partial render —
 //! Telegram accepted some messages, then refused one — records

@@ -764,8 +764,7 @@ impl ReplyDocument {
         while end > 0 && !delta.is_char_boundary(end) {
             end -= 1;
         }
-        // safety: `end` walked back to a char boundary above.
-        self.answer.text.0.push_str(&delta[..end]);
+        self.answer.text.0.push_str(&delta[..end]); // safety: `end` walked back to a char boundary above.
         self.answer.truncated = true;
     }
 

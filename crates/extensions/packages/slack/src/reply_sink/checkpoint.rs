@@ -216,7 +216,7 @@ pub(super) fn char_prefix(text: &str, chars: u64) -> Option<&str> {
     let mut seen = 0u64;
     for (index, _) in text.char_indices() {
         if seen == chars {
-            return Some(&text[..index]);
+            return Some(&text[..index]); // safety: `index` comes from char_indices, a char boundary.
         }
         seen += 1;
     }
