@@ -41,7 +41,7 @@ pub enum CompletionSurface {
     NoSurfaceWatchingThread,
     InApp,
     LocalOs,
-    WebPush,
+    WebAppPush,
 }
 
 /// The delivery half of the notice state machine (§5.3). Every transition

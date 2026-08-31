@@ -2327,8 +2327,8 @@ fn thread_artifact_rate_limit() -> RateLimitPolicy {
 }
 
 fn stream_rate_limit() -> RateLimitPolicy {
-    // Shared budget for the SSE (`stream_events`) and WebSocket
-    // (`stream_events_ws`) routes. SSE sessions are long-lived; the
+    // Shared budget for the compatibility SSE (`stream_events`) and session
+    // WebSocket (`session_websocket`) routes. SSE sessions are long-lived; the
     // per-tenant/user concurrency cap (3 streams, enforced in
     // `WebUiV2State::SseCapacity`) does the real bounding. The
     // request-rate window here is just for burst protection against

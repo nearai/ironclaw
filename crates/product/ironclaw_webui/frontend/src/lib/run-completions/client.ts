@@ -226,7 +226,7 @@ async function handleGrant(grant: RunCompletionGrant) {
   }
 }
 
-// Bounded slack between the revision a grant was issued against and the
+// Bounded tolerance between the revision a grant was issued against and the
 // profile's current revision: focus churn during the arbitration window is
 // normal; a large gap means the grant no longer describes this browser.
 const STALE_REVISION_TOLERANCE = 64;

@@ -147,7 +147,7 @@ impl SessionSocketTicketStore for SecretStoreSessionSocketTicketStore {
                 | SecretStoreError::LeaseConsumed { .. }
                 | SecretStoreError::LeaseRevoked { .. }
                 | SecretStoreError::LeaseExpired { .. }
-                | SecretStoreError::SecretExpired { .. }
+                | SecretStoreError::SecretExpired
                 | SecretStoreError::UnknownSecret { .. },
             ) => return Ok(None),
             Err(error) => {
@@ -172,14 +172,14 @@ impl SessionSocketTicketStore for SecretStoreSessionSocketTicketStore {
         };
         // The lease was the single-use gate; the secret row is now spent
         // transport state. Best-effort cleanup — expiry reaps stragglers.
-        if let Ok(handle) = SecretHandle::new(&stored.handle) {
-            if let Err(error) = self.secrets.delete(&self.scope, &handle).await {
-                tracing::debug!(
-                    target: "ironclaw::reborn::session_tickets",
-                    error = %error,
-                    "consumed session socket ticket cleanup failed",
-                );
-            }
+        if let Ok(handle) = SecretHandle::new(&stored.handle)
+            && let Err(error) = self.secrets.delete(&self.scope, &handle).await
+        {
+            tracing::debug!(
+                target: "ironclaw::reborn::session_tickets",
+                error = %error,
+                "consumed session socket ticket cleanup failed",
+            );
         }
         Ok(Some(stored.ticket))
     }

@@ -55,15 +55,6 @@ impl InMemorySessionSocketTicketStore {
         }
     }
 
-    #[cfg(test)]
-    fn with_bounds(ttl: Duration, max_outstanding: usize) -> Self {
-        Self {
-            ttl,
-            max_outstanding,
-            inner: Mutex::new(HashMap::new()),
-        }
-    }
-
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, StoredTicket>> {
         // Recover from poison: ticket state is small, self-healing (TTL), and
         // a panicked minting task must not wedge every future upgrade.
@@ -136,6 +127,14 @@ impl SessionSocketTicketStore for InMemorySessionSocketTicketStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_bounds(ttl: Duration, max_outstanding: usize) -> InMemorySessionSocketTicketStore {
+        InMemorySessionSocketTicketStore {
+            ttl,
+            max_outstanding,
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
     use ironclaw_host_api::ids::{TenantId, UserId};
 
     fn ticket(user: &str) -> SessionSocketTicket {
@@ -172,7 +171,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_tickets_do_not_authenticate() {
-        let store = InMemorySessionSocketTicketStore::with_bounds(Duration::from_millis(0), 1024);
+        let store = with_bounds(Duration::from_millis(0), 1024);
         let nonce = store.mint(ticket("user-a")).await.expect("mint");
         assert_eq!(
             store.consume(&nonce).await.expect("consume"),
@@ -183,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn saturation_evicts_the_oldest_nonce_instead_of_growing() {
-        let store = InMemorySessionSocketTicketStore::with_bounds(Duration::from_secs(60), 2);
+        let store = with_bounds(Duration::from_secs(60), 2);
         let nonce_1 = store.mint(ticket("user-a")).await.expect("mint");
         let nonce_2 = store.mint(ticket("user-b")).await.expect("mint");
         let nonce_3 = store.mint(ticket("user-c")).await.expect("mint");

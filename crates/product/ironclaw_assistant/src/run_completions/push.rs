@@ -55,6 +55,14 @@ struct CompletionTarget {
     extension_id: String,
 }
 
+/// The typed run identity a push delivery is authorized under, parsed once
+/// from the durable notice before any egress work begins.
+struct CompletionRunIdentity {
+    run_id: TurnRunId,
+    agent_id: AgentId,
+    thread_id: ThreadId,
+}
+
 /// Host-owned web-app enrollment probe (§6.1 "Enrolled"). Composition
 /// implements it over the web-app subscription store; this crate never
 /// touches push-transport records directly.
@@ -147,11 +155,14 @@ impl RunCompletionExternalDelivery {
         owner: &RunCompletionOwner,
         notice: &RunCompletionNotice,
         target: &CompletionTarget,
-        run_id: TurnRunId,
-        agent_id: AgentId,
-        thread_id: ThreadId,
+        identity: CompletionRunIdentity,
         unread_count_for_thread: u16,
     ) {
+        let CompletionRunIdentity {
+            run_id,
+            agent_id,
+            thread_id,
+        } = identity;
         let project_id = notice
             .project_id
             .as_deref()
@@ -332,9 +343,11 @@ impl CompletionPushFallback for RunCompletionExternalDelivery {
             owner,
             notice,
             &target,
-            run_id,
-            agent_id,
-            thread_id,
+            CompletionRunIdentity {
+                run_id,
+                agent_id,
+                thread_id,
+            },
             unread_count_for_thread,
         )
         .await;

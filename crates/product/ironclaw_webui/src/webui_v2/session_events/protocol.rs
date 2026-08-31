@@ -25,7 +25,7 @@ pub(crate) const MAX_ACTIVE_SUBSCRIPTIONS: usize = 16;
 pub(crate) const SUBSCRIPTION_QUEUE_BATCHES: usize = 16;
 
 /// Bound on a resume cursor supplied in a subscribe frame. Matches the
-/// product-side `PROJECTION_CURSOR_MAX_BYTES` plus JSON quoting slack.
+/// product-side `PROJECTION_CURSOR_MAX_BYTES` plus JSON quoting headroom.
 pub(crate) const MAX_SUBSCRIBE_CURSOR_BYTES: usize = 2048;
 
 /// Client -> server control frames. This vocabulary is closed; a frame that

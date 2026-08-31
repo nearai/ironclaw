@@ -168,7 +168,7 @@ impl RunCompletionStreamHub {
             CompletionSurface::InApp => RunCompletionGrantSurface::InApp,
             CompletionSurface::LocalOs => RunCompletionGrantSurface::LocalOs,
             // Web Push is never presented through a browser grant.
-            CompletionSurface::WebPush => return,
+            CompletionSurface::WebAppPush => return,
         };
         let _ = self.sender(owner).send(SequencedCompletionEvent {
             sequence: notice.sequence,
