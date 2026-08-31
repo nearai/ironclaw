@@ -185,8 +185,7 @@ pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{threa
 pub const WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET: &str =
     "/api/webchat/v2/session/websocket-ticket";
 pub const WEBUI_V2_PATTERN_SESSION_WEBSOCKET: &str = "/api/webchat/v2/session/websocket";
-pub const WEBUI_V2_PATTERN_RUN_COMPLETION_INTENT: &str =
-    "/api/webchat/v2/run-completions/intent";
+pub const WEBUI_V2_PATTERN_RUN_COMPLETION_INTENT: &str = "/api/webchat/v2/run-completions/intent";
 pub const WEBUI_V2_PATTERN_RUN_COMPLETION_ACKNOWLEDGE: &str =
     "/api/webchat/v2/run-completions/acknowledge";
 pub const WEBUI_V2_PATTERN_RUN_COMPLETION_THREAD_READ: &str =

@@ -12,9 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_assistant::run_completions::push::{
-    WebAppEnrollmentProbe, WebAppEnrollmentSnapshot,
-};
+use ironclaw_assistant::run_completions::push::{WebAppEnrollmentProbe, WebAppEnrollmentSnapshot};
 use ironclaw_assistant::run_completions::store::RunCompletionOwner;
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_product_contracts::delivery::{

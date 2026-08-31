@@ -156,9 +156,10 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // all live behind dynamic imports (client.ts graph), and the chat hot path
 // only gains a lazy-import stub for read evidence. The store's sequence
 // compare was inlined so the protocol module stays out of the eager graph.
-// Measured on the merged tree after the rebase; the budget below retains
-// about 1.5 KB of explicit headroom over that measurement.
-const CHAT_GZIP_BUDGET = 225_500;
+// Measured on the rebased tree (main's inbox bell + device-link + OOBE
+// weight underneath): 224.8 KB gzip. 226.0 KB retains about 1.2 KB of
+// explicit headroom.
+const CHAT_GZIP_BUDGET = 226_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

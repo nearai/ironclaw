@@ -66,21 +66,47 @@ export function GatewayLayout({
     activeThreadId: activeRouteThreadId,
   });
   const mergedNotificationsState = React.useMemo(() => {
-    const runIds = new Set(runCompletions.messages.map((message) => message.id));
+    // Partition with the durable inbox: the inbox owns the list row for
+    // scheduled-trigger runs (its rows carry read/archive controls and a
+    // reply-render acknowledgement flow), so a run-completion notice whose
+    // run already has an inbox row is presentation-deduped here and only
+    // drives the live surfaces (toast/OS/push/suppression). Foreground runs
+    // never get inbox rows, so our rows are their only bell presence.
+    const inboxRunIds = new Set(
+      notificationsState.messages
+        .map((message) => message.turnRunId)
+        .filter(Boolean),
+    );
+    const completionRows = runCompletions.messages.filter(
+      (message) => !inboxRunIds.has(message.runId),
+    );
+    const completionRowIds = new Set(completionRows.map((message) => message.id));
     return {
       ...notificationsState,
-      messages: [...runCompletions.messages, ...notificationsState.messages],
-      unreadIds: new Set([...runIds, ...notificationsState.unreadIds]),
-      unreadCount: notificationsState.unreadCount + runCompletions.unreadCount,
-      hasUnread:
-        notificationsState.hasUnread || runCompletions.unreadCount > 0,
+      messages: [...completionRows, ...notificationsState.messages],
+      unreadIds: new Set([...completionRowIds, ...notificationsState.unreadIds]),
+      unreadCount: notificationsState.unreadCount + completionRows.length,
+      hasUnread: notificationsState.hasUnread || completionRows.length > 0,
       dismissMessage: (messageId) => {
         // Run-completion read state is server-owned (§9.3): navigation to
-        // the thread clears it; local dismissal only affects approval rows.
-        if (!runIds.has(messageId)) notificationsState.dismissMessage(messageId);
+        // the thread clears it; local dismissal only affects inbox rows.
+        if (!completionRowIds.has(messageId)) {
+          notificationsState.dismissMessage(messageId);
+        }
+      },
+      prepareMessageOpen: (message) => {
+        // Our rows settle through thread-read evidence after navigation —
+        // the click needs no local bookkeeping. Inbox rows keep their own
+        // open flow (reply-render acknowledgement for run_completed rows).
+        if (message?.id && completionRowIds.has(message.id)) return;
+        notificationsState.prepareMessageOpen?.(message);
+      },
+      archiveMessage: (messageId) => {
+        if (completionRowIds.has(messageId)) return;
+        notificationsState.archiveMessage?.(messageId);
       },
     };
-  }, [notificationsState, runCompletions.messages, runCompletions.unreadCount]);
+  }, [notificationsState, runCompletions.messages]);
   const sidebar = useSidebar({
     onNewChat: () => threadsState.setActiveThreadId(null),
   });

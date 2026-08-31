@@ -637,6 +637,7 @@ mod tests {
                 gate_prompts: true,
                 auth_prompts: true,
                 notifications: true,
+                run_completions: false,
                 modalities: Vec::new(),
             },
             destination: reply_ref(format!("reply:{target_id_value}")),

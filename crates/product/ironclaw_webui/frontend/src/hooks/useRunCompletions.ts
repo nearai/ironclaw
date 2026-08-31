@@ -79,6 +79,7 @@ export function useRunCompletions({ enabled = true, activeThreadId = null } = {}
     () =>
       snapshot.notices.map((notice) => ({
         id: `run-completion:${notice.notice_id}`,
+        runId: notice.run_id,
         href: `/chat/${encodeURIComponent(notice.thread_id)}`,
         title:
           notice.unread_count_for_thread > 1

@@ -8,8 +8,8 @@
 //! bounded unread snapshot rather than blocking completion commits.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use ironclaw_product_contracts::run_completions::{
     RUN_COMPLETION_CLEAR_SCHEMA, RUN_COMPLETION_GRANT_SCHEMA, RUN_COMPLETION_NOTICE_SCHEMA,
@@ -46,7 +46,11 @@ impl RunCompletionStreamHub {
     }
 
     fn owner_key(owner: &RunCompletionOwner) -> String {
-        format!("{}\u{1f}{}", owner.tenant_id.as_str(), owner.user_id.as_str())
+        format!(
+            "{}\u{1f}{}",
+            owner.tenant_id.as_str(),
+            owner.user_id.as_str()
+        )
     }
 
     fn sender(&self, owner: &RunCompletionOwner) -> broadcast::Sender<SequencedCompletionEvent> {
@@ -86,9 +90,7 @@ impl RunCompletionStreamHub {
         for notice in &replayed {
             events.push(SequencedCompletionEvent {
                 sequence: notice.sequence,
-                event: RunCompletionStreamEvent::Notice(
-                    self.notice_event(owner, notice).await,
-                ),
+                event: RunCompletionStreamEvent::Notice(self.notice_event(owner, notice).await),
             });
         }
         Ok((events, receiver))
@@ -104,9 +106,7 @@ impl RunCompletionStreamHub {
         for notice in &unread {
             events.push(SequencedCompletionEvent {
                 sequence: notice.sequence,
-                event: RunCompletionStreamEvent::Notice(
-                    self.notice_event(owner, notice).await,
-                ),
+                event: RunCompletionStreamEvent::Notice(self.notice_event(owner, notice).await),
             });
         }
         Ok(events)

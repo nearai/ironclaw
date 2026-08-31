@@ -167,9 +167,8 @@ where
     }
 
     fn alias_root() -> Result<ScopedPath, RunCompletionStoreError> {
-        ScopedPath::new(RUN_NOTICES_MOUNT_ALIAS).map_err(|error| {
-            RunCompletionStoreError::backend("run-notices alias parse", error)
-        })
+        ScopedPath::new(RUN_NOTICES_MOUNT_ALIAS)
+            .map_err(|error| RunCompletionStoreError::backend("run-notices alias parse", error))
     }
 
     fn notice_path(notice_id: &str) -> Result<ScopedPath, RunCompletionStoreError> {
@@ -183,8 +182,10 @@ where
                 reason: "notice id is not a bounded opaque identifier",
             });
         }
-        ScopedPath::new(format!("{RUN_NOTICES_MOUNT_ALIAS}/notices/{notice_id}.json"))
-            .map_err(|error| RunCompletionStoreError::backend("notice path parse", error))
+        ScopedPath::new(format!(
+            "{RUN_NOTICES_MOUNT_ALIAS}/notices/{notice_id}.json"
+        ))
+        .map_err(|error| RunCompletionStoreError::backend("notice path parse", error))
     }
 
     fn due_owners_path() -> Result<ScopedPath, RunCompletionStoreError> {
@@ -326,9 +327,8 @@ where
             &scope,
             &path,
             |bytes: &[u8]| {
-                serde_json::from_slice::<SequenceDocument>(bytes).map_err(|error| {
-                    RunCompletionStoreError::backend("sequence decode", error)
-                })
+                serde_json::from_slice::<SequenceDocument>(bytes)
+                    .map_err(|error| RunCompletionStoreError::backend("sequence decode", error))
             },
             |document: &SequenceDocument| {
                 let body = serde_json::to_vec(document).map_err(|error| {
@@ -364,10 +364,7 @@ where
         mutate: M,
     ) -> Result<(), RunCompletionStoreError>
     where
-        M: Fn(Vec<String>) -> Result<Vec<String>, RunCompletionStoreError>
-            + Send
-            + Sync
-            + 'static,
+        M: Fn(Vec<String>) -> Result<Vec<String>, RunCompletionStoreError> + Send + Sync + 'static,
     {
         let scope = scope_owner.resource_scope();
         let path = Self::due_owners_path()?;
@@ -377,9 +374,8 @@ where
             &scope,
             &path,
             |bytes: &[u8]| {
-                serde_json::from_slice::<DueOwnersDocument>(bytes).map_err(|error| {
-                    RunCompletionStoreError::backend("due-owners decode", error)
-                })
+                serde_json::from_slice::<DueOwnersDocument>(bytes)
+                    .map_err(|error| RunCompletionStoreError::backend("due-owners decode", error))
             },
             |document: &DueOwnersDocument| {
                 let body = serde_json::to_vec(document).map_err(|error| {
@@ -549,8 +545,7 @@ where
                     .await
                     .map_err(|error| RunCompletionStoreError::backend("notice reread", error))?
                     .ok_or(RunCompletionStoreError::Unavailable {
-                        reason: "notice vanished between conflicting create and reread"
-                            .to_string(),
+                        reason: "notice vanished between conflicting create and reread".to_string(),
                     })?;
                 Ok(NoticeCreateOutcome::AlreadyRecorded(Self::decode(
                     &existing.entry.body,
@@ -750,24 +745,22 @@ where
         presented_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
         let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| {
-                match &notice.delivery {
-                    CompletionDeliveryState::Granted {
-                        grant_id: outstanding,
-                        surface,
-                        ..
-                    } if outstanding == grant_id => {
-                        notice.delivery = CompletionDeliveryState::Presented {
-                            surface: *surface,
-                            presented_at,
-                        };
-                        Ok((notice, ()))
-                    }
-                    CompletionDeliveryState::Presented { .. } => Ok((notice, ())),
-                    _ => Err(RunCompletionStoreError::Conflict {
-                        reason: "acknowledgement does not match the outstanding grant",
-                    }),
+            .transition(owner, notice_id, move |mut notice| match &notice.delivery {
+                CompletionDeliveryState::Granted {
+                    grant_id: outstanding,
+                    surface,
+                    ..
+                } if outstanding == grant_id => {
+                    notice.delivery = CompletionDeliveryState::Presented {
+                        surface: *surface,
+                        presented_at,
+                    };
+                    Ok((notice, ()))
                 }
+                CompletionDeliveryState::Presented { .. } => Ok((notice, ())),
+                _ => Err(RunCompletionStoreError::Conflict {
+                    reason: "acknowledgement does not match the outstanding grant",
+                }),
             })
             .await?;
         Ok(notice)
@@ -783,25 +776,23 @@ where
         closes_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
         let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| {
-                match &notice.delivery {
-                    CompletionDeliveryState::Granted {
-                        grant_id: outstanding,
+            .transition(owner, notice_id, move |mut notice| match &notice.delivery {
+                CompletionDeliveryState::Granted {
+                    grant_id: outstanding,
+                    grants_issued,
+                    ..
+                } if outstanding == grant_id => {
+                    let grants_issued = *grants_issued;
+                    notice.delivery = CompletionDeliveryState::PendingArbitration {
+                        closes_at,
                         grants_issued,
-                        ..
-                    } if outstanding == grant_id => {
-                        let grants_issued = *grants_issued;
-                        notice.delivery = CompletionDeliveryState::PendingArbitration {
-                            closes_at,
-                            grants_issued,
-                        };
-                        Ok((notice, ()))
-                    }
-                    CompletionDeliveryState::PendingArbitration { .. } => Ok((notice, ())),
-                    _ => Err(RunCompletionStoreError::Conflict {
-                        reason: "grant regression does not match the outstanding grant",
-                    }),
+                    };
+                    Ok((notice, ()))
                 }
+                CompletionDeliveryState::PendingArbitration { .. } => Ok((notice, ())),
+                _ => Err(RunCompletionStoreError::Conflict {
+                    reason: "grant regression does not match the outstanding grant",
+                }),
             })
             .await?;
         Ok(notice)
@@ -852,18 +843,15 @@ where
         settled_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
         let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| {
-                match &notice.delivery {
-                    CompletionDeliveryState::PendingArbitration { .. } => {
-                        notice.delivery =
-                            CompletionDeliveryState::NoExternalTarget { settled_at };
-                        Ok((notice, ()))
-                    }
-                    CompletionDeliveryState::NoExternalTarget { .. } => Ok((notice, ())),
-                    _ => Err(RunCompletionStoreError::Conflict {
-                        reason: "no-target settlement requires a pending notice",
-                    }),
+            .transition(owner, notice_id, move |mut notice| match &notice.delivery {
+                CompletionDeliveryState::PendingArbitration { .. } => {
+                    notice.delivery = CompletionDeliveryState::NoExternalTarget { settled_at };
+                    Ok((notice, ()))
                 }
+                CompletionDeliveryState::NoExternalTarget { .. } => Ok((notice, ())),
+                _ => Err(RunCompletionStoreError::Conflict {
+                    reason: "no-target settlement requires a pending notice",
+                }),
             })
             .await?;
         Ok(notice)
@@ -1574,8 +1562,7 @@ mod tests {
             tab_id: "tab-1".to_string(),
             state_revision: revision,
             focus_epoch: 1,
-            intent:
-                ironclaw_product_contracts::run_completions::RunCompletionIntentKind::InApp,
+            intent: ironclaw_product_contracts::run_completions::RunCompletionIntentKind::InApp,
             offered_at: Utc::now(),
         };
 

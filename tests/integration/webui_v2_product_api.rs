@@ -2092,7 +2092,9 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let gate_prompt = loop {
         let events = replayed.events;
         if let Some(prompt) = events.iter().find_map(|envelope| {
-            let ProductStreamEvent::Thread(payload) = &envelope.event;
+            let ProductStreamEvent::Thread(payload) = &envelope.event else {
+                panic!("expected a thread stream event, got {:?}", envelope.event);
+            };
             match payload {
                 ProductOutboundPayload::GatePrompt(view) if view.gate_ref == gate_ref.as_str() => {
                     Some(view.clone())

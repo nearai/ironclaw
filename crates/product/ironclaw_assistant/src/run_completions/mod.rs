@@ -37,6 +37,12 @@ pub struct RunCompletionSurfaceServices {
     /// `stale_state`/`effect_failed` plus grants that expired unacknowledged.
     /// Operator-visible through logs/metrics only; carries no content.
     stale_grants: std::sync::atomic::AtomicU64,
+    /// The durable notification Inbox, when composition wires it. Read
+    /// bridge only: evidence that settles a run-completion notice also
+    /// marks the run's `run_completed` Inbox row read, so the bell list
+    /// (inbox-owned for scheduled runs) and the live notice surfaces never
+    /// disagree about read state. Absent in minimal test assemblies.
+    inbox: Option<Arc<dyn ironclaw_notifications::NotificationInboxStorePort>>,
 }
 
 impl RunCompletionSurfaceServices {
@@ -50,6 +56,55 @@ impl RunCompletionSurfaceServices {
             wake: Arc::new(tokio::sync::Notify::new()),
             active_owners: Mutex::new(HashSet::new()),
             stale_grants: std::sync::atomic::AtomicU64::new(0),
+            inbox: None,
+        }
+    }
+
+    /// Wire the durable notification Inbox for the read bridge.
+    pub fn with_inbox(
+        mut self,
+        inbox: Arc<dyn ironclaw_notifications::NotificationInboxStorePort>,
+    ) -> Self {
+        self.inbox = Some(inbox);
+        self
+    }
+
+    /// Best-effort read bridge: read evidence for one completed run also
+    /// settles the run's `run_completed` Inbox row (present only for
+    /// scheduled-trigger runs — the Inbox excludes foreground runs, so a
+    /// missing row is the ordinary case, not a failure).
+    pub(crate) async fn settle_inbox_row(&self, owner: &store::RunCompletionOwner, run_id: &str) {
+        let Some(inbox) = self.inbox.as_ref() else {
+            return;
+        };
+        let Ok(run_uuid) = uuid::Uuid::parse_str(run_id) else {
+            return;
+        };
+        let notification_id = match crate::run_outcome_observer::outcome_notification_id(
+            ironclaw_host_api::turn::TurnRunId::from_uuid(run_uuid),
+            ironclaw_notifications::NotificationKind::RunCompleted,
+        ) {
+            Ok(notification_id) => notification_id,
+            Err(_) => return,
+        };
+        if let Err(error) = inbox
+            .mark_read(ironclaw_notifications::NotificationMutationRequest {
+                recipient: ironclaw_notifications::NotificationRecipient {
+                    tenant_id: owner.tenant_id.clone(),
+                    user_id: owner.user_id.clone(),
+                },
+                notification_id,
+                occurred_at: chrono::Utc::now(),
+            })
+            .await
+        {
+            // Foreground runs have no Inbox row; every failure here is
+            // best-effort bookkeeping, never notice-settlement authority.
+            tracing::debug!(
+                target: "ironclaw::reborn::run_completions",
+                error = %error,
+                "inbox read bridge skipped",
+            );
         }
     }
 

@@ -32,10 +32,7 @@ fn owner_of(caller: &ProductSurfaceCaller) -> RunCompletionOwner {
     }
 }
 
-fn bounded_opaque_id(
-    field: &'static str,
-    value: &str,
-) -> Result<(), ProductSurfaceError> {
+fn bounded_opaque_id(field: &'static str, value: &str) -> Result<(), ProductSurfaceError> {
     if value.is_empty() || value.len() > RUN_COMPLETION_OPAQUE_ID_MAX_BYTES {
         return Err(ProductSurfaceError::validation(
             field,
@@ -48,10 +45,9 @@ fn bounded_opaque_id(
 fn surface_error(error: RunCompletionStoreError) -> ProductSurfaceError {
     match error {
         RunCompletionStoreError::NotFound => ProductSurfaceError::not_found(),
-        RunCompletionStoreError::Invalid { .. } => ProductSurfaceError::validation(
-            "input",
-            ProductSurfaceValidationCode::InvalidValue,
-        ),
+        RunCompletionStoreError::Invalid { .. } => {
+            ProductSurfaceError::validation("input", ProductSurfaceValidationCode::InvalidValue)
+        }
         RunCompletionStoreError::Conflict { .. } => ProductSurfaceError::from_status(
             ironclaw_product_contracts::surface::ProductSurfaceErrorCode::Conflict,
             409,
@@ -115,6 +111,7 @@ pub async fn submit_intent(
             .await
             .map_err(surface_error)?;
         services.hub.publish_clear(&owner, &read);
+        services.settle_inbox_row(&owner, &read.run_id).await;
         services.wake_owner(&owner);
         return Ok(RunCompletionMutationResponse {
             settled_notice_ids: vec![read.notice_id],
@@ -168,6 +165,7 @@ pub async fn acknowledge(
                 .await
                 .map_err(surface_error)?;
             services.hub.publish_clear(&owner, &read);
+            services.settle_inbox_row(&owner, &read.run_id).await;
             services.wake_owner(&owner);
             Ok(RunCompletionMutationResponse {
                 settled_notice_ids: vec![read.notice_id],
@@ -264,6 +262,7 @@ pub async fn thread_read(
             .await
             .map_err(surface_error)?;
         services.hub.publish_clear(&owner, &read);
+        services.settle_inbox_row(&owner, &read.run_id).await;
         settled.push(read.notice_id);
     }
     if !settled.is_empty() {

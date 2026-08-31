@@ -4620,11 +4620,9 @@ where
             {
                 views::parse_empty_view_params(query.params)?;
                 let run_completions = self.run_completions_or_unavailable()?;
-                let response = crate::run_completions::operations::unread_view(
-                    &run_completions,
-                    caller,
-                )
-                .await?;
+                let response =
+                    crate::run_completions::operations::unread_view(&run_completions, caller)
+                        .await?;
                 views::view_page(response)
             }
             id if id == NOTIFICATION_SETUP_STATUS_VIEW.id => {
@@ -5909,10 +5907,7 @@ async fn open_run_completion_subscription<I, V>(
     services: &RebornServices<I, V>,
     caller: ProductSurfaceCaller,
     after_sequence: Option<u64>,
-) -> Result<
-    ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
-    ProductSurfaceError,
->
+) -> Result<ironclaw_product_contracts::surface::ProductSurfaceStreamResponse, ProductSurfaceError>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,

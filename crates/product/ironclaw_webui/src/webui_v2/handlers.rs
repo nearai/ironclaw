@@ -83,12 +83,6 @@ use ironclaw_product_contracts::admin_users::{
 use ironclaw_product_contracts::descriptors::{
     EmptyProductCommandInput, ProductCapabilityDescriptor, ProductSurfaceCommandDescriptor,
 };
-use ironclaw_product_contracts::run_completions::{
-    RUN_COMPLETION_ACKNOWLEDGE_COMMAND, RUN_COMPLETION_INTENT_COMMAND,
-    RUN_COMPLETION_THREAD_READ_COMMAND, RUN_COMPLETION_UNREAD_VIEW,
-    RunCompletionAcknowledgeRequest, RunCompletionIntentRequest, RunCompletionMutationResponse,
-    RunCompletionThreadReadRequest, RunCompletionUnreadRequest, RunCompletionUnreadResponse,
-};
 use ironclaw_product_contracts::inbound_requests::{
     ProductCancelRunRequest, ProductCreateThreadRequest, ProductListAutomationsRequest,
     ProductListThreadsRequest, ProductRenameAutomationRequest, ProductResolveGateRequest,
@@ -143,6 +137,12 @@ use ironclaw_product_contracts::product_wire::{
 };
 use ironclaw_product_contracts::product_wire::{
     RebornNotificationSetupMutationRequest, RebornNotificationSetupStatusResponse,
+};
+use ironclaw_product_contracts::run_completions::{
+    RUN_COMPLETION_ACKNOWLEDGE_COMMAND, RUN_COMPLETION_INTENT_COMMAND,
+    RUN_COMPLETION_THREAD_READ_COMMAND, RUN_COMPLETION_UNREAD_VIEW,
+    RunCompletionAcknowledgeRequest, RunCompletionIntentRequest, RunCompletionMutationResponse,
+    RunCompletionThreadReadRequest, RunCompletionUnreadRequest, RunCompletionUnreadResponse,
 };
 use ironclaw_product_contracts::views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 use ironclaw_product_contracts::workspace_views::{
@@ -1510,8 +1510,8 @@ struct SseErrorPayload {
 fn sse_event_from_stream(
     envelope: ironclaw_product_contracts::surface::ProductStreamEventEnvelope,
 ) -> Option<Event> {
-    let browser = super::session_events::codec::browser_frame(envelope);
-    match serde_json::to_string(&browser.frame) {
+    let browser = super::session_events::codec::browser_frame(envelope)?;
+    match browser.sse_data() {
         Ok(payload) => {
             let mut event = Event::default().event(browser.event_name).data(payload);
             if let Some(id) = browser.cursor_token {

@@ -37,8 +37,8 @@ use crate::model_channel_delivery::CodecChannelTargetResolver;
 use crate::notification_channel_resolution::{
     EffectiveNotificationChannel, LookupErrorPolicy, resolve_effective_notification_channels_arc,
 };
-use crate::run_delivery::RunDeliveryServices;
 use crate::run_delivery::AllowNoProjectionAccess;
+use crate::run_delivery::RunDeliveryServices;
 use crate::run_delivery::prompts;
 
 const TRACE_TARGET: &str = "ironclaw::reborn::run_completions";
@@ -111,10 +111,7 @@ impl RunCompletionExternalDelivery {
         owner: &RunCompletionOwner,
     ) -> Result<Option<CompletionTarget>, OutboundError> {
         let key = CommunicationPreferenceKey {
-            scope: DeliveryDefaultScope::personal(
-                owner.tenant_id.clone(),
-                owner.user_id.clone(),
-            ),
+            scope: DeliveryDefaultScope::personal(owner.tenant_id.clone(), owner.user_id.clone()),
         };
         let owner_scope =
             OutboundDeliveryTargetScope::new(owner.tenant_id.clone(), owner.user_id.clone());
@@ -372,11 +369,7 @@ impl LocalOsIntentPolicy for RunCompletionExternalDelivery {
     /// notification set holds a live run-completion target (Selected) AND
     /// the claiming browser profile holds a usable host-owned registration
     /// (Enrolled). Backend uncertainty fails closed.
-    async fn allows_local_os(
-        &self,
-        owner: &RunCompletionOwner,
-        browser_instance_id: &str,
-    ) -> bool {
+    async fn allows_local_os(&self, owner: &RunCompletionOwner, browser_instance_id: &str) -> bool {
         match self.resolve_completion_target(owner).await {
             Ok(Some(_)) => {}
             Ok(None) => return false,

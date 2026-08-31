@@ -384,7 +384,11 @@ impl ProductSurface for FakeProductSurface {
         ProductSurfaceError,
     > {
         let ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id } =
-            request.selector;
+            request.selector
+        else {
+            // This double backs thread-stream handler tests only.
+            return Err(invalid_request());
+        };
         let after_cursor = request
             .after_cursor
             .map(ironclaw_product_contracts::outbound::ProjectionCursor::new)

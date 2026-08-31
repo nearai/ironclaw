@@ -417,6 +417,7 @@ mod tests {
             gate_prompts: false,
             auth_prompts: true,
             notifications: true,
+            run_completions: false,
             modalities: vec![CommunicationModality::Text, CommunicationModality::Mixed],
         };
 

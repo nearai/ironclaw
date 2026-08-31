@@ -67,7 +67,9 @@ impl RunCompletionJournalObserver {
             run_id: TurnRunId::from_uuid(commit.state.process_id.as_uuid()),
             scope,
             owner_user_id,
-            completed_at: commit.state.created_at,
+            // The journal's per-commit occurrence instant when recorded
+            // (post-#7700); snapshot creation time for older commits.
+            completed_at: commit.occurred_at.unwrap_or(commit.state.created_at),
         })
     }
 }

@@ -78,8 +78,7 @@ impl CompletionPushFallback for NoPushFallback {
 /// Phase 2 alongside enrollment correlation).
 #[async_trait::async_trait]
 pub trait LocalOsIntentPolicy: Send + Sync {
-    async fn allows_local_os(&self, owner: &RunCompletionOwner, browser_instance_id: &str)
-    -> bool;
+    async fn allows_local_os(&self, owner: &RunCompletionOwner, browser_instance_id: &str) -> bool;
 }
 
 pub struct DenyLocalOsIntents;
@@ -312,9 +311,7 @@ impl RunCompletionCoordinator {
             };
         };
         let surface = match winner.intent {
-            RunCompletionIntentKind::WatchingThread => {
-                CompletionSurface::NoSurfaceWatchingThread
-            }
+            RunCompletionIntentKind::WatchingThread => CompletionSurface::NoSurfaceWatchingThread,
             RunCompletionIntentKind::InApp => CompletionSurface::InApp,
             RunCompletionIntentKind::LocalOs => CompletionSurface::LocalOs,
             // ReplyObserved settles at intent time; Unavailable was skipped.
@@ -473,8 +470,7 @@ mod tests {
     use crate::run_completions::RunCompletionSurfaceServices;
     use crate::run_completions::records::CompletionReadEvidence;
     use crate::run_completions::store::{
-        NewRunCompletionNotice, NoticeCreateOutcome, RunCompletionNoticeStore,
-        RunCompletionNotices,
+        NewRunCompletionNotice, NoticeCreateOutcome, RunCompletionNoticeStore, RunCompletionNotices,
     };
     use crate::run_completions::stream::RunCompletionStreamHub;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
@@ -515,9 +511,7 @@ mod tests {
         }
     }
 
-    fn coordinator(
-        services: &Arc<RunCompletionSurfaceServices>,
-    ) -> RunCompletionCoordinator {
+    fn coordinator(services: &Arc<RunCompletionSurfaceServices>) -> RunCompletionCoordinator {
         RunCompletionCoordinator::new(
             Arc::clone(services),
             Arc::new(NoPushFallback),
@@ -763,8 +757,7 @@ mod tests {
             regranted.delivery,
             CompletionDeliveryState::Granted { .. }
         ));
-        let final_tick =
-            second_close + ChronoDuration::milliseconds(GRANT_ACK_TIMEOUT_MS + 100);
+        let final_tick = second_close + ChronoDuration::milliseconds(GRANT_ACK_TIMEOUT_MS + 100);
         coordinator.tick_once(final_tick).await;
         let settled = services
             .notices

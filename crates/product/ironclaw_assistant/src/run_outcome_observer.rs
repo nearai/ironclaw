@@ -932,7 +932,7 @@ fn outcome_lifecycle_ref(value: &'static str) -> Result<LifecycleRef, String> {
         .map_err(|error| format!("build run outcome lifecycle reference failed: {error}"))
 }
 
-fn outcome_notification_id(
+pub(crate) fn outcome_notification_id(
     run_id: TurnRunId,
     kind: NotificationKind,
 ) -> Result<NotificationId, String> {

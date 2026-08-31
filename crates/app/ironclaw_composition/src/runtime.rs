@@ -4715,7 +4715,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironclaw_assistant::run_completions::RunCompletionSurfaceServices::new(
             run_completion_notices,
             run_completion_hub,
-        ),
+        )
+        // Read bridge to the durable Inbox: evidence that settles a
+        // completion notice also marks the run's `run_completed` Inbox row
+        // read, so the bell list and live surfaces agree.
+        .with_inbox(Arc::clone(&services.notification_inbox)),
     );
     let run_completion_ingest = Arc::new(
         ironclaw_assistant::run_completions::ingest::RunCompletionIngest::new(
@@ -4768,8 +4772,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                     (Arc::clone(&external) as _, external as _)
                 }
                 _ => (
-                    Arc::new(ironclaw_assistant::run_completions::coordinator::NoPushFallback)
-                        as _,
+                    Arc::new(ironclaw_assistant::run_completions::coordinator::NoPushFallback) as _,
                     Arc::new(ironclaw_assistant::run_completions::coordinator::DenyLocalOsIntents)
                         as _,
                 ),

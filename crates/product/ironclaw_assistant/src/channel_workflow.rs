@@ -269,6 +269,7 @@ impl RebornChannelWorkflowFactory {
             approval_context: delivery.approval_context.clone(),
             blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
             auth_flow_cancel: delivery.auth_flow_cancel.clone(),
+            notification_inbox: self.services.notification_inbox.clone(),
         })
     }
 
