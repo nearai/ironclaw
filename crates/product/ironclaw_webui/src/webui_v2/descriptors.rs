@@ -1145,7 +1145,7 @@ fn session_websocket_ticket_descriptor() -> IngressRouteDescriptor {
             audit: AuditTraceClass::UserAction,
             effect_path: AllowedEffectPath::NoEffect,
         })
-        .expect("session websocket ticket policy is statically valid"),
+        .expect("session websocket ticket policy is statically valid"), // safety: all parts are crate-local constants; the LocalGateway + bearer + AuthenticatedCaller + NoBody + None-streaming combination is a permitted shape, pinned by the descriptor contract test,
     )
 }
 
@@ -1171,7 +1171,7 @@ fn session_websocket_descriptor() -> IngressRouteDescriptor {
             audit: AuditTraceClass::StreamingSubscription,
             effect_path: AllowedEffectPath::ProjectionOnly,
         })
-        .expect("session websocket policy is statically valid"),
+        .expect("session websocket policy is statically valid"), // safety: all parts are crate-local constants; the LocalGateway + single-use-ticket + AuthenticatedCaller + WebSocket-streaming + same-origin-required combination is a permitted shape, pinned by the descriptor contract test,
     )
 }
 

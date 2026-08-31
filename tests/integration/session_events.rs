@@ -70,11 +70,11 @@ type SessionSocket =
 async fn connect_session_socket(addr: std::net::SocketAddr) -> SessionSocket {
     let url = format!("ws://{addr}/api/webchat/v2/session/websocket");
     let (socket, response) = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(15),
         tokio_tungstenite::connect_async(url),
     )
     .await
-    .expect("session socket connects within 5s")
+    .expect("session socket connects within 15s")
     .expect("session socket upgrades");
     assert_eq!(response.status().as_u16(), 101);
     socket
@@ -179,7 +179,9 @@ async fn session_socket_streams_the_exact_durable_final_reply() {
 
     let mut socket = connect_session_socket(addr).await;
     subscribe(&mut socket, "chat-active", &thread_id).await;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Deadline caps WAITING only — passing runs finish in well under a
+    // second locally; saturated CI partitions need the headroom.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let admitted = next_frame(&mut socket, deadline).await;
     assert_eq!(admitted["type"], "subscribed", "admission: {admitted}");
     assert_eq!(admitted["subscription_id"], "chat-active");
@@ -262,7 +264,9 @@ async fn one_session_socket_carries_two_threads_independently() {
     subscribe(&mut socket, "sub-a", &id_a).await;
     subscribe(&mut socket, "sub-b", &id_b).await;
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Deadline caps WAITING only — passing runs finish in well under a
+    // second locally; saturated CI partitions need the headroom.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let mut admitted = 0;
     while admitted < 2 {
         let frame = next_frame(&mut socket, deadline).await;
