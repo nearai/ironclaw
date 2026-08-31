@@ -849,4 +849,11 @@ impl OutboundStateStorePort for FailingOutboundStore {
     ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
         Err(self.error())
     }
+
+    async fn list_open_reply_publications(
+        &self,
+        _scope: TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
+        Err(self.error())
+    }
 }

@@ -212,6 +212,12 @@ pub struct RebornHostBindings {
     /// uses. A named binding that already carries its own reply is refused.
     /// `None` for a deployment without a session channel.
     pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
+    /// Test-support: build everything but leave reply publication unstarted,
+    /// so an integration harness whose runs execute on its own turn runtime
+    /// can start the coordinator's one publication lane with the kernel
+    /// handles those runs actually live in.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) defer_reply_publication_for_test: bool,
     /// Binary-assembled first-party capability handler registrars (GSuite,
     /// web tooling): composition runs each once against the shared registry so
     /// the concrete executors live in the binary, not composition.
@@ -995,6 +1001,8 @@ impl RebornHostBindings {
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
             session_reply_channel: None,
+            #[cfg(any(test, feature = "test-support"))]
+            defer_reply_publication_for_test: false,
             first_party_registrars: Vec::new(),
             credential_account_visibility_policy: None,
             memory_binding_policy: None,

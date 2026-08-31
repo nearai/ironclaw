@@ -196,6 +196,7 @@ impl Reconciler<'_> {
         };
         let document = &self.request.revision.document;
         let text = document.answer.text.as_str();
+        let carried_text = pending.to_chars > stream.appended_chars;
         let message = match self.api.read_back(&route.channel, &stream.ts).await {
             Ok(message) => message,
             Err(failure) => {
@@ -203,12 +204,27 @@ impl Reconciler<'_> {
                 if matches!(outcome, ReplySinkOutcome::Retryable { .. }) {
                     return Err(outcome);
                 }
-                // The message cannot be read (scope, deleted): assume the
-                // request did not land and re-send. Re-sending can repeat a
-                // fragment; assuming success could lose one.
+                if carried_text {
+                    // Read-back cannot determine whether the text landed
+                    // (missing scope, a deleted parent, …): never repeat a
+                    // fragment the user may already see. The pending stays on
+                    // the checkpoint and the outcome stays `Ambiguous`; the
+                    // host settles `Unknown` if this never resolves.
+                    tracing::debug!(
+                        outcome = outcome.kind_name(),
+                        "slack reply read-back unavailable for a text-carrying append; staying ambiguous"
+                    );
+                    return Err(ReplySinkOutcome::Ambiguous {
+                        reason: ReplyOutcomeReason::new(
+                            "slack read-back is unavailable; a pending text append cannot be verified",
+                        ),
+                    });
+                }
+                // A pending that carried only task and status chunks is safe
+                // to re-send: a repeated task card upserts by id.
                 tracing::debug!(
                     outcome = outcome.kind_name(),
-                    "slack reply read-back unavailable; treating the pending append as not landed"
+                    "slack reply read-back unavailable; re-sending the idempotent non-text chunks"
                 );
                 self.clear_pending();
                 return Ok(());
@@ -219,7 +235,6 @@ impl Reconciler<'_> {
             self.clear_pending();
             return Ok(());
         };
-        let carried_text = pending.to_chars > stream.appended_chars;
         let landed = carried_text
             && char_prefix(text, pending.to_chars).is_some_and(|prefix| {
                 let expected = normalized_tail(prefix);
@@ -340,6 +355,18 @@ impl Reconciler<'_> {
         route: &SlackReplyRoute,
         document: &ReplyDocument,
     ) -> Result<(), ReplySinkOutcome> {
+        if self.checkpoint.stream_open_ambiguous {
+            // An earlier `chat.startStream` may have created a stream this
+            // sink has no handle for. Slack documents no idempotency key and
+            // no way to locate a stream after a lost response, so opening
+            // another could show the user two streams; fail closed instead.
+            return Err(ReplySinkOutcome::Ambiguous {
+                reason: ReplyOutcomeReason::new(
+                    "an earlier chat.startStream went unanswered and slack has no way to \
+                     locate the stream it may have created; not opening another",
+                ),
+            });
+        }
         self.ensure_session_status(route, SlackSessionStatus::Processing, false)
             .await?;
         let plan = match plan_chunks(document, &self.checkpoint, 0, "", None) {
@@ -380,6 +407,10 @@ impl Reconciler<'_> {
                     .filter(|ts| !ts.trim().is_empty())
                     .map(str::to_string);
                 let Some(ts) = ts else {
+                    // Slack accepted the stream but returned no handle for
+                    // it — the same unaddressable-ghost shape as a lost
+                    // response.
+                    self.checkpoint.stream_open_ambiguous = true;
                     return Err(ReplySinkOutcome::Ambiguous {
                         reason: ReplyOutcomeReason::new(
                             "slack chat.startStream answered ok without a message ts",
@@ -398,12 +429,18 @@ impl Reconciler<'_> {
                 self.record_ref(&ts);
                 Ok(())
             }
-            // No ts to read back: the next reconcile opens a fresh stream.
-            // If Slack did open one, it stays an empty streaming message
-            // until Slack expires it — recorded as the residual of this path.
-            Err(SlackApiFailure::Ambiguous { reason }) => Err(ReplySinkOutcome::Ambiguous {
-                reason: ReplyOutcomeReason::new(reason),
-            }),
+            // No ts to read back, and Slack documents no way to find a
+            // stream a lost response may have created: mark the checkpoint
+            // so no later reconcile opens another stream (or posts the
+            // terminal text conventionally beside a ghost stream). The host
+            // records the ambiguity and settles `Unknown` when it never
+            // resolves.
+            Err(SlackApiFailure::Ambiguous { reason }) => {
+                self.checkpoint.stream_open_ambiguous = true;
+                Err(ReplySinkOutcome::Ambiguous {
+                    reason: ReplyOutcomeReason::new(reason),
+                })
+            }
             Err(failure) => Err(outcome_for_failure(
                 SlackWebApiMethod::ChatStartStream,
                 failure,
@@ -549,6 +586,18 @@ impl Reconciler<'_> {
         if self.checkpoint.terminal.is_none() {
             let outcome = match self.checkpoint.stream.clone() {
                 Some(stream) => self.close_stream(route, &document, &stream).await,
+                None if self.checkpoint.stream_open_ambiguous => {
+                    // A ghost stream may exist and may already show the
+                    // chunks the unanswered `chat.startStream` carried;
+                    // posting the terminal text beside it could duplicate
+                    // content. Stay ambiguous; the host settles `Unknown`.
+                    Err(ReplySinkOutcome::Ambiguous {
+                        reason: ReplyOutcomeReason::new(
+                            "an earlier chat.startStream went unanswered; the terminal text is \
+                             not posted beside a stream slack may have created",
+                        ),
+                    })
+                }
                 None => self.post_terminal_conventionally(route, &document).await,
             };
             if let Err(outcome) = outcome {

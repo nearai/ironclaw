@@ -360,18 +360,6 @@ impl ReplyPhase {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Preparing => "preparing",
-            Self::Thinking => "thinking",
-            Self::Working => "working",
-            Self::WaitingForInput => "waiting_for_input",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
 }
 
 /// The answer as it currently stands.
@@ -400,20 +388,21 @@ impl Default for ReplyAnswer {
     }
 }
 
-/// Lifecycle state of one capability/tool activity row.
+/// Lifecycle state of one capability/tool activity row. The projection folds
+/// capability milestones straight from started to finished, so these three
+/// states are the complete producer vocabulary (a killed capability arrives
+/// as `Failed` with its failure kind).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyActivityState {
     Started,
-    Running,
     Completed,
     Failed { kind: ReplyDisplayText },
-    Killed,
 }
 
 impl ReplyActivityState {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed { .. } | Self::Killed)
+        matches!(self, Self::Completed | Self::Failed { .. })
     }
 }
 
@@ -719,26 +708,6 @@ impl ReplyDocument {
         if self.attention.is_none() {
             self.phase = ReplyPhase::Working;
         }
-        true
-    }
-
-    /// Progress on a known activity row; unknown rows are ignored.
-    pub fn activity_progress(
-        &mut self,
-        id: &ReplyItemId,
-        detail: Option<ReplyDisplayPreview>,
-    ) -> bool {
-        let ordinal = self.next_ordinal();
-        let Some(existing) = self.activities.iter_mut().find(|row| &row.id == id) else {
-            return false;
-        };
-        if !existing.state.is_terminal() {
-            existing.state = ReplyActivityState::Running;
-        }
-        if detail.is_some() {
-            existing.detail = detail;
-        }
-        existing.updated_ordinal = ordinal;
         true
     }
 
@@ -1105,7 +1074,12 @@ pub enum ReplySinkOutcome {
     Ambiguous { reason: ReplyOutcomeReason },
     /// This target can no longer take this reply.
     Permanent { reason: ReplyOutcomeReason },
-    /// The provider rejected the credential; the host raises re-auth.
+    /// The provider rejected the credential. The host records the sanitized
+    /// failure and settles the publication fail-closed
+    /// (`.claude/rules/lifecycle.md`: authentication rejection is terminal —
+    /// never retried until the credential changes). Restoring the channel's
+    /// credentials goes through the extension's ordinary reconnect/setup
+    /// flow; a settled reply is not republished afterwards.
     Unauthorized { reason: ReplyOutcomeReason },
     /// The provider reports the user stopped this reply. The host records a
     /// cancellation for the reply.
@@ -1115,13 +1089,6 @@ pub enum ReplySinkOutcome {
 impl ReplySinkOutcome {
     pub fn is_applied(&self) -> bool {
         matches!(self, Self::Applied)
-    }
-
-    pub fn retry_after(&self) -> Option<Duration> {
-        match self {
-            Self::Retryable { retry_after, .. } => *retry_after,
-            _ => None,
-        }
     }
 
     pub fn kind_name(&self) -> &'static str {

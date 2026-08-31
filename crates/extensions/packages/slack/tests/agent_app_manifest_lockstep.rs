@@ -1,4 +1,6 @@
-//! The documented Slack app manifest (`docs/channels/slack.mdx`), the
+//! The canonical Slack app manifest (`app_manifest.json`, in this package —
+//! the file an administrator imports into Slack's app configuration), the
+//! copy embedded in the public docs (`docs/channels/slack.mdx`), the
 //! extension manifest's egress allowlist (`manifest.toml`), and the Slack
 //! calls the code makes move in lockstep.
 //!
@@ -27,8 +29,17 @@ fn read(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()))
 }
 
-/// The JSON block under `## App Manifest` in the public Slack page.
+/// The canonical, directly importable app manifest shipped with the package.
 fn documented_app_manifest() -> serde_json::Value {
+    let json = read("crates/extensions/packages/slack/app_manifest.json");
+    serde_json::from_str(&json).expect("app_manifest.json is valid JSON")
+}
+
+/// The docs page embeds a copy for readability; it must be JSON-identical to
+/// the canonical file so the page can never drift from what an administrator
+/// actually imports.
+#[test]
+fn the_documented_app_manifest_matches_the_canonical_package_file() {
     let page = read("docs/channels/slack.mdx");
     let section = page
         .split("## App Manifest")
@@ -42,7 +53,13 @@ fn documented_app_manifest() -> serde_json::Value {
         .split("```")
         .next()
         .expect("the ```json block closes");
-    serde_json::from_str(json).expect("the documented app manifest is valid JSON")
+    let documented: serde_json::Value =
+        serde_json::from_str(json).expect("the documented app manifest is valid JSON");
+    assert_eq!(
+        documented,
+        documented_app_manifest(),
+        "docs/channels/slack.mdx must embed exactly          crates/extensions/packages/slack/app_manifest.json"
+    );
 }
 
 fn string_array<'a>(value: &'a serde_json::Value, pointer: &str) -> Vec<&'a str> {

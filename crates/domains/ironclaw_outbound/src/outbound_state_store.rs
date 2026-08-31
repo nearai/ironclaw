@@ -1514,6 +1514,61 @@ where
             .filter_map(DeliveryAttemptRow::publication_record)
             .collect())
     }
+
+    async fn list_open_reply_publications(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ReplyPublicationRecord>, OutboundError> {
+        let resource_scope = scope.to_resource_scope();
+        let root = deliveries_root()?;
+        self.ensure_tenant_id_index(&resource_scope, &root).await?;
+        let filter = Filter::Eq {
+            key: tenant_id_index_key(),
+            value: tenant_id_index_value(&scope.tenant_id),
+        };
+        let mut rows: Vec<DeliveryAttemptRow> = Vec::new();
+        let mut offset: u64 = 0;
+        loop {
+            let page = Page::new(offset, Page::MAX_LIMIT);
+            let entries = match self
+                .filesystem
+                .query(&resource_scope, &root, &filter, page)
+                .await
+            {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => break,
+                Err(error) => return Err(map_fs_error(error)),
+            };
+            let received = entries.len();
+            for versioned in entries {
+                let row = decode_delivery_attempt_row(&versioned.entry.body)?;
+                // Defence-in-depth beyond the mount prefix: keep only rows
+                // whose persisted scope names the caller's tenant.
+                if row.attempt.scope.tenant_id == scope.tenant_id {
+                    rows.push(row);
+                }
+            }
+            if received < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset.saturating_add(received as u64);
+        }
+        rows.sort_by_key(|row| {
+            (
+                row.attempt.attempted_at,
+                row.attempt.delivery_id.to_string(),
+            )
+        });
+        Ok(rows
+            .iter()
+            .filter(|row| {
+                row.publication
+                    .as_ref()
+                    .is_some_and(|publication| publication.status.is_active())
+            })
+            .filter_map(DeliveryAttemptRow::publication_record)
+            .collect())
+    }
 }
 
 fn policy_path(scope: &TurnScope) -> Result<ScopedPath, OutboundError> {

@@ -74,7 +74,7 @@ consumer of durable reply events, never a replacement") and
 | Provider-neutral reply vocabulary: `ReplyDocument` (evolved only through its bounded semantic mutators), `ReplyRevision`, `ReplyTarget`, `ReplySink`, bounded newtypes, checkpoint/evidence/report types, `ReplyTransport::reconciles_at` | `ironclaw_extension_contracts::reply` (+ `channel`) | implemented |
 | `[channel.reply]` binding rule: a declared reply transport requires a real bound `ReplySink`; no fake bridge half satisfies it | `ironclaw_extension_host::entrypoint::check_channel_halves`, `generic_host.rs` | implemented |
 | The reply projection: milestones → bounded document mutations; rebuild from durable facts; disclosure policy | `ironclaw_assistant::projection::reply` — a submodule of the existing projection owner (it replaced `projection/live_progress.rs`'s reducer) | implemented |
-| Publication: per-target worker, coalescing, the atomic claim (lease/fence), retries, heartbeat, terminal settlement, sink/egress resolution | `ironclaw_assistant::delivery_coordinator::publication` — a submodule of the delivery coordinator with one small public face (register / run-terminal / await-settled / shutdown) | implemented |
+| Publication: per-target worker, coalescing, the atomic claim (lease/fence), retries, heartbeat, terminal settlement, sink/egress resolution, restart recovery | `DeliveryCoordinator` itself — its public methods (`start_reply_publication` / `register_reply_target` / `reply_run_terminal` / `await_reply_settled` / `resume_reply_publications` / `shutdown_reply_publication`) over the private `delivery_coordinator::publication` module; there is no separately constructed publication service, and the coordinator is the process-journal observer | implemented |
 | Publication state persistence: guarded CAS operations on the attempt aggregate | `ironclaw_outbound::OutboundStateStorePort` / `OutboundStateStore` | implemented |
 | WebUI edge: revision → live projection items over the existing `LiveProjectionPublisher`; durable facets reach the browser through the existing turn-event/runtime projection | `ironclaw_assistant::projection::reply_sink::ProjectionReplySink` | implemented (live facets: answer, reasoning, activity, status) |
 | Slack edge: native Agent session/stream/task rendering, error and rate-limit mapping, read-back | `crates/extensions/packages/slack/src/reply_sink/` | implemented |
@@ -85,7 +85,10 @@ consumer of durable reply events, never a replacement") and
 Composition names no extension. The binary names the session-reply channel
 (`with_session_reply_channel`) beside the same trusted table that binds
 Slack's adapter to `slack`; composition attaches the sink to that binding's
-ordinary `surfaces.reply` slot.
+ordinary `surfaces.reply` slot and calls
+`DeliveryCoordinator::start_reply_publication` once — wiring, not a second
+lifecycle: the coordinator owns the workers, the shutdown, and the journal
+subscription.
 
 ## 3. Canonical history — the durable source of every document field
 
@@ -182,11 +185,17 @@ separate renew) · `advance_reply_publication` (published
 revision monotonic and ≤ desired; checkpoint/evidence/generation recorded;
 refused once settled or under a stale fence) · `settle_reply_publication` (`Delivered` only when the
 terminal revision was applied; `Unknown` for an unverifiable terminal
-reconcile; `Failed(kind)` for permanent/unauthorized/abandoned). Crash
+reconcile; `Failed(kind)` for permanent/unauthorized/abandoned) ·
+`list_open_reply_publications` (every still-Active publication in the
+tenant, off the existing tenant index — the boot-time recovery read). Crash
 recovery: `recover_interrupted_delivery_attempt` leaves publication rows
 alone — they recover through lease expiry and takeover, never by being marked
-`Unknown`. Wake-up after a crash: the existing `ProcessJournalCommitObserver`
-on terminal run commits plus lease expiry; no outbox.
+`Unknown`. Wake-up after a crash has two durable halves and no outbox: the
+coordinator observes terminal process-journal commits and acknowledges one
+only after the run's open publications have workers again (an error leaves
+the durable cursor unacknowledged and the journal redelivers), and
+`resume_reply_publications` sweeps the attempt index at boot for the crash
+window after an acknowledgement.
 
 Worker rules (inside the coordinator family): one task per `(reply, target)`;
 different replies publish concurrently; replaceable revisions coalesce under
@@ -206,23 +215,33 @@ the store in one write (`open_reply_publication` creates attempt + substate
 together — a plain attempt row is a different aggregate). Worker: one tokio
 task per `(run, exact target)`, woken by the projection; it always publishes
 the latest snapshot (natural coalescing) under `min_progress_interval`
-pacing for `Progress`, never delays `ControlCritical`/`Terminal`, reconciles
-idle `stream` targets at `Heartbeat` every `heartbeat_interval` (20 min
-default — Slack sessions expire after an hour), persists the checkpoint a
-sink returns with `Retryable`/`Ambiguous` outcomes (so a retry resumes the
-provider presentation instead of opening another), classifies
-`ChannelError` (transfer faults retryable; parse/render/config permanent),
-materializes workspace attachments only for the terminal reconcile under the
-attachment budgets (missing/denied → `Failed(Rejected)`, unavailable reader →
-retried then `Failed(TransportUnavailable)`), and settles `Unknown` after the
-terminal attempt budget when the provider stays ambiguous. Graceful shutdown
-releases held leases; a crash lets them lapse. Wake-up after a crash is the
-`ReplyPublicationCommitObserver` on terminal process-journal commits
-(`run_terminal` → resume open publications from the store + fetch terminal
-facts). The observer also calls `run_terminal` when it polls a terminal state
-and waits (bounded, 20 s) for settlement before retracting its working
-indicator, so a `message` channel never shows a gap between indicator and
-answer.
+pacing for `Progress` and never delays `ControlCritical`/`Terminal`. The
+durable order of one reconcile is fixed: load the row; prepare everything
+provider-independent (channel + sink resolution, the stored reply context,
+disclosure and gate-prompt enrichment, terminal attachment materialization)
+*before* ownership is taken so unbounded work never burns lease time; take
+the atomic claim immediately before egress; persist the newest desired
+revision under that fence *before* the sink is called; call the sink bounded
+by a timeout clamped to the lease TTL (so lease expiry can never produce two
+simultaneous provider calls); persist checkpoint/evidence/outcome under the
+same fence. It reconciles idle `stream` targets at `Heartbeat` every
+`heartbeat_interval` (20 min default — Slack sessions expire after an hour),
+persists the checkpoint a sink returns with `Retryable`/`Ambiguous` outcomes
+(so a retry resumes the provider presentation instead of opening another),
+classifies `ChannelError` (transfer faults retryable; parse/render/config
+permanent), materializes workspace attachments only for the terminal
+reconcile under the attachment budgets (missing/denied → `Failed(Rejected)`,
+unavailable reader → retried then `Failed(TransportUnavailable)`), and
+settles `Unknown` after the terminal attempt budget when the provider stays
+ambiguous. `Unauthorized` settles `Failed(AuthorizationRevoked)` fail-closed
+— `.claude/rules/lifecycle.md`'s rule that an authentication rejection is
+terminal until the credential changes; restoring the channel's credentials
+goes through the extension's ordinary reconnect/setup flow, and a settled
+reply is deliberately not republished afterwards. Graceful shutdown releases
+held leases; a crash lets them lapse. The run-delivery observer also calls
+`reply_run_terminal` when it polls a terminal state and waits (bounded,
+20 s) for settlement before retracting its working indicator, so a `message`
+channel never shows a gap between indicator and answer.
 
 ## 6. The sink seam *(implemented in contracts; sinks: projection, Telegram, Slack Agent, acme fixture)*
 
@@ -290,7 +309,7 @@ regardless of route; the coordinator is transport-blind.
   every package-bound sink uses, with no marker flag and nothing downstream
   distinguishing host-supplied from package-supplied sinks — before
   activation checks the halves against the manifest (the binary never
-  depends on `ironclaw_assistant`). The publication service registers that
+  depends on `ironclaw_assistant`). The coordinator registers that
   channel as a target for every run at its first revision (private
   audience), so WebUI live progress is the same publication path Slack
   uses.
@@ -323,14 +342,30 @@ regardless of route; the coordinator is transport-blind.
 - Native plan mode (`plan_update`, `task_display_mode: plan`) is **not**
   claimed: no plan producer exists in the loop; task UI is driven from real
   activity facts in timeline mode.
+- Ambiguity is fail-closed, keyed to what Slack documents (verified
+  2026-08-31: `chat.startStream` has no idempotency key, and its response
+  `ts` is the only handle for the stream it creates). An ambiguous
+  `chat.appendStream` with a known stream `ts` is resolved by
+  `conversations.replies` read-back before anything else is appended: a
+  landed append advances the checkpoint without repeating it, a not-landed
+  one re-sends only the missing delta, and when read-back itself is
+  unavailable a text-carrying pending stays `Ambiguous` and is never
+  re-sent (only idempotent task/status chunks may be repeated). An
+  ambiguous `chat.startStream` marks the checkpoint and the sink never
+  opens a second stream — nor posts the terminal text conventionally beside
+  a possible ghost stream — so the host settles `Unknown` rather than ever
+  duplicating content.
 - As built: manifest `[channel.reply] transport = "stream"` + the five agent
   endpoints as exact-path bot-token egress; `src/reply_sink/` renders the
   document (status line, markdown text by char offset, `task_update` from
   activity rows, attention as a quoted block + `suspended`, terminal
   `stopStream` + attachments after the stream closes) with a versioned,
   bounded checkpoint; `agent_session_stopped` normalizes to the product
-  `stop` command; lockstep tests pin the documented app manifest and setup
-  guides to the code. No live Slack app or workspace was modified.
+  `stop` command. The importable Slack app manifest ships as the canonical
+  `crates/extensions/packages/slack/app_manifest.json`; the docs page embeds
+  a copy and the lockstep tests pin file, docs, extension-manifest egress,
+  and the calls the code makes to each other. No live Slack app or
+  workspace was modified.
 
 ## 10. Migration and compatibility
 
@@ -347,15 +382,15 @@ regardless of route; the coordinator is transport-blind.
 | Claim | Evidence | Command |
 | --- | --- | --- |
 | Reply vocabulary is bounded by construction, reducer deterministic, cadence rule, single sink seam | `crates/contracts/ironclaw_extension_contracts/tests/reply_contract.rs` (21) | `cargo test -p ironclaw_extension_contracts --all-features` |
-| Publication substate: open/claim/advance/settle/release guards (claim re-entry doubles as renew), lease takeover with fence bump, stale-fence rejection, pre-change rows unchanged, libSQL parity | `crates/domains/ironclaw_outbound/tests/outbound_state_store_contract.rs` | `cargo test -p ironclaw_outbound` |
+| Publication substate: open/claim/advance/settle/release guards (claim re-entry doubles as renew), lease takeover with fence bump, stale-fence rejection, the tenant-wide open-publication listing behind the boot sweep, pre-change rows unchanged, libSQL parity | `crates/domains/ironclaw_outbound/tests/outbound_state_store_contract.rs` | `cargo test -p ironclaw_outbound` |
 | Projection composes bounded, redacted documents; terminal from durable facts; phases; disclosure; capacity | `crates/product/ironclaw_assistant/src/projection/reply/tests.rs` | `cargo test -p ironclaw_assistant --lib -- projection::reply` |
-| Publication worker: stream vs message cadence, session target, disclosure, retry/ambiguous/permanent/unauthorized/stop, another-node resume with persisted checkpoint and generation change, held lease, heartbeat, retry checkpoint, microburst coalescing, attachments | `crates/product/ironclaw_assistant/src/delivery_coordinator/publication/tests.rs` (17) | `cargo test -p ironclaw_assistant --lib -- publication` |
+| Publication worker: stream vs message cadence, session target, disclosure, retry/ambiguous/permanent/unauthorized/stop, another-node resume with persisted checkpoint and generation change, held lease, heartbeat, retry checkpoint, microburst coalescing, attachments — plus the corrected order (desired revision durable before every provider call; provider-independent preparation before the claim; the sink timeout clamped to the lease TTL), the boot sweep resuming an open publication with no journal signal, and the journal acknowledgement awaited behind a stable observer id | `crates/product/ironclaw_assistant/src/delivery_coordinator/publication/tests.rs` (24) | `cargo test -p ironclaw_assistant --lib -- publication` |
 | Observer cutover: answer via the sink, notices/prompts via the delivery half, nothing-to-report, attachments, resolution-ack dedupe, working indicator retraction after settlement | `crates/product/ironclaw_assistant/tests/run_delivery_contract.rs` (79), `tests/outbound_delivery_contract.rs` (35) | `cargo test -p ironclaw_assistant` |
 | WebUI live items from the projection sink; cursor rebasing; text phases under one id; tool failure redaction | `crates/product/ironclaw_assistant/src/projection/tests/{reply_sink,live_progress_stream,runtime_stream}.rs` | `cargo test -p ironclaw_assistant --lib -- projection` |
-| Telegram terminal-only sink; Slack Agent sink against a stateful fake Agent API; manifest lockstep | `crates/extensions/packages/telegram/src/tests/reply.rs`, `crates/extensions/packages/slack/tests/{reply_sink_agent_api,agent_app_manifest_lockstep}.rs` | `cargo test -p ironclaw_telegram_extension`, `cargo test -p ironclaw_slack_extension` |
+| Telegram terminal-only sink; Slack Agent sink against a stateful fake Agent API (incl. the fail-closed ambiguous `chat.startStream` — never a second stream, never a conventional post beside a possible ghost — and the no-resend rule when read-back is unavailable for a text-carrying pending); canonical `app_manifest.json` / docs / egress lockstep | `crates/extensions/packages/telegram/src/tests/reply.rs`, `crates/extensions/packages/slack/tests/{reply_sink_agent_api,agent_app_manifest_lockstep}.rs` | `cargo test -p ironclaw_telegram_extension`, `cargo test -p ironclaw_slack_extension` |
 | Activation refuses a declared reply without a real sink; host bridge binds no fake sink | `crates/extensions/ironclaw_extension_host/src/{entrypoint,generic_host}.rs` tests | `cargo test -p ironclaw_extension_host` |
 | Channel-host Slack DM journeys ride the Agent wire end-to-end through the production assembly: gate/auth prompts as streamed attention with the message-path copy (approval instruction; auth headline + private-DM setup link; `Shared` strips the link), working state as session status (`processing`/`suspended`), final replies at the single stream close, exactly-once under gate-resolution ack races, and a bare threaded `approve` resolving via the observer's source-conversation route record with no delivered prompt message | `crates/extensions/ironclaw_extension_host/src/channel_host/e2e_tests.rs` (54, incl. `bare_approve_in_dm_resolves_gate_recorded_by_observer`); the scripted coordinator feeds the shared `ReplyProjection` the loop's milestones, standing in for `ReplyProjectionMilestoneSink` | `cargo test -p ironclaw_extension_host` |
-| Layer/edge gates, frozen contract names, contracts size ceiling re-pinned (11 451 → 12 928) | `crates/app/ironclaw_architecture_tests` | `cargo test -p ironclaw_architecture_tests` |
+| Layer/edge gates, frozen contract names, contracts size ceiling re-pinned down (11 451 → 12 928 → 12 867 after the vocabulary trim) | `crates/app/ironclaw_architecture_tests` | `cargo test -p ironclaw_architecture_tests` |
 | Whole-path integration: a signed Slack channel event becomes a run whose reply is STREAMED through the native Agent surface (startStream with recipient/thread from the stored reply context → text → one stopStream, bot token injected host-side, never a plain post); a Slack-origin run delivers to Telegram while its own reply streams back | `tests/integration/extension_delivery.rs::slack_final_reply_flows_through_the_real_delivery_coordinator`, `tests/integration/delivery_user_journeys.rs::slack_origin_delivers_to_telegram_and_acks_in_slack` | `cargo test -p ironclaw_integration_tests --test reborn_integration_extension_delivery --test reborn_integration_delivery_user_journeys` |
 
 Known follow-ups (not claimed): gate reply routes (`record_gate_route_if_needed`)

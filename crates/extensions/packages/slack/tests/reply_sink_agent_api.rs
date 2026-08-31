@@ -1028,3 +1028,117 @@ async fn slack_errors_map_to_the_documented_outcomes() {
         }
     }
 }
+
+#[tokio::test]
+async fn an_ambiguous_stream_open_never_opens_a_second_stream_or_posts_conventionally() {
+    let mut harness = Harness::dm();
+    harness.append("Hello");
+    // The startStream crosses into transport and the answer is lost: Slack
+    // may have created a stream this sink has no handle for, and Slack
+    // documents no way to find it.
+    harness.fake.inject(Fault::TransportAfterAccept {
+        method: SlackWebApiMethod::ChatStartStream,
+    });
+    let report = harness.reconcile(ReplyReconcilePoint::Opened).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
+        "got {:?}",
+        report.outcome
+    );
+    assert_eq!(
+        harness.checkpoint_json()["stream_open_ambiguous"],
+        Value::Bool(true),
+        "the checkpoint remembers the unanswered open"
+    );
+
+    // Every later reconcile stays ambiguous and never touches chat.startStream
+    // again.
+    harness.append(" world");
+    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
+        "got {:?}",
+        report.outcome
+    );
+
+    // The terminal materialization is not posted conventionally either: the
+    // ghost stream may already show the chunks the unanswered open carried.
+    harness.document.complete();
+    let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
+        "got {:?}",
+        report.outcome
+    );
+    let calls = harness.fake.calls();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.as_str() == "chat.startStream")
+            .count(),
+        1,
+        "exactly one chat.startStream ever went out: {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| call == "chat.postMessage"),
+        "no conventional post beside a possible ghost stream: {calls:?}"
+    );
+    assert!(harness.fake.posted().is_empty());
+}
+
+#[tokio::test]
+async fn an_unreadable_read_back_for_a_text_carrying_pending_stays_ambiguous_without_resending() {
+    let mut harness = Harness::dm();
+    harness.append("Hello");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+
+    // The append reached transport unanswered; the pending carries text.
+    harness.fake.inject(Fault::TransportAfterAccept {
+        method: SlackWebApiMethod::ChatAppendStream,
+    });
+    harness.append(" world");
+    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
+        "got {:?}",
+        report.outcome
+    );
+
+    // Read-back itself is unavailable (a permanent provider answer, not a
+    // rate limit): the sink cannot determine whether the text landed, so it
+    // must not repeat it — the outcome stays ambiguous and the pending stays
+    // on the checkpoint for the host to settle `Unknown`.
+    harness.fake.inject(Fault::SlackError {
+        method: SlackWebApiMethod::ConversationsReplies,
+        error: "missing_scope",
+    });
+    let appends_before = harness
+        .fake
+        .bodies(SlackWebApiMethod::ChatAppendStream)
+        .len();
+    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
+        "got {:?}",
+        report.outcome
+    );
+    assert_eq!(
+        harness
+            .fake
+            .bodies(SlackWebApiMethod::ChatAppendStream)
+            .len(),
+        appends_before,
+        "nothing was re-sent while the append's fate is unknown"
+    );
+    assert!(
+        harness.checkpoint_json()["stream"]["pending"].is_object(),
+        "the pending survives for a later read-back to resolve"
+    );
+
+    // Once read-back works again, the ordinary resolution applies (here it
+    // proves the append landed) and only the genuinely new delta goes out.
+    harness.append("!");
+    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
+    assert_applied(&report);
+    assert!(report.evidence.read_back_verified);
+}

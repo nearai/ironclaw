@@ -2,11 +2,11 @@
 //!
 //! An extension package is a protocol translator and may implement any subset
 //! of three one-way axes: receive a complete vendor message, answer a run
-//! (as progressive semantic revisions through a [`crate::reply::ReplySink`],
-//! or as the terminal materialized reply through the [`crate::reply::ReplySink`] a declared `[channel.reply]` binds — whichever
+//! (through the one [`crate::reply::ReplySink`] a declared `[channel.reply]`
+//! binds — progressive revisions or the terminal materialization, whichever
 //! `[channel.reply] transport` declares), and deliver out of band. The host
 //! owns everything around those translations (route table, verification
-//! recipes, replay, admission, target policy, the reply journal and its
+//! recipes, replay, admission, target policy, the reply projection and its
 //! publication, attempt persistence, retry, drain). It also owns
 //! authenticated-session ingress, so that manifest mode intentionally requires
 //! no ingress implementation. The package never reports metadata (the resolved

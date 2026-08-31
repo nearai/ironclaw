@@ -416,6 +416,10 @@ pub(crate) struct ChannelHostAssemblyWiring {
     /// The deployment's authenticated-session channel (host-owned reply), if
     /// any: registered as a publication target for every run.
     pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
+    /// Whether this call starts the coordinator's reply publication lane.
+    /// Production always does; a test-harness composition defers so the one
+    /// start carries the harness's own kernel handles (input doc).
+    pub(crate) start_reply_publication: bool,
     pub(crate) admin_users: Arc<dyn AdminUserService>,
 }
 
@@ -531,10 +535,6 @@ pub(crate) fn channel_admin_users(
 pub(crate) struct StartedChannelHost {
     pub(crate) assembly: Arc<ironclaw_extension_host::channel_host::GenericChannelHostAssembly>,
     pub(crate) workflow_factory: Arc<ironclaw_assistant::RebornChannelWorkflowFactory>,
-    /// The reply publication service, present exactly when a delivery
-    /// coordinator exists (channel egress is configured). The runtime hooks
-    /// it to the process journal so terminal commits resume publications.
-    pub(crate) reply_publication: Option<Arc<ironclaw_assistant::ReplyPublicationService>>,
 }
 
 pub(crate) fn start_channel_host(
@@ -560,6 +560,7 @@ pub(crate) fn start_channel_host(
         admin_users,
         reply_projection,
         session_reply_channel,
+        start_reply_publication,
     } = wiring;
     let ChannelHostAssemblySource {
         generic_host,
@@ -580,17 +581,15 @@ pub(crate) fn start_channel_host(
         channel_config,
         channel_pairing,
     } = source;
-    // Reply publication rides the same coordinator (sole writer of the
-    // attempt aggregate) and exists exactly when it does. The terminal facts
-    // come from the turn kernel and the thread service; a sink's stop
-    // request becomes an ordinary cancel; gate attention is enriched from
-    // the approval and auth prompt sources every other channel surface uses.
-    let reply_publication = delivery_coordinator.clone().map(|coordinator| {
-        use ironclaw_assistant::{
-            ReplyPublicationDeps, ReplyPublicationService, ReplyPublicationSettings,
-        };
-        ReplyPublicationService::start(ReplyPublicationDeps {
-            coordinator,
+    // Reply publication is the coordinator's own progressive lane (sole
+    // writer of the attempt aggregate) and starts exactly when a coordinator
+    // exists. The terminal facts come from the turn kernel and the thread
+    // service; a sink's stop request becomes an ordinary cancel; gate
+    // attention is enriched from the approval and auth prompt sources every
+    // other channel surface uses.
+    if start_reply_publication && let Some(coordinator) = delivery_coordinator.as_ref() {
+        use ironclaw_assistant::{ReplyPublicationSettings, ReplyPublicationWiring};
+        if !coordinator.start_reply_publication(ReplyPublicationWiring {
             projection: Arc::clone(&reply_projection),
             turn_coordinator: Arc::clone(&turn_coordinator),
             thread_service: Arc::clone(&thread_service),
@@ -599,26 +598,26 @@ pub(crate) fn start_channel_host(
             project_filesystem: Arc::clone(project_filesystem),
             session_channel: session_reply_channel,
             settings: ReplyPublicationSettings::default(),
-        })
+        }) {
+            tracing::debug!(
+                "reply publication was already started on this coordinator; keeping it"
+            );
+        }
+    }
+    let delivery = delivery_coordinator.clone().map(|coordinator| {
+        ironclaw_assistant::ChannelWorkflowDeliveryServices {
+            coordinator,
+            outbound_store: Arc::clone(outbound_state),
+            route_store: Arc::clone(delivered_gate_routes),
+            communication_preferences: Arc::clone(outbound_preferences),
+            delivery_targets: Arc::clone(outbound_delivery_targets),
+            approval_context,
+            blocked_auth_prompts,
+            auth_flow_cancel,
+            settings: run_delivery_settings,
+            triggered_delivery_store: Arc::clone(triggered_delivery_store),
+        }
     });
-    let delivery = delivery_coordinator
-        .clone()
-        .zip(reply_publication.clone())
-        .map(|(coordinator, reply_publication)| {
-            ironclaw_assistant::ChannelWorkflowDeliveryServices {
-                coordinator,
-                reply_publication,
-                outbound_store: Arc::clone(outbound_state),
-                route_store: Arc::clone(delivered_gate_routes),
-                communication_preferences: Arc::clone(outbound_preferences),
-                delivery_targets: Arc::clone(outbound_delivery_targets),
-                approval_context,
-                blocked_auth_prompts,
-                auth_flow_cancel,
-                settings: run_delivery_settings,
-                triggered_delivery_store: Arc::clone(triggered_delivery_store),
-            }
-        });
     let workflow_factory = Arc::new(ironclaw_assistant::RebornChannelWorkflowFactory::new(
         ironclaw_assistant::RebornChannelWorkflowServices {
             filesystem: Arc::clone(workflow_filesystem),
@@ -658,7 +657,6 @@ pub(crate) fn start_channel_host(
     StartedChannelHost {
         assembly,
         workflow_factory,
-        reply_publication,
     }
 }
 
@@ -717,6 +715,16 @@ pub(crate) async fn build_runtime_channel_host(
             admin_users,
             reply_projection,
             session_reply_channel: services.session_reply_channel.clone(),
+            start_reply_publication: {
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    !services.defer_reply_publication_for_test
+                }
+                #[cfg(not(any(test, feature = "test-support")))]
+                {
+                    true
+                }
+            },
         },
     );
     let assembly = Arc::clone(&started.assembly);

@@ -3317,6 +3317,121 @@ async fn run_reply_publication_contract(store: &impl OutboundStateStorePort) {
     reply_publication_settlement_is_guarded_and_one_way(store).await;
     reply_publication_rows_are_left_alone_by_crash_recovery(store).await;
     pre_publication_attempt_rows_keep_the_one_shot_lifecycle(store).await;
+    open_reply_publications_list_spans_the_tenant_and_excludes_settled_and_plain_rows(store).await;
+}
+
+/// The boot-time crash-recovery read: every still-`Active` publication in the
+/// caller's tenant is returned — across thread scopes — while settled
+/// publications and plain one-shot attempt rows are not.
+async fn open_reply_publications_list_spans_the_tenant_and_excludes_settled_and_plain_rows(
+    store: &impl OutboundStateStorePort,
+) {
+    let now = now();
+    let scope_one = TurnScope::new(
+        TenantId::new("sweep-tenant").unwrap(),
+        Some(AgentId::new("sweep-agent").unwrap()),
+        None,
+        ThreadId::new("sweep-thread-one").unwrap(),
+    );
+    let scope_two = TurnScope::new(
+        TenantId::new("sweep-tenant").unwrap(),
+        Some(AgentId::new("sweep-agent").unwrap()),
+        None,
+        ThreadId::new("sweep-thread-two").unwrap(),
+    );
+    // Active publication in thread one.
+    let active_run = TurnRunId::new();
+    let active = prepared_attempt(&scope_one, "sweep-active", active_run);
+    store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: active.clone(),
+            target: publication_target(active_run, "sweep-active"),
+            descriptor: None,
+            now,
+        })
+        .await
+        .unwrap();
+    // Active publication in thread two — a different scope of the same
+    // tenant, which the per-scope listing cannot see but the sweep must.
+    let sibling_run = TurnRunId::new();
+    let sibling = prepared_attempt(&scope_two, "sweep-sibling", sibling_run);
+    store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: sibling.clone(),
+            target: publication_target(sibling_run, "sweep-sibling"),
+            descriptor: None,
+            now,
+        })
+        .await
+        .unwrap();
+    // Settled publication in thread one: claimed, advanced to its terminal
+    // revision, settled Delivered.
+    let settled_run = TurnRunId::new();
+    let settled = open_and_claim(
+        store,
+        &scope_one,
+        "sweep-settled",
+        settled_run,
+        "sweeper",
+        now,
+    )
+    .await;
+    store
+        .advance_reply_publication(advance_request(
+            settled.attempt.delivery_id,
+            &scope_one,
+            settled.publication.fence,
+            1,
+            1,
+            Some(1),
+            Some(1),
+            None,
+            evidence("sweep-ref", false),
+            now,
+        ))
+        .await
+        .unwrap();
+    store
+        .settle_reply_publication(settle_request(
+            settled.attempt.delivery_id,
+            &scope_one,
+            settled.publication.fence,
+            ReplyPublicationSettlement::Delivered,
+            now,
+        ))
+        .await
+        .unwrap();
+    // A plain one-shot attempt row carries no publication substate.
+    let plain = prepared_attempt(&scope_one, "sweep-plain", TurnRunId::new());
+    store.record_delivery_attempt(plain.clone()).await.unwrap();
+
+    let open = store
+        .list_open_reply_publications(scope_one.clone())
+        .await
+        .unwrap();
+    let ids: Vec<_> = open
+        .iter()
+        .map(|record| record.attempt.delivery_id)
+        .collect();
+    assert!(
+        ids.contains(&active.delivery_id),
+        "the active publication in the query scope's thread is listed"
+    );
+    assert!(
+        ids.contains(&sibling.delivery_id),
+        "an active publication in ANOTHER thread of the same tenant is listed"
+    );
+    assert!(
+        !ids.contains(&settled.attempt.delivery_id),
+        "a settled publication is not resumed"
+    );
+    assert!(
+        !ids.contains(&plain.delivery_id),
+        "a plain one-shot attempt row is not a publication"
+    );
+    for record in &open {
+        assert!(record.publication.status.is_active());
+    }
 }
 
 #[tokio::test]

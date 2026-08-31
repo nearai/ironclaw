@@ -213,6 +213,16 @@ pub trait OutboundStateStorePort: Send + Sync {
         scope: TurnScope,
         run_id: TurnRunId,
     ) -> Result<Vec<ReplyPublicationRecord>, OutboundError>;
+
+    /// Every publication still `Active` anywhere in the caller's tenant —
+    /// the boot-time crash-recovery read, served from the existing tenant
+    /// index over the delivery rows. `scope` authorizes the read and names
+    /// the tenant; rows from every thread of that tenant are returned so a
+    /// restarted publisher can resume work the journal already acknowledged.
+    async fn list_open_reply_publications(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ReplyPublicationRecord>, OutboundError>;
 }
 
 fn plan_push_targets_from_policy(

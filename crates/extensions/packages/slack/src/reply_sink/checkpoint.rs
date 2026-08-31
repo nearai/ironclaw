@@ -58,6 +58,16 @@ pub(super) struct SlackReplyCheckpoint {
     /// session indicator is skipped.
     #[serde(default)]
     pub(super) session_unavailable: bool,
+    /// A `chat.startStream` crossed into transport without an answer: Slack
+    /// may or may not have created a streaming message, and the response's
+    /// `ts` is the only handle Slack documents (no idempotency key, no way
+    /// to list or locate streams — docs.slack.dev, verified 2026-08-31).
+    /// While set, this sink never starts another stream and never posts the
+    /// terminal text conventionally — either could duplicate content the
+    /// ghost stream already shows — so the publication stays `Ambiguous`
+    /// until the host settles it `Unknown`.
+    #[serde(default)]
+    pub(super) stream_open_ambiguous: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

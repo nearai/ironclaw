@@ -1,27 +1,40 @@
 //! Reply publication: the delivery coordinator's progressive lane (design doc
 //! §5–§6).
 //!
-//! Every run's reply is published from one place. The reply projection
-//! ([`crate::projection::reply`]) holds the desired document; this lane owns
-//! *targets* — the exact places a run answers to (its originating vendor
-//! conversation, the deployment's session channel) — and, per target, one
-//! worker that reconciles the channel's bound [`ReplySink`] toward the newest
-//! revision. Cadence is the channel's declared `[channel.reply]` transport: a
-//! `stream` sink hears every reconcile point, a `message` sink hears the
-//! terminal one only. Audience disclosure is applied to the copy each target
-//! receives.
+//! Every run's reply is published from one place — the [`DeliveryCoordinator`]
+//! itself. The reply projection ([`crate::projection::reply`]) holds the
+//! desired document; this private module owns *targets* — the exact places a
+//! run answers to (its originating vendor conversation, the deployment's
+//! session channel) — and, per target, one worker task that reconciles the
+//! channel's bound [`ReplySink`] toward the newest revision. Cadence is the
+//! channel's declared `[channel.reply]` transport: a `stream` sink hears
+//! every reconcile point, a `message` sink hears the terminal one only.
+//! Audience disclosure is applied to the copy each target receives.
+//!
+//! There is no separately constructed publication service: composition calls
+//! [`DeliveryCoordinator::start_reply_publication`] once, and every caller —
+//! the run-delivery observer, the process-journal hook, shutdown — reaches
+//! publication through the coordinator's own methods. Workers, the target
+//! map, and the projection subscription are implementation details behind
+//! that surface.
 //!
 //! Publication state never lives here. It lives on the outbound delivery
 //! attempt aggregate (one attempt row per run and exact target, written only
-//! through the [`DeliveryCoordinator`]): the atomic publication claim (a
-//! lease and fence) a worker must hold before provider egress, monotonic
-//! desired/published revisions, the sink's generation-pinned checkpoint,
-//! bounded provider evidence, and a one-way settlement that says `Delivered`
-//! only once the terminal revision was applied, `Unknown` when read-back
-//! could not resolve an ambiguous provider answer, and `Failed` otherwise. A
-//! publisher on any node can resume an open publication from that row: the
-//! target descriptor is persisted at open, the terminal revision is rebuilt
-//! from durable history, and the fence rejects the stale worker.
+//! through the coordinator's guarded store operations): the atomic
+//! publication claim (a lease and fence) a worker must hold before provider
+//! egress, monotonic desired/published revisions (the desired revision is
+//! made durable before the provider is touched), the sink's
+//! generation-pinned checkpoint, bounded provider evidence, and a one-way
+//! settlement that says `Delivered` only once the terminal revision was
+//! applied, `Unknown` when read-back could not resolve an ambiguous provider
+//! answer, and `Failed` otherwise. A publisher on any node can resume an
+//! open publication from that row: the target descriptor is persisted at
+//! open, the terminal revision is rebuilt from durable history, and the
+//! fence rejects the stale worker. Two durable wake-ups exist — the
+//! process-journal terminal commit (acknowledged only after the run's open
+//! publications have workers again) and the boot-time
+//! [`DeliveryCoordinator::resume_reply_publications`] sweep over the
+//! existing outbound attempt index.
 //!
 //! [`ReplySink`]: ironclaw_extension_contracts::reply::ReplySink
 
@@ -29,6 +42,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::reply::{ReplyAudience, ReplyThreadAnchor};
@@ -37,6 +51,9 @@ use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnS
 use ironclaw_outbound::{
     OutboundDeliveryId, PublisherId, ReplyPublicationRecord, ReplyPublicationSettlement,
     ReplyPublicationTargetDescriptor, ReplyPublicationTargetKey,
+};
+use ironclaw_processes::{
+    ProcessJournalCommit, ProcessJournalCommitObserver, ProcessKind, ProcessLifecycleStatus,
 };
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
@@ -56,8 +73,6 @@ mod worker;
 #[cfg(test)]
 mod tests;
 
-pub use kernel_ports::ReplyPublicationCommitObserver;
-
 /// Why a target could not be registered or a publication could not proceed.
 #[derive(Debug, thiserror::Error)]
 pub enum ReplyPublicationError {
@@ -67,6 +82,10 @@ pub enum ReplyPublicationError {
     ChannelCannotReply { extension_id: String },
     #[error("reply publication target is invalid: {reason}")]
     InvalidTarget { reason: String },
+    /// Reply publication was never started on this coordinator
+    /// ([`DeliveryCoordinator::start_reply_publication`]).
+    #[error("reply publication is not started on this delivery coordinator")]
+    NotStarted,
     #[error(transparent)]
     Coordinator(#[from] CoordinatedDeliveryError),
     /// The durable terminal facts could not be read; the publication stays
@@ -79,7 +98,10 @@ pub enum ReplyPublicationError {
 /// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplyPublicationSettings {
-    /// How long one worker owns a publication between claim re-entries.
+    /// How long one worker owns a publication between claim re-entries. The
+    /// claim is taken immediately before provider egress, and the sink call
+    /// is bounded by `reconcile_timeout` (clamped to this), so the lease is
+    /// valid for the entire provider operation.
     pub lease_ttl: Duration,
     /// Minimum gap between two `Progress` reconciles of one target; control
     /// -critical and terminal reconciles are never delayed by it.
@@ -91,7 +113,8 @@ pub struct ReplyPublicationSettings {
     /// Consecutive non-applied reconciles of the terminal revision before the
     /// publication settles (`Unknown` after ambiguity, `Failed` otherwise).
     pub terminal_attempt_budget: u32,
-    /// Upper bound on one sink reconcile call.
+    /// Upper bound on one sink reconcile call. Clamped to `lease_ttl` at use
+    /// so a slow provider call can never outlive the claim that covers it.
     pub reconcile_timeout: Duration,
     /// How many times the durable terminal facts are re-read while the run's
     /// terminal commit catches up with its final milestone.
@@ -132,12 +155,13 @@ pub struct ReplyTargetRegistration {
     pub audience: ReplyAudience,
 }
 
-/// Everything the publication lane needs. The durable-fact and gate-prompt
-/// reads go straight to their owners — the turn kernel, the thread service,
-/// and the same prompt sources the delivery observer consults — rather than
-/// through publication-local port traits.
-pub struct ReplyPublicationDeps {
-    pub coordinator: Arc<DeliveryCoordinator>,
+/// Everything reply publication needs beyond the coordinator's own
+/// dependencies — the wiring argument of
+/// [`DeliveryCoordinator::start_reply_publication`]. The durable-fact and
+/// gate-prompt reads go straight to their owners — the turn kernel, the
+/// thread service, and the same prompt sources the delivery observer
+/// consults — rather than through publication-local port traits.
+pub struct ReplyPublicationWiring {
     pub projection: Arc<ReplyProjection>,
     pub turn_coordinator: Arc<dyn TurnCoordinator>,
     pub thread_service: Arc<dyn SessionThreadService>,
@@ -179,8 +203,16 @@ pub(crate) struct TargetState {
     task: Mutex<Option<JoinHandle<()>>>,
 }
 
-pub(crate) struct Inner {
-    pub(crate) coordinator: Arc<DeliveryCoordinator>,
+/// The coordinator's reply-publication state: the projection subscription,
+/// the live target map, and the per-run bookkeeping. Private to the
+/// coordinator — constructed once by
+/// [`DeliveryCoordinator::start_reply_publication`] and reached only through
+/// coordinator methods.
+pub(crate) struct ReplyPublication {
+    /// The owning coordinator. Weak because the coordinator holds this state:
+    /// a worker that outlives the coordinator (process teardown) exits
+    /// instead of keeping it alive.
+    coordinator: Weak<DeliveryCoordinator>,
     pub(crate) projection: Arc<ReplyProjection>,
     pub(crate) turn_coordinator: Arc<dyn TurnCoordinator>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
@@ -200,23 +232,8 @@ pub(crate) struct Inner {
     session_registrations: Mutex<HashSet<RunKey>>,
 }
 
-/// The service handle. Cloning shares it; dropping the last handle does not
-/// stop workers (call [`Self::shutdown`]).
-pub struct ReplyPublicationService {
-    inner: Arc<Inner>,
-}
-
-impl std::fmt::Debug for ReplyPublicationService {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ReplyPublicationService")
-            .field("publisher_id", &self.inner.publisher_id)
-            .finish_non_exhaustive()
-    }
-}
-
 struct ProjectionListener {
-    inner: Weak<Inner>,
+    publication: Weak<ReplyPublication>,
 }
 
 impl ReplyProjectionObserver for ProjectionListener {
@@ -226,73 +243,96 @@ impl ReplyProjectionObserver for ProjectionListener {
         run_id: TurnRunId,
         event: ReplyProjectionEvent,
     ) {
-        let Some(inner) = self.inner.upgrade() else {
+        let Some(publication) = self.publication.upgrade() else {
             return;
         };
         let key = RunKey::new(scope, run_id);
         match event {
             ReplyProjectionEvent::Revised(_) => {
-                inner.ensure_session_target(&key);
-                inner.wake_run(&key);
+                publication.ensure_session_target(&key);
+                publication.wake_run(&key);
             }
             ReplyProjectionEvent::TerminalPending => {
-                inner.ensure_session_target(&key);
-                let inner = Arc::clone(&inner);
+                publication.ensure_session_target(&key);
+                let publication = Arc::clone(&publication);
                 tokio::spawn(async move {
-                    inner.ensure_terminal_facts(&key).await;
+                    publication.ensure_terminal_facts(&key).await;
                 });
             }
         }
     }
 }
 
-impl ReplyPublicationService {
-    /// Build the service and subscribe it to the projection.
-    pub fn start(deps: ReplyPublicationDeps) -> Arc<Self> {
+// ── The coordinator's publication surface ────────────────────────────────
+
+impl DeliveryCoordinator {
+    /// Start reply publication on this coordinator: build the private state
+    /// and subscribe it to the projection. One-time — composition calls it
+    /// right after wiring the turn and thread services (the coordinator
+    /// itself is built earlier, before those exist). Returns `false` when
+    /// publication was already started.
+    pub fn start_reply_publication(self: &Arc<Self>, wiring: ReplyPublicationWiring) -> bool {
         let publisher_id = PublisherId::new(format!("publisher-{}", uuid::Uuid::new_v4().simple()))
             .unwrap_or_else(|_| {
                 // A v4 uuid in simple form is 32 hex characters: always within the
                 // identifier grammar. Kept total for the type system's sake.
                 PublisherId::new("publisher").unwrap_or_else(|_| unreachable!("static id"))
             });
-        let inner = Arc::new(Inner {
-            coordinator: deps.coordinator,
-            projection: deps.projection,
-            turn_coordinator: deps.turn_coordinator,
-            thread_service: deps.thread_service,
-            approval_context: deps.approval_context,
-            blocked_auth_prompts: deps.blocked_auth_prompts,
-            project_filesystem: deps.project_filesystem,
-            session_channel: deps.session_channel,
-            settings: deps.settings,
+        let publication = Arc::new(ReplyPublication {
+            coordinator: Arc::downgrade(self),
+            projection: Arc::clone(&wiring.projection),
+            turn_coordinator: wiring.turn_coordinator,
+            thread_service: wiring.thread_service,
+            approval_context: wiring.approval_context,
+            blocked_auth_prompts: wiring.blocked_auth_prompts,
+            project_filesystem: wiring.project_filesystem,
+            session_channel: wiring.session_channel,
+            settings: wiring.settings,
             publisher_id,
             targets: Mutex::new(HashMap::new()),
             terminal_attachments: Mutex::new(HashMap::new()),
             fact_fetches: Mutex::new(HashSet::new()),
             session_registrations: Mutex::new(HashSet::new()),
         });
-        inner.projection.add_observer(Arc::new(ProjectionListener {
-            inner: Arc::downgrade(&inner),
+        if self
+            .reply_publication
+            .set(Arc::clone(&publication))
+            .is_err()
+        {
+            return false;
+        }
+        wiring.projection.add_observer(Arc::new(ProjectionListener {
+            publication: Arc::downgrade(&publication),
         }));
-        Arc::new(Self { inner })
+        true
+    }
+
+    fn started_reply_publication(&self) -> Option<&Arc<ReplyPublication>> {
+        self.reply_publication.get()
     }
 
     /// Register one target for a run: resolves the channel (which must bind
     /// a reply sink — there is no fallback), opens the publication on the
     /// attempt aggregate, and starts the worker. Idempotent per exact target.
-    pub async fn register_target(
+    pub async fn register_reply_target(
         &self,
         registration: ReplyTargetRegistration,
     ) -> Result<(), ReplyPublicationError> {
-        self.inner.register_target(registration).await.map(|_| ())
+        let publication = self
+            .started_reply_publication()
+            .ok_or(ReplyPublicationError::NotStarted)?;
+        publication.register_target(registration).await.map(|_| ())
     }
 
     /// The run reached a terminal commit (or a publisher learned so): resume
     /// any open publication for it from the store and make sure the terminal
     /// revision is built from durable facts.
-    pub async fn run_terminal(&self, scope: &TurnScope, run_id: TurnRunId) {
+    pub async fn reply_run_terminal(&self, scope: &TurnScope, run_id: TurnRunId) {
+        let Some(publication) = self.started_reply_publication() else {
+            return;
+        };
         let key = RunKey::new(scope, run_id);
-        if let Err(error) = self.inner.recover_run(&key).await {
+        if let Err(error) = publication.recover_run(&key).await {
             tracing::debug!(
                 target: "ironclaw::reborn::reply_publication",
                 %run_id,
@@ -300,7 +340,7 @@ impl ReplyPublicationService {
                 "reply publication recovery failed; the next terminal signal retries"
             );
         }
-        self.inner.ensure_terminal_facts(&key).await;
+        publication.ensure_terminal_facts(&key).await;
     }
 
     /// Wait (bounded) until every publication opened for the run has
@@ -308,7 +348,7 @@ impl ReplyPublicationService {
     /// never had a publication. Lets a caller order its own side effects
     /// (retracting a working indicator, swapping a reaction) after the
     /// answer landed, without owning the answer.
-    pub async fn await_run_settled(
+    pub async fn await_reply_settled(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
@@ -316,12 +356,7 @@ impl ReplyPublicationService {
     ) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            match self
-                .inner
-                .coordinator
-                .list_reply_publications(scope.clone(), run_id)
-                .await
-            {
+            match self.list_reply_publications(scope.clone(), run_id).await {
                 Ok(records) if records.iter().all(|r| !r.publication.status.is_active()) => {
                     return true;
                 }
@@ -343,13 +378,40 @@ impl ReplyPublicationService {
         }
     }
 
-    /// Stop every worker without settling anything, handing each held lease
-    /// back so another publisher can resume at once. (A crash skips the
-    /// hand-back; the lease then lapses on its own and the same resume path
-    /// applies.)
-    pub async fn shutdown(&self) {
-        let targets: Vec<Arc<TargetState>> = self
-            .inner
+    /// Resume every open publication in the tenant from the outbound attempt
+    /// index — the boot-time half of crash recovery. The journal's terminal
+    /// commit is acknowledged only after recovery ran, so a crash *after*
+    /// that acknowledgement leaves rows this sweep finds; a crash *before*
+    /// it is redelivered by the journal. Returns how many workers were
+    /// given a target again.
+    pub async fn resume_reply_publications(
+        &self,
+        scope: &TurnScope,
+    ) -> Result<usize, ReplyPublicationError> {
+        let publication = self
+            .started_reply_publication()
+            .ok_or(ReplyPublicationError::NotStarted)?;
+        let records = self.list_open_reply_publications(scope.clone()).await?;
+        let resumed = publication.resume_records(records).await?;
+        for key in resumed.iter() {
+            let publication = Arc::clone(publication);
+            let key = key.clone();
+            tokio::spawn(async move {
+                publication.ensure_terminal_facts(&key).await;
+            });
+        }
+        Ok(resumed.len())
+    }
+
+    /// Stop every publication worker without settling anything, handing each
+    /// held lease back so another publisher can resume at once. (A crash
+    /// skips the hand-back; the lease then lapses on its own and the same
+    /// resume path applies.)
+    pub async fn shutdown_reply_publication(&self) {
+        let Some(publication) = self.started_reply_publication() else {
+            return;
+        };
+        let targets: Vec<Arc<TargetState>> = publication
             .lock_targets()
             .drain()
             .flat_map(|(_, targets)| targets)
@@ -360,8 +422,6 @@ impl ReplyPublicationService {
             }
             let scope = target.registration.scope.clone();
             let held = match self
-                .inner
-                .coordinator
                 .load_reply_publication(scope.clone(), target.delivery_id)
                 .await
             {
@@ -370,7 +430,7 @@ impl ReplyPublicationService {
                         .publication
                         .lease
                         .as_ref()
-                        .is_some_and(|lease| lease.owner == self.inner.publisher_id) =>
+                        .is_some_and(|lease| lease.owner == publication.publisher_id) =>
                 {
                     Some(record.publication.fence)
                 }
@@ -387,8 +447,6 @@ impl ReplyPublicationService {
             };
             if let Some(fence) = held
                 && let Err(error) = self
-                    .inner
-                    .coordinator
                     .release_reply_publication(scope, target.delivery_id, fence)
                     .await
             {
@@ -403,7 +461,73 @@ impl ReplyPublicationService {
     }
 }
 
-impl Inner {
+/// The durable wake-up: every terminal commit of a top-level user run
+/// resumes that run's open publications. On the node that ran the run this
+/// is the fast path to the terminal facts; on any other node it is how an
+/// orphaned publication (a crashed publisher, a lapsed lease) gets a worker
+/// again. Recovery is awaited before the commit is acknowledged, so the
+/// journal's durable observer cursor never advances past a terminal commit
+/// whose publications have no worker — a crash after the acknowledgement is
+/// covered by [`DeliveryCoordinator::resume_reply_publications`] at boot,
+/// and a crash before it is redelivered by the journal.
+#[async_trait]
+impl ProcessJournalCommitObserver for DeliveryCoordinator {
+    fn process_observer_id(&self) -> &'static str {
+        "reply-publication-commit-observer-v1"
+    }
+
+    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        let Some(publication) = self.started_reply_publication() else {
+            return Ok(());
+        };
+        let snapshot = &commit.state;
+        if snapshot.process_kind != ProcessKind::AgentTurn
+            || snapshot.parent_process_id.is_some()
+            || !snapshot.status.is_terminal()
+            || snapshot.status == ProcessLifecycleStatus::RecoveryRequired
+        {
+            return Ok(());
+        }
+        let (Some(thread_id), Some(agent_id)) = (
+            snapshot.scope.thread_id.clone(),
+            snapshot.scope.agent_id.clone(),
+        ) else {
+            return Ok(());
+        };
+        let scope = TurnScope::new(
+            snapshot.scope.tenant_id.clone(),
+            Some(agent_id),
+            snapshot.scope.project_id.clone(),
+            thread_id,
+        );
+        let run_id = TurnRunId::from_uuid(snapshot.process_id.as_uuid());
+        let key = RunKey::new(&scope, run_id);
+        // Await recovery so the acknowledgement means what it says; an error
+        // leaves the cursor unacknowledged and the journal redelivers.
+        publication
+            .recover_run(&key)
+            .await
+            .map_err(|error| format!("reply publication recovery failed: {error}"))?;
+        // The terminal-fact fetch polls the kernel while the terminal commit
+        // settles; it never holds the journal. A crash before it lands is
+        // covered by the boot resume over the still-open rows.
+        let publication = Arc::clone(publication);
+        tokio::spawn(async move {
+            publication.ensure_terminal_facts(&key).await;
+        });
+        Ok(())
+    }
+}
+
+// ── Publication internals ────────────────────────────────────────────────
+
+impl ReplyPublication {
+    /// The owning coordinator, while it is alive. `None` only during process
+    /// teardown; callers treat it as "stop quietly".
+    pub(crate) fn coordinator(&self) -> Option<Arc<DeliveryCoordinator>> {
+        self.coordinator.upgrade()
+    }
+
     fn lock_targets(&self) -> std::sync::MutexGuard<'_, HashMap<RunKey, Vec<Arc<TargetState>>>> {
         self.targets
             .lock()
@@ -480,7 +604,7 @@ impl Inner {
                 return;
             }
         };
-        let inner = Arc::clone(self);
+        let publication = Arc::clone(self);
         let registration = ReplyTargetRegistration {
             scope: key.scope.clone(),
             actor,
@@ -493,14 +617,14 @@ impl Inner {
         };
         let key = key.clone();
         tokio::spawn(async move {
-            if let Err(error) = inner.register_target(registration).await {
+            if let Err(error) = publication.register_target(registration).await {
                 tracing::debug!(
                     target: "ironclaw::reborn::reply_publication",
                     run_id = %key.run_id,
                     %error,
                     "session channel target registration failed"
                 );
-                inner
+                publication
                     .session_registrations
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
@@ -513,8 +637,10 @@ impl Inner {
         self: &Arc<Self>,
         registration: ReplyTargetRegistration,
     ) -> Result<Arc<TargetState>, ReplyPublicationError> {
-        let channel = self
-            .coordinator
+        let coordinator = self
+            .coordinator()
+            .ok_or(ReplyPublicationError::NotStarted)?;
+        let channel = coordinator
             .resolve_reply_channel(registration.extension_id.as_str())
             .ok_or_else(|| ReplyPublicationError::ChannelCannotReply {
                 extension_id: registration.extension_id.as_str().to_string(),
@@ -534,8 +660,7 @@ impl Inner {
             existing.wake.notify_one();
             return Ok(existing);
         }
-        let record = self
-            .coordinator
+        let record = coordinator
             .open_reply_publication(OpenReplyPublication {
                 scope: registration.scope.clone(),
                 run_id: registration.run_id,
@@ -586,11 +711,11 @@ impl Inner {
             }
             entry.push(Arc::clone(&target));
         }
-        let inner = Arc::clone(self);
+        let publication = Arc::clone(self);
         let worker_target = Arc::clone(&target);
         let handle = tokio::spawn(async move {
-            worker::run_target(Arc::clone(&inner), Arc::clone(&worker_target)).await;
-            inner.forget_target(&run_key, &worker_target.key);
+            worker::run_target(Arc::clone(&publication), Arc::clone(&worker_target)).await;
+            publication.forget_target(&run_key, &worker_target.key);
         });
         *target.task.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
         target.wake.notify_one();
@@ -627,20 +752,35 @@ impl Inner {
     }
 
     /// Resume every open publication of the run from the store: a worker per
-    /// Active record that has none here. A record without a descriptor
-    /// cannot be addressed and settles `Unknown` (the reply may or may not
-    /// have reached it; nothing pretends either way).
+    /// Active record that has none here.
     async fn recover_run(self: &Arc<Self>, key: &RunKey) -> Result<usize, ReplyPublicationError> {
-        let records = self
-            .coordinator
+        let coordinator = self
+            .coordinator()
+            .ok_or(ReplyPublicationError::NotStarted)?;
+        let records = coordinator
             .list_reply_publications(key.scope.clone(), key.run_id)
             .await?;
-        let mut resumed = 0usize;
+        Ok(self.resume_records(records).await?.len())
+    }
+
+    /// Give each Active record a worker on this process (idempotent per
+    /// delivery id). A record without a descriptor cannot be addressed and
+    /// settles `Unknown` (the reply may or may not have reached it; nothing
+    /// pretends either way). Returns the distinct runs that were resumed.
+    async fn resume_records(
+        self: &Arc<Self>,
+        records: Vec<ReplyPublicationRecord>,
+    ) -> Result<Vec<RunKey>, ReplyPublicationError> {
+        let coordinator = self
+            .coordinator()
+            .ok_or(ReplyPublicationError::NotStarted)?;
+        let mut resumed: Vec<RunKey> = Vec::new();
         for record in records {
             if !record.publication.status.is_active() {
                 continue;
             }
-            let already = self.lock_targets().get(key).is_some_and(|targets| {
+            let key = RunKey::new(&record.attempt.scope, record.publication.target.run_id);
+            let already = self.lock_targets().get(&key).is_some_and(|targets| {
                 targets
                     .iter()
                     .any(|t| t.delivery_id == record.attempt.delivery_id)
@@ -655,7 +795,7 @@ impl Inner {
                     delivery_id = %record.attempt.delivery_id,
                     "open reply publication carries no target descriptor; settling Unknown"
                 );
-                settle_unaddressable(&self.coordinator, key, &record).await;
+                settle_unaddressable(&coordinator, &key, &record).await;
                 continue;
             };
             let registration = ReplyTargetRegistration {
@@ -675,7 +815,9 @@ impl Inner {
                 record.attempt.delivery_id,
                 record.publication.target.key.clone(),
             );
-            resumed += 1;
+            if !resumed.contains(&key) {
+                resumed.push(key);
+            }
         }
         Ok(resumed)
     }
@@ -711,6 +853,9 @@ impl Inner {
         self: &Arc<Self>,
         key: &RunKey,
     ) -> Result<(), ReplyPublicationError> {
+        let coordinator = self
+            .coordinator()
+            .ok_or(ReplyPublicationError::NotStarted)?;
         let snapshot = self.projection.snapshot(&key.scope, key.run_id);
         if snapshot.as_ref().is_some_and(|s| s.document.is_terminal()) {
             self.wake_run(key);
@@ -729,8 +874,7 @@ impl Inner {
         // A run rebuilt on this process numbers its terminal revision above
         // whatever its targets already saw, or the resumed publications would
         // read as complete.
-        let floor = self
-            .coordinator
+        let floor = coordinator
             .list_reply_publications(key.scope.clone(), key.run_id)
             .await?
             .iter()

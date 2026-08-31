@@ -1215,28 +1215,25 @@ impl RebornIntegrationHarness {
         Arc::clone(&self._shared.reply_projection)
     }
 
-    /// A reply publication service over the group's REAL kernel handles (the
-    /// coordinator and thread service the caller's runs actually live in)
-    /// and the composed runtime's delivery coordinator. A test that wires its
-    /// own `RunDeliveryObserver` uses this instead of the composed runtime's
-    /// own service: that runtime's turn store is the capability harness's
-    /// disjoint bootstrap store (see `turn_coordinator_for_test`), so its
-    /// terminal-fact reads would never find the group's runs.
-    pub(crate) fn reply_publication_for_test(
+    /// Start the composed coordinator's reply publication over the group's
+    /// REAL kernel handles (the turn coordinator and thread service the
+    /// caller's runs actually live in). A test that wires its own
+    /// `RunDeliveryObserver` without starting the production channel-host
+    /// assembly calls this so the one publication owner reads the group's
+    /// runs; when the assembly already started publication (with the same
+    /// group handles), this is a no-op.
+    pub(crate) fn start_reply_publication_for_test(
         &self,
         services: &ironclaw_composition::RebornRuntime,
-    ) -> Arc<ironclaw_assistant::ReplyPublicationService> {
-        use ironclaw_assistant::{
-            ReplyPublicationDeps, ReplyPublicationService, ReplyPublicationSettings,
-        };
+    ) {
+        use ironclaw_assistant::{ReplyPublicationSettings, ReplyPublicationWiring};
         let coordinator = services
             .delivery_coordinator()
             .expect("composition built the delivery coordinator");
         let thread_service = self
             .thread_service_for_test()
             .expect("group thread service");
-        ReplyPublicationService::start(ReplyPublicationDeps {
-            coordinator,
+        let started = coordinator.start_reply_publication(ReplyPublicationWiring {
             projection: self.reply_projection_for_test(),
             turn_coordinator: self.turn_coordinator_for_test(),
             thread_service,
@@ -1245,7 +1242,12 @@ impl RebornIntegrationHarness {
             project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
             session_channel: None,
             settings: ReplyPublicationSettings::default(),
-        })
+        });
+        if !started {
+            tracing::debug!(
+                "reply publication was already started on the composed coordinator; keeping it"
+            );
+        }
     }
 
     /// The group-shared turn-state store paired with

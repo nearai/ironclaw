@@ -98,9 +98,9 @@ pub struct ChannelWorkflowIdentity {
 /// composed runtime has no delivery coordinator — graphs are then ingress-only
 /// (turns run; nothing watches them for channel replies).
 pub struct ChannelWorkflowDeliveryServices {
+    /// The coordinator every send goes through; its reply-publication
+    /// surface owns every run's answer.
     pub coordinator: Arc<DeliveryCoordinator>,
-    /// The reply publication service every run's answer goes through.
-    pub reply_publication: Arc<crate::ReplyPublicationService>,
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -214,7 +214,6 @@ impl RebornChannelWorkflowFactory {
             notification_inbox: self.services.notification_inbox.clone(),
             delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
-            reply_publication: Arc::clone(&delivery.reply_publication),
             extension_id: BACKGROUND_RUN_NOTIFIER_ID.to_string(),
             fallback_notice_scope: self.notice_scope(notice_thread_id),
             approval_context: delivery.approval_context.clone(),
@@ -487,7 +486,6 @@ impl RebornChannelWorkflowFactory {
             notification_inbox: self.services.notification_inbox.clone(),
             delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
-            reply_publication: Arc::clone(&delivery.reply_publication),
             extension_id: extension_id.to_string(),
             fallback_notice_scope: self.notice_scope(notice_thread_id),
             approval_context: delivery.approval_context.clone(),

@@ -843,7 +843,13 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // request/report — which every reply-capable channel consumes; the
         // pin re-captures the measured count rather than restoring 11_451.
         // Count read from this test's own failure message.
-        ("ironclaw_extension_contracts", 12_896),
+        // 12_896 -> 12_867 (2026-08-31, reply-vocabulary trim): the dead
+        // `activity_progress` mutator and the never-produced
+        // `ReplyActivityState::{Running, Killed}` variants, plus the unused
+        // `ReplySinkOutcome::retry_after` and `ReplyPhase::as_str` helpers,
+        // were deleted after a workspace-wide consumer sweep. Count read
+        // from this test's own failure message.
+        ("ironclaw_extension_contracts", 12_867),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

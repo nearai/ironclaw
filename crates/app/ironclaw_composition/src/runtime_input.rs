@@ -650,6 +650,18 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Test-support: leave reply publication unstarted at build so an
+    /// integration harness whose runs execute on its own turn runtime can
+    /// start the coordinator's one publication lane with the kernel handles
+    /// those runs actually live in (`RebornHostBindings` field doc).
+    #[cfg(feature = "test-support")]
+    pub fn with_deferred_reply_publication_for_test(mut self) -> Self {
+        if let Some(services) = self.services.as_mut() {
+            services.defer_reply_publication_for_test = true;
+        }
+        self
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self

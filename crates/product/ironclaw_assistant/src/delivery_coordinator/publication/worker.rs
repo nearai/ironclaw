@@ -1,19 +1,32 @@
 //! The per-target reconcile loop.
 //!
 //! Desired state is the projection's newest document; the worker converges
-//! the sink toward it under the publication claim, coalescing naturally (it
-//! always publishes the *latest* snapshot, so intermediate replaceable
-//! revisions collapse) while never skipping a control-critical or terminal
-//! point. Every store write goes through the coordinator with the fence the
-//! claim handed back, so a worker that lost its claim to another node is
-//! rejected at the store, not trusted.
+//! the sink toward it, coalescing naturally (it always publishes the *latest*
+//! snapshot, so intermediate replaceable revisions collapse) while never
+//! skipping a control-critical or terminal point.
+//!
+//! The durable order of one reconcile is fixed:
+//! 1. load the publication row;
+//! 2. prepare everything provider-independent — the channel and sink, the
+//!    stored reply context, the disclosed/enriched document copy, and (at the
+//!    terminal point) the materialized attachments — all *before* ownership
+//!    is taken, so unbounded work never burns lease time;
+//! 3. acquire the atomic publication claim (lease + fence) immediately
+//!    before provider access;
+//! 4. persist the newest desired revision under that fence, so the store
+//!    knows what was being published before the provider is touched;
+//! 5. call the bound sink, bounded by a timeout clamped to the lease TTL so
+//!    the claim stays valid for the entire provider operation;
+//! 6. persist the checkpoint, published revision, evidence, and outcome —
+//!    every write carries the fence, so a worker that lost its claim to
+//!    another node is rejected at the store, not trusted.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use ironclaw_extension_contracts::channel_adapter::ChannelError;
 use ironclaw_extension_contracts::reply::{
-    ReplyAttentionKind, ReplyContextBytes, ReplyOutcomeReason, ReplyReconcilePoint,
+    ReplyAttentionKind, ReplyContextBytes, ReplyDocument, ReplyOutcomeReason, ReplyReconcilePoint,
     ReplyReconcileRequest, ReplyRevision, ReplySinkCheckpoint, ReplySinkOutcome, ReplySinkReport,
     ReplyTarget,
 };
@@ -25,9 +38,10 @@ use ironclaw_outbound::{
 use ironclaw_product_contracts::delivery::ResolvedChannelDelivery;
 use ironclaw_threads::ThreadScope;
 
-use super::{Inner, RunKey, TargetState, kernel_ports};
+use super::{ReplyPublication, RunKey, TargetState, kernel_ports};
 use crate::delivery_coordinator::{
-    CoordinatedDeliveryError, materialize_workspace_files, workspace_materialization_failure_kind,
+    CoordinatedDeliveryError, DeliveryCoordinator, materialize_workspace_files,
+    workspace_materialization_failure_kind,
 };
 use crate::projection::reply::{ReplySnapshot, disclose_for_audience};
 
@@ -42,27 +56,32 @@ struct Published {
     at: Option<tokio::time::Instant>,
 }
 
-pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
+pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<TargetState>) {
     let run_key = RunKey::new(&target.registration.scope, target.registration.run_id);
     let mut published = Published::default();
     let mut attempts: u32 = 0;
     let mut attempted_revision: u64 = 0;
     loop {
+        let Some(coordinator) = publication.coordinator() else {
+            return;
+        };
         // 1. Desired state.
-        let Some(snapshot) = inner.projection.snapshot(&run_key.scope, run_key.run_id) else {
+        let Some(snapshot) = publication
+            .projection
+            .snapshot(&run_key.scope, run_key.run_id)
+        else {
             target.wake.notified().await;
             continue;
         };
         if snapshot.terminal_pending && !snapshot.document.is_terminal() {
-            let fetch_inner = Arc::clone(&inner);
+            let fetch_publication = Arc::clone(&publication);
             let fetch_key = run_key.clone();
-            tokio::spawn(async move { fetch_inner.ensure_terminal_facts(&fetch_key).await });
+            tokio::spawn(async move { fetch_publication.ensure_terminal_facts(&fetch_key).await });
             target.wake.notified().await;
             continue;
         }
         // 2. Published state.
-        let record = match inner
-            .coordinator
+        let record = match coordinator
             .load_reply_publication(run_key.scope.clone(), target.delivery_id)
             .await
         {
@@ -73,7 +92,7 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
             }
             Err(error) => {
                 tracing::debug!(target: LOG_TARGET, %error, "reply publication load failed; retrying");
-                tokio::time::sleep(inner.settings.retry_backoff).await;
+                tokio::time::sleep(publication.settings.retry_backoff).await;
                 continue;
             }
         };
@@ -97,9 +116,9 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
                 .at
                 .map(|at| at.elapsed())
                 .unwrap_or(Duration::ZERO);
-            if idle_for < inner.settings.heartbeat_interval {
+            if idle_for < publication.settings.heartbeat_interval {
                 tokio::select! {
-                    _ = tokio::time::sleep(inner.settings.heartbeat_interval - idle_for) => {}
+                    _ = tokio::time::sleep(publication.settings.heartbeat_interval - idle_for) => {}
                     _ = target.wake.notified() => {}
                 }
                 continue;
@@ -124,29 +143,56 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
             && let Some(last) = published.at
         {
             let elapsed = last.elapsed();
-            if elapsed < inner.settings.min_progress_interval {
-                tokio::time::sleep(inner.settings.min_progress_interval - elapsed).await;
+            if elapsed < publication.settings.min_progress_interval {
+                tokio::time::sleep(publication.settings.min_progress_interval - elapsed).await;
                 continue;
             }
         }
-        // 3. Own the publication — the atomic claim every provider egress
-        // sits behind. Re-entry doubles as the heartbeat.
-        let record = match inner
-            .coordinator
+        // 3. Prepare everything provider-independent before ownership is
+        // taken: channel resolution, the stored reply context, disclosure and
+        // gate-prompt enrichment, and terminal attachment materialization.
+        let prep = prepare(
+            &publication,
+            &coordinator,
+            &target,
+            &run_key,
+            &snapshot,
+            point,
+        )
+        .await;
+        if let Err(Step::Later { delay }) = prep {
+            // Nothing was attempted and nothing needs a durable write.
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = target.wake.notified() => {}
+            }
+            continue;
+        }
+        // 4. Own the publication — the atomic claim immediately before
+        // provider egress. Re-entry doubles as the heartbeat. Failure paths
+        // discovered during preparation also settle under this claim.
+        let record = match coordinator
             .claim_reply_publication(
                 run_key.scope.clone(),
                 target.delivery_id,
-                inner.publisher_id.clone(),
-                inner.settings.lease_ttl,
+                publication.publisher_id.clone(),
+                publication.settings.lease_ttl,
             )
             .await
         {
-            Ok(ReplyPublicationClaim::Acquired(record)) => record,
+            Ok(ReplyPublicationClaim::Acquired(claimed)) => {
+                if claimed.publication.published_revision != record.publication.published_revision {
+                    // Another owner advanced this publication between the
+                    // load and the claim; re-plan against the fresh row.
+                    continue;
+                }
+                claimed
+            }
             Ok(ReplyPublicationClaim::Held { expires_at, .. }) => {
                 let wait = (expires_at - chrono::Utc::now())
                     .to_std()
                     .unwrap_or(Duration::from_millis(50))
-                    .min(inner.settings.lease_ttl)
+                    .min(publication.settings.lease_ttl)
                     .max(Duration::from_millis(20));
                 tokio::select! {
                     _ = tokio::time::sleep(wait) => {}
@@ -157,197 +203,91 @@ pub(super) async fn run_target(inner: Arc<Inner>, target: Arc<TargetState>) {
             Ok(ReplyPublicationClaim::Settled(_)) => return,
             Err(error) => {
                 tracing::debug!(target: LOG_TARGET, %error, "reply publication claim failed; retrying");
-                tokio::time::sleep(inner.settings.retry_backoff).await;
+                tokio::time::sleep(publication.settings.retry_backoff).await;
                 continue;
             }
         };
         let fence = record.publication.fence;
-        // 4. Reconcile.
-        let step = reconcile_once(&inner, &target, &run_key, &snapshot, &record, point).await;
-        match step {
-            Step::Applied { report, generation } => {
-                let evidence = ReplyPublicationEvidence {
-                    provider_refs: report.evidence.provider_refs.clone(),
-                    read_back_verified: report.evidence.read_back_verified,
-                    last_outcome: None,
-                    generation_changed: record
-                        .publication
-                        .generation
-                        .is_some_and(|previous| previous != generation),
-                };
-                let advanced = inner
-                    .coordinator
-                    .advance_reply_publication(AdvanceReplyPublicationRequest {
-                        delivery_id: target.delivery_id,
-                        scope: run_key.scope.clone(),
-                        fence,
-                        desired_revision: snapshot.revision,
-                        published_revision: snapshot.revision,
-                        terminal_revision: terminal.then_some(snapshot.revision),
-                        generation: Some(generation),
-                        checkpoint: report.checkpoint.clone(),
-                        evidence,
-                        now: chrono::Utc::now(),
-                    })
-                    .await;
-                if let Err(error) = advanced {
-                    tracing::debug!(target: LOG_TARGET, %error, "reply publication advance refused; the claim was lost or the publication settled");
-                    if is_fenced_out(&error) {
-                        return;
+        let step = match prep {
+            Ok(prepared) => {
+                // 5. The newest desired revision is durable before any
+                // provider access, under the fence the claim handed back.
+                let desired = snapshot.revision.max(record.publication.desired_revision);
+                let record = if record.publication.desired_revision < desired
+                    || (terminal && record.publication.terminal_revision.is_none())
+                {
+                    match coordinator
+                        .advance_reply_publication(AdvanceReplyPublicationRequest {
+                            delivery_id: target.delivery_id,
+                            scope: run_key.scope.clone(),
+                            fence,
+                            desired_revision: desired,
+                            published_revision: record.publication.published_revision,
+                            terminal_revision: record
+                                .publication
+                                .terminal_revision
+                                .or(terminal.then_some(snapshot.revision)),
+                            generation: record.publication.generation,
+                            checkpoint: None,
+                            evidence: record.publication.evidence.clone(),
+                            now: chrono::Utc::now(),
+                        })
+                        .await
+                    {
+                        Ok(record) => record,
+                        Err(error) => {
+                            tracing::debug!(target: LOG_TARGET, %error, "desired reply revision could not be persisted");
+                            if is_fenced_out(&error) {
+                                return;
+                            }
+                            tokio::time::sleep(publication.settings.retry_backoff).await;
+                            continue;
+                        }
                     }
-                    tokio::time::sleep(inner.settings.retry_backoff).await;
-                    continue;
-                }
-                published.attention = attention_signature(&snapshot);
-                published.finalized = snapshot.document.answer.finalized;
-                published.at = Some(tokio::time::Instant::now());
-                attempts = 0;
-                if terminal {
-                    settle(
-                        &inner,
-                        &target,
-                        &run_key,
-                        fence,
-                        ReplyPublicationSettlement::Delivered,
-                    )
-                    .await;
-                    return;
-                }
-            }
-            Step::Retry {
-                reason,
-                retry_after,
-                generation,
-                checkpoint,
-            } => {
-                attempts = attempts.saturating_add(1);
-                record_outcome(
-                    &inner,
-                    &target,
-                    OutcomeWrite {
+                } else {
+                    record
+                };
+                // 6. Reconcile, bounded within the lease just claimed.
+                let step = reconcile(&publication, &snapshot, &record, point, prepared).await;
+                handle_step(
+                    StepContext {
+                        publication: &publication,
+                        coordinator: &coordinator,
+                        target: &target,
                         run_key: &run_key,
                         snapshot: &snapshot,
                         record: &record,
                         fence,
-                        last_outcome: reason.clone(),
-                        generation,
-                        checkpoint,
+                        terminal,
+                        published: &mut published,
+                        attempts: &mut attempts,
                     },
+                    step,
                 )
-                .await;
-                if terminal && attempts >= inner.settings.terminal_attempt_budget {
-                    tracing::debug!(target: LOG_TARGET, delivery_id = %target.delivery_id, ?reason, "terminal reply reconcile exhausted its retry budget; failing closed");
-                    settle(
-                        &inner,
-                        &target,
-                        &run_key,
-                        fence,
-                        ReplyPublicationSettlement::Failed(
-                            DeliveryFailureKind::TransportUnavailable,
-                        ),
-                    )
-                    .await;
-                    return;
-                }
-                let delay = retry_after.unwrap_or_else(|| backoff(&inner, attempts));
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    _ = target.wake.notified(), if !terminal => {}
-                }
+                .await
             }
-            Step::Ambiguous {
-                reason,
-                generation,
-                checkpoint,
-            } => {
-                attempts = attempts.saturating_add(1);
-                record_outcome(
-                    &inner,
-                    &target,
-                    OutcomeWrite {
+            Err(step) => {
+                handle_step(
+                    StepContext {
+                        publication: &publication,
+                        coordinator: &coordinator,
+                        target: &target,
                         run_key: &run_key,
                         snapshot: &snapshot,
                         record: &record,
                         fence,
-                        last_outcome: Some(reason),
-                        generation,
-                        checkpoint,
+                        terminal,
+                        published: &mut published,
+                        attempts: &mut attempts,
                     },
+                    step,
                 )
-                .await;
-                if terminal && attempts >= inner.settings.terminal_attempt_budget {
-                    settle(
-                        &inner,
-                        &target,
-                        &run_key,
-                        fence,
-                        ReplyPublicationSettlement::Unknown,
-                    )
-                    .await;
-                    return;
-                }
-                tokio::time::sleep(backoff(&inner, attempts)).await;
+                .await
             }
-            Step::Permanent {
-                reason,
-                kind,
-                generation,
-            } => {
-                record_outcome(
-                    &inner,
-                    &target,
-                    OutcomeWrite {
-                        run_key: &run_key,
-                        snapshot: &snapshot,
-                        record: &record,
-                        fence,
-                        last_outcome: Some(reason),
-                        generation,
-                        checkpoint: None,
-                    },
-                )
-                .await;
-                settle(
-                    &inner,
-                    &target,
-                    &run_key,
-                    fence,
-                    ReplyPublicationSettlement::Failed(kind),
-                )
-                .await;
-                return;
-            }
-            Step::Stopped { generation } => {
-                record_outcome(
-                    &inner,
-                    &target,
-                    OutcomeWrite {
-                        run_key: &run_key,
-                        snapshot: &snapshot,
-                        record: &record,
-                        fence,
-                        last_outcome: Some(ReplyOutcomeReason::new("stopped by user")),
-                        generation,
-                        checkpoint: None,
-                    },
-                )
-                .await;
-                kernel_ports::request_stop(
-                    inner.turn_coordinator.as_ref(),
-                    &run_key.scope,
-                    &target.registration.actor,
-                    run_key.run_id,
-                )
-                .await;
-                // The run's terminal commit brings the terminal revision.
-                target.wake.notified().await;
-            }
-            Step::Later { delay } => {
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    _ = target.wake.notified() => {}
-                }
-            }
+        };
+        match step {
+            LoopStep::Continue => {}
+            LoopStep::Exit => return,
         }
     }
 }
@@ -385,33 +325,266 @@ enum Step {
     },
 }
 
-async fn reconcile_once(
-    inner: &Arc<Inner>,
+/// What the outer loop does after a step was handled.
+enum LoopStep {
+    Continue,
+    Exit,
+}
+
+struct StepContext<'a> {
+    publication: &'a Arc<ReplyPublication>,
+    coordinator: &'a Arc<DeliveryCoordinator>,
+    target: &'a TargetState,
+    run_key: &'a RunKey,
+    snapshot: &'a ReplySnapshot,
+    record: &'a ReplyPublicationRecord,
+    fence: u64,
+    terminal: bool,
+    published: &'a mut Published,
+    attempts: &'a mut u32,
+}
+
+async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
+    let StepContext {
+        publication,
+        coordinator,
+        target,
+        run_key,
+        snapshot,
+        record,
+        fence,
+        terminal,
+        published,
+        attempts,
+    } = context;
+    match step {
+        Step::Applied { report, generation } => {
+            let evidence = ReplyPublicationEvidence {
+                provider_refs: report.evidence.provider_refs.clone(),
+                read_back_verified: report.evidence.read_back_verified,
+                last_outcome: None,
+                generation_changed: record
+                    .publication
+                    .generation
+                    .is_some_and(|previous| previous != generation),
+            };
+            let advanced = coordinator
+                .advance_reply_publication(AdvanceReplyPublicationRequest {
+                    delivery_id: target.delivery_id,
+                    scope: run_key.scope.clone(),
+                    fence,
+                    desired_revision: snapshot.revision.max(record.publication.desired_revision),
+                    published_revision: snapshot.revision,
+                    terminal_revision: record
+                        .publication
+                        .terminal_revision
+                        .or(terminal.then_some(snapshot.revision)),
+                    generation: Some(generation),
+                    checkpoint: report.checkpoint.clone(),
+                    evidence,
+                    now: chrono::Utc::now(),
+                })
+                .await;
+            if let Err(error) = advanced {
+                tracing::debug!(target: LOG_TARGET, %error, "reply publication advance refused; the claim was lost or the publication settled");
+                if is_fenced_out(&error) {
+                    return LoopStep::Exit;
+                }
+                tokio::time::sleep(publication.settings.retry_backoff).await;
+                return LoopStep::Continue;
+            }
+            published.attention = attention_signature(snapshot);
+            published.finalized = snapshot.document.answer.finalized;
+            published.at = Some(tokio::time::Instant::now());
+            *attempts = 0;
+            if terminal {
+                settle(
+                    coordinator,
+                    target,
+                    run_key,
+                    fence,
+                    ReplyPublicationSettlement::Delivered,
+                )
+                .await;
+                return LoopStep::Exit;
+            }
+            LoopStep::Continue
+        }
+        Step::Retry {
+            reason,
+            retry_after,
+            generation,
+            checkpoint,
+        } => {
+            *attempts = attempts.saturating_add(1);
+            record_outcome(
+                coordinator,
+                target,
+                OutcomeWrite {
+                    run_key,
+                    snapshot,
+                    record,
+                    fence,
+                    last_outcome: reason.clone(),
+                    generation,
+                    checkpoint,
+                },
+            )
+            .await;
+            if terminal && *attempts >= publication.settings.terminal_attempt_budget {
+                tracing::debug!(target: LOG_TARGET, delivery_id = %target.delivery_id, ?reason, "terminal reply reconcile exhausted its retry budget; failing closed");
+                settle(
+                    coordinator,
+                    target,
+                    run_key,
+                    fence,
+                    ReplyPublicationSettlement::Failed(DeliveryFailureKind::TransportUnavailable),
+                )
+                .await;
+                return LoopStep::Exit;
+            }
+            let delay = retry_after.unwrap_or_else(|| backoff(publication, *attempts));
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = target.wake.notified(), if !terminal => {}
+            }
+            LoopStep::Continue
+        }
+        Step::Ambiguous {
+            reason,
+            generation,
+            checkpoint,
+        } => {
+            *attempts = attempts.saturating_add(1);
+            record_outcome(
+                coordinator,
+                target,
+                OutcomeWrite {
+                    run_key,
+                    snapshot,
+                    record,
+                    fence,
+                    last_outcome: Some(reason),
+                    generation,
+                    checkpoint,
+                },
+            )
+            .await;
+            if terminal && *attempts >= publication.settings.terminal_attempt_budget {
+                settle(
+                    coordinator,
+                    target,
+                    run_key,
+                    fence,
+                    ReplyPublicationSettlement::Unknown,
+                )
+                .await;
+                return LoopStep::Exit;
+            }
+            tokio::time::sleep(backoff(publication, *attempts)).await;
+            LoopStep::Continue
+        }
+        Step::Permanent {
+            reason,
+            kind,
+            generation,
+        } => {
+            record_outcome(
+                coordinator,
+                target,
+                OutcomeWrite {
+                    run_key,
+                    snapshot,
+                    record,
+                    fence,
+                    last_outcome: Some(reason),
+                    generation,
+                    checkpoint: None,
+                },
+            )
+            .await;
+            settle(
+                coordinator,
+                target,
+                run_key,
+                fence,
+                ReplyPublicationSettlement::Failed(kind),
+            )
+            .await;
+            LoopStep::Exit
+        }
+        Step::Stopped { generation } => {
+            record_outcome(
+                coordinator,
+                target,
+                OutcomeWrite {
+                    run_key,
+                    snapshot,
+                    record,
+                    fence,
+                    last_outcome: Some(ReplyOutcomeReason::new("stopped by user")),
+                    generation,
+                    checkpoint: None,
+                },
+            )
+            .await;
+            kernel_ports::request_stop(
+                publication.turn_coordinator.as_ref(),
+                &run_key.scope,
+                &target.registration.actor,
+                run_key.run_id,
+            )
+            .await;
+            // The run's terminal commit brings the terminal revision.
+            target.wake.notified().await;
+            LoopStep::Continue
+        }
+        Step::Later { delay } => {
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = target.wake.notified() => {}
+            }
+            LoopStep::Continue
+        }
+    }
+}
+
+/// Everything a reconcile needs that does not require publication ownership.
+struct PreparedReconcile {
+    channel: ResolvedChannelDelivery,
+    reply_context: Option<ReplyContextBytes>,
+    document: ReplyDocument,
+    reply_target: ReplyTarget,
+    materialized_attachments: Vec<WorkspaceFile>,
+}
+
+async fn prepare(
+    publication: &Arc<ReplyPublication>,
+    coordinator: &Arc<DeliveryCoordinator>,
     target: &TargetState,
     run_key: &RunKey,
     snapshot: &ReplySnapshot,
-    record: &ReplyPublicationRecord,
     point: ReplyReconcilePoint,
-) -> Step {
+) -> Result<PreparedReconcile, Step> {
     let registration = &target.registration;
-    let Some(channel) = inner
-        .coordinator
-        .resolve_reply_channel(registration.extension_id.as_str())
+    let Some(channel) = coordinator.resolve_reply_channel(registration.extension_id.as_str())
     else {
         tracing::debug!(target: LOG_TARGET, extension_id = %registration.extension_id, "reply channel is not active; retrying later");
-        return Step::Later {
-            delay: inner.settings.max_retry_backoff.min(Duration::from_secs(5)),
-        };
+        return Err(Step::Later {
+            delay: publication
+                .settings
+                .max_retry_backoff
+                .min(Duration::from_secs(5)),
+        });
     };
-    let Some(sink) = channel.reply.clone() else {
-        return Step::Permanent {
+    if channel.reply.is_none() {
+        return Err(Step::Permanent {
             reason: ReplyOutcomeReason::new("channel no longer binds a reply sink"),
             kind: DeliveryFailureKind::Rejected,
             generation: channel.generation,
-        };
-    };
-    let reply_context = match inner
-        .coordinator
+        });
+    }
+    let reply_context = match coordinator
         .reply_context_for_publication(&channel, registration.conversation.as_ref())
         .await
     {
@@ -424,9 +597,9 @@ async fn reconcile_once(
         }),
         Err(error) => {
             tracing::debug!(target: LOG_TARGET, %error, "reply context unavailable; retrying later");
-            return Step::Later {
-                delay: inner.settings.retry_backoff,
-            };
+            return Err(Step::Later {
+                delay: publication.settings.retry_backoff,
+            });
         }
     };
     let reply_target = ReplyTarget {
@@ -440,9 +613,9 @@ async fn reconcile_once(
     let mut document = disclose_for_audience(&snapshot.document, registration.audience);
     if document.attention.is_some() {
         kernel_ports::enrich_attention(
-            inner.approval_context.as_ref(),
-            inner.blocked_auth_prompts.as_ref(),
-            inner.turn_coordinator.as_ref(),
+            publication.approval_context.as_ref(),
+            publication.blocked_auth_prompts.as_ref(),
+            publication.turn_coordinator.as_ref(),
             &reply_target,
             &mut document,
         )
@@ -452,13 +625,45 @@ async fn reconcile_once(
     }
     let materialized_attachments =
         if point == ReplyReconcilePoint::Terminal && !document.attachments.is_empty() {
-            match materialize(inner, run_key, &channel, &reply_target).await {
-                Ok(files) => files,
-                Err(step) => return step,
-            }
+            materialize(publication, run_key, &channel, &reply_target).await?
         } else {
             Vec::new()
         };
+    Ok(PreparedReconcile {
+        channel,
+        reply_context,
+        document,
+        reply_target,
+        materialized_attachments,
+    })
+}
+
+async fn reconcile(
+    publication: &Arc<ReplyPublication>,
+    snapshot: &ReplySnapshot,
+    record: &ReplyPublicationRecord,
+    point: ReplyReconcilePoint,
+    prepared: PreparedReconcile,
+) -> Step {
+    let PreparedReconcile {
+        channel,
+        reply_context,
+        document,
+        reply_target,
+        materialized_attachments,
+    } = prepared;
+    let generation = channel.generation;
+    let Some(sink) = channel.reply.clone() else {
+        // Checked during preparation; the channel snapshot is immutable.
+        return Step::Permanent {
+            reason: ReplyOutcomeReason::new("channel no longer binds a reply sink"),
+            kind: DeliveryFailureKind::Rejected,
+            generation,
+        };
+    };
+    // The pre-claim point classification stands: the caller re-plans (and
+    // re-classifies) whenever the claimed row's published revision moved
+    // between the load and the claim.
     let request = ReplyReconcileRequest {
         revision: ReplyRevision {
             revision: snapshot.revision,
@@ -468,15 +673,19 @@ async fn reconcile_once(
         target: reply_target,
         reply_context,
         checkpoint: record.publication.checkpoint.clone(),
-        extension_generation: channel.generation,
+        extension_generation: generation,
         materialized_attachments,
     };
-    let generation = channel.generation;
-    let reconcile = tokio::time::timeout(
-        inner.settings.reconcile_timeout,
-        sink.reconcile(request, channel.egress.as_ref()),
-    )
-    .await;
+    // The lease was claimed immediately before this call; clamping the sink
+    // timeout to the lease TTL guarantees the claim outlives the provider
+    // operation, so lease expiry can never produce two simultaneous
+    // provider calls.
+    let timeout = publication
+        .settings
+        .reconcile_timeout
+        .min(publication.settings.lease_ttl);
+    let reconcile =
+        tokio::time::timeout(timeout, sink.reconcile(request, channel.egress.as_ref())).await;
     match reconcile {
         Ok(Ok(report)) => match &report.outcome {
             ReplySinkOutcome::Applied => Step::Applied { report, generation },
@@ -499,6 +708,12 @@ async fn reconcile_once(
                 kind: DeliveryFailureKind::Rejected,
                 generation,
             },
+            // Fail-closed per `.claude/rules/lifecycle.md`: an authentication
+            // rejection is terminal and never retried until the credential
+            // changes. The failure kind, reason, and the sink's checkpoint
+            // stay on the settled row; restoring credentials goes through the
+            // extension's ordinary reconnect flow, and the settled reply is
+            // not republished.
             ReplySinkOutcome::Unauthorized { reason } => Step::Permanent {
                 reason: reason.clone(),
                 kind: DeliveryFailureKind::AuthorizationRevoked,
@@ -542,7 +757,7 @@ fn channel_error_step(error: ChannelError, generation: u64) -> Step {
 }
 
 async fn materialize(
-    inner: &Arc<Inner>,
+    publication: &Arc<ReplyPublication>,
     run_key: &RunKey,
     channel: &ResolvedChannelDelivery,
     reply_target: &ReplyTarget,
@@ -561,9 +776,13 @@ async fn materialize(
         owner_user_id: Some(reply_target.actor.user_id.clone()),
         mission_id: None,
     };
-    let sources = inner.terminal_attachments(run_key);
-    match materialize_workspace_files(inner.project_filesystem.as_ref(), &thread_scope, sources)
-        .await
+    let sources = publication.terminal_attachments(run_key);
+    match materialize_workspace_files(
+        publication.project_filesystem.as_ref(),
+        &thread_scope,
+        sources,
+    )
+    .await
     {
         Ok(files) => Ok(files),
         Err(error) => {
@@ -626,7 +845,11 @@ struct OutcomeWrite<'a> {
     checkpoint: Option<ReplySinkCheckpoint>,
 }
 
-async fn record_outcome(inner: &Arc<Inner>, target: &TargetState, write: OutcomeWrite<'_>) {
+async fn record_outcome(
+    coordinator: &Arc<DeliveryCoordinator>,
+    target: &TargetState,
+    write: OutcomeWrite<'_>,
+) {
     let terminal = write.snapshot.document.is_terminal();
     let evidence = ReplyPublicationEvidence {
         provider_refs: write.record.publication.evidence.provider_refs.clone(),
@@ -638,8 +861,7 @@ async fn record_outcome(inner: &Arc<Inner>, target: &TargetState, write: Outcome
             .generation
             .is_some_and(|previous| previous != write.generation),
     };
-    if let Err(error) = inner
-        .coordinator
+    if let Err(error) = coordinator
         .advance_reply_publication(AdvanceReplyPublicationRequest {
             delivery_id: target.delivery_id,
             scope: write.run_key.scope.clone(),
@@ -666,14 +888,13 @@ async fn record_outcome(inner: &Arc<Inner>, target: &TargetState, write: Outcome
 }
 
 async fn settle(
-    inner: &Arc<Inner>,
+    coordinator: &Arc<DeliveryCoordinator>,
     target: &TargetState,
     run_key: &RunKey,
     fence: u64,
     settlement: ReplyPublicationSettlement,
 ) {
-    if let Err(error) = inner
-        .coordinator
+    if let Err(error) = coordinator
         .settle_reply_publication(run_key.scope.clone(), target.delivery_id, fence, settlement)
         .await
     {
@@ -681,10 +902,13 @@ async fn settle(
     }
 }
 
-fn backoff(inner: &Arc<Inner>, attempts: u32) -> Duration {
-    let base = inner.settings.retry_backoff.max(Duration::from_millis(1));
+fn backoff(publication: &Arc<ReplyPublication>, attempts: u32) -> Duration {
+    let base = publication
+        .settings
+        .retry_backoff
+        .max(Duration::from_millis(1));
     let factor = 2u32.saturating_pow(attempts.saturating_sub(1).min(16));
-    (base.saturating_mul(factor)).min(inner.settings.max_retry_backoff)
+    (base.saturating_mul(factor)).min(publication.settings.max_retry_backoff)
 }
 
 fn is_fenced_out(error: &CoordinatedDeliveryError) -> bool {

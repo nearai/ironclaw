@@ -665,15 +665,14 @@ pub struct RebornRuntime {
     pub(crate) triggered_run_delivery: Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
-    #[cfg(any(test, feature = "test-support"))]
+    /// The delivery coordinator (present exactly when channel egress is
+    /// configured). It owns reply publication; shutdown hands held
+    /// publication leases back so another publisher can resume open replies
+    /// at once.
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_assistant::DeliveryCoordinator>>,
     /// The host-served reply channel (authenticated session), registered as a
     /// reply publication target for every run.
     pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
-    /// The runtime's reply publication service (present exactly when the
-    /// delivery coordinator is). Shutdown hands its leases back so another
-    /// publisher can resume open replies at once.
-    pub(crate) reply_publication: Option<Arc<ironclaw_assistant::ReplyPublicationService>>,
     pub(crate) channel_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
@@ -1176,16 +1175,11 @@ impl RebornRuntime {
             .unwrap_or_default()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    /// The runtime's delivery coordinator. A caller that wires its own
+    /// run-delivery observer shares it so one publication owns each run's
+    /// answer.
     pub fn delivery_coordinator(&self) -> Option<Arc<ironclaw_assistant::DeliveryCoordinator>> {
         self.delivery_coordinator.clone()
-    }
-
-    /// The reply publication service the runtime's channel host runs. A
-    /// caller that wires its own run-delivery observer shares it so one
-    /// publication owns each run's answer.
-    pub fn reply_publication(&self) -> Option<Arc<ironclaw_assistant::ReplyPublicationService>> {
-        self.reply_publication.clone()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1198,6 +1192,7 @@ impl RebornRuntime {
             turn_coordinator,
             identity,
             run_delivery_settings,
+            reply_projection,
         } = wiring;
         let attachment_filesystem = self.read_write_workspace_filesystem()?;
         let inbound_attachments: Arc<dyn ironclaw_attachments::InboundAttachmentLander> =
@@ -1253,10 +1248,9 @@ impl RebornRuntime {
                     auth_flow_cancel: None,
                     run_delivery_settings,
                     admin_users,
-                    reply_projection: Arc::new(
-                        ironclaw_assistant::projection::reply::ReplyProjection::new(),
-                    ),
+                    reply_projection,
                     session_reply_channel: self.session_reply_channel.clone(),
+                    start_reply_publication: true,
                 },
             )
             .assembly,
@@ -2540,8 +2534,8 @@ impl RebornRuntime {
         // Hand open reply publications back: their leases are released so
         // a publisher on the next process (or another node) resumes them
         // immediately instead of waiting for the lease to lapse.
-        if let Some(reply_publication) = &self.reply_publication {
-            reply_publication.shutdown().await;
+        if let Some(coordinator) = &self.delivery_coordinator {
+            coordinator.shutdown_reply_publication().await;
         }
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
@@ -4403,18 +4397,38 @@ pub(crate) async fn build_runtime_with_resource_governor(
         .map(|started| Arc::clone(&started.workflow_factory));
     // A run's terminal commit resumes its publications: on this node a fast
     // path to the durable terminal facts, on any other node the way an
-    // orphaned publication gets a worker again.
-    let reply_publication_service = started_channel_host
-        .as_ref()
-        .and_then(|started| started.reply_publication.clone());
-    if let Some(reply_publication) = reply_publication_service.clone() {
+    // orphaned publication gets a worker again. The coordinator acknowledges
+    // the commit only after recovery ran, and the boot sweep below covers a
+    // crash that happened after an acknowledgement.
+    if let Some(coordinator) = services.delivery_coordinator.clone() {
         processes
-            .subscribe_process_observer(Arc::new(
-                ironclaw_assistant::ReplyPublicationCommitObserver::new(reply_publication),
-            ))
+            .subscribe_process_observer(Arc::clone(&coordinator)
+                as Arc<dyn ironclaw_processes::ProcessJournalCommitObserver>)
             .map_err(|error| RebornRuntimeError::MalformedConfig {
                 reason: format!("reply publication observer wiring failed: {error}"),
             })?;
+        let recovery_thread_id = ThreadId::new("reply-publication-recovery").map_err(|reason| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("reply publication recovery thread id: {reason}"),
+            }
+        })?;
+        let recovery_scope = TurnScope::new(
+            thread_scope.tenant_id.clone(),
+            Some(thread_scope.agent_id.clone()),
+            thread_scope.project_id.clone(),
+            recovery_thread_id,
+        );
+        tokio::spawn(async move {
+            match coordinator.resume_reply_publications(&recovery_scope).await {
+                Ok(resumed) if resumed > 0 => {
+                    tracing::debug!(resumed, "resumed open reply publications at boot")
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "reply publication boot resume failed; open publications wait for the next terminal signal")
+                }
+            }
+        });
     }
     let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
@@ -4776,10 +4790,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         triggered_run_delivery: services.triggered_run_delivery.clone(),
         #[cfg(any(test, feature = "test-support"))]
         delivered_gate_routes: services.delivered_gate_routes.clone(),
-        #[cfg(any(test, feature = "test-support"))]
         delivery_coordinator: services.delivery_coordinator.clone(),
         session_reply_channel: services.session_reply_channel.clone(),
-        reply_publication: reply_publication_service,
         channel_facade_slot: services.channel_disconnect_slot.clone(),
         channel_config_service: services.channel_config_service.clone(),
         admin_configuration: services.admin_configuration.clone(),

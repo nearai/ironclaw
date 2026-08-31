@@ -531,7 +531,6 @@ impl LiveProjectionPublisher {
             };
             let (status, error_kind, error_detail) = match &activity.state {
                 ReplyActivityState::Started => (CapabilityActivityStatus::Started, None, None),
-                ReplyActivityState::Running => (CapabilityActivityStatus::Running, None, None),
                 ReplyActivityState::Completed => (CapabilityActivityStatus::Completed, None, None),
                 ReplyActivityState::Failed { kind } => (
                     CapabilityActivityStatus::Failed,
@@ -541,7 +540,6 @@ impl LiveProjectionPublisher {
                         .as_ref()
                         .map(|preview| preview.as_str().to_string()),
                 ),
-                ReplyActivityState::Killed => (CapabilityActivityStatus::Killed, None, None),
             };
             let sequence = self.next_live_sequence();
             self.publish_live_item(

@@ -199,10 +199,11 @@ Two things to know before switching an existing app:
   the feature and reinstalls the app. A bot token without `chat:write` fails
   the same way with `missing_scope`.
 
-The public page `docs/channels/slack.mdx` carries the complete Agent-enabled
-app manifest; `tests/agent_app_manifest_lockstep.rs` in the Slack package pins
-it against the extension manifest's egress allowlist and the calls the code
-makes.
+The canonical, directly importable Agent-enabled app manifest is
+`crates/extensions/packages/slack/app_manifest.json`; the public page
+`docs/channels/slack.mdx` embeds a test-pinned identical copy, and
+`tests/agent_app_manifest_lockstep.rs` in the Slack package pins both against
+the extension manifest's egress allowlist and the calls the code makes.
 
 Basic Information:
 

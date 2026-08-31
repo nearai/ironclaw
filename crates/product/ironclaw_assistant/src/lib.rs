@@ -89,8 +89,8 @@ mod workflow;
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
 
 pub use delivery_coordinator::publication::{
-    ReplyPublicationCommitObserver, ReplyPublicationDeps, ReplyPublicationError,
-    ReplyPublicationService, ReplyPublicationSettings, ReplyTargetRegistration,
+    ReplyPublicationError, ReplyPublicationSettings, ReplyPublicationWiring,
+    ReplyTargetRegistration,
 };
 
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};

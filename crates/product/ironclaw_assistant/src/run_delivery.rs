@@ -143,12 +143,11 @@ pub struct RunDeliveryServices {
     /// resolves the creator's stored notification-channel ids through it at
     /// fire time; a target that vanished since it was chosen simply drops out.
     pub delivery_targets: Arc<dyn OutboundDeliveryTargetProvider>,
-    /// The coordinator every send goes through (OUT-1: none bypasses).
+    /// The coordinator every send goes through (OUT-1: none bypasses). It
+    /// also owns the run's answer: the observer registers the originating
+    /// conversation as a reply publication target on it and never sends the
+    /// reply itself (design doc §6–§7).
     pub coordinator: Arc<DeliveryCoordinator>,
-    /// Owns the run's answer: the observer registers the originating
-    /// conversation as a publication target and never sends the reply
-    /// itself (design doc §6–§7).
-    pub reply_publication: Arc<crate::ReplyPublicationService>,
     /// The channel extension whose surface these components serve (the
     /// coordinator resolves the adapter + egress from the active snapshot by
     /// this id). Configured, not derived from envelopes: the envelope's

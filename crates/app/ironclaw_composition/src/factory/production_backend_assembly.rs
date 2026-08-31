@@ -353,6 +353,8 @@ pub(super) async fn build_backend_production(
         native_extension_factories,
         channel_extension_bindings,
         session_reply_channel: input_session_reply_channel,
+        #[cfg(any(test, feature = "test-support"))]
+        defer_reply_publication_for_test,
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
@@ -1484,6 +1486,8 @@ pub(super) async fn build_backend_production(
         channel_extension_bindings,
         projection_reply_sink,
         session_reply_channel,
+        #[cfg(any(test, feature = "test-support"))]
+        defer_reply_publication_for_test,
         deployment_channels,
         extension_ingress: channel_host_wiring.extension_ingress,
         channel_pairing: channel_pairing_registry,

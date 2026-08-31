@@ -410,6 +410,10 @@ pub(crate) struct RebornRuntimeStores {
     /// authenticated-session channel); reply publication registers it as a
     /// target for every run.
     pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
+    /// Test-support: `start_channel_host` leaves reply publication unstarted
+    /// so the harness can start it with its own kernel handles (input doc).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) defer_reply_publication_for_test: bool,
     /// Manifest-declared deployment channel surfaces, independent of user
     /// installation/activation state.
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,

@@ -649,6 +649,7 @@ fn slack_run_delivery_services(
     let coordinator = services
         .delivery_coordinator()
         .expect("composition built the delivery coordinator");
+    harness.start_reply_publication_for_test(services);
     let fallback_notice_scope = TurnScope::new_with_owner(
         harness.binding.tenant_id.clone(),
         harness.binding.agent_id.clone(),
@@ -658,7 +659,6 @@ fn slack_run_delivery_services(
         Some(harness.binding.actor_user_id.clone()),
     );
     RunDeliveryServices {
-        reply_publication: harness.reply_publication_for_test(services),
         binding_service: harness
             .binding_service_for_test()
             .expect("group binding service"),

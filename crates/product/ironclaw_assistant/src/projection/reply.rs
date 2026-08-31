@@ -55,7 +55,7 @@ const DEFAULT_MAX_TRACKED_RUNS: usize = 4_096;
 
 /// What the projection tells its observers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplyProjectionEvent {
+pub(crate) enum ReplyProjectionEvent {
     /// The document moved to a new revision; the point says how urgently a
     /// progressive sink should hear about it.
     Revised(ReplyReconcilePoint),
@@ -65,8 +65,10 @@ pub enum ReplyProjectionEvent {
     TerminalPending,
 }
 
-/// Something that reacts to the projection moving (the publication lane).
-pub trait ReplyProjectionObserver: Send + Sync {
+/// Something that reacts to the projection moving. Crate-internal on
+/// purpose: the delivery coordinator's publication lane is the one
+/// production consumer, and nothing outside the crate subscribes.
+pub(crate) trait ReplyProjectionObserver: Send + Sync {
     fn reply_projection_event(
         &self,
         scope: &TurnScope,
@@ -267,7 +269,7 @@ impl ReplyProjection {
         }
     }
 
-    pub fn add_observer(&self, observer: Arc<dyn ReplyProjectionObserver>) {
+    pub(crate) fn add_observer(&self, observer: Arc<dyn ReplyProjectionObserver>) {
         self.observers
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())

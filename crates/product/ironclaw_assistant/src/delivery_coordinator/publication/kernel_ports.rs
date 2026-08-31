@@ -1,27 +1,24 @@
 //! The publication lane's reads of the durable owners — the turn kernel, the
-//! thread service, and the gate-prompt sources — plus the process-journal
-//! hook that resumes publications on a run's terminal commit. Plain
-//! functions over the owners' own contracts: the lane has no
-//! publication-local port traits.
+//! thread service, and the gate-prompt sources. Plain functions over the
+//! owners' own contracts: the lane has no publication-local port traits.
+//! (The process-journal hook that resumes publications on a run's terminal
+//! commit is the coordinator's own `ProcessJournalCommitObserver`
+//! implementation, in the parent module.)
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use ironclaw_extension_contracts::reply::{
     REPLY_DISPLAY_PREVIEW_MAX_BYTES, REPLY_DISPLAY_TEXT_MAX_BYTES, ReplyAttentionKind,
     ReplyAudience, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument, ReplyTarget,
 };
 use ironclaw_host_api::turn::{TurnActor, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
-use ironclaw_processes::{
-    ProcessJournalCommit, ProcessJournalCommitObserver, ProcessKind, ProcessLifecycleStatus,
-};
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptRequest, BlockedAuthPromptSource,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_turns::{CancelRunRequest, GetRunStateRequest, TurnCoordinator, TurnExecutionOutcome};
 
-use super::{ReplyPublicationError, ReplyPublicationService};
+use super::ReplyPublicationError;
 use crate::projection::reply::TerminalReplyFacts;
 use crate::run_delivery::prompts;
 
@@ -257,58 +254,4 @@ fn display_preview(value: &str) -> Option<ReplyDisplayPreview> {
         end -= 1;
     }
     ReplyDisplayPreview::new(&stripped[..end]).ok() // safety: `end` walked back to a char boundary above.
-}
-
-/// Resumes publications from the durable side: every terminal commit of a
-/// top-level user run tells the service the run is over. On the node that
-/// ran the run this is a fast path to the terminal facts; on any other node
-/// it is how an orphaned publication (a crashed publisher, a lapsed lease)
-/// gets a worker again. Registered on the existing generic process-journal
-/// observer seam.
-pub struct ReplyPublicationCommitObserver {
-    service: Arc<ReplyPublicationService>,
-}
-
-impl ReplyPublicationCommitObserver {
-    pub fn new(service: Arc<ReplyPublicationService>) -> Self {
-        Self { service }
-    }
-}
-
-#[async_trait]
-impl ProcessJournalCommitObserver for ReplyPublicationCommitObserver {
-    fn process_observer_id(&self) -> &'static str {
-        "reply-publication-commit-observer-v1"
-    }
-
-    async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
-        let snapshot = &commit.state;
-        if snapshot.process_kind != ProcessKind::AgentTurn
-            || snapshot.parent_process_id.is_some()
-            || !snapshot.status.is_terminal()
-            || snapshot.status == ProcessLifecycleStatus::RecoveryRequired
-        {
-            return Ok(());
-        }
-        let (Some(thread_id), Some(agent_id)) = (
-            snapshot.scope.thread_id.clone(),
-            snapshot.scope.agent_id.clone(),
-        ) else {
-            return Ok(());
-        };
-        let scope = TurnScope::new(
-            snapshot.scope.tenant_id.clone(),
-            Some(agent_id),
-            snapshot.scope.project_id.clone(),
-            thread_id,
-        );
-        let run_id = TurnRunId::from_uuid(snapshot.process_id.as_uuid());
-        // Never block the journal on publication work; the service is
-        // idempotent, so a lost wake-up is caught by the next signal.
-        let service = Arc::clone(&self.service);
-        tokio::spawn(async move {
-            service.run_terminal(&scope, run_id).await;
-        });
-        Ok(())
-    }
 }

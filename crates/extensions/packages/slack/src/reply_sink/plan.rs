@@ -112,10 +112,9 @@ pub(super) fn plan_chunks(
 
 fn task_update_chunk(activity: &ReplyActivity) -> Value {
     let (status, fallback_details) = match &activity.state {
-        ReplyActivityState::Started | ReplyActivityState::Running => ("in_progress", None),
+        ReplyActivityState::Started => ("in_progress", None),
         ReplyActivityState::Completed => ("complete", None),
         ReplyActivityState::Failed { kind } => ("error", Some(format!("Failed: {kind}"))),
-        ReplyActivityState::Killed => ("error", Some("Stopped".to_string())),
     };
     let mut chunk = json!({
         "type": "task_update",
@@ -140,10 +139,8 @@ fn task_update_chunk(activity: &ReplyActivity) -> Value {
 pub(super) fn task_fingerprint(activity: &ReplyActivity) -> String {
     let (state, kind) = match &activity.state {
         ReplyActivityState::Started => ("started", ""),
-        ReplyActivityState::Running => ("running", ""),
         ReplyActivityState::Completed => ("completed", ""),
         ReplyActivityState::Failed { kind } => ("failed", kind.as_str()),
-        ReplyActivityState::Killed => ("killed", ""),
     };
     fingerprint(&[
         state,

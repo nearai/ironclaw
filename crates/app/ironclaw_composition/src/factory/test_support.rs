@@ -20,6 +20,10 @@ pub struct ChannelHostAssemblyTestWiring {
     pub turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
     pub run_delivery_settings: ironclaw_assistant::RunDeliverySettings,
+    /// The reply projection the group's runs feed. Publication is started on
+    /// the delivery coordinator exactly once, so the harness hands the
+    /// projection its milestones actually land in.
+    pub reply_projection: Arc<ironclaw_assistant::projection::reply::ReplyProjection>,
 }
 
 #[allow(
@@ -367,10 +371,9 @@ impl RebornRuntimeStores {
                 auth_flow_cancel: None,
                 run_delivery_settings: wiring.run_delivery_settings,
                 admin_users,
-                reply_projection: Arc::new(
-                    ironclaw_assistant::projection::reply::ReplyProjection::new(),
-                ),
+                reply_projection: wiring.reply_projection,
                 session_reply_channel: self.session_reply_channel.clone(),
+                start_reply_publication: true,
             },
         )
     }

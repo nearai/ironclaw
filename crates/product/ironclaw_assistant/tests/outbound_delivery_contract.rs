@@ -2733,4 +2733,11 @@ impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
     ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
         self.inner.list_reply_publications(scope, run_id).await
     }
+
+    async fn list_open_reply_publications(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
+        self.inner.list_open_reply_publications(scope).await
+    }
 }

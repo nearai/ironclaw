@@ -919,6 +919,12 @@ impl HostRuntimeCapabilityHarness {
                 input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
         let mut runtime_input = RebornRuntimeInput::from_build_input(input);
+        // The harness's runs execute on the test group's own turn runtime,
+        // not this composed runtime's, so the coordinator's ONE reply
+        // publication start must carry the group's kernel handles — the
+        // group wires it (channel-host-for-test or the builder helper)
+        // instead of the build.
+        runtime_input = runtime_input.with_deferred_reply_publication_for_test();
         if workspace_scoped_per_caller {
             // The same raise `serve` applies unconditionally: agent tool
             // grants, approval leases, and attachment handles resolve the

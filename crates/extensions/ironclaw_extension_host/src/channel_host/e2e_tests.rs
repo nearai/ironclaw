@@ -42,7 +42,7 @@ use ironclaw_assistant::{
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, RunDeliveryServices,
     RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
-use ironclaw_assistant::{ReplyPublicationDeps, ReplyPublicationService, ReplyPublicationSettings};
+use ironclaw_assistant::{ReplyPublicationSettings, ReplyPublicationWiring};
 use ironclaw_extension_contracts::channel::ChannelConnectionStrategy;
 use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -762,14 +762,16 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                 operator_user_id: identity.operator_user_id.clone(),
             },
             delivery: Some(ironclaw_assistant::ChannelWorkflowDeliveryServices {
-                reply_publication: test_reply_publication(
-                    &delivery_coordinator,
-                    Arc::new(coordinator.clone()),
-                    Arc::new(threads.clone()),
-                    Arc::clone(&reply_projection),
-                    blocked_auth_prompts.clone(),
-                ),
-                coordinator: delivery_coordinator,
+                coordinator: {
+                    start_test_reply_publication(
+                        &delivery_coordinator,
+                        Arc::new(coordinator.clone()),
+                        Arc::new(threads.clone()),
+                        Arc::clone(&reply_projection),
+                        blocked_auth_prompts.clone(),
+                    );
+                    delivery_coordinator
+                },
                 outbound_store,
                 route_store: Arc::clone(&route_store),
                 communication_preferences: preferences,
@@ -1744,14 +1746,14 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
+    start_test_reply_publication(
+        &fixture.delivery_coordinator,
+        Arc::clone(&coordinator),
+        Arc::new(threads.clone()),
+        Arc::new(ReplyProjection::new()),
+        None,
+    );
     let services = RunDeliveryServices {
-        reply_publication: test_reply_publication(
-            &fixture.delivery_coordinator,
-            Arc::clone(&coordinator),
-            Arc::new(threads.clone()),
-            Arc::new(ReplyProjection::new()),
-            None,
-        ),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -2031,14 +2033,14 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
+    start_test_reply_publication(
+        &fixture.delivery_coordinator,
+        Arc::clone(&coordinator),
+        Arc::new(threads.clone()),
+        Arc::new(ReplyProjection::new()),
+        None,
+    );
     let services = RunDeliveryServices {
-        reply_publication: test_reply_publication(
-            &fixture.delivery_coordinator,
-            Arc::clone(&coordinator),
-            Arc::new(threads.clone()),
-            Arc::new(ReplyProjection::new()),
-            None,
-        ),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -2168,14 +2170,14 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
         Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
+    start_test_reply_publication(
+        &fixture.delivery_coordinator,
+        Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+        Arc::new(threads.clone()),
+        Arc::new(ReplyProjection::new()),
+        None,
+    );
     let services = RunDeliveryServices {
-        reply_publication: test_reply_publication(
-            &fixture.delivery_coordinator,
-            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
-            Arc::new(threads.clone()),
-            Arc::new(ReplyProjection::new()),
-            None,
-        ),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
@@ -6748,28 +6750,29 @@ async fn ssl_check_form_gets_empty_200_without_admission() {
     assert_eq!(harness.coordinator.submitted_turn_count(), 0);
 }
 
-/// The reply publication service every delivery graph now owns: the run's
+/// Start the delivery coordinator's reply publication lane: the run's
 /// answer is published through it rather than sent by the observer, so these
 /// host tests wire the same kernel deps production wires (the turn
 /// coordinator for terminal facts and stop requests, the shared reply
 /// projection, and the same blocked-auth prompt source the observer
 /// consults) instead of a double.
-fn test_reply_publication(
+fn start_test_reply_publication(
     delivery_coordinator: &Arc<DeliveryCoordinator>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<dyn SessionThreadService>,
     projection: Arc<ReplyProjection>,
     blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
-) -> Arc<ReplyPublicationService> {
-    ReplyPublicationService::start(ReplyPublicationDeps {
-        coordinator: Arc::clone(delivery_coordinator),
-        projection,
-        turn_coordinator,
-        thread_service,
-        approval_context: None,
-        blocked_auth_prompts,
-        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
-        session_channel: None,
-        settings: ReplyPublicationSettings::default(),
-    })
+) {
+    assert!(
+        delivery_coordinator.start_reply_publication(ReplyPublicationWiring {
+            projection,
+            turn_coordinator,
+            thread_service,
+            approval_context: None,
+            blocked_auth_prompts,
+            project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+            session_channel: None,
+            settings: ReplyPublicationSettings::default(),
+        })
+    );
 }

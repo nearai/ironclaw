@@ -22,7 +22,7 @@
 //!   the vendor already accepted (OUT-7).
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -432,6 +432,12 @@ pub struct DeliveryCoordinator {
     retry: DeliveryRetryPolicy,
     /// Per-delivery single-flight: a delivery id enters once.
     in_flight: Mutex<HashSet<ironclaw_outbound::OutboundDeliveryId>>,
+    /// The coordinator's reply-publication state (targets, workers, the
+    /// projection subscription). Late-bound because the coordinator is
+    /// constructed before the turn/thread services exist; production always
+    /// starts it (`Self::start_reply_publication`) once they do, and every
+    /// publication caller goes through the coordinator's methods.
+    reply_publication: OnceLock<Arc<publication::ReplyPublication>>,
 }
 
 impl DeliveryCoordinator {
@@ -452,6 +458,7 @@ impl DeliveryCoordinator {
             registrations,
             retry,
             in_flight: Mutex::new(HashSet::new()),
+            reply_publication: OnceLock::new(),
         }
     }
 

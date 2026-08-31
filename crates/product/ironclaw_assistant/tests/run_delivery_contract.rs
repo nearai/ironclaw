@@ -623,6 +623,13 @@ impl OutboundStateStorePort for TerminalDeliveredWriteFailingStore {
     ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
         self.inner.list_reply_publications(scope, run_id).await
     }
+
+    async fn list_open_reply_publications(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
+        self.inner.list_open_reply_publications(scope).await
+    }
 }
 
 #[derive(Default)]
@@ -1269,8 +1276,8 @@ fn build_harness_with_gate_ports(
             backoff: Duration::ZERO,
         },
     ));
+    start_test_reply_publication(&coordinator, &turns, &threads, &project_files);
     let services = RunDeliveryServices {
-        reply_publication: test_reply_publication(&coordinator, &turns, &threads, &project_files),
         binding_service: Arc::new(StaticBindingService {
             binding: resolved_binding,
             fail: bind_fails,
@@ -3544,8 +3551,8 @@ fn build_triggered_harness_with_turns_catalog(
             backoff: Duration::ZERO,
         },
     ));
+    start_test_reply_publication(&coordinator, &turns, &threads, &project_files);
     let services = RunDeliveryServices {
-        reply_publication: test_reply_publication(&coordinator, &turns, &threads, &project_files),
         binding_service: Arc::new(StaticBindingService {
             binding: binding(),
             fail: true,
@@ -5563,8 +5570,8 @@ fn notify_user_fixture(
             .expect("allowlist")
             .insert(ReplyTargetBindingRef::new(entry.binding_ref).expect("binding ref"));
     }
+    start_test_reply_publication(&coordinator, &turns, &threads, &project_files);
     let services = RunDeliveryServices {
-        reply_publication: test_reply_publication(&coordinator, &turns, &threads, &project_files),
         binding_service: Arc::new(StaticBindingService {
             binding: binding(),
             fail: true,
@@ -5787,19 +5794,16 @@ impl TurnCoordinator for PublicationKernelView {
     }
 }
 
-/// The production publication service over the test's coordinator, with
-/// fast pacing so a scripted run settles within a test's patience.
-fn test_reply_publication(
+/// Start the coordinator's production publication lane, with fast pacing so
+/// a scripted run settles within a test's patience.
+fn start_test_reply_publication(
     coordinator: &Arc<DeliveryCoordinator>,
     turns: &Arc<ScriptedTurnCoordinator>,
     threads: &Arc<InMemorySessionThreadService>,
     project_files: &Arc<ScriptedProjectFilesystemReader>,
-) -> Arc<ironclaw_assistant::ReplyPublicationService> {
-    use ironclaw_assistant::{
-        ReplyPublicationDeps, ReplyPublicationService, ReplyPublicationSettings,
-    };
-    ReplyPublicationService::start(ReplyPublicationDeps {
-        coordinator: Arc::clone(coordinator),
+) {
+    use ironclaw_assistant::{ReplyPublicationSettings, ReplyPublicationWiring};
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
         projection: Arc::new(ironclaw_assistant::projection::reply::ReplyProjection::new()),
         turn_coordinator: Arc::new(PublicationKernelView {
             turns: Arc::clone(turns),
@@ -5820,5 +5824,5 @@ fn test_reply_publication(
             terminal_fact_attempts: 3,
             heartbeat_interval: Duration::from_secs(60),
         },
-    })
+    }));
 }

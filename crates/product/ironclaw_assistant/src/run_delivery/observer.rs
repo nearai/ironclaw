@@ -533,8 +533,8 @@ impl RunDeliveryObserver {
         };
         if let Err(error) = self
             .services
-            .reply_publication
-            .register_target(ReplyTargetRegistration {
+            .coordinator
+            .register_reply_target(ReplyTargetRegistration {
                 scope: scope.clone(),
                 actor: actor.clone(),
                 run_id,
@@ -720,13 +720,13 @@ impl RunDeliveryObserver {
                         // land before the working indicator goes away, so the
                         // conversation never shows a gap.
                         self.services
-                            .reply_publication
-                            .run_terminal(&scope, run_id)
+                            .coordinator
+                            .reply_run_terminal(&scope, run_id)
                             .await;
                         if !self
                             .services
-                            .reply_publication
-                            .await_run_settled(&scope, run_id, REPLY_SETTLE_WAIT)
+                            .coordinator
+                            .await_reply_settled(&scope, run_id, REPLY_SETTLE_WAIT)
                             .await
                         {
                             tracing::debug!(

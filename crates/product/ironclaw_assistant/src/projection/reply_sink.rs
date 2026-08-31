@@ -7,8 +7,10 @@
 //! binds its own. Each reconciled revision is converted into product
 //! projection items and published through the live update source the SSE and
 //! WebSocket transports tail. That broadcast is a latency optimization only:
-//! the durable reply journal is what an origin snapshot rebuilds from, so a
-//! reconnect or restart never depends on this process's memory.
+//! a reconnect or restart rebuilds from the existing durable projections —
+//! the turn-event projection, the runtime event log, and the transcript —
+//! never from this process's memory (there is no reply journal; those
+//! durable facts are the reply's only history).
 //!
 //! The publisher is late-bound because channel bindings are assembled by the
 //! binary before composition builds the projection graph; until composition

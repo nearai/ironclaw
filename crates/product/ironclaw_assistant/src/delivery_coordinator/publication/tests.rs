@@ -47,7 +47,7 @@ use ironclaw_turns::{
 };
 
 use super::{
-    ReplyPublicationDeps, ReplyPublicationError, ReplyPublicationService, ReplyPublicationSettings,
+    ReplyPublicationError, ReplyPublicationSettings, ReplyPublicationWiring,
     ReplyTargetRegistration,
 };
 use crate::delivery_coordinator::{
@@ -216,7 +216,6 @@ struct Harness {
     resolver: Arc<SinkResolver>,
     kernel: Arc<FakeTurnKernel>,
     threads: Arc<InMemorySessionThreadService>,
-    service: Arc<ReplyPublicationService>,
     scope: TurnScope,
     actor: TurnActor,
     run_id: TurnRunId,
@@ -294,8 +293,7 @@ fn harness_over_files(
     let projection = Arc::new(ReplyProjection::new());
     let kernel = Arc::new(FakeTurnKernel::default());
     let threads = Arc::new(InMemorySessionThreadService::default());
-    let service = ReplyPublicationService::start(ReplyPublicationDeps {
-        coordinator: Arc::clone(&coordinator),
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
         projection: Arc::clone(&projection),
         turn_coordinator: Arc::clone(&kernel) as Arc<dyn TurnCoordinator>,
         thread_service: Arc::clone(&threads) as Arc<dyn SessionThreadService>,
@@ -304,7 +302,7 @@ fn harness_over_files(
         project_filesystem,
         session_channel: session_channel.map(|id| ExtensionId::new(id).unwrap()),
         settings,
-    });
+    }));
     Harness {
         store,
         coordinator,
@@ -313,7 +311,6 @@ fn harness_over_files(
         resolver,
         kernel,
         threads,
-        service,
         scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
         actor: TurnActor::new(user_id),
         run_id: TurnRunId::new(),
@@ -449,8 +446,8 @@ where
 async fn a_stream_target_receives_opened_progress_and_terminal_revisions_and_settles_delivered() {
     let harness = harness("stream", ReplyTransport::Stream, None);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     // Registration opens the publication on the attempt aggregate before any
@@ -556,8 +553,8 @@ async fn a_stream_target_receives_opened_progress_and_terminal_revisions_and_set
 async fn a_message_target_receives_only_the_terminal_revision() {
     let harness = harness("message", ReplyTransport::Message, None);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Shared))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Shared))
         .await
         .unwrap();
     harness.text("progress the channel never sees");
@@ -630,8 +627,8 @@ async fn the_session_channel_is_registered_for_every_run_with_a_disclosed_privat
 async fn shared_audience_targets_never_receive_reasoning() {
     let harness = harness("shared", ReplyTransport::Stream, None);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Shared))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Shared))
         .await
         .unwrap();
     harness.projection.observe_milestone(&harness.milestone(
@@ -667,8 +664,8 @@ async fn retryable_outcomes_back_off_and_the_terminal_budget_fails_closed() {
         ReplySinkOutcome::Applied,
     ]);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     let started = tokio::time::Instant::now();
@@ -700,8 +697,8 @@ async fn retryable_outcomes_back_off_and_the_terminal_budget_fails_closed() {
         10,
     ));
     stuck
-        .service
-        .register_target(stuck.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(stuck.registration(ReplyAudience::Private))
         .await
         .unwrap();
     stuck.complete_with("never lands").await;
@@ -740,8 +737,8 @@ async fn permanent_and_unauthorized_outcomes_settle_failed_without_another_attem
         reason: ReplyOutcomeReason::new("channel archived"),
     }]);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     harness.complete_with("gone").await;
@@ -759,8 +756,8 @@ async fn permanent_and_unauthorized_outcomes_settle_failed_without_another_attem
         reason: ReplyOutcomeReason::new("token revoked"),
     }]);
     unauthorized
-        .service
-        .register_target(unauthorized.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(unauthorized.registration(ReplyAudience::Private))
         .await
         .unwrap();
     unauthorized.complete_with("gone").await;
@@ -784,8 +781,8 @@ async fn an_ambiguous_terminal_outcome_settles_unknown_after_read_back_attempts(
         10,
     ));
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     harness.complete_with("maybe landed").await;
@@ -816,8 +813,8 @@ async fn a_stop_from_the_channel_requests_a_run_cancel_and_the_terminal_revision
     let harness = harness("stop", ReplyTransport::Stream, None);
     harness.sink.script([ReplySinkOutcome::StoppedByUser]);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     harness.text("working…");
@@ -832,8 +829,8 @@ async fn a_stop_from_the_channel_requests_a_run_cancel_and_the_terminal_revision
     // The kernel cancels the run; its terminal commit yields Cancelled facts.
     harness.kernel.set_status(TurnStatus::Cancelled);
     harness
-        .service
-        .run_terminal(&harness.scope, harness.run_id)
+        .coordinator
+        .reply_run_terminal(&harness.scope, harness.run_id)
         .await;
     let settled = harness.wait_settled().await;
     assert_eq!(
@@ -849,8 +846,8 @@ async fn a_stop_from_the_channel_requests_a_run_cancel_and_the_terminal_revision
 async fn a_publisher_on_another_node_resumes_an_open_publication_from_the_store() {
     let first = harness("resume", ReplyTransport::Stream, None);
     first
-        .service
-        .register_target(first.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(first.registration(ReplyAudience::Private))
         .await
         .unwrap();
     first.text("half an answer");
@@ -858,7 +855,7 @@ async fn a_publisher_on_another_node_resumes_an_open_publication_from_the_store(
     let before = first.publications().await;
     assert_eq!(before[0].publication.published_revision, 1);
     // The first process dies: its workers stop, its projection is gone.
-    first.service.shutdown().await;
+    first.coordinator.shutdown_reply_publication().await;
 
     // A fresh process over the same store observes the run's terminal
     // commit. It has no in-memory document, so it rebuilds the terminal
@@ -887,8 +884,7 @@ async fn a_publisher_on_another_node_resumes_an_open_publication_from_the_store(
         .await;
     let second_kernel = Arc::new(FakeTurnKernel::default());
     second_kernel.set_status(TurnStatus::Completed);
-    let second = ReplyPublicationService::start(ReplyPublicationDeps {
-        coordinator,
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
         projection: Arc::new(ReplyProjection::new()),
         turn_coordinator: Arc::clone(&second_kernel) as Arc<dyn TurnCoordinator>,
         thread_service: Arc::clone(&first.threads) as Arc<dyn SessionThreadService>,
@@ -897,8 +893,10 @@ async fn a_publisher_on_another_node_resumes_an_open_publication_from_the_store(
         project_filesystem: Arc::new(crate::NoProjectFilesystem),
         session_channel: None,
         settings: settings(),
-    });
-    second.run_terminal(&first.scope, first.run_id).await;
+    }));
+    coordinator
+        .reply_run_terminal(&first.scope, first.run_id)
+        .await;
     let settled = wait_until(|| async {
         first
             .publications()
@@ -946,8 +944,8 @@ async fn a_publisher_on_another_node_resumes_an_open_publication_from_the_store(
 async fn a_live_lease_held_elsewhere_is_respected_until_it_lapses() {
     let harness = harness("held", ReplyTransport::Message, None);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     let record = harness.publications().await.remove(0);
@@ -998,8 +996,7 @@ async fn a_channel_that_cannot_reply_is_refused_at_registration() {
         Arc::new(NoDeliveryRegistrations),
         DeliveryRetryPolicy::default(),
     ));
-    let service = ReplyPublicationService::start(ReplyPublicationDeps {
-        coordinator,
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
         projection: Arc::clone(&harness.projection),
         turn_coordinator: Arc::clone(&harness.kernel) as Arc<dyn TurnCoordinator>,
         thread_service: Arc::clone(&harness.threads) as Arc<dyn SessionThreadService>,
@@ -1008,9 +1005,9 @@ async fn a_channel_that_cannot_reply_is_refused_at_registration() {
         project_filesystem: Arc::new(crate::NoProjectFilesystem),
         session_channel: None,
         settings: settings(),
-    });
-    let error = service
-        .register_target(harness.registration(ReplyAudience::Private))
+    }));
+    let error = coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap_err();
     assert!(
@@ -1031,8 +1028,8 @@ async fn an_idle_stream_target_is_reconciled_at_the_heartbeat_point_but_a_messag
     fast.heartbeat_interval = Duration::from_millis(30);
     let harness = harness_with_settings("heartbeat", ReplyTransport::Stream, fast);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     harness.text("working on it");
@@ -1062,8 +1059,8 @@ async fn an_idle_stream_target_is_reconciled_at_the_heartbeat_point_but_a_messag
 
     let quiet = harness_with_settings("heartbeat-message", ReplyTransport::Message, fast);
     quiet
-        .service
-        .register_target(quiet.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(quiet.registration(ReplyAudience::Private))
         .await
         .unwrap();
     quiet.text("working on it");
@@ -1088,8 +1085,8 @@ async fn a_checkpoint_returned_with_a_retryable_outcome_is_persisted_for_the_ret
         ReplySinkOutcome::Applied,
     ]);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     harness.text("first");
@@ -1111,8 +1108,8 @@ async fn a_text_microburst_coalesces_and_the_latest_text_precedes_tool_activity(
     paced.min_progress_interval = Duration::from_millis(15);
     let harness = harness_with_settings("microburst", ReplyTransport::Stream, paced);
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     let activity_id = ironclaw_host_api::turn::CapabilityActivityId::new();
@@ -1298,8 +1295,8 @@ async fn terminal_attachments_ride_the_terminal_reconcile_with_their_workspace_b
         Arc::clone(&files) as Arc<dyn crate::ProjectFilesystemReader>,
     );
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     harness.text("drafting");
@@ -1361,8 +1358,8 @@ async fn a_missing_or_oversized_workspace_file_fails_the_publication_closed() {
         Arc::clone(&files) as Arc<dyn crate::ProjectFilesystemReader>,
     );
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     harness
@@ -1408,8 +1405,8 @@ async fn a_missing_or_oversized_workspace_file_fails_the_publication_closed() {
         Arc::clone(&files) as Arc<dyn crate::ProjectFilesystemReader>,
     );
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     let too_many = (0..=ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_count)
@@ -1446,8 +1443,8 @@ async fn an_unavailable_workspace_reader_is_retried_then_fails_closed_as_transpo
         Arc::clone(&files) as Arc<dyn crate::ProjectFilesystemReader>,
     );
     harness
-        .service
-        .register_target(harness.registration(ReplyAudience::Private))
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
         .await
         .unwrap();
     harness
@@ -1471,3 +1468,5 @@ async fn an_unavailable_workspace_reader_is_retried_then_fails_closed_as_transpo
     );
     assert!(harness.sink.requests().is_empty());
 }
+
+mod ordering_and_recovery;

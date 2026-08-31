@@ -360,6 +360,7 @@ fn delivery_run_services(
     let coordinator = services
         .delivery_coordinator()
         .expect("composition built the delivery coordinator");
+    harness.start_reply_publication_for_test(services);
     let fallback_notice_scope = TurnScope::new_with_owner(
         harness.binding.tenant_id.clone(),
         harness.binding.agent_id.clone(),
@@ -380,7 +381,6 @@ fn delivery_run_services(
         route_store,
         communication_preferences,
         notification_inbox: None,
-        reply_publication: harness.reply_publication_for_test(services),
         delivery_targets,
         coordinator,
         extension_id: extension_id.to_string(),
@@ -986,6 +986,7 @@ fn start_channel_host_assembly(
                 .expect("group thread service"),
             turn_coordinator: inbound.turn_coordinator_for_test(),
             run_delivery_settings: RunDeliverySettings::default(),
+            reply_projection: inbound.reply_projection_for_test(),
             identity: ChannelHostIdentity {
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
@@ -1585,6 +1586,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply_impl(storage: St
                 .expect("group thread service"),
             turn_coordinator: inbound.turn_coordinator_for_test(),
             run_delivery_settings: RunDeliverySettings::default(),
+            reply_projection: inbound.reply_projection_for_test(),
             identity: ChannelHostIdentity {
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
@@ -2527,6 +2529,7 @@ async fn telegram_install_reports_already_linked_for_a_caller_with_a_satisfied_d
                 .expect("group thread service"),
             turn_coordinator: lifecycle.turn_coordinator_for_test(),
             run_delivery_settings: RunDeliverySettings::default(),
+            reply_projection: lifecycle.reply_projection_for_test(),
             identity: ChannelHostIdentity {
                 tenant_id: lifecycle.binding.tenant_id.clone(),
                 agent_id: lifecycle
@@ -2769,6 +2772,7 @@ async fn paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_re
                 .expect("group thread service"),
             turn_coordinator: inbound.turn_coordinator_for_test(),
             run_delivery_settings: RunDeliverySettings::default(),
+            reply_projection: inbound.reply_projection_for_test(),
             identity: ChannelHostIdentity {
                 tenant_id: inbound.binding.tenant_id.clone(),
                 agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),

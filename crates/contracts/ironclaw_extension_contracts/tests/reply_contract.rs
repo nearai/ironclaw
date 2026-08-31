@@ -349,10 +349,6 @@ fn activity_fan_out_is_bounded_and_unknown_finishes_are_recorded_not_dropped() {
         sparse.activities[0].state,
         ReplyActivityState::Failed { .. }
     ));
-    assert!(
-        !sparse.activity_progress(&item("never-seen"), None),
-        "progress on an unknown row folds nothing"
-    );
 }
 
 #[test]
@@ -492,7 +488,13 @@ fn retryable_outcomes_carry_a_typed_retry_after_hint() {
         checkpoint: None,
         evidence: ReplySinkEvidence::default(),
     };
-    assert_eq!(report.outcome.retry_after(), Some(Duration::from_secs(3)));
+    assert!(matches!(
+        report.outcome,
+        ReplySinkOutcome::Retryable {
+            retry_after: Some(hint),
+            ..
+        } if hint == Duration::from_secs(3)
+    ));
     assert!(!report.outcome.is_applied());
     assert_eq!(report.outcome.kind_name(), "retryable");
 }

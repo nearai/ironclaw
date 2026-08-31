@@ -210,4 +210,14 @@ impl DeliveryCoordinator {
     ) -> Result<Vec<ReplyPublicationRecord>, CoordinatedDeliveryError> {
         Ok(self.store.list_reply_publications(scope, run_id).await?)
     }
+
+    /// Every publication still `Active` in the caller's tenant — the
+    /// boot-time crash-recovery read behind
+    /// [`DeliveryCoordinator::resume_reply_publications`].
+    pub(crate) async fn list_open_reply_publications(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ReplyPublicationRecord>, CoordinatedDeliveryError> {
+        Ok(self.store.list_open_reply_publications(scope).await?)
+    }
 }
