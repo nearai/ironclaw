@@ -1207,6 +1207,52 @@ impl RebornIntegrationHarness {
         Arc::clone(&self.coordinator)
     }
 
+    /// The reply projection the group's planned runtime composes every run's
+    /// document into (see `GroupSharedStorage::reply_projection`).
+    pub(crate) fn reply_projection_for_test(
+        &self,
+    ) -> Arc<ironclaw_assistant::reply_projection::ReplyProjection> {
+        Arc::clone(&self._shared.reply_projection)
+    }
+
+    /// A reply publication service over the group's REAL kernel handles (the
+    /// coordinator and thread service the caller's runs actually live in)
+    /// and the composed runtime's delivery coordinator. A test that wires its
+    /// own `RunDeliveryObserver` uses this instead of the composed runtime's
+    /// own service: that runtime's turn store is the capability harness's
+    /// disjoint bootstrap store (see `turn_coordinator_for_test`), so its
+    /// terminal-fact reads would never find the group's runs.
+    pub(crate) fn reply_publication_for_test(
+        &self,
+        services: &ironclaw_composition::RebornRuntime,
+    ) -> Arc<ironclaw_assistant::reply_publication::ReplyPublicationService> {
+        use ironclaw_assistant::reply_publication::{
+            KernelTerminalReplyFacts, ReplyPublicationDeps, ReplyPublicationService,
+            ReplyPublicationSettings, TurnCoordinatorStopRequester,
+        };
+        let coordinator = services
+            .delivery_coordinator()
+            .expect("composition built the delivery coordinator");
+        let thread_service = self
+            .thread_service_for_test()
+            .expect("group thread service");
+        ReplyPublicationService::start(ReplyPublicationDeps {
+            coordinator,
+            projection: self.reply_projection_for_test(),
+            terminal_facts: Arc::new(KernelTerminalReplyFacts::new(
+                self.turn_coordinator_for_test(),
+                thread_service,
+            )),
+            stop_requests: Arc::new(TurnCoordinatorStopRequester::new(
+                self.turn_coordinator_for_test(),
+            )),
+            attention: None,
+            project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+            session_channel: None,
+            settings: ReplyPublicationSettings::default(),
+        })
+    }
+
     /// The group-shared turn-state store paired with
     /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
     /// inspect or resume the caller's real runs use this pair instead of the

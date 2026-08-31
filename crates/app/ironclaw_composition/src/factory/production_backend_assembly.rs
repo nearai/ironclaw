@@ -487,6 +487,13 @@ pub(super) async fn build_backend_production(
     let outbound_delivery_targets =
         Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
     // arch-exempt: large_file, channel assembly stays co-located pending factory decomposition, plan #7477
+    // The authenticated-session channel's `[channel.reply]` is host-served:
+    // its edge is the product projection stream, so the sink is product-tier
+    // and only composition can construct it. Bind it before the bindings are
+    // loaded, so activation checks it like any package-bound half.
+    let mut channel_extension_bindings = channel_extension_bindings;
+    let (projection_reply_sink, session_reply_channel) =
+        bind_host_owned_reply_sinks(&mut channel_extension_bindings)?;
     // Extension-owned catalog providers arrive opaquely on channel bindings (e.g.
     // web-app's constant per-user entry); register by extension id.
     for binding in &channel_extension_bindings {
@@ -1345,8 +1352,6 @@ pub(super) async fn build_backend_production(
     // path built no coordinator: with no channel egress transport there is
     // nothing to deliver through, and the tool stays fail-closed.
     if let Some(coordinator) = channel_host_wiring.delivery_coordinator.as_ref() {
-        let model_delivery_project_filesystem =
-            model_delivery_project_filesystem(&stores.filesystem, &runtime_workspace_mounts);
         let target_codecs = channel_extension_bindings
             .iter()
             .filter_map(|binding| binding.preference_target_codec.clone())
@@ -1371,7 +1376,6 @@ pub(super) async fn build_backend_production(
                     // the same caller-scoped workspace view the channel-host
                     // delivery services read so the contract holds if that
                     // ever changes.
-                    project_filesystem: model_delivery_project_filesystem,
                     fallback_agent_id: turn_state_scope
                         .agent_id
                         .clone()
@@ -1473,6 +1477,8 @@ pub(super) async fn build_backend_production(
         standalone_wasm_runtime_credential_provider_captured,
         credential_refresh_worker,
         channel_extension_bindings,
+        projection_reply_sink,
+        session_reply_channel,
         deployment_channels,
         extension_ingress: channel_host_wiring.extension_ingress,
         channel_pairing: channel_pairing_registry,
@@ -1688,55 +1694,52 @@ pub(super) async fn build_postgres_production(
     .await
 }
 
-/// The caller-scoped project-filesystem view `builtin.outbound_deliver`'s
-/// coordinator requests carry. Mirrors `channel_host_source`'s reader wiring;
-/// falls back to an empty-view reader when no workspace mount is composed
-/// (nothing can materialize either way — model deliveries carry no
-/// attachments).
-fn model_delivery_project_filesystem(
-    filesystem: &Arc<CompositeRootFilesystem>,
-    workspace_mounts: &crate::runtime_mounts::WorkspaceMountPolicy,
-) -> Arc<dyn ironclaw_assistant::ProjectFilesystemReader> {
-    match crate::runtime_mounts::read_write_workspace_filesystem(filesystem, workspace_mounts) {
-        Some(inbound_filesystem) => Arc::new(
-            ironclaw_assistant::ProjectScopedFilesystemReader::with_max_read_bytes(
-                inbound_filesystem,
-                ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
-            ),
-        ),
-        None => Arc::new(EmptyModelDeliveryProjectFilesystem),
-    }
-}
-
-/// Empty project view used only when composition has no read-write workspace
-/// mount. Explicit model deliveries never carry attachments, so absence of a
-/// workspace must not disable otherwise healthy channel egress.
-struct EmptyModelDeliveryProjectFilesystem;
-
-#[async_trait::async_trait]
-impl ironclaw_assistant::ProjectFilesystemReader for EmptyModelDeliveryProjectFilesystem {
-    async fn list_dir(
-        &self,
-        _thread_scope: &ironclaw_threads::ThreadScope,
-        _path: &str,
-    ) -> Result<Vec<ironclaw_assistant::ProjectFsEntry>, ironclaw_assistant::ProjectFsError> {
-        Err(ironclaw_assistant::ProjectFsError::NotFound)
-    }
-
-    async fn read_file(
-        &self,
-        _thread_scope: &ironclaw_threads::ThreadScope,
-        _path: &str,
-    ) -> Result<ironclaw_host_api::attachment::WorkspaceFile, ironclaw_assistant::ProjectFsError>
+/// Bind one product projection reply sink as the reply half of every channel
+/// binding the binary marked `host_owned_reply`. Returns the sink so the
+/// runtime can attach the live projection publisher once the projection graph
+/// exists; `None` when no binding asked for it (composition paths without a
+/// session channel). A binding that carries its own reply *and* asks for the
+/// host-owned one is a wiring bug and fails the build rather than silently
+/// picking one.
+fn bind_host_owned_reply_sinks(
+    bindings: &mut [crate::input::ChannelExtensionBinding],
+) -> Result<
+    (
+        Option<Arc<ironclaw_assistant::projection::reply_sink::ProjectionReplySink>>,
+        Option<ironclaw_host_api::ids::ExtensionId>,
+    ),
+    RebornBuildError,
+> {
+    let mut sink: Option<Arc<ironclaw_assistant::projection::reply_sink::ProjectionReplySink>> =
+        None;
+    let mut session_channel: Option<ironclaw_host_api::ids::ExtensionId> = None;
+    for binding in bindings
+        .iter_mut()
+        .filter(|binding| binding.host_owned_reply)
     {
-        Err(ironclaw_assistant::ProjectFsError::NotFound)
+        if let Some(existing) = &session_channel {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "two channel bindings ({existing} and {}) declare a host-owned reply; a deployment has one session channel",
+                    binding.extension_id
+                ),
+            });
+        }
+        session_channel = Some(binding.extension_id.clone());
+        if binding.surfaces.reply.is_some() {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "channel binding for {} declares a host-owned reply but also binds its own reply sink",
+                    binding.extension_id
+                ),
+            });
+        }
+        let shared = sink.get_or_insert_with(|| {
+            Arc::new(ironclaw_assistant::projection::reply_sink::ProjectionReplySink::new())
+        });
+        binding.surfaces = std::mem::take(&mut binding.surfaces).with_reply(
+            Arc::clone(shared) as Arc<dyn ironclaw_extension_contracts::reply::ReplySink>
+        );
     }
-
-    async fn stat(
-        &self,
-        _thread_scope: &ironclaw_threads::ThreadScope,
-        _path: &str,
-    ) -> Result<ironclaw_assistant::ProjectFsStat, ironclaw_assistant::ProjectFsError> {
-        Err(ironclaw_assistant::ProjectFsError::NotFound)
-    }
+    Ok((sink, session_channel))
 }

@@ -1305,12 +1305,10 @@ async fn deliver_pre_submit_failure_to_target(
         .deliver(
             &outbound_policy,
             context.target_resolver,
-            context.services.project_filesystem.as_ref(),
             CoordinatedDeliveryRequest {
                 intent: DeliveryIntent::BackgroundRunNotice,
                 delivery,
                 parts: vec![OutboundPart::Text(context.text.to_string())],
-                attachments: Vec::new(),
                 thread_anchor: None,
                 require_direct_message_target: false,
                 extension_id: &target.extension_id,

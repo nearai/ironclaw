@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::channel_adapter::ChannelSurfaces;
 use ironclaw_extension_contracts::channel_adapter::{
     ChannelError, ChannelIngress, InboundOutcome, OutboundEnvelope, OutboundPart, OutboundTarget,
@@ -43,7 +44,11 @@ fn scripted_bot_api(request: &RestrictedEgressRequest) -> RestrictedEgressRespon
         // setWebhook / deleteWebhook and friends.
         br#"{"ok":true,"result":true}"#.to_vec()
     };
-    RestrictedEgressResponse { status: 200, body }
+    RestrictedEgressResponse {
+        retry_after: None,
+        status: 200,
+        body,
+    }
 }
 
 #[tokio::test]
@@ -58,6 +63,10 @@ async fn telegram_adapter_satisfies_the_conformance_contract() {
                 .with_reply(adapter.clone())
                 .with_delivery(adapter)
         },
+        // The manifest's `[channel.reply] transport`: the sink is driven at
+        // message cadence — the terminal materialization plus an idempotent
+        // repeat with the checkpoint it minted.
+        reply_transport: Some(ReplyTransport::Message),
         extension_id: "telegram".to_string(),
         installation_id: "install_alpha".to_string(),
         message_inbound: Some(ConformanceInbound {

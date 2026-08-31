@@ -331,10 +331,28 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
             .map_err(map_runtime_http_error)?;
 
         Ok(RestrictedEgressResponse {
+            retry_after: retry_after_hint(&response.headers),
             status: response.status,
             body: response.body,
         })
     }
+}
+
+/// The longest `Retry-After` a provider may park a publisher for. A hostile
+/// or misconfigured provider sending an enormous value would otherwise stall
+/// a reply indefinitely; anything above the cap is clamped to it.
+const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Parse the delta-seconds form of `Retry-After` (RFC 9110 §10.2.3) into the
+/// one typed response-header hint adapters may see. The HTTP-date form is
+/// deliberately not parsed: it needs a clock the adapter cannot verify, and
+/// every rate-limiting provider this host talks to sends delta-seconds.
+fn retry_after_hint(headers: &[(String, String)]) -> Option<std::time::Duration> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+        .map(|seconds| std::time::Duration::from_secs(seconds).min(RETRY_AFTER_CAP))
 }
 
 fn credential_target_with_body_limit(
@@ -702,5 +720,29 @@ mod tests {
             requests.lock().unwrap().is_empty(),
             "no network activity without credential material"
         );
+    }
+
+    #[test]
+    fn retry_after_hint_parses_delta_seconds_case_insensitively_and_caps() {
+        let header = |name: &str, value: &str| vec![(name.to_string(), value.to_string())];
+        assert_eq!(
+            retry_after_hint(&header("Retry-After", "3")),
+            Some(std::time::Duration::from_secs(3))
+        );
+        assert_eq!(
+            retry_after_hint(&header("retry-after", " 12 ")),
+            Some(std::time::Duration::from_secs(12))
+        );
+        assert_eq!(
+            retry_after_hint(&header("Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT")),
+            None,
+            "the HTTP-date form is deliberately not parsed"
+        );
+        assert_eq!(
+            retry_after_hint(&header("Retry-After", "999999999")),
+            Some(RETRY_AFTER_CAP),
+            "a hostile value is clamped, never honoured"
+        );
+        assert_eq!(retry_after_hint(&[]), None);
     }
 }

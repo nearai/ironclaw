@@ -227,8 +227,12 @@ Notes on the sections:
   and intentionally binds no package ingress capability.
 - **`[channel.reply]` and `[channel.delivery]` are orthogonal axes.** Reply is
   source-routed back to a run's input; delivery is target-resolved and may
-  happen without a run. `reply.transport = "stream"` is host-owned and binds no
-  `ChannelReply`; message reply binds one. Every delivery section binds
+  happen without a run. Every declared `[channel.reply]` binds one
+  `ReplySink` (`ironclaw_extension_contracts::reply`); `transport` only sets
+  the cadence — `stream` sinks are reconciled at every point of the run's
+  reply document, `message` sinks at the terminal revision only. The
+  authenticated-session channel's sink is the host's projection sink, bound by
+  composition (`host_owned_reply`). Every delivery section binds
   `ChannelDelivery`.
 - **`[[channel.egress]]`** may narrow a host/method grant with exact `paths`,
   segment-bounded `path_prefixes`, and request/response byte limits. Empty path
@@ -379,7 +383,7 @@ pub struct ExtensionBindings {
 
 pub struct ChannelSurfaces {
     pub ingress: Option<Arc<dyn ChannelIngress>>,
-    pub reply: Option<Arc<dyn ChannelReply>>,
+    pub reply: Option<Arc<dyn ReplySink>>,
     pub delivery: Option<Arc<dyn ChannelDelivery>>,
 }
 ```
@@ -489,12 +493,15 @@ pub trait ChannelIngress: Send + Sync {
 }
 
 #[async_trait]
-pub trait ChannelReply: Send + Sync {
-    async fn send_reply(
+pub trait ReplySink: Send + Sync {
+    /// Converge the channel's presentation of one run's reply onto
+    /// `request.revision` (desired state, never an event): idempotent under
+    /// the sink's own checkpoint, truthful about ambiguity.
+    async fn reconcile(
         &self,
-        envelope: OutboundEnvelope,
+        request: ReplyReconcileRequest,
         egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError>;
+    ) -> Result<ReplySinkReport, ChannelError>;
 }
 
 #[async_trait]
@@ -626,7 +633,7 @@ one narrow call — or nothing:
 | --- | --- | --- |
 | Tool call | dispatcher (§5.2) | `ToolAdapter::invoke` |
 | Inbound message | ingress router (§5.3) | `ChannelIngress::receive` (or host session normalization) |
-| Run reply | delivery coordinator (§5.4) | `ChannelReply::send_reply` (or host projection stream) |
+| Run reply | reply publication over the delivery coordinator's attempt aggregate (§5.4; `docs/internal/design/2026-08-31-progressive-reply-publication.md`) | `ReplySink::reconcile` (the projection sink for the session channel) |
 | Target-resolved delivery | delivery coordinator (§5.4) | `ChannelDelivery::deliver` |
 | Auth | auth engine (§5.5) | recipe data only |
 
@@ -784,7 +791,7 @@ handler is not a second pipeline — it is one more caller of the same
 host-emitted intent, so the tool call *is* the coordinator path, not a
 shortcut around it.
 
-The coordinator is **not folded into `ChannelReply`/`ChannelDelivery`** for the
+The coordinator is **not folded into `ReplySink`/`ChannelDelivery`** for the
 same reason the dispatcher is not folded into `ToolAdapter` and the ingress
 router is not folded into `ChannelIngress::receive`: folding it in would hand every channel its own copy
 of retry/persistence/crash semantics, give adapters store access (a buggy or

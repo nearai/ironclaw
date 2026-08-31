@@ -14,6 +14,7 @@ mod ids;
 mod model_channel_delivery;
 mod outbound_state_store;
 mod reply_attachment_intents;
+mod reply_publication;
 mod resolution_engine;
 mod run_delivery_cleanup;
 mod service;
@@ -56,6 +57,15 @@ pub use model_channel_delivery::{
 pub use outbound_state_store::OutboundStateStore;
 pub use reply_attachment_intents::{
     ReplyAttachmentHandle, ReplyAttachmentIntent, ReplyAttachmentIntentPort,
+};
+pub use reply_publication::{
+    AdvanceReplyPublicationRequest, ClaimReplyPublicationLeaseRequest, OpenReplyPublicationRequest,
+    PublisherId, REPLY_PUBLICATION_IDENTIFIER_MAX_BYTES, ReleaseReplyPublicationLeaseRequest,
+    RenewReplyPublicationLeaseRequest, ReplyPublicationClaim, ReplyPublicationEvidence,
+    ReplyPublicationIdentifierError, ReplyPublicationLease, ReplyPublicationRecord,
+    ReplyPublicationSettlement, ReplyPublicationState, ReplyPublicationStatus,
+    ReplyPublicationTarget, ReplyPublicationTargetDescriptor, ReplyPublicationTargetKey,
+    SettleReplyPublicationRequest,
 };
 pub use run_delivery_cleanup::{
     MAX_RUN_DELIVERY_CLEANUP_RECORDS, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,

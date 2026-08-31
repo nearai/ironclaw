@@ -29,13 +29,24 @@ only through its own policy service.
   typed delivery requests into `CommunicationDeliveryCandidate` / `NoDelivery`.
 - Communication preferences, delivery targets, reply-attachment intents,
   run-final-reply handoff records, delivered gate routes, cleanup.
+- Progressive reply publication (`reply_publication`): the serde-defaulted
+  `ReplyPublicationState` substate on the persisted attempt row plus the
+  guarded `OutboundStateStorePort` operations `open_reply_publication` /
+  `claim_reply_publication_lease` / `renew_reply_publication_lease` /
+  `advance_reply_publication` / `settle_reply_publication` /
+  `release_reply_publication_lease` / `load_reply_publication` /
+  `list_reply_publications` (design
+  `docs/internal/design/2026-08-31-progressive-reply-publication.md` §5).
 
 ## Depends on / consumed by
 
 - **Normal deps (measured):** `ironclaw_attachments` (reuses
   `DEFAULT_ATTACHMENT_BUDGETS` for reply-attachment intents — the inventoried
-  same-layer edge), `ironclaw_event_projections`, `ironclaw_filesystem`,
-  `ironclaw_host_api` (incl. turn vocabulary).
+  same-layer edge), `ironclaw_event_projections`,
+  `ironclaw_extension_contracts` (the bounded reply-sink vocabulary —
+  `ReplySinkCheckpoint`, `ReplyProviderRefs`, `ReplyOutcomeReason` — carried
+  by the publication substate), `ironclaw_filesystem`, `ironclaw_host_api`
+  (incl. turn vocabulary).
 - **Consumed by (7):** `ironclaw_assistant`, `ironclaw_composition`,
   `ironclaw_event_streams`, `ironclaw_extension_host`,
   `ironclaw_host_runtime`, `ironclaw_loop_host`, `ironclaw_turn_runner`.
@@ -51,6 +62,14 @@ only through its own policy service.
 - **At-most-once:** delivery attempts reserve via CAS `Prepared → Sending`;
   scope/candidate identity mismatches are rejected before validator I/O or
   store writes — pinned by the two contract suites below.
+- **Publication ownership is a lease + fence, not the send claim:** a
+  progressively published reply keeps its one attempt row, whose
+  `publication` substate is written only under the current fence; settlement
+  is one-way, and `recover_interrupted_delivery_attempt` leaves publication
+  rows alone (they recover through lease expiry and takeover). Rows without
+  the substate are one-shot sends exactly as before — pinned by the
+  `reply_publication_*` and `legacy_delivery_attempt_rows_*` scenarios in
+  `outbound_state_store_contract` (in-memory and libSQL).
 - Every push target is a candidate until `ReplyTargetBindingValidator`
   revalidates the route; revoked authorization records a sanitized failure and
   returns no sendable target.

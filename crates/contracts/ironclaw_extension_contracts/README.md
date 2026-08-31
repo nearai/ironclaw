@@ -24,13 +24,13 @@ packages depend on product.
 18 shipped modules (`src/lib.rs` is the source of truth; the module-by-module
 charter table lives in [`AGENTS.md`](./AGENTS.md)). The load-bearing entries:
 
-- `channel_adapter` — `ChannelIngress`, `ChannelReply`, and `ChannelDelivery`
+- `channel_adapter` — `ChannelIngress` and `ChannelDelivery` (the reply half is `reply::ReplySink`)
   (a package implements only the capabilities its manifest selects) plus
   `ChannelSurfaces` and their DTO family (`NormalizedInboundMessage`/
   `InboundAttachment`, `OutboundEnvelope`/`Part`, `DeliveryReport`,
   `DirectTargetProvisionRequest`, `ChannelError`, `ProductTriggerReason`). Vendor
   webhook ingress pairs with `ChannelIngress`; message replies pair with
-  `ChannelReply`; delivery pairs with `ChannelDelivery`. Authenticated-session
+  a `reply::ReplySink` (stream or message cadence); delivery pairs with `ChannelDelivery`. Authenticated-session
   ingress and stream replies are host-owned, so those sections deliberately
   bind no adapter half. `ChannelDelivery` also has one optional, typed
   direct-target provisioning operation; it is deliberately not target search.

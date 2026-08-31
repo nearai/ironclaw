@@ -68,7 +68,9 @@ pub fn with_test_authenticated_session_channel(
             extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted(
                 TEST_SESSION_EXTENSION_ID.to_string(),
             ),
-            surfaces: ironclaw_extension_host::test_support::FakeChannelAdapter::delivery_only(),
+            host_owned_reply: false,
+            surfaces:
+                ironclaw_extension_host::test_support::FakeChannelAdapter::reply_and_delivery(),
             preference_target_codec: None,
             outbound_target_provider: None,
             first_party_initializer: None,

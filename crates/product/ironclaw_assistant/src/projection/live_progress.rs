@@ -1,15 +1,10 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Mutex, MutexGuard, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_event_log::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
+use ironclaw_event_log::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_event_projections::{
     CapabilityActivityStatus, ProjectionCursor as EventProjectionCursor,
     ProjectionScope as EventProjectionScope,
@@ -22,16 +17,12 @@ use ironclaw_host_api::{
     ids::{CapabilityId, ExtensionId, InvocationId, UserId},
     runtime::RuntimeKind,
 };
-use ironclaw_loop_contracts::{
-    AgentLoopHostError, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneKind,
-    LoopHostMilestoneSink, LoopSafeSummary, sanitize_model_visible_text,
-};
+use ironclaw_loop_contracts::sanitize_model_visible_text;
 use ironclaw_loop_host::{SkillActivationObservedEvent, SkillActivationObserver};
 use ironclaw_product_contracts::outbound::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
-    ProductWorkSummaryPhase,
+    PROJECTION_SKILL_NAME_MAX_BYTES, ProductProjectionItem, ProductWorkSummaryPhase,
 };
 use ironclaw_turns::{TurnRunId, TurnScope};
 
@@ -41,23 +32,6 @@ use ironclaw_turns::{TurnRunId, TurnScope};
 // same live broadcast would put low append-log cursors and high synthetic
 // cursors behind the same `last_delivered_cursor` ordering gate.
 const LIVE_PROGRESS_CURSOR_BASE: u64 = 1 << 62;
-// Cumulative model text is replaceable state, not a lossless event log. Bound
-// publication to one browser paint interval so provider bursts cannot overrun
-// projection subscribers while ordinary 20-50 ms provider cadence passes
-// through unchanged.
-const LIVE_TEXT_COALESCE_WINDOW: Duration = Duration::from_millis(16);
-// The runtime's concurrent-run limit is substantially lower. Keep this
-// defensive ceiling so a missing terminal milestone cannot turn phase
-// bookkeeping into unbounded process memory.
-const MAX_TRACKED_TEXT_PHASE_RUNS: usize = 1_024;
-
-pub(super) struct LiveProgressMilestoneSink {
-    inner: Arc<dyn LoopHostMilestoneSink>,
-    publisher: Arc<LiveProjectionPublisher>,
-    text_coalescer: Arc<LiveTextProjectionCoalescer>,
-    text_phase_by_run: RwLock<HashMap<TurnRunId, u64>>,
-}
-
 #[derive(Debug)]
 pub(super) struct LiveSkillActivationObserver {
     publisher: Arc<LiveProjectionPublisher>,
@@ -72,212 +46,12 @@ pub struct LiveProjectionPublisher {
     no_active_subscriber_logged: AtomicBool,
 }
 
-struct LiveTextProjectionCoalescer {
-    publisher: Arc<LiveProjectionPublisher>,
-    next_generation: AtomicU64,
-    publication_order: Mutex<()>,
-    states: Mutex<HashMap<TurnRunId, LiveTextProjectionState>>,
-}
-
-struct LiveTextProjectionState {
-    generation: u64,
-    last_published_at: tokio::time::Instant,
-    pending: Option<PendingTextProjection>,
-    timer_scheduled: bool,
-}
-
-struct PendingTextProjection {
-    owner: Option<UserId>,
-    scope: TurnScope,
-    run_id: TurnRunId,
-    id: String,
-    body: String,
-}
-
 impl std::fmt::Debug for LiveProjectionPublisher {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("LiveProjectionPublisher")
             .field("actor_user_id", &self.actor_user_id)
             .finish_non_exhaustive()
-    }
-}
-
-impl LiveProgressMilestoneSink {
-    pub(super) fn new(
-        inner: Arc<dyn LoopHostMilestoneSink>,
-        publisher: Arc<LiveProjectionPublisher>,
-    ) -> Self {
-        Self {
-            inner,
-            text_coalescer: Arc::new(LiveTextProjectionCoalescer::new(Arc::clone(&publisher))),
-            publisher,
-            text_phase_by_run: RwLock::new(HashMap::new()),
-        }
-    }
-
-    fn begin_text_phase(&self, run_id: TurnRunId) {
-        let mut phases = match self.text_phase_by_run.write() {
-            Ok(phases) => phases,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if !phases.contains_key(&run_id) && phases.len() >= MAX_TRACKED_TEXT_PHASE_RUNS {
-            tracing::debug!(
-                %run_id,
-                "live text phase tracker reached its bounded capacity"
-            );
-            return;
-        }
-        let next_phase = phases
-            .get(&run_id)
-            .copied()
-            .unwrap_or_default()
-            .saturating_add(1);
-        phases.insert(run_id, next_phase);
-    }
-
-    fn text_id(&self, run_id: TurnRunId) -> String {
-        let phases = match self.text_phase_by_run.read() {
-            Ok(phases) => phases,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        match phases.get(&run_id) {
-            Some(phase) => text_phase_id(run_id, *phase),
-            None => legacy_text_id(run_id),
-        }
-    }
-
-    fn finish_run(&self, run_id: TurnRunId) {
-        let mut phases = match self.text_phase_by_run.write() {
-            Ok(phases) => phases,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        phases.remove(&run_id);
-    }
-}
-
-impl LiveTextProjectionCoalescer {
-    fn new(publisher: Arc<LiveProjectionPublisher>) -> Self {
-        Self {
-            publisher,
-            next_generation: AtomicU64::new(0),
-            publication_order: Mutex::new(()),
-            states: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn submit(self: &Arc<Self>, projection: PendingTextProjection) {
-        let run_id = projection.run_id;
-        let mut timer = None;
-        let mut publish_projection = None;
-        {
-            let _publication_order = self.lock_publication_order();
-            {
-                let mut states = self.lock_states();
-                match states.get_mut(&run_id) {
-                    Some(state) => {
-                        state.pending = Some(projection);
-                        if !state.timer_scheduled {
-                            state.timer_scheduled = true;
-                            timer = Some((
-                                state.generation,
-                                state.last_published_at + LIVE_TEXT_COALESCE_WINDOW,
-                            ));
-                        }
-                    }
-                    None => {
-                        if states.len() >= MAX_TRACKED_TEXT_PHASE_RUNS {
-                            drop(states);
-                            self.publish(projection);
-                            return;
-                        }
-                        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
-                        states.insert(
-                            run_id,
-                            LiveTextProjectionState {
-                                generation,
-                                last_published_at: tokio::time::Instant::now(),
-                                pending: None,
-                                timer_scheduled: false,
-                            },
-                        );
-                        publish_projection = Some(projection);
-                    }
-                }
-            }
-            if let Some(projection) = publish_projection.take() {
-                self.publish(projection);
-            }
-        }
-
-        if let Some((generation, deadline)) = timer {
-            let coalescer = Arc::clone(self);
-            tokio::spawn(async move {
-                tokio::time::sleep_until(deadline).await;
-                coalescer.flush_timer(run_id, generation);
-            });
-        }
-    }
-
-    fn flush_boundary(&self, run_id: TurnRunId) {
-        let _publication_order = self.lock_publication_order();
-        let projection = {
-            let mut states = self.lock_states();
-            states.remove(&run_id).and_then(|state| state.pending)
-        };
-        if let Some(projection) = projection {
-            self.publish(projection);
-        }
-    }
-
-    fn flush_timer(&self, run_id: TurnRunId, generation: u64) {
-        let _publication_order = self.lock_publication_order();
-        let projection = {
-            let mut states = self.lock_states();
-            let Some(state) = states.get_mut(&run_id) else {
-                return;
-            };
-            if state.generation != generation {
-                return;
-            }
-            state.timer_scheduled = false;
-            let projection = state.pending.take();
-            if projection.is_some() {
-                state.last_published_at = tokio::time::Instant::now();
-            }
-            projection
-        };
-        if let Some(projection) = projection {
-            self.publish(projection);
-        }
-    }
-
-    fn publish(&self, projection: PendingTextProjection) {
-        let sequence = self.publisher.next_live_sequence();
-        self.publisher.publish_live_item(
-            projection.owner.as_ref(),
-            &projection.scope,
-            sequence,
-            ThreadLiveProjectionItem::Text {
-                id: projection.id,
-                run_id: projection.run_id,
-                body: projection.body,
-            },
-        );
-    }
-
-    fn lock_states(&self) -> MutexGuard<'_, HashMap<TurnRunId, LiveTextProjectionState>> {
-        match self.states.lock() {
-            Ok(states) => states,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    fn lock_publication_order(&self) -> MutexGuard<'_, ()> {
-        match self.publication_order.lock() {
-            Ok(order) => order,
-            Err(poisoned) => poisoned.into_inner(),
-        }
     }
 }
 
@@ -449,6 +223,7 @@ pub(super) fn product_items_for_live_update(
                 output_bytes,
                 error_kind,
                 error_detail,
+                input_summary,
             } => {
                 let running = display_previews.running_input(*invocation_id);
                 match CapabilityActivityView::new(CapabilityActivityViewInput {
@@ -464,7 +239,9 @@ pub(super) fn product_items_for_live_update(
                     error_kind: error_kind.clone(),
                     error_detail: error_detail.clone(),
                     subtitle: running.as_ref().and_then(|input| input.subtitle.clone()),
-                    input_summary: running.and_then(|input| input.input_summary),
+                    input_summary: input_summary
+                        .clone()
+                        .or_else(|| running.and_then(|input| input.input_summary)),
                     updated_at: Utc::now(),
                     activity_order: None,
                 }) {
@@ -517,107 +294,6 @@ fn live_work_summary_phase_to_product_phase(
     }
 }
 
-impl LiveProgressMilestoneSink {
-    fn publish_text_delta(&self, milestone: &LoopHostMilestone, safe_text: &str) {
-        // The model port already sanitizes chunks before milestone emission.
-        // Re-sanitize and bound here because this path is browser-facing.
-        let body = sanitize_bounded_projection_text(safe_text, PROJECTION_TEXT_MAX_BYTES);
-        if body.is_empty() {
-            return;
-        }
-        self.text_coalescer.submit(PendingTextProjection {
-            owner: milestone.actor.as_ref().map(|actor| actor.user_id.clone()),
-            scope: milestone.scope.clone(),
-            run_id: milestone.run_id,
-            id: self.text_id(milestone.run_id),
-            body,
-        });
-    }
-
-    fn publish_reasoning_delta(&self, milestone: &LoopHostMilestone, safe_delta: &str) {
-        // The delta is already model-visible sanitized upstream. Re-sanitize at
-        // the product projection boundary so this publish path has its own
-        // last-mile redaction gate before sending a browser-facing payload.
-        let safe_delta = sanitize_model_visible_text(safe_delta);
-        if safe_delta.is_empty() {
-            return;
-        }
-        let sequence = self.publisher.next_live_sequence();
-        self.publisher.publish_live_item(
-            milestone.actor.as_ref().map(|actor| &actor.user_id),
-            &milestone.scope,
-            sequence,
-            ThreadLiveProjectionItem::Thinking {
-                id: thinking_id(milestone.run_id, sequence),
-                run_id: milestone.run_id,
-                body: safe_delta,
-            },
-        );
-    }
-
-    fn publish_capability_activity(
-        &self,
-        milestone: &LoopHostMilestone,
-        invocation_id: InvocationId,
-        capability_id: &CapabilityId,
-        status: CapabilityActivityStatus,
-        terminal: TerminalCapabilityActivity,
-    ) {
-        let sequence = self.publisher.next_live_sequence();
-        self.publisher.publish_live_item(
-            milestone.actor.as_ref().map(|actor| &actor.user_id),
-            &milestone.scope,
-            sequence,
-            ThreadLiveProjectionItem::CapabilityActivity {
-                run_id: milestone.run_id,
-                invocation_id,
-                capability_id: capability_id.clone(),
-                status,
-                provider: terminal.provider,
-                runtime: terminal.runtime,
-                output_bytes: terminal.output_bytes,
-                error_kind: terminal.error_kind,
-                error_detail: terminal.error_detail,
-            },
-        );
-    }
-
-    fn publish_work_summary(
-        &self,
-        milestone: &LoopHostMilestone,
-        kind: LoopDriverNoteKind,
-        safe_summary: &str,
-    ) {
-        let body = sanitize_model_visible_text(safe_summary).trim().to_string();
-        if body.is_empty() {
-            return;
-        }
-        let body = match LoopSafeSummary::new(body) {
-            Ok(summary) => summary.to_string(),
-            Err(reason) => {
-                tracing::debug!(
-                    reason = %reason,
-                    run_id = %milestone.run_id,
-                    "live progress work summary rejected by boundary validation"
-                );
-                return;
-            }
-        };
-        let sequence = self.publisher.next_live_sequence();
-        self.publisher.publish_live_item(
-            milestone.actor.as_ref().map(|actor| &actor.user_id),
-            &milestone.scope,
-            sequence,
-            ThreadLiveProjectionItem::WorkSummary {
-                id: work_summary_id(milestone.run_id, sequence),
-                run_id: milestone.run_id,
-                phase: driver_note_kind_to_live_work_summary_phase(kind),
-                body,
-            },
-        );
-    }
-}
-
 impl SkillActivationObserver for LiveSkillActivationObserver {
     fn observe_skill_activation(&self, event: SkillActivationObservedEvent) {
         let skill_names = event
@@ -659,116 +335,6 @@ impl SkillActivationObserver for LiveSkillActivationObserver {
     }
 }
 
-#[async_trait]
-impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
-    async fn publish_loop_milestone(
-        &self,
-        milestone: LoopHostMilestone,
-    ) -> Result<(), AgentLoopHostError> {
-        self.inner.publish_loop_milestone(milestone.clone()).await?;
-        if !matches!(
-            &milestone.kind,
-            LoopHostMilestoneKind::ModelTextDelta { .. }
-        ) {
-            self.text_coalescer.flush_boundary(milestone.run_id);
-        }
-        match &milestone.kind {
-            LoopHostMilestoneKind::ModelStarted { .. } => {
-                self.begin_text_phase(milestone.run_id);
-            }
-            LoopHostMilestoneKind::ModelTextDelta { safe_text } => {
-                self.publish_text_delta(&milestone, safe_text);
-            }
-            LoopHostMilestoneKind::ModelReasoningDelta { safe_delta } => {
-                self.publish_reasoning_delta(&milestone, safe_delta);
-            }
-            LoopHostMilestoneKind::CapabilityInvoked {
-                activity_id,
-                capability_id,
-            } => {
-                self.publish_capability_activity(
-                    &milestone,
-                    InvocationId::from_uuid(activity_id.as_uuid()),
-                    capability_id,
-                    CapabilityActivityStatus::Started,
-                    TerminalCapabilityActivity::default(),
-                );
-            }
-            LoopHostMilestoneKind::CapabilityCompleted {
-                activity_id,
-                capability_id,
-                provider,
-                runtime,
-                output_bytes,
-            } => {
-                self.publish_capability_activity(
-                    &milestone,
-                    InvocationId::from_uuid(activity_id.as_uuid()),
-                    capability_id,
-                    CapabilityActivityStatus::Completed,
-                    TerminalCapabilityActivity {
-                        provider: Some(provider.clone()),
-                        runtime: Some(*runtime),
-                        output_bytes: Some(*output_bytes),
-                        error_kind: None,
-                        error_detail: None,
-                    },
-                );
-            }
-            LoopHostMilestoneKind::CapabilityFailed {
-                activity_id,
-                capability_id,
-                provider,
-                runtime,
-                reason_kind,
-                safe_summary,
-            } => {
-                self.publish_capability_activity(
-                    &milestone,
-                    InvocationId::from_uuid(activity_id.as_uuid()),
-                    capability_id,
-                    CapabilityActivityStatus::Failed,
-                    TerminalCapabilityActivity {
-                        provider: provider.clone(),
-                        runtime: *runtime,
-                        output_bytes: None,
-                        error_kind: Some(reason_kind.as_str().to_string()),
-                        error_detail: sanitized_capability_error_detail(
-                            safe_summary.as_ref().map(LoopSafeSummary::as_str),
-                        ),
-                    },
-                );
-            }
-            LoopHostMilestoneKind::DriverNote { kind, safe_summary } => {
-                self.publish_work_summary(&milestone, *kind, safe_summary.as_str());
-            }
-            LoopHostMilestoneKind::Completed { .. } | LoopHostMilestoneKind::Failed { .. } => {
-                self.finish_run(milestone.run_id);
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
-/// Sanitize and bound a host-authored capability failure summary for the live
-/// activity card. Returns `None` for absent/empty input so the card falls back
-/// to the bare error kind. The product-adapter boundary re-validates length and
-/// control chars.
-fn sanitized_capability_error_detail(safe_summary: Option<&str>) -> Option<String> {
-    let summary = safe_summary?;
-    sanitize_error_summary(summary)
-}
-
-#[derive(Default)]
-struct TerminalCapabilityActivity {
-    provider: Option<ExtensionId>,
-    runtime: Option<RuntimeKind>,
-    output_bytes: Option<u64>,
-    error_kind: Option<String>,
-    error_detail: Option<String>,
-}
-
 fn live_capability_activity_status(
     status: CapabilityActivityStatus,
 ) -> CapabilityActivityStatusView {
@@ -787,10 +353,6 @@ fn thinking_id(run_id: TurnRunId, sequence: u64) -> String {
 
 fn legacy_text_id(run_id: TurnRunId) -> String {
     format!("text:{run_id}")
-}
-
-fn text_phase_id(run_id: TurnRunId, phase: u64) -> String {
-    format!("text:{run_id}:{phase}")
 }
 
 fn work_summary_id(run_id: TurnRunId, sequence: u64) -> String {
@@ -814,27 +376,279 @@ fn sanitize_bounded_model_visible_text(value: &str, max_bytes: usize) -> String 
     trimmed[..end].trim_end().to_string()
 }
 
-fn sanitize_bounded_projection_text(value: &str, max_bytes: usize) -> String {
-    let sanitized = sanitize_model_visible_text(value);
-    if sanitized.len() <= max_bytes {
-        return sanitized;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !sanitized.is_char_boundary(end) {
-        end -= 1;
-    }
-    sanitized[..end].to_string()
+// ── Reply-publication edge ───────────────────────────────────────────────
+//
+// The product projection reply sink hands each reconciled revision here. The
+// document is desired state, so the publisher diffs it against a bounded,
+// host-persisted checkpoint and republishes only the facets that changed;
+// stable item ids make even a full republish idempotent for the browser.
+
+/// Checkpoint version the projection publisher writes. A checkpoint of any
+/// other version is ignored (everything is republished), never misread.
+const PROJECTION_REPLY_CHECKPOINT_VERSION: u32 = 1;
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct ProjectionReplyCheckpoint {
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    answer_len: usize,
+    /// Fingerprint of the published answer text: a rewrite that keeps the
+    /// same length must still republish.
+    #[serde(default)]
+    answer_fingerprint: u64,
+    #[serde(default)]
+    answer_finalized: bool,
+    #[serde(default)]
+    reasoning_segments: usize,
+    /// The highest activity `updated_ordinal` already published.
+    #[serde(default)]
+    activity_ordinal: u64,
+    #[serde(default)]
+    status: Option<String>,
+    /// How many status lines were published; mints unique work-summary ids.
+    #[serde(default)]
+    status_publications: u64,
 }
 
-fn driver_note_kind_to_live_work_summary_phase(
-    kind: LoopDriverNoteKind,
-) -> ThreadLiveWorkSummaryPhase {
-    match kind {
-        LoopDriverNoteKind::Planning => ThreadLiveWorkSummaryPhase::Planning,
-        LoopDriverNoteKind::Waiting => ThreadLiveWorkSummaryPhase::Waiting,
-        LoopDriverNoteKind::Retrying => ThreadLiveWorkSummaryPhase::Retrying,
-        LoopDriverNoteKind::Context | LoopDriverNoteKind::EventSubscriptionTerminated => {
-            ThreadLiveWorkSummaryPhase::Context
+impl ProjectionReplyCheckpoint {
+    fn restore(
+        checkpoint: Option<&ironclaw_extension_contracts::reply::ReplySinkCheckpoint>,
+    ) -> Self {
+        let Some(checkpoint) = checkpoint else {
+            return Self::default();
+        };
+        if checkpoint.version() != PROJECTION_REPLY_CHECKPOINT_VERSION {
+            return Self::default();
         }
+        serde_json::from_str(checkpoint.payload()).unwrap_or_default() // silent-ok: an unreadable checkpoint republishes every facet, which stable ids make idempotent
+    }
+
+    fn seal(
+        &self,
+    ) -> Result<
+        ironclaw_extension_contracts::reply::ReplySinkCheckpoint,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        let payload = serde_json::to_string(self).map_err(|error| {
+            ironclaw_extension_contracts::channel_adapter::ChannelError::Render {
+                reason: format!("projection reply checkpoint could not be encoded: {error}"),
+            }
+        })?;
+        ironclaw_extension_contracts::reply::ReplySinkCheckpoint::new(
+            PROJECTION_REPLY_CHECKPOINT_VERSION,
+            payload,
+        )
+        .map_err(|error| {
+            ironclaw_extension_contracts::channel_adapter::ChannelError::Render {
+                reason: format!("projection reply checkpoint exceeds its bound: {error}"),
+            }
+        })
+    }
+}
+
+impl LiveProjectionPublisher {
+    /// Publish the facets of `request.revision` that changed since the
+    /// checkpoint as live projection items, and return the next checkpoint.
+    pub(crate) fn publish_reply_revision(
+        &self,
+        request: &ironclaw_extension_contracts::reply::ReplyReconcileRequest,
+    ) -> Result<
+        ironclaw_extension_contracts::reply::ReplySinkCheckpoint,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        use ironclaw_extension_contracts::reply::ReplyActivityState;
+
+        let mut checkpoint = ProjectionReplyCheckpoint::restore(request.checkpoint.as_ref());
+        let document = &request.revision.document;
+        let target = &request.target;
+        let owner = Some(&target.actor.user_id);
+        let scope = &target.scope;
+        let run_id = target.run_id;
+
+        for segment in document
+            .reasoning
+            .iter()
+            .skip(checkpoint.reasoning_segments)
+        {
+            let sequence = self.next_live_sequence();
+            self.publish_live_item(
+                owner,
+                scope,
+                sequence,
+                ThreadLiveProjectionItem::Thinking {
+                    id: thinking_id(run_id, sequence),
+                    run_id,
+                    body: segment.as_str().to_string(),
+                },
+            );
+        }
+        checkpoint.reasoning_segments = document.reasoning.len();
+
+        let answer = document.answer.text.as_str();
+        let answer_fingerprint = text_fingerprint(answer);
+        if !answer.is_empty()
+            && (answer.len() != checkpoint.answer_len
+                || answer_fingerprint != checkpoint.answer_fingerprint
+                || document.answer.finalized != checkpoint.answer_finalized)
+        {
+            let sequence = self.next_live_sequence();
+            self.publish_live_item(
+                owner,
+                scope,
+                sequence,
+                ThreadLiveProjectionItem::Text {
+                    id: legacy_text_id(run_id),
+                    run_id,
+                    body: answer.to_string(),
+                },
+            );
+        }
+        checkpoint.answer_len = answer.len();
+        checkpoint.answer_fingerprint = answer_fingerprint;
+        checkpoint.answer_finalized = document.answer.finalized;
+
+        let mut highest_ordinal = checkpoint.activity_ordinal;
+        for activity in document
+            .activities
+            .iter()
+            .filter(|activity| activity.updated_ordinal > checkpoint.activity_ordinal)
+        {
+            highest_ordinal = highest_ordinal.max(activity.updated_ordinal);
+            let Ok(invocation) = uuid::Uuid::parse_str(activity.id.as_str()) else {
+                tracing::debug!(
+                    activity_id = %activity.id,
+                    "reply activity id is not an invocation identity; not projected as a capability card"
+                );
+                continue;
+            };
+            let Ok(capability_id) = CapabilityId::new(activity.title.as_str()) else {
+                tracing::debug!(
+                    activity_id = %activity.id,
+                    "reply activity title is not a capability id; not projected as a capability card"
+                );
+                continue;
+            };
+            let (status, error_kind, error_detail) = match &activity.state {
+                ReplyActivityState::Started => (CapabilityActivityStatus::Started, None, None),
+                ReplyActivityState::Running => (CapabilityActivityStatus::Running, None, None),
+                ReplyActivityState::Completed => (CapabilityActivityStatus::Completed, None, None),
+                ReplyActivityState::Failed { kind } => (
+                    CapabilityActivityStatus::Failed,
+                    Some(kind.as_str().to_string()),
+                    activity
+                        .output_preview
+                        .as_ref()
+                        .map(|preview| preview.as_str().to_string()),
+                ),
+                ReplyActivityState::Killed => (CapabilityActivityStatus::Killed, None, None),
+            };
+            let sequence = self.next_live_sequence();
+            self.publish_live_item(
+                owner,
+                scope,
+                sequence,
+                ThreadLiveProjectionItem::CapabilityActivity {
+                    run_id,
+                    invocation_id: InvocationId::from_uuid(invocation),
+                    capability_id,
+                    status,
+                    provider: activity
+                        .provenance
+                        .as_ref()
+                        .and_then(|p| p.provider.as_ref())
+                        .and_then(|provider| ExtensionId::new(provider.as_str()).ok()),
+                    runtime: activity
+                        .provenance
+                        .as_ref()
+                        .and_then(|p| p.runtime.as_ref())
+                        .and_then(|runtime| runtime_kind_from_display(runtime.as_str())),
+                    output_bytes: activity.provenance.as_ref().and_then(|p| p.output_bytes),
+                    error_kind,
+                    error_detail,
+                    input_summary: activity
+                        .detail
+                        .as_ref()
+                        .map(|detail| detail.as_str().to_string()),
+                },
+            );
+        }
+        checkpoint.activity_ordinal = highest_ordinal;
+
+        let status = document
+            .status
+            .as_ref()
+            .map(|status| status.as_str().to_string());
+        if status != checkpoint.status
+            && let Some(body) = &status
+        {
+            checkpoint.status_publications = checkpoint.status_publications.saturating_add(1);
+            let sequence = self.next_live_sequence();
+            self.publish_live_item(
+                owner,
+                scope,
+                sequence,
+                ThreadLiveProjectionItem::WorkSummary {
+                    id: work_summary_id(run_id, sequence),
+                    run_id,
+                    phase: document
+                        .status_kind
+                        .map(reply_status_kind_to_live_work_summary_phase)
+                        .unwrap_or_else(|| reply_phase_to_live_work_summary_phase(document.phase)),
+                    body: body.clone(),
+                },
+            );
+        }
+        checkpoint.status = status;
+        checkpoint.revision = request.revision.revision;
+        checkpoint.seal()
+    }
+}
+
+/// The runtime lane a provenance display text names; the display text is the
+/// lane's own `as_str()`, so this is the inverse of that mapping.
+fn runtime_kind_from_display(text: &str) -> Option<RuntimeKind> {
+    [
+        RuntimeKind::Wasm,
+        RuntimeKind::Mcp,
+        RuntimeKind::Script,
+        RuntimeKind::Sandbox,
+        RuntimeKind::FirstParty,
+        RuntimeKind::System,
+    ]
+    .into_iter()
+    .find(|kind| kind.as_str() == text)
+}
+
+fn text_fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn reply_status_kind_to_live_work_summary_phase(
+    kind: ironclaw_extension_contracts::reply::ReplyStatusKind,
+) -> ThreadLiveWorkSummaryPhase {
+    use ironclaw_extension_contracts::reply::ReplyStatusKind;
+    match kind {
+        ReplyStatusKind::Planning => ThreadLiveWorkSummaryPhase::Planning,
+        ReplyStatusKind::Waiting => ThreadLiveWorkSummaryPhase::Waiting,
+        ReplyStatusKind::Retrying => ThreadLiveWorkSummaryPhase::Retrying,
+        ReplyStatusKind::Context => ThreadLiveWorkSummaryPhase::Context,
+    }
+}
+
+fn reply_phase_to_live_work_summary_phase(
+    phase: ironclaw_extension_contracts::reply::ReplyPhase,
+) -> ThreadLiveWorkSummaryPhase {
+    use ironclaw_extension_contracts::reply::ReplyPhase;
+    match phase {
+        ReplyPhase::Preparing | ReplyPhase::Thinking => ThreadLiveWorkSummaryPhase::Planning,
+        ReplyPhase::WaitingForInput => ThreadLiveWorkSummaryPhase::Waiting,
+        ReplyPhase::Working
+        | ReplyPhase::Completed
+        | ReplyPhase::Failed
+        | ReplyPhase::Cancelled => ThreadLiveWorkSummaryPhase::Context,
     }
 }

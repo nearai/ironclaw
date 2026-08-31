@@ -348,13 +348,17 @@ display_name = "Slack messages"
 conversation_model = "continuous"
 commands = ["model", "status", "new", "stop", "interrupt"]
 
-# For a conversational vendor the two axes happen to share one mechanism — a
-# message in the conversation — which is exactly why the reply/delivery
-# distinction stayed invisible until a streaming channel existed. They are
-# still declared separately: `message` twice is a coincidence of transport,
-# not one concept.
+# The two output axes are declared separately because they are two concepts.
+# The reply half streams: the run's answer is published progressively into
+# Slack's native Agent surface (`agents.sessions.setStatus` → `chat.startStream`
+# → `chat.appendStream` → `chat.stopStream`), so the host reconciles the bound
+# `ReplySink` at every revision. The delivery half stays a plain message: an
+# out-of-band notice (a connect nudge, a busy hint, a gate prompt on the
+# message lane) is one `chat.postMessage`/`chat.postEphemeral` in the
+# conversation. A workspace whose app is not an Agent (`feature_disabled`)
+# fails the reply clearly — there is no conventional-message fallback.
 [channel.reply]
-transport = "message"
+transport = "stream"
 
 [channel.delivery]
 transport = "message"
@@ -411,6 +415,16 @@ paths = [
   # best-effort and never fails the run).
   "/api/reactions.add",
   "/api/reactions.remove",
+  # Native Agent reply surface (stream reply transport): one session status
+  # per run, one streaming message per run, appended by delta and closed
+  # with the terminal outcome. Every path is exact — the sink never calls a
+  # method the manifest does not name (pinned by
+  # tests/agent_app_manifest_lockstep.rs).
+  "/api/chat.startStream",
+  "/api/chat.appendStream",
+  "/api/chat.stopStream",
+  "/api/agents.sessions.setStatus",
+  "/api/agents.sessions.rename",
 ]
 request_body_limit_bytes = 262144
 response_body_limit_bytes = 262144
@@ -419,6 +433,8 @@ response_body_limit_bytes = 262144
 # with recent conversation context at ingress. The bot needs the
 # channels:history-family scopes granted operator-side; when absent, Slack
 # returns missing_scope and the ping proceeds with no context.
+# conversations.replies is also the reply sink's read-back: after a transport
+# failure mid-append it re-reads the streaming message before appending more.
 [[channel.egress]]
 scheme = "https"
 host = "slack.com"

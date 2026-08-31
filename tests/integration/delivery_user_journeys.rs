@@ -557,6 +557,7 @@ async fn parse_slack_dm_message(body: &str) -> NormalizedInboundMessage {
     let egress = ironclaw_extension_contracts::test_support::conformance::ScriptedVendorServer::new(
         Arc::new(
             |_| ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                retry_after: None,
                 status: 200,
                 body: Vec::new(),
             },
@@ -657,7 +658,7 @@ fn slack_run_delivery_services(
         Some(harness.binding.actor_user_id.clone()),
     );
     RunDeliveryServices {
-        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+        reply_publication: harness.reply_publication_for_test(services),
         binding_service: harness
             .binding_service_for_test()
             .expect("group binding service"),
@@ -1049,37 +1050,67 @@ async fn slack_origin_delivers_to_telegram_and_acks_in_slack() {
         "the telegram send must target the registered DM chat id; got {sent}"
     );
 
-    // Slack wire: no SECOND tool attempt to Slack. A channel-origin run also
-    // posts (and later retracts) an immediate "thinking" placeholder ahead of
-    // the real reply — a separate, already-covered UX feature this journey
-    // does not own — so assert on the ack CONTENT rather than the total
-    // postMessage count: exactly one post must carry the run's own final
-    // reply, and none may carry the tool's delivered content (which belongs
-    // on the Telegram wire only).
-    let posts: Vec<_> = requests
+    // Slack wire: the run's own final reply is PUBLISHED through Slack's
+    // native Agent stream (`[channel.reply] transport = "stream"`), never
+    // posted as a message — one `chat.startStream` opens the answer in the
+    // originating DM, the ack text lands in the stream chunks, and one
+    // `chat.stopStream` closes it. No second tool attempt reaches Slack and
+    // no Slack request carries the tool's delivered content (Telegram's).
+    let slack_requests: Vec<_> = requests
         .iter()
-        .filter(|request| request.url.ends_with("/api/chat.postMessage"))
+        .filter(|request| request.url.contains("slack.com/api/"))
         .collect();
-    let ack_posts: Vec<_> = posts
+    let starts: Vec<_> = slack_requests
         .iter()
-        .filter(|request| String::from_utf8_lossy(&request.body).contains(CROSS_SLACK_ACK))
+        .filter(|request| request.url.ends_with("/api/chat.startStream"))
         .collect();
     assert_eq!(
-        ack_posts.len(),
+        starts.len(),
         1,
-        "exactly one slack post must carry the run's own final reply (the lane-1 echo); got {:?}",
-        posts
+        "exactly one agent stream opens for the run's reply; got {:?}",
+        slack_requests
             .iter()
-            .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+            .map(|r| r.url.clone())
             .collect::<Vec<_>>()
     );
-    let posted = String::from_utf8_lossy(&ack_posts[0].body);
+    let started = String::from_utf8_lossy(&starts[0].body);
     assert!(
-        posted.contains(&format!("\"channel\":\"{CROSS_SLACK_DM_CHANNEL}\"")),
-        "the lane-1 echo must target the originating slack DM; got {posted}"
+        started.contains(&format!("\"channel\":\"{CROSS_SLACK_DM_CHANNEL}\"")),
+        "the stream must open in the originating slack DM; got {started}"
+    );
+    let streamed_text: String = slack_requests
+        .iter()
+        .filter(|request| {
+            request.url.ends_with("/api/chat.startStream")
+                || request.url.ends_with("/api/chat.appendStream")
+                || request.url.ends_with("/api/chat.stopStream")
+        })
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        streamed_text.contains(CROSS_SLACK_ACK),
+        "the run's own final reply must be streamed through the agent surface; got {streamed_text}"
+    );
+    assert_eq!(
+        slack_requests
+            .iter()
+            .filter(|request| request.url.ends_with("/api/chat.stopStream"))
+            .count(),
+        1,
+        "the stream is closed exactly once at the terminal revision"
     );
     assert!(
-        !posts
+        !slack_requests
+            .iter()
+            .any(
+                |request| String::from_utf8_lossy(&request.body).contains(CROSS_SLACK_ACK)
+                    && request.url.ends_with("/api/chat.postMessage")
+            ),
+        "the answer is never also posted as a plain message"
+    );
+    assert!(
+        !slack_requests
             .iter()
             .any(|request| String::from_utf8_lossy(&request.body).contains(CROSS_DELIVERED_TEXT)),
         "the tool's delivered content must never also reach the slack wire (no tool attempt to slack)"

@@ -565,6 +565,191 @@ fn strip_leading_bot_mention_never_eats_a_third_partys_leading_mention() {
     );
 }
 
+/// Slack's native Agent stop button is a message-less event. It normalizes
+/// to the channel's declared `stop` command in the session's conversation,
+/// keyed on its own `-agent-stop-` event-id namespace, so the host's command
+/// dispatch — not this adapter — decides what stopping means.
+#[test]
+fn agent_session_stopped_normalizes_to_the_declared_stop_command() {
+    let stop = message(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "EvStop",
+        "event": {
+            "type": "agent_session_stopped",
+            "channel": "C0123ABC456",
+            "thread_ts": "1782234671.392669",
+            "user": "U123ABC456",
+            "streaming_message_ts": ["1782234987.693923"],
+            "event_ts": "1783536983.783769"
+        }
+    }));
+    assert_eq!(stop.text, "/stop");
+    assert_eq!(stop.trigger, ProductTriggerReason::BotCommand);
+    assert_eq!(stop.actor.id(), "U123ABC456");
+    assert_eq!(stop.conversation.conversation_id(), "C0123ABC456");
+    assert_eq!(stop.conversation.topic_id(), Some("1782234671.392669"));
+    assert_eq!(stop.conversation.reply_target_message_id(), None);
+    assert_eq!(
+        stop.event_id.as_str(),
+        "slack-install-alpha-agent-stop-1783536983.783769"
+    );
+    assert!(stop.pending_attachments.is_empty());
+
+    let dm_stop = message(serde_json::json!({
+        "type": "event_callback",
+        "team_id": "T123",
+        "event_id": "EvStopDm",
+        "event": {
+            "type": "agent_session_stopped",
+            "channel": "D0123ABC456",
+            "thread_ts": "1782234671.392669",
+            "user": "U123ABC456",
+            "streaming_message_ts": [],
+            "event_ts": "1783536983.783770"
+        }
+    }));
+    assert_eq!(dm_stop.trigger, ProductTriggerReason::DirectChat);
+
+    // A stop without the fields the command needs is dropped with the
+    // missing field named, never admitted half-built.
+    let outcome = normalize(serde_json::json!({
+        "type": "event_callback", "team_id": "T123", "event_id": "EvStopBroken",
+        "event": { "type": "agent_session_stopped", "channel": "C1", "event_ts": "1.0" }
+    }));
+    assert!(matches!(
+        outcome,
+        SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::MissingField("user")
+        }
+    ));
+}
+
+/// The rest of the Agent event family an Agent app subscribes to is an
+/// authenticated no-op, each with its own reason — never
+/// `UnsupportedEventType`, which would make a subscribed event look like a
+/// forgotten one in the drop log.
+#[test]
+fn agent_lifecycle_events_ignore_with_their_own_reason() {
+    for (event, expected) in [
+        (
+            serde_json::json!({"type": "app_home_opened", "user": "U1", "channel": "D1", "tab": "messages", "event_ts": "1.0"}),
+            SlackIgnoreReason::AppHomeOpened,
+        ),
+        (
+            serde_json::json!({"type": "app_context_changed", "user": "U1", "channel": "D1", "event_ts": "1.1"}),
+            SlackIgnoreReason::AppContextChanged,
+        ),
+        (
+            serde_json::json!({"type": "assistant_thread_started", "assistant_thread": {"user_id": "U1", "channel_id": "D1", "thread_ts": "1.2", "context": {}}, "event_ts": "1.2"}),
+            SlackIgnoreReason::AssistantThreadStarted,
+        ),
+        (
+            serde_json::json!({"type": "assistant_thread_context_changed", "assistant_thread": {"user_id": "U1", "channel_id": "D1", "thread_ts": "1.2", "context": {"channel_id": "C1"}}, "event_ts": "1.3"}),
+            SlackIgnoreReason::AssistantThreadContextChanged,
+        ),
+        (
+            serde_json::json!({"type": "agent_session_title_changed", "channel": "C1", "thread_ts": "1.2", "user": "U1", "title": "New", "previous_title": "Old", "team_id": "T123", "event_ts": "1.4"}),
+            SlackIgnoreReason::AgentSessionTitleChanged,
+        ),
+    ] {
+        let outcome = normalize(serde_json::json!({
+            "type": "event_callback", "team_id": "T123", "event_id": "EvAgent", "event": event
+        }));
+        let SlackInboundEvent::Ignore { reason } = outcome else {
+            panic!("expected Ignore for {expected:?}, got {outcome:?}");
+        };
+        assert_eq!(reason, expected);
+        assert_ne!(reason, SlackIgnoreReason::UnsupportedEventType);
+    }
+}
+
+/// Every normalized message carries the package-owned reply context the
+/// reply sink streams from: the recipient (user + team) a channel stream
+/// requires, and the thread the session lives in. A top-level DM roots that
+/// thread on the message itself; a channel message keeps its (self-rooted or
+/// real) thread; a slash command has none.
+#[test]
+fn every_normalized_message_carries_a_bounded_reply_context() {
+    let parse = |message: &NormalizedInboundMessage| {
+        message.validate().expect("within host bounds");
+        SlackReplyContext::from_bytes(
+            message
+                .reply_context
+                .as_deref()
+                .expect("reply context present"),
+        )
+        .expect("reply context parses")
+    };
+
+    let dm = message(serde_json::json!({
+        "type": "event_callback", "team_id": "T123", "event_id": "EvDm",
+        "event": {"type": "message", "channel_type": "im", "user": "U1", "channel": "D1",
+                  "text": "hi", "ts": "1710000000.000001"}
+    }));
+    assert_eq!(
+        parse(&dm.message),
+        SlackReplyContext {
+            team_id: Some("T123".to_string()),
+            channel: "D1".to_string(),
+            thread_ts: Some("1710000000.000001".to_string()),
+            user: "U1".to_string(),
+            is_dm: true,
+        }
+    );
+
+    let threaded_dm = message(serde_json::json!({
+        "type": "event_callback", "team_id": "T123", "event_id": "EvDmThread",
+        "event": {"type": "message", "channel_type": "im", "user": "U1", "channel": "D1",
+                  "text": "hi", "thread_ts": "1710000000.000000", "ts": "1710000000.000002"}
+    }));
+    assert_eq!(
+        parse(&threaded_dm.message).thread_ts.as_deref(),
+        Some("1710000000.000000"),
+        "an existing DM thread is the session thread"
+    );
+
+    let mention = message(serde_json::json!({
+        "type": "event_callback", "team_id": "T123", "event_id": "EvMention",
+        "event": {"type": "app_mention", "user": "U2", "channel": "C1",
+                  "text": "<@UBOT> hi", "ts": "1710000000.000003"}
+    }));
+    assert_eq!(
+        parse(&mention.message),
+        SlackReplyContext {
+            team_id: Some("T123".to_string()),
+            channel: "C1".to_string(),
+            thread_ts: Some("1710000000.000003".to_string()),
+            user: "U2".to_string(),
+            is_dm: false,
+        }
+    );
+
+    let headers = vec![(
+        "content-type".to_string(),
+        "application/x-www-form-urlencoded".to_string(),
+    )];
+    let SlackInboundEvent::Message(slash) = normalize_slack_inbound(
+        b"channel_id=D123&channel_name=directmessage&user_id=U9&command=%2Fironclaw&text=status&trigger_id=trigger-1&team_id=T123",
+        &headers,
+        &installation_id(),
+        Some(TEST_BOT_USER_ID),
+    )
+    .expect("slash form") else {
+        panic!("slash command must become a message");
+    };
+    assert_eq!(
+        parse(&slash.message),
+        SlackReplyContext {
+            team_id: Some("T123".to_string()),
+            channel: "D123".to_string(),
+            thread_ts: None,
+            user: "U9".to_string(),
+            is_dm: true,
+        }
+    );
+}
+
 /// A bare mention with nothing else in the text still admits a message —
 /// stripping to an empty string must not itself be treated as missing
 /// content.

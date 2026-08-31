@@ -36,7 +36,6 @@ use ironclaw_host_api::{
     path::{MountAlias, VirtualPath},
     resource::ResourceScope,
 };
-use ironclaw_loop_contracts::LoopHostMilestoneSink;
 use ironclaw_loop_host::SkillActivationObserver;
 use ironclaw_outbound::OutboundStateStore;
 use ironclaw_product_contracts::outbound::{
@@ -58,6 +57,7 @@ use uuid::Uuid;
 
 pub mod display_preview;
 pub mod live_progress;
+pub mod reply_sink;
 pub mod runtime_replay;
 pub mod turn_events;
 use display_preview::{
@@ -65,9 +65,7 @@ use display_preview::{
     NoopCapabilityDisplayPreviewSource,
 };
 use ironclaw_auth::product_prompt::AuthChallengeProvider;
-use live_progress::{
-    LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
-};
+use live_progress::{LiveSkillActivationObserver, product_items_for_live_update};
 // Crate-visible so the skill-learning sink can name the publisher type.
 pub use live_progress::LiveProjectionPublisher;
 use runtime_replay::{
@@ -190,14 +188,6 @@ impl RebornProjectionServices {
             live_epoch: Arc::clone(&self.live_epoch),
             thread_service: self.thread_service.clone(),
         })
-    }
-
-    pub fn with_live_progress_milestone_sink_for_publisher(
-        &self,
-        inner: Arc<dyn LoopHostMilestoneSink>,
-        publisher: Arc<LiveProjectionPublisher>,
-    ) -> Arc<dyn LoopHostMilestoneSink> {
-        Arc::new(LiveProgressMilestoneSink::new(inner, publisher))
     }
 
     pub fn live_projection_publisher(&self, actor_user_id: UserId) -> Arc<LiveProjectionPublisher> {

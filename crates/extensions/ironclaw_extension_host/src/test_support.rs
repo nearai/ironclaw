@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, ChannelSurfaces, DeliveryReport,
-    InboundOutcome, OutboundEnvelope, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelIngress, ChannelSurfaces, DeliveryReport, InboundOutcome,
+    OutboundEnvelope, VerifiedInbound,
 };
 use ironclaw_extension_contracts::device_link::{
     DeviceLinkAdapter, DeviceLinkContext, DeviceLinkError, DeviceLinkFlowId, DeviceLinkInput,
@@ -564,7 +564,7 @@ impl ToolAdapter for FakeToolAdapter {
 /// what a lifecycle test observes now — through the egress it drives.
 #[derive(Default)]
 pub struct FakeChannelAdapter {
-    /// Counts `send_reply` + `deliver` calls, so a test can prove the
+    /// Counts reply reconciliations + `deliver` calls, so a test can prove the
     /// coordinator picked an axis rather than that "something was sent".
     pub reply_calls: Arc<AtomicUsize>,
     pub delivery_calls: Arc<AtomicUsize>,
@@ -582,18 +582,6 @@ impl ChannelIngress for FakeChannelAdapter {
 }
 
 #[async_trait]
-impl ChannelReply for FakeChannelAdapter {
-    async fn send_reply(
-        &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
-        self.reply_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(DeliveryReport::default())
-    }
-}
-
-#[async_trait]
 impl ChannelDelivery for FakeChannelAdapter {
     async fn deliver(
         &self,
@@ -602,6 +590,28 @@ impl ChannelDelivery for FakeChannelAdapter {
     ) -> Result<DeliveryReport, ChannelError> {
         self.delivery_calls.fetch_add(1, Ordering::SeqCst);
         Ok(DeliveryReport::default())
+    }
+}
+
+#[async_trait]
+impl ironclaw_extension_contracts::reply::ReplySink for FakeChannelAdapter {
+    async fn reconcile(
+        &self,
+        request: ironclaw_extension_contracts::reply::ReplyReconcileRequest,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<ironclaw_extension_contracts::reply::ReplySinkReport, ChannelError> {
+        self.reply_calls.fetch_add(1, Ordering::SeqCst);
+        let checkpoint = ironclaw_extension_contracts::reply::ReplySinkCheckpoint::new(
+            1,
+            format!("fake:{}", request.revision.revision),
+        )
+        .expect("fake checkpoint is within its bound"); // safety: test-support fake with a fixed small payload.
+        Ok(
+            ironclaw_extension_contracts::reply::ReplySinkReport::applied(
+                Some(checkpoint),
+                ironclaw_extension_contracts::reply::ReplySinkEvidence::default(),
+            ),
+        )
     }
 }
 
@@ -616,10 +626,19 @@ impl FakeChannelAdapter {
             .with_delivery(adapter)
     }
 
-    /// The delivery-only shape: what an outbound-only manifest declares, and
-    /// what a `transport = "stream"` reply plus session ingress leaves.
+    /// The delivery-only shape: what an outbound-only manifest (no reply
+    /// section) declares.
     pub fn delivery_only() -> ChannelSurfaces {
         ChannelSurfaces::default().with_delivery(Arc::new(Self::default()))
+    }
+
+    /// A reply sink plus delivery: what a declared reply (either transport),
+    /// a delivery section, and session ingress require.
+    pub fn reply_and_delivery() -> ChannelSurfaces {
+        let adapter = Arc::new(Self::default());
+        ChannelSurfaces::default()
+            .with_reply(adapter.clone())
+            .with_delivery(adapter)
     }
 }
 
@@ -920,6 +939,7 @@ impl RestrictedEgress for RecordingEgress {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request);
         Ok(RestrictedEgressResponse {
+            retry_after: None,
             status: self.status.load(Ordering::SeqCst),
             body: b"{\"ok\":true}".to_vec(),
         })

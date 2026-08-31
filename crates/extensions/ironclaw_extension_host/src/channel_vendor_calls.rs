@@ -353,6 +353,7 @@ mod tests {
     #[tokio::test]
     async fn a_non_success_vendor_status_is_a_labeled_wiring_failure() {
         let egress = ScriptedEgress(Ok(RestrictedEgressResponse {
+            retry_after: None,
             status: 503,
             body: Vec::new(),
         }));
@@ -378,6 +379,7 @@ mod tests {
     #[tokio::test]
     async fn a_success_vendor_status_completes_the_vendor_call() {
         let egress = ScriptedEgress(Ok(RestrictedEgressResponse {
+            retry_after: None,
             status: 204,
             body: Vec::new(),
         }));

@@ -45,6 +45,7 @@ pub(crate) fn bundled_channel_extensions(
     let bindings = vec![
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("slack".to_string()),
+            host_owned_reply: false,
             // Every half: a webhook ingress, a message reply, a message
             // delivery. One vendor mechanism serves both output axes, which
             // is why the distinction stayed invisible until web-app existed.
@@ -64,6 +65,7 @@ pub(crate) fn bundled_channel_extensions(
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("telegram".to_string()),
+            host_owned_reply: false,
             surfaces: {
                 let adapter = Arc::new(TelegramChannelAdapter::default());
                 ChannelSurfaces::default()
@@ -78,11 +80,16 @@ pub(crate) fn bundled_channel_extensions(
         },
         ChannelExtensionBinding {
             extension_id: ExtensionId::from_trusted("web-app".to_string()),
-            // DELIVERY ONLY, and both absences are load-bearing: input
-            // arrives on the authenticated session door (whose actor
-            // authority an adapter may never mint), and the manifest's
-            // `transport = "stream"` reply is published by the host. Adding a
-            // half here fails activation — see `check_binding`.
+            // The manifest's `transport = "stream"` reply is host-served:
+            // the browser's SSE/WebSocket tail is this channel's edge,
+            // reconciled from the same reply document every other channel
+            // publishes from, and the sink behind it is product-tier, so
+            // composition binds it (the binary only marks the channel).
+            host_owned_reply: true,
+            // No ingress half, and that absence is load-bearing: input
+            // arrives on the authenticated session door, whose actor
+            // authority an adapter may never mint. Delivery is the web-push
+            // half.
             surfaces: ChannelSurfaces::default().with_delivery(Arc::new(
                 ironclaw_web_app_extension::WebAppChannelAdapter::new(),
             )),

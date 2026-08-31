@@ -9,7 +9,7 @@
 //!   input arrives on the authenticated session door, whose actor authority
 //!   is the authenticated caller — a thing an adapter may never mint from a
 //!   payload. There is no webhook mount and no vendor payload to parse.
-//! - No [`ChannelReply`](ironclaw_extension_contracts::channel_adapter::ChannelReply):
+//! - No package-bound [`ReplySink`](ironclaw_extension_contracts::reply::ReplySink):
 //!   the manifest declares `[channel.reply] transport = "stream"`, so the
 //!   host publishes to the durable projection pipeline and an adapter is
 //!   never called. A stub here would be dead code that reads as live.

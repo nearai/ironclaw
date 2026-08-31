@@ -109,11 +109,14 @@ impl<'de> serde::Deserialize<'de> for RouteSuffix {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyTransport {
-    /// The answer streams to a subscribed client over the durable projection
-    /// pipeline. The host publishes; the channel's adapter is never called for
-    /// a reply, which is why such a channel implements no reply half at all.
+    /// The answer is published progressively: the channel binds a
+    /// `crate::reply::ReplySink` that reconciles its provider toward each
+    /// semantic reply revision (answer growth, reasoning summaries, activity,
+    /// attention, terminal state). Any ingress trust class may declare it —
+    /// a browser session and a webhook vendor stream the same timeline.
     Stream,
-    /// The answer is sent as one or more channel messages. The package owns
+    /// The answer is sent once, as one or more channel messages, from the
+    /// terminal materialization of the same timeline. The package owns
     /// provider-specific rendering and splitting because limits may use
     /// transport-specific units such as UTF-16 code units.
     Message,
@@ -378,20 +381,6 @@ impl ChannelDescriptor {
         }
         if self.connection.is_some() && self.ingress.is_none() {
             return Err(ChannelDescriptorError::ConnectionWithoutInbound);
-        }
-        // A `stream` reply forwards the durable projection stream over the
-        // session transport. A webhook vendor has no such stream to consume,
-        // and a channel with no ingress has no run whose answer to stream —
-        // so the declared reply transport must pair with the entrypoint.
-        // Checked outside the ingress block below so the no-ingress case is
-        // rejected too, not silently skipped.
-        if self.reply_transport() == Some(ReplyTransport::Stream)
-            && !self
-                .ingress
-                .as_ref()
-                .is_some_and(|ingress| ingress.verification.is_authenticated_session())
-        {
-            return Err(ChannelDescriptorError::StreamingReplyWithoutSessionIngress);
         }
         if let Some(connection) = &self.connection {
             connection.validate()?;
@@ -847,18 +836,19 @@ pub enum ChannelDescriptorError {
     SessionIngressWithRouteSuffix,
     #[error("webhook ingress must declare a route_suffix to mount its receiving route")]
     WebhookIngressWithoutRouteSuffix,
-    #[error(
-        "streaming reply mode requires an authenticated-session entrypoint; webhook channels batch"
-    )]
-    StreamingReplyWithoutSessionIngress,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Streaming is a channel capability, not a session-transport privilege:
+    /// the same documented webhook channel validates with either reply
+    /// transport, and the transport decides only which half the binding rule
+    /// demands (`ironclaw_extension_host::entrypoint::check_channel_halves`).
+    // arch-exempt: large_file, one cadence test beside the transport it pins; decomposition follow-up in docs/internal/design/2026-08-31-progressive-reply-publication.md
     #[test]
-    fn stream_reply_transport_requires_the_session_entrypoint() {
+    fn the_reply_transport_is_independent_of_the_ingress_trust_class() {
         let mut channel: ChannelDescriptor =
             toml::from_str(documented_channel_toml()).expect("documented channel deserializes");
         assert_eq!(channel.reply_transport(), Some(ReplyTransport::Message));
@@ -867,13 +857,9 @@ mod tests {
             .as_mut()
             .expect("documented channel declares a reply half")
             .transport = ReplyTransport::Stream;
-        assert!(
-            matches!(
-                channel.validate(),
-                Err(ChannelDescriptorError::StreamingReplyWithoutSessionIngress)
-            ),
-            "a webhook channel must not declare a stream reply transport"
-        );
+        channel
+            .validate()
+            .expect("a webhook channel may declare a stream reply");
 
         let mut session = channel.clone();
         if let Some(ingress) = session.ingress.as_mut() {
@@ -883,20 +869,6 @@ mod tests {
         session
             .validate()
             .expect("a stream reply over the session entrypoint validates");
-
-        // A channel with no ingress has no run whose answer to stream. This
-        // arm is why the check sits outside the `if let Some(ingress)` block:
-        // with it inside, a no-ingress stream declaration validated silently.
-        let mut ingressless = session.clone();
-        ingressless.ingress = None;
-        ingressless.connection = None;
-        assert!(
-            matches!(
-                ingressless.validate(),
-                Err(ChannelDescriptorError::StreamingReplyWithoutSessionIngress)
-            ),
-            "a stream reply with no entrypoint must fail closed"
-        );
     }
 
     #[test]

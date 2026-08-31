@@ -64,6 +64,8 @@ mod product_surface_inbound;
 mod project_create_capability;
 pub mod projection;
 mod reborn_services;
+pub mod reply_projection;
+pub mod reply_publication;
 mod run_delivery;
 
 /// Test-only access to the stable Inbox identity used by production run

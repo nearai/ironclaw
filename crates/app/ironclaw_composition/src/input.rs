@@ -254,6 +254,15 @@ pub struct ChannelExtensionBinding {
     /// its manifest does not declare (or omits one it does) fails there
     /// rather than at first send.
     pub surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces,
+    /// The channel's `[channel.reply]` is served by the host, not the
+    /// package: the deployment's authenticated-session channel answers a run
+    /// through the product projection stream (its SSE/WebSocket tail is the
+    /// edge), and that sink is product-tier, so the binary cannot construct
+    /// it. Composition owns one such sink and binds it as this channel's
+    /// reply half before activation checks the bound halves against the
+    /// manifest. A binding that also carries its own reply is refused.
+    #[doc(alias = "projection_reply_sink")]
+    pub host_owned_reply: bool,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec: Option<

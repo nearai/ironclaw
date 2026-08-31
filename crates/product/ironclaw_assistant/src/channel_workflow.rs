@@ -69,7 +69,6 @@ use crate::delivery_coordinator::DeliveryCoordinator;
 use crate::filesystem_ledger::RebornFilesystemIdempotencyLedger;
 use crate::inbound_turn::DefaultInboundTurnService;
 use crate::ledger::IdempotencyLedger;
-use crate::reborn_services::ProjectFilesystemReader;
 use crate::run_delivery::{
     RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
 };
@@ -100,9 +99,8 @@ pub struct ChannelWorkflowIdentity {
 /// (turns run; nothing watches them for channel replies).
 pub struct ChannelWorkflowDeliveryServices {
     pub coordinator: Arc<DeliveryCoordinator>,
-    /// Canonical project-filesystem authority the delivery coordinator
-    /// materializes `/workspace/...` references through.
-    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
+    /// The reply publication service every run's answer goes through.
+    pub reply_publication: Arc<crate::reply_publication::ReplyPublicationService>,
     pub outbound_store: Arc<dyn OutboundStateStorePort>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -207,7 +205,6 @@ impl RebornChannelWorkflowFactory {
                 }
             };
         let services = RunDeliveryServices {
-            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: Arc::new(TriggeredNoopConversationBindingService),
             thread_service: Arc::clone(&self.services.thread_service),
             turn_coordinator: Arc::clone(&self.services.turn_coordinator),
@@ -217,6 +214,7 @@ impl RebornChannelWorkflowFactory {
             notification_inbox: self.services.notification_inbox.clone(),
             delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
+            reply_publication: Arc::clone(&delivery.reply_publication),
             extension_id: BACKGROUND_RUN_NOTIFIER_ID.to_string(),
             fallback_notice_scope: self.notice_scope(notice_thread_id),
             approval_context: delivery.approval_context.clone(),
@@ -480,7 +478,6 @@ impl RebornChannelWorkflowFactory {
         let notice_thread_id = ThreadId::new(format!("{extension_id}-channel-notices"))
             .map_err(|error| format!("invalid channel-notice thread id: {error}"))?;
         let services = RunDeliveryServices {
-            project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: binding,
             thread_service: Arc::clone(&self.services.thread_service),
             turn_coordinator: Arc::clone(&self.services.turn_coordinator),
@@ -490,6 +487,7 @@ impl RebornChannelWorkflowFactory {
             notification_inbox: self.services.notification_inbox.clone(),
             delivery_targets: Arc::clone(&delivery.delivery_targets),
             coordinator: Arc::clone(&delivery.coordinator),
+            reply_publication: Arc::clone(&delivery.reply_publication),
             extension_id: extension_id.to_string(),
             fallback_notice_scope: self.notice_scope(notice_thread_id),
             approval_context: delivery.approval_context.clone(),

@@ -2485,6 +2485,7 @@ fn web_app_build_extras(
             extension_id: ExtensionId::from_trusted(
                 ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
             ),
+            host_owned_reply: true,
             surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
                 .with_delivery(Arc::new(
                     ironclaw_web_app_extension::WebAppChannelAdapter::new(),

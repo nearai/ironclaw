@@ -337,6 +337,7 @@ impl HostRuntimeHarnessOptions {
                 extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted(
                     ironclaw_web_app::WEB_APP_EXTENSION_ID.to_string(),
                 ),
+                host_owned_reply: true,
                 surfaces: ironclaw_extension_contracts::channel_adapter::ChannelSurfaces::default()
                     .with_delivery(std::sync::Arc::new(
                         ironclaw_web_app_extension::WebAppChannelAdapter::new(),

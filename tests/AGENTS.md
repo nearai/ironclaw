@@ -307,7 +307,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 |---|---|
 | An extension installs and activates through the real generic runtime | `extension_runtime.rs` |
 | An inbound channel message is verified and routed by the real generic ingress mount | `extension_ingress.rs` |
-| An outbound reply is delivered through the real inbound→outbound pipeline | `extension_delivery.rs` |
+| An outbound reply is published through the real inbound→outbound pipeline — Slack's lands on the native Agent stream (`chat.startStream`→`stopStream` with recipient/thread from the stored reply context), Telegram's as a terminal `sendMessage`; the answer never rides a coordinator send | `extension_delivery.rs` |
 | Pair a Telegram bot actor, run as that verified user, deliver anchored replies and busy notices, disconnect to revoke admission, then pair again to restore delivery (#6643/#6644) | `extension_delivery.rs::paired_telegram_bot_actor_turns_attribute_to_the_user_and_disconnect_revokes_admission` (production generated-code pairing, disconnect/repair, and anchored delivery evidence) |
 | Tenant-admin configuration and per-user install/remove stay separate state machines | `extension_user_lifecycle_isolation.rs` |
 | A notification inbox belongs to one recipient: knowing another user's notification id grants no read and no mutation | `notification_inbox_user_isolation.rs` |
@@ -346,7 +346,7 @@ channel-delivery journeys (two-lane model):
 | A user can… | Scenario |
 |---|---|
 | Ask in WebUI to be pinged on Slack and get a bot delivery with provider evidence | `webui_send_me_on_slack_delivers_via_bot_with_evidence` |
-| Ask from Slack for a Telegram delivery; ack lands in Slack, payload in Telegram | `slack_origin_delivers_to_telegram_and_acks_in_slack` |
+| Ask from Slack for a Telegram delivery; the payload lands in Telegram and the run's own reply is streamed back through Slack's native Agent surface (`chat.startStream` → `chat.stopStream`, never a plain post) — the reply-publication path every channel shares | `slack_origin_delivers_to_telegram_and_acks_in_slack` |
 | Never have the model deliver into the run's own conversation (lane 1 is automatic) | `deliver_to_origin_conversation_is_denied_and_model_replies` |
 | See per-call honest results when one of several deliveries fails | `partial_failure_reports_per_call_honestly` |
 | Get a refusal (no tool calls) for an undeliverable destination | `undeliverable_destination_is_refused_without_tool_calls` |

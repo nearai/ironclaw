@@ -12,7 +12,7 @@ struct LiveProjectionFixture {
     thread_id: ThreadId,
     scope: TurnScope,
     services: RebornProjectionServices,
-    sink: Arc<dyn LoopHostMilestoneSink>,
+    sink: Arc<ProjectionReplyDrive>,
 }
 
 fn live_projection_fixture(label: &str) -> LiveProjectionFixture {
@@ -25,9 +25,10 @@ fn live_projection_fixture(label: &str) -> LiveProjectionFixture {
         event_log,
         ReplyTargetBindingRef::new(format!("{label}-reply")).unwrap(),
     );
-    let sink = services.with_live_progress_milestone_sink_for_publisher(
+    let sink = live_progress_sink_for_tests(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
     );
     let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id.clone());
     LiveProjectionFixture {
@@ -59,11 +60,11 @@ async fn product_event_stream_rebases_live_cursor_from_prior_process_epoch() {
         Arc::clone(&event_log),
         ReplyTargetBindingRef::new("webui-live-restart-before").unwrap(),
     );
-    let sink_before_restart = services_before_restart
-        .with_live_progress_milestone_sink_for_publisher(
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-            services_before_restart.live_projection_publisher(user_id.clone()),
-        );
+    let sink_before_restart = live_progress_sink_for_tests(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services_before_restart.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
+    );
     let run_id = TurnRunId::new();
     let reasoning = |body: &str| LoopHostMilestone {
         scope: scope.clone(),
@@ -111,11 +112,11 @@ async fn product_event_stream_rebases_live_cursor_from_prior_process_epoch() {
         event_log,
         ReplyTargetBindingRef::new("webui-live-restart-after").unwrap(),
     );
-    let sink_after_restart = services_after_restart
-        .with_live_progress_milestone_sink_for_publisher(
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-            services_after_restart.live_projection_publisher(user_id),
-        );
+    let sink_after_restart = live_progress_sink_for_tests(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services_after_restart.live_projection_publisher(user_id.clone()),
+        user_id,
+    );
     sink_after_restart
         .publish_loop_milestone(reasoning("after restart"))
         .await
@@ -284,7 +285,7 @@ async fn fresh_product_event_stream_compacts_buffered_assistant_text_to_latest_s
 }
 
 #[tokio::test]
-async fn fresh_product_event_stream_preserves_text_phases_and_clears_terminal_run() {
+async fn model_text_phases_concatenate_under_one_live_id_and_the_transcript_row_wins() {
     let fixture = live_projection_fixture("webui-text-phases");
     let scope = fixture.scope.clone();
     let run_id = TurnRunId::new();
@@ -297,6 +298,8 @@ async fn fresh_product_event_stream_preserves_text_phases_and_clears_terminal_ru
         kind,
     };
 
+    // `ModelTextDelta` carries the cumulative text of the current model
+    // call; a second call's text lands after the first call's.
     for kind in [
         LoopHostMilestoneKind::ModelStarted {
             requested_model_profile_id: None,
@@ -321,9 +324,6 @@ async fn fresh_product_event_stream_preserves_text_phases_and_clears_terminal_ru
             completion_kind: LoopCompletionKind::FinalReply,
             exit_id: LoopExitId::new("exit:webui-text-phases").unwrap(),
         },
-        LoopHostMilestoneKind::ModelTextDelta {
-            safe_text: "Unexpected trailing text.".to_string(),
-        },
     ] {
         fixture
             .sink
@@ -331,54 +331,89 @@ async fn fresh_product_event_stream_preserves_text_phases_and_clears_terminal_ru
             .await
             .unwrap();
     }
-
+    let live_text = |events: &[ProductOutboundEnvelope]| {
+        events
+            .iter()
+            .flat_map(|event| match event.payload() {
+                ProductOutboundPayload::ProjectionUpdate { state } => state
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        ProductProjectionItem::Text {
+                            id,
+                            run_id: observed_run_id,
+                            body,
+                            finalized,
+                        } if *observed_run_id == Some(run_id) => {
+                            Some((id.clone(), body.clone(), *finalized))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+    };
     let events = fixture
         .services
         .product_event_stream()
         .drain(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(fixture.user_id),
-            scope,
+            actor: TurnActor::new(fixture.user_id.clone()),
+            scope: scope.clone(),
             after_cursor: None,
         })
         .await
         .unwrap();
-    let text_items = events
-        .iter()
-        .flat_map(|event| match event.payload() {
-            ProductOutboundPayload::ProjectionUpdate { state } => state
-                .items
-                .iter()
-                .filter_map(|item| match item {
-                    ProductProjectionItem::Text {
-                        id,
-                        run_id: observed_run_id,
-                        body,
-                        ..
-                    } if *observed_run_id == Some(run_id) => Some((id.clone(), body.clone())),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        })
-        .collect::<Vec<_>>();
-
     assert_eq!(
-        text_items,
-        vec![
-            (
-                format!("text:{run_id}:1"),
-                "I’ll research this first.".to_string()
-            ),
-            (
-                format!("text:{run_id}:2"),
-                "Here is the final answer.".to_string()
-            ),
-            (
-                format!("text:{run_id}"),
-                "Unexpected trailing text.".to_string()
-            ),
-        ],
-        "model phases must remain distinct and terminal milestones must clear phase state"
+        live_text(&events),
+        vec![(
+            format!("text:{run_id}"),
+            "I’ll research this first.\n\nHere is the final answer.".to_string(),
+            false,
+        )],
+        "one stable live text id per run carries every model call's text in order"
+    );
+
+    // The durable terminal facts replace the ephemeral stream text with the
+    // transcript row; a stray delta after that changes nothing.
+    fixture.sink.projection.apply_terminal_facts(
+        &scope,
+        run_id,
+        crate::reply_projection::TerminalReplyFacts {
+            actor: Some(TurnActor::new(fixture.user_id.clone())),
+            status: ironclaw_host_api::turn::TurnStatus::Completed,
+            nothing_to_report: false,
+            answer: Some("Here is the final answer.".to_string()),
+            attachments: Vec::new(),
+            failure_summary: None,
+        },
+    );
+    fixture.sink.reconcile_latest(&scope, run_id).await;
+    fixture
+        .sink
+        .publish_loop_milestone(milestone(LoopHostMilestoneKind::ModelTextDelta {
+            safe_text: "Unexpected trailing text.".to_string(),
+        }))
+        .await
+        .unwrap();
+    let events = fixture
+        .services
+        .product_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(fixture.user_id.clone()),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        live_text(&events),
+        vec![(
+            format!("text:{run_id}"),
+            "Here is the final answer.".to_string(),
+            false,
+        )],
+        "the finalized transcript text is authoritative and terminal documents ignore stray text"
     );
 }
 
@@ -459,104 +494,9 @@ async fn provider_cadence_text_updates_are_not_visibly_batched() {
     panic!("tool activity did not follow provider-cadence text");
 }
 
-#[tokio::test]
-async fn live_text_microburst_keeps_latest_snapshot_and_precedes_tool_activity() {
-    let fixture = live_projection_fixture("webui-text-burst");
-    let scope = fixture.scope.clone();
-    let run_id = TurnRunId::new();
-    let capability_id = CapabilityId::new("builtin.http").unwrap();
-    let activity_id = CapabilityActivityId::new();
-    let mut subscription = fixture
-        .services
-        .product_event_stream()
-        .subscribe(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(fixture.user_id.clone()),
-            scope: scope.clone(),
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
-
-    let milestone = |kind| LoopHostMilestone {
-        scope: scope.clone(),
-        actor: None,
-        turn_id: TurnId::new(),
-        run_id,
-        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
-        kind,
-    };
-
-    for index in 0..64 {
-        fixture
-            .sink
-            .publish_loop_milestone(milestone(LoopHostMilestoneKind::ModelTextDelta {
-                safe_text: format!("partial answer {index}"),
-            }))
-            .await
-            .unwrap();
-    }
-    fixture
-        .sink
-        .publish_loop_milestone(milestone(LoopHostMilestoneKind::CapabilityInvoked {
-            activity_id,
-            capability_id: capability_id.clone(),
-        }))
-        .await
-        .unwrap();
-
-    let mut text_bodies = Vec::new();
-    let mut saw_tool = false;
-    let mut latest_text_preceded_tool = false;
-    for _ in 0..8 {
-        let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
-            .await
-            .expect("live projection event")
-            .expect("live projection subscription remains open")
-            .expect("live projection event remains valid");
-
-        let ProductOutboundPayload::ProjectionUpdate { state } = envelope.payload() else {
-            continue;
-        };
-        for item in &state.items {
-            match item {
-                ProductProjectionItem::Text {
-                    run_id: observed_run_id,
-                    body,
-                    ..
-                } if *observed_run_id == Some(run_id) => text_bodies.push(body.clone()),
-                ProductProjectionItem::CapabilityActivity(activity)
-                    if activity.invocation_id == InvocationId::from_uuid(activity_id.as_uuid()) =>
-                {
-                    latest_text_preceded_tool =
-                        text_bodies.last().map(String::as_str) == Some("partial answer 63");
-                    saw_tool = true;
-                }
-                _ => {}
-            }
-        }
-        if saw_tool {
-            break;
-        }
-    }
-
-    assert!(
-        saw_tool,
-        "the text burst must not terminate the live subscription"
-    );
-    assert!(
-        latest_text_preceded_tool,
-        "releasing the state lock must not reorder the latest text after tool activity"
-    );
-    assert_eq!(
-        text_bodies.last().map(String::as_str),
-        Some("partial answer 63"),
-        "the latest cumulative assistant text must precede tool activity"
-    );
-    assert!(
-        text_bodies.len() <= 3,
-        "the 64-update microburst should keep only paint-relevant cumulative snapshots: {text_bodies:#?}"
-    );
-}
+// Coalescing of a text microburst is reply publication's job now (the
+// worker publishes the latest snapshot per target under its pacing):
+// `crate::reply_publication::tests::a_text_microburst_coalesces_and_the_latest_text_precedes_tool_activity`.
 
 // The post-run skill-learning notifier publishes a learned-skill bubble
 // through a `LiveProjectionPublisher` that shares the runtime's live update
@@ -660,9 +600,10 @@ async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cu
     // 2. A prior live reasoning update advances the live cursor on the same
     //    still-open SSE stream. This uses the production milestone-sink caller,
     //    not a projection helper.
-    let sink = services.with_live_progress_milestone_sink_for_publisher(
+    let sink = live_progress_sink_for_tests(
         Arc::new(InMemoryLoopHostMilestoneSink::default()),
         services.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
     );
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
@@ -794,12 +735,11 @@ async fn live_publishers_from_same_services_share_monotonic_sequence() {
 
     // A second, independently created publisher emits another. In production
     // this is a fresh publisher minted later in the run's lifetime.
-    let sink_b = fixture
-        .services
-        .with_live_progress_milestone_sink_for_publisher(
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-            fixture.services.live_projection_publisher(user_id.clone()),
-        );
+    let sink_b = live_progress_sink_for_tests(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        fixture.services.live_projection_publisher(user_id.clone()),
+        user_id.clone(),
+    );
     sink_b
         .publish_loop_milestone(reasoning("from publisher B"))
         .await

@@ -367,6 +367,10 @@ impl RebornRuntimeStores {
                 auth_flow_cancel: None,
                 run_delivery_settings: wiring.run_delivery_settings,
                 admin_users,
+                reply_projection: Arc::new(
+                    ironclaw_assistant::reply_projection::ReplyProjection::new(),
+                ),
+                session_reply_channel: self.session_reply_channel.clone(),
             },
         )
     }

@@ -111,8 +111,14 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    generic, host-built-in tool for reaching any other target explicitly,
    `builtin.outbound_deliver` (lane 2) — it is not a per-channel tool an
    extension declares.
-3. Behavior lives in the extension's `ChannelAdapter` (`inbound` parse →
-   normalized outcome; `deliver` render+send; idempotent `activate`/`cleanup`
+3. Behavior lives in the extension's channel adapter: `ChannelIngress::receive`
+   (parse → normalized outcome), `ChannelDelivery::deliver` (render+send a
+   discrete message), and — for a declared `[channel.reply]` — one
+   `ReplySink::reconcile` (`crates/contracts/ironclaw_extension_contracts/src/reply.rs`)
+   that converges the vendor's presentation onto the run's reply document
+   (`transport = "stream"` hears every revision, `"message"` the terminal
+   one; the host publishes, the sink renders; verify with
+   `rg -n "impl ReplySink for" crates/extensions/packages`); idempotent `activate`/`cleanup`
    vendor wiring) — see the trait doc for the method contract. The binary
    supplies the adapter to composition through the
    `RebornHostBindings::with_channel_extension_bindings` seam

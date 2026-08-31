@@ -78,7 +78,7 @@ const FROZEN_CONTRACT_NAMES: &[&str] = &[
     "ChannelConnectionScopeSource",
     "ChannelDelivery",
     "ChannelIngress",
-    "ChannelReply",
+    "ReplySink",
     "Extension",
     "MemoryLifecycleHook",
     "PreferenceTargetCodec",
@@ -437,7 +437,7 @@ fn collision_exemptions_name_live_owner_types_and_do_not_widen_the_import_path_h
         import_path_governed.contains("ToolAdapter"),
         "the import-path half must still govern the tool tier's trait"
     );
-    for name in ["ChannelIngress", "ChannelReply", "ChannelDelivery"] {
+    for name in ["ChannelIngress", "ReplySink", "ChannelDelivery"] {
         assert!(
             import_path_governed.contains(name),
             "the import-path half must still govern the channel tier's `{name}` trait"

@@ -56,6 +56,15 @@ outbound egress/subscription policy.
   validation/rate-limit policy denies.
 - Prefer service-level tests when policy gates subscription, delivery,
   persistence, or authorization side effects.
+- **Publication substate rides the attempt row.** Progressive reply
+  publication state (`ReplyPublicationState`) is a serde-defaulted field of
+  the persisted delivery row, never a field of the public
+  `OutboundDeliveryAttempt` and never a second store. Every read-modify-write
+  of a delivery row goes through the private `DeliveryAttemptRow` envelope so
+  an attempt-only rewrite cannot drop the substate; guarded mutations check
+  status → fence → lease in that order; settlement is one-way; crash recovery
+  never marks a publication row `Unknown`. Re-verify with
+  `rg -n "DeliveryAttemptRow|fn update_reply_publication" crates/domains/ironclaw_outbound/src/outbound_state_store.rs`.
 
 ## Validation
 

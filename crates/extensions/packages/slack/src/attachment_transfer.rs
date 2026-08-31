@@ -21,7 +21,7 @@ use ironclaw_host_api::{
 use serde::Deserialize;
 use url::Url;
 
-use crate::payload::SLACK_API_HOST;
+use crate::api::SlackWebApiMethod;
 use crate::{
     channel::{part_outcome_for_egress_error, part_outcome_for_kind},
     delivery::{SlackDeliveryFailureKind, slack_error_kind},
@@ -501,10 +501,8 @@ fn upload_ticket_request(
     length: usize,
     credential: &SecretHandle,
 ) -> Result<RestrictedEgressRequest, String> {
-    let mut url = Url::parse(&format!(
-        "https://{SLACK_API_HOST}/api/files.getUploadURLExternal"
-    ))
-    .map_err(|_| "slack upload ticket URL is invalid".to_string())?;
+    let mut url = Url::parse(&SlackWebApiMethod::FilesGetUploadUrlExternal.url())
+        .map_err(|_| "slack upload ticket URL is invalid".to_string())?;
     url.query_pairs_mut()
         .append_pair("filename", filename)
         .append_pair("length", &length.to_string());
@@ -555,7 +553,7 @@ fn complete_upload_request(
         .map_err(|_| "slack upload completion body did not serialize".to_string())?;
     Ok(RestrictedEgressRequest {
         method: NetworkMethod::Post,
-        url: format!("https://{SLACK_API_HOST}/api/files.completeUploadExternal"),
+        url: SlackWebApiMethod::FilesCompleteUploadExternal.url(),
         headers: vec![(
             "content-type".to_string(),
             "application/json; charset=utf-8".to_string(),
@@ -567,7 +565,7 @@ fn complete_upload_request(
 }
 
 fn files_info_request(file_id: &str) -> Result<RestrictedEgressRequest, ChannelError> {
-    let mut url = Url::parse(&format!("https://{SLACK_API_HOST}/api/files.info"))
+    let mut url = Url::parse(&SlackWebApiMethod::FilesInfo.url())
         .map_err(|_| transfer_error("slack file lookup URL is invalid", false))?;
     url.query_pairs_mut().append_pair("file", file_id);
     Ok(RestrictedEgressRequest {

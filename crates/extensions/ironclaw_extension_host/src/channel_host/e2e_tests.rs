@@ -4222,6 +4222,7 @@ fn slack_response_for_approved(
         body: &[u8],
     ) -> ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
         ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+            retry_after: None,
             status: 200,
             body: body.to_vec(),
         }

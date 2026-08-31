@@ -667,6 +667,14 @@ pub struct RebornRuntime {
     pub(crate) delivered_gate_routes: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_assistant::DeliveryCoordinator>>,
+    /// The host-served reply channel (authenticated session), registered as a
+    /// reply publication target for every run.
+    pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
+    /// The runtime's reply publication service (present exactly when the
+    /// delivery coordinator is). Shutdown hands its leases back so another
+    /// publisher can resume open replies at once.
+    pub(crate) reply_publication:
+        Option<Arc<ironclaw_assistant::reply_publication::ReplyPublicationService>>,
     pub(crate) channel_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
@@ -1174,6 +1182,15 @@ impl RebornRuntime {
         self.delivery_coordinator.clone()
     }
 
+    /// The reply publication service the runtime's channel host runs. A
+    /// caller that wires its own run-delivery observer shares it so one
+    /// publication owns each run's answer.
+    pub fn reply_publication(
+        &self,
+    ) -> Option<Arc<ironclaw_assistant::reply_publication::ReplyPublicationService>> {
+        self.reply_publication.clone()
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn start_channel_host_assembly_for_test(
         &self,
@@ -1239,6 +1256,10 @@ impl RebornRuntime {
                     auth_flow_cancel: None,
                     run_delivery_settings,
                     admin_users,
+                    reply_projection: Arc::new(
+                        ironclaw_assistant::reply_projection::ReplyProjection::new(),
+                    ),
+                    session_reply_channel: self.session_reply_channel.clone(),
                 },
             )
             .assembly,
@@ -2519,6 +2540,12 @@ impl RebornRuntime {
             skill_learning_extraction_tasks.shutdown().await;
         }
         self.turn_scheduler.shutdown().await;
+        // Hand open reply publications back: their leases are released so
+        // a publisher on the next process (or another node) resumes them
+        // immediately instead of waiting for the lease to lapse.
+        if let Some(reply_publication) = &self.reply_publication {
+            reply_publication.shutdown().await;
+        }
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
         }
@@ -3513,6 +3540,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
     let durable_milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
         DurableLoopHostMilestoneSink::new(Arc::clone(&runtime_event_sink), milestone_scope),
     );
+    // One safe reply projection per runtime: the milestone sink composes
+    // every run's document into it, reply publication reads from it.
+    let reply_projection = Arc::new(ironclaw_assistant::reply_projection::ReplyProjection::new());
     if trusted_laptop_access {
         append_trusted_laptop_access_audit(&audit_log, &thread_scope, &actor_user_id).await?;
     }
@@ -3529,6 +3559,17 @@ pub(crate) async fn build_runtime_with_resource_governor(
     }
     let live_projection_publisher =
         projection_services.live_projection_publisher(actor_user_id.clone());
+    // The authenticated-session channel's reply sink publishes reconciled
+    // reply revisions through the same live source the SSE/WebSocket
+    // transports tail. Bound here because the binary assembled the binding
+    // before this projection graph existed.
+    if let Some(sink) = services.projection_reply_sink.as_ref()
+        && !sink.bind_publisher(Arc::clone(&live_projection_publisher))
+    {
+        tracing::debug!(
+            "projection reply sink publisher was already bound; keeping the first source"
+        );
+    }
     if let Some(skill_activation_source) = &skill_activation_source {
         skill_activation_source
             .set_activation_observer(
@@ -3556,12 +3597,16 @@ pub(crate) async fn build_runtime_with_resource_governor(
             }
             _ => None,
         };
-    // Clone the live projection publisher for the skill-learning sink before
-    // the milestone-sink builder consumes the original by value.
-    let skill_learning_publisher = Arc::clone(&live_projection_publisher);
-    let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
-        durable_milestone_sink,
-        live_projection_publisher,
+    let skill_learning_publisher = live_projection_publisher;
+    // Live progress reaches the browser through reply publication: the
+    // milestone sink composes the safe reply document, and the
+    // authenticated-session channel's projection reply sink renders each
+    // revision as live projection items — the same path every channel uses.
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
+        ironclaw_assistant::reply_projection::ReplyProjectionMilestoneSink::new(
+            durable_milestone_sink,
+            Arc::clone(&reply_projection),
+        ),
     );
     let diagnostic_store_impl =
         Arc::new(ironclaw_assistant::inspector_store::InMemoryDiagnosticStore::default());
@@ -4278,15 +4323,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
     } else {
         projection_services
     };
-    if let Some(coordinator) = services.delivery_coordinator.as_ref() {
-        let bound = coordinator.bind_projection_stream(projection_services.product_event_stream());
-        if !bound {
-            tracing::debug!(
-                "delivery coordinator projection stream was already bound; keeping the first source"
-            );
-        }
-    }
-
     // Durable idempotency ledger for the authenticated-session inbound lane
     // (browser + API transports riding `submit_turn`): the session half of the
     // same durable-admission discipline the per-extension channel ledgers
@@ -4361,12 +4397,30 @@ pub(crate) async fn build_runtime_with_resource_governor(
             auth_challenges,
             outbound_delivery_targets: outbound_delivery_target_registry.as_ref(),
             local_runtime,
+            reply_projection: Arc::clone(&reply_projection),
         },
     )
     .await;
     let channel_workflow_factory = started_channel_host
         .as_ref()
         .map(|started| Arc::clone(&started.workflow_factory));
+    // A run's terminal commit resumes its publications: on this node a fast
+    // path to the durable terminal facts, on any other node the way an
+    // orphaned publication gets a worker again.
+    let reply_publication_service = started_channel_host
+        .as_ref()
+        .and_then(|started| started.reply_publication.clone());
+    if let Some(reply_publication) = reply_publication_service.clone() {
+        processes
+            .subscribe_process_observer(Arc::new(
+                ironclaw_assistant::reply_publication::ReplyPublicationCommitObserver::new(
+                    reply_publication,
+                ),
+            ))
+            .map_err(|error| RebornRuntimeError::MalformedConfig {
+                reason: format!("reply publication observer wiring failed: {error}"),
+            })?;
+    }
     let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
     // Forward-migrate pre-removal routines that still carry a stored delivery
@@ -4729,6 +4783,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
         delivered_gate_routes: services.delivered_gate_routes.clone(),
         #[cfg(any(test, feature = "test-support"))]
         delivery_coordinator: services.delivery_coordinator.clone(),
+        session_reply_channel: services.session_reply_channel.clone(),
+        reply_publication: reply_publication_service,
         channel_facade_slot: services.channel_disconnect_slot.clone(),
         channel_config_service: services.channel_config_service.clone(),
         admin_configuration: services.admin_configuration.clone(),

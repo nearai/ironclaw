@@ -16,9 +16,23 @@ use ironclaw_host_api::product_adapter::AdapterInstallationId;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::reply_context::SlackReplyContext;
+
 pub const SLACK_API_HOST: &str = "slack.com";
 pub const SLACK_USER_ACTOR_KIND: &str = "slack_user";
 const SLACK_FILE_SHARE_SUBTYPE: &str = "file_share";
+/// Slack's native Agent stop button: "A user clicked the stop button on an
+/// agent session" (`agent_session_stopped`). The payload names the channel,
+/// thread, user, and the streaming message timestamps — no message text —
+/// and Slack says "The session status does not update automatically when
+/// the user clicks stop. Your app is responsible for transitioning the
+/// status", so the event is normalized into the channel's declared `stop`
+/// command and the reply sink transitions the session at the terminal.
+const SLACK_AGENT_SESSION_STOPPED_EVENT: &str = "agent_session_stopped";
+/// The dispatch text the channel's declared `stop` command produces — the
+/// same text the `/ironclaw stop` slash path yields, so both stop routes
+/// reach one dispatcher (`manifest.toml` `[channel] commands`).
+const SLACK_AGENT_STOP_COMMAND_TEXT: &str = "/stop";
 /// Slack's marker for a post authored by an integration. Authorship, not
 /// rendering — see the guard in [`normalize_user_message`].
 const SLACK_BOT_MESSAGE_SUBTYPE: &str = "bot_message";
@@ -130,6 +144,22 @@ pub enum SlackIgnoreReason {
     NonUserMessageSubtype(String),
     /// A field the normalized contract cannot be built without.
     MissingField(&'static str),
+    /// `app_home_opened`: a person opened the app's Home/Messages tab. An
+    /// Agent app subscribes to it (Slack lists it with `app_context_changed`
+    /// and `message.im`), but nothing was said — an authenticated no-op.
+    AppHomeOpened,
+    /// `app_context_changed`: the person switched the channel/context the
+    /// Agent container tracks. Context is re-read from the next message.
+    AppContextChanged,
+    /// `assistant_thread_started`: Slack opened a new Agent session thread.
+    /// The session begins when the person sends its first message.
+    AssistantThreadStarted,
+    /// `assistant_thread_context_changed`: the session's tracked context
+    /// moved. Context is re-read from the next message.
+    AssistantThreadContextChanged,
+    /// `agent_session_title_changed`: the person renamed the session. The
+    /// title is Slack-side presentation; nothing durable changes here.
+    AgentSessionTitleChanged,
 }
 
 /// Pure payload-normalization result retained inside the Slack package until
@@ -231,6 +261,38 @@ pub fn normalize_slack_event(
                 });
             }
         }
+        SLACK_AGENT_SESSION_STOPPED_EVENT => {
+            return normalize_agent_session_stopped(installation_id, team_id, event);
+        }
+        // The rest of the Agent event family an Agent app must subscribe to
+        // (`docs.slack.dev/ai/developing-agents`). Each is an authenticated
+        // no-op with its own reason, so the drop log names the event Slack
+        // sent rather than filing it under "unsupported".
+        "app_home_opened" => {
+            return Ok(SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::AppHomeOpened,
+            });
+        }
+        "app_context_changed" => {
+            return Ok(SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::AppContextChanged,
+            });
+        }
+        "assistant_thread_started" => {
+            return Ok(SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::AssistantThreadStarted,
+            });
+        }
+        "assistant_thread_context_changed" => {
+            return Ok(SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::AssistantThreadContextChanged,
+            });
+        }
+        "agent_session_title_changed" => {
+            return Ok(SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::AgentSessionTitleChanged,
+            });
+        }
         _ => {
             return Ok(SlackInboundEvent::Ignore {
                 reason: SlackIgnoreReason::UnsupportedEventType,
@@ -238,6 +300,94 @@ pub fn normalize_slack_event(
         }
     };
     normalize_user_message(installation_id, team_id, event, kind, bot_user_id)
+}
+
+/// The native Agent stop button. Slack's documented payload is
+/// `{ channel, thread_ts, user, streaming_message_ts (a list), event_ts }`:
+/// it carries no message, so the person's intent — "stop this run" — is
+/// expressed as the channel's declared `stop` command in the session's
+/// conversation (channel + thread), exactly what the `/ironclaw stop` slash
+/// path produces. The trigger mirrors the slash path too: `DirectChat` in a
+/// DM, `BotCommand` elsewhere. The event id lives in its own
+/// `-agent-stop-` namespace keyed on `event_ts`, so a redelivered stop
+/// collapses to one command and never collides with a message id.
+fn normalize_agent_session_stopped(
+    installation_id: &AdapterInstallationId,
+    team_id: Option<&str>,
+    event: &SlackEvent,
+) -> Result<SlackInboundEvent, SlackPayloadParseError> {
+    let Some(user) = event.user.as_deref() else {
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::MissingField("user"),
+        });
+    };
+    let Some(channel) = event.channel.as_deref() else {
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::MissingField("channel"),
+        });
+    };
+    let Some(event_ts) = event.event_ts.as_deref() else {
+        return Ok(SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::MissingField("event_ts"),
+        });
+    };
+    let thread_ts = event.thread_ts.as_deref();
+    let event_id = ExternalEventId::new(format!(
+        "slack-{}-agent-stop-{event_ts}",
+        installation_id.as_str()
+    ))
+    .map_err(|err| SlackPayloadParseError::InvalidExternalRef {
+        kind: "external_event_id",
+        reason: err.to_string(),
+    })?;
+    let actor = build_actor_ref(user)?;
+    let conversation = build_conversation_ref(team_id, channel, thread_ts, None)?;
+    let is_dm = is_dm_channel(channel, None);
+    let trigger = if is_dm {
+        ProductTriggerReason::DirectChat
+    } else {
+        ProductTriggerReason::BotCommand
+    };
+    let reply_context = build_reply_context(team_id, channel, thread_ts, user, is_dm)?;
+    Ok(SlackInboundEvent::Message(Box::new(
+        ParsedSlackInboundMessage {
+            message: NormalizedInboundMessage {
+                actor,
+                conversation,
+                event_id,
+                text: SLACK_AGENT_STOP_COMMAND_TEXT.to_string(),
+                trigger,
+                attachments: Vec::new(),
+                conversation_context: None,
+                reply_context: Some(reply_context),
+            },
+            pending_attachments: Vec::new(),
+        },
+    )))
+}
+
+/// The package-owned reply context every normalized message carries
+/// ([`SlackReplyContext`]): the reply sink needs the recipient's user and
+/// team ids to stream into a channel, and the thread the session lives in.
+fn build_reply_context(
+    team_id: Option<&str>,
+    channel: &str,
+    thread_ts: Option<&str>,
+    user: &str,
+    is_dm: bool,
+) -> Result<Vec<u8>, SlackPayloadParseError> {
+    SlackReplyContext {
+        team_id: team_id.map(str::to_string),
+        channel: channel.to_string(),
+        thread_ts: thread_ts.map(str::to_string),
+        user: user.to_string(),
+        is_dm,
+    }
+    .to_bytes()
+    .map_err(|err| SlackPayloadParseError::InvalidExternalRef {
+        kind: "reply_context",
+        reason: err.to_string(),
+    })
 }
 
 /// Parse one host-verified Slack inbound request that may be EITHER the
@@ -316,6 +466,13 @@ fn normalize_slack_slash_command(
         ProductTriggerReason::BotCommand
     };
     let text = slash_command_dispatch_text(&form.command, form.text.as_deref());
+    let reply_context = build_reply_context(
+        form.team_id.as_deref(),
+        &form.channel_id,
+        None,
+        &form.user_id,
+        is_dm,
+    )?;
 
     Ok(SlackInboundEvent::Message(Box::new(
         ParsedSlackInboundMessage {
@@ -327,7 +484,7 @@ fn normalize_slack_slash_command(
                 trigger,
                 attachments: Vec::new(),
                 conversation_context: None,
-                reply_context: None,
+                reply_context: Some(reply_context),
             },
             pending_attachments: Vec::new(),
         },
@@ -520,6 +677,15 @@ fn normalize_user_message(
 
     let actor = build_actor_ref(user)?;
     let conversation = build_conversation_ref(team_id, channel, thread_ts, Some(ts))?;
+    let is_dm = matches!(kind, SlackMessageKind::Dm);
+    // The reply's session thread. A channel message already has one (a
+    // top-level mention self-roots on its own `ts` above). A top-level DM
+    // roots the session on the message itself: Agent sessions are
+    // thread-based in DMs, and the conversation ref deliberately keeps its
+    // topic-less identity so DM binding is unchanged — only the reply
+    // context, which the host never interprets, carries the thread.
+    let reply_thread_ts = thread_ts.or(if is_dm { Some(ts) } else { None });
+    let reply_context = build_reply_context(team_id, channel, reply_thread_ts, user, is_dm)?;
     let pending_attachments = collect_attachments(&event.files)?
         .into_iter()
         .map(|descriptor| ChannelAttachmentRef {
@@ -537,7 +703,7 @@ fn normalize_user_message(
                 trigger,
                 attachments: Vec::new(),
                 conversation_context: None,
-                reply_context: None,
+                reply_context: Some(reply_context),
             },
             pending_attachments,
         },
@@ -712,6 +878,9 @@ struct SlackEvent {
     text: Option<String>,
     thread_ts: Option<String>,
     ts: Option<String>,
+    /// Slack's own event timestamp. Message events dedupe on `ts`; the
+    /// message-less `agent_session_stopped` event dedupes on this.
+    event_ts: Option<String>,
     bot_id: Option<String>,
     subtype: Option<String>,
     channel_type: Option<String>,

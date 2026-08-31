@@ -798,4 +798,62 @@ impl OutboundStateStorePort for FailingOutboundStore {
     ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
         Err(self.error())
     }
+
+    async fn open_reply_publication(
+        &self,
+        _request: ironclaw_outbound::OpenReplyPublicationRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationRecord, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn claim_reply_publication_lease(
+        &self,
+        _request: ironclaw_outbound::ClaimReplyPublicationLeaseRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationClaim, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn renew_reply_publication_lease(
+        &self,
+        _request: ironclaw_outbound::RenewReplyPublicationLeaseRequest,
+    ) -> Result<bool, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn advance_reply_publication(
+        &self,
+        _request: ironclaw_outbound::AdvanceReplyPublicationRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationRecord, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn settle_reply_publication(
+        &self,
+        _request: ironclaw_outbound::SettleReplyPublicationRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationRecord, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn release_reply_publication_lease(
+        &self,
+        _request: ironclaw_outbound::ReleaseReplyPublicationLeaseRequest,
+    ) -> Result<(), OutboundError> {
+        Err(self.error())
+    }
+
+    async fn load_reply_publication(
+        &self,
+        _scope: TurnScope,
+        _delivery_id: ironclaw_outbound::OutboundDeliveryId,
+    ) -> Result<Option<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn list_reply_publications(
+        &self,
+        _scope: TurnScope,
+        _run_id: ironclaw_host_api::turn::TurnRunId,
+    ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, OutboundError> {
+        Err(self.error())
+    }
 }

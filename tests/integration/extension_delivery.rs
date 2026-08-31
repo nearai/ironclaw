@@ -107,7 +107,11 @@ use sha2::Sha256;
 use tower::ServiceExt;
 
 const SLACK_ROUTE: &str = "/webhooks/extensions/slack/events";
-const SLACK_INSTALLATION: &str = "slack-itest-install";
+// The active snapshot reports the bundled deployment channel's installation
+// as the extension id itself; the ingress route must register under the SAME
+// installation identity or the reply-context rows it stores (ING-11) are
+// invisible to reply publication's read-back.
+const SLACK_INSTALLATION: &str = "slack";
 const SLACK_SIGNING_SECRET: &[u8] = b"itest-slack-signing-secret";
 const SLACK_BOT_TOKEN: &str = "xoxb-itest-bot-token";
 const SLACK_REPLY: &str = "Here is the coordinated Slack reply.";
@@ -376,7 +380,7 @@ fn delivery_run_services(
         route_store,
         communication_preferences,
         notification_inbox: None,
-        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+        reply_publication: harness.reply_publication_for_test(services),
         delivery_targets,
         coordinator,
         extension_id: extension_id.to_string(),
@@ -414,6 +418,7 @@ async fn preresolve_vendor_turn_scope(
         ironclaw_extension_contracts::test_support::conformance::ScriptedVendorServer::new(
             Arc::new(
                 |_| ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                    retry_after: None,
                     status: 503,
                     body: Vec::new(),
                 },
@@ -688,25 +693,6 @@ async fn assert_delivered_attempt(services: &RebornRuntime, scope: &TurnScope) {
             .iter()
             .map(|attempt| attempt.status)
             .collect::<Vec<_>>()
-    );
-}
-
-fn assert_slack_thread_delivery_evidence(messages: &[serde_json::Value]) {
-    let expected_conversation_id = "C777";
-    let expected_thread_anchor = Some("1710000200.000050");
-    let expected_count = 1;
-    let matching = messages.iter().filter(|message| {
-        message["channel"] == expected_conversation_id
-            && message.get("thread_ts").and_then(serde_json::Value::as_str)
-                == expected_thread_anchor
-            && message["text"]
-                .as_str()
-                .is_some_and(|text| text.contains(SLACK_REPLY))
-    });
-    assert_eq!(
-        matching.count(),
-        expected_count,
-        "the coordinated Slack reply must reach the exact channel thread once: {messages:?}"
     );
 }
 
@@ -1449,36 +1435,83 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     );
     assert_delivered_attempt(services, &vendor_scope).await;
 
-    // Wire seam: the coordinated FinalReply reached chat.postMessage with the
-    // bridged bot token injected host-side (the adapter never saw it).
-    // #6520 delivery is event-driven, so poll the wire with the file's
-    // bounded deadline instead of a single post-idle snapshot.
+    // Wire seam: the run's reply is PUBLISHED through Slack's native Agent
+    // stream (`[channel.reply] transport = "stream"`) — opened in the source
+    // channel with the stored reply context's recipient/thread, carrying the
+    // reply text, closed once — with the bridged bot token injected
+    // host-side (the adapter never saw it). Publication is event-driven, so
+    // poll the wire with the file's bounded deadline.
     let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let (requests, post_message_position) = loop {
+    let (requests, start_position) = loop {
         let requests = inbound.captured_network_requests_for_test();
-        if let Some(position) = requests.iter().position(|request| {
-            request.url.ends_with("/api/chat.postMessage")
-                && String::from_utf8_lossy(&request.body).contains(SLACK_REPLY)
-        }) {
+        if let Some(position) = requests
+            .iter()
+            .position(|request| request.url.ends_with("/api/chat.startStream"))
+        {
             break (requests, position);
         }
         assert!(
             tokio::time::Instant::now() < wire_deadline,
-            "chat.postMessage with the reply must land on the wire; got {:?}",
+            "chat.startStream must open the reply on the wire; got {:?}",
             requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    let post_message = &requests[post_message_position];
-    let posted_messages = requests
+    let start_stream = &requests[start_position];
+    let started: serde_json::Value =
+        serde_json::from_slice(&start_stream.body).expect("chat.startStream body is JSON");
+    assert_eq!(
+        started["channel"], "C777",
+        "the stream opens in the source channel"
+    );
+    assert_eq!(
+        started["thread_ts"], "1710000200.000050",
+        "the stored reply context's thread anchors the stream"
+    );
+    assert_eq!(
+        started["recipient_user_id"], "U777",
+        "a channel stream names its recipient from the stored reply context"
+    );
+    assert_eq!(started["recipient_team_id"], "T-A");
+    let streamed: String = requests
         .iter()
-        .filter(|request| request.url.ends_with("/api/chat.postMessage"))
-        .map(|request| {
-            serde_json::from_slice(&request.body).expect("Slack chat.postMessage body is JSON")
+        .filter(|request| {
+            request.url.ends_with("/api/chat.startStream")
+                || request.url.ends_with("/api/chat.appendStream")
+                || request.url.ends_with("/api/chat.stopStream")
         })
-        .collect::<Vec<_>>();
-    assert_slack_thread_delivery_evidence(&posted_messages);
-    let authorization = post_message
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        streamed.contains(SLACK_REPLY),
+        "the reply text is streamed through the agent surface: {streamed}"
+    );
+    let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let stops = inbound
+            .captured_network_requests_for_test()
+            .into_iter()
+            .filter(|request| request.url.ends_with("/api/chat.stopStream"))
+            .count();
+        if stops == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < wire_deadline,
+            "the stream is closed exactly once at the terminal revision"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .any(|request| request.url.ends_with("/api/chat.postMessage")
+                && String::from_utf8_lossy(&request.body).contains(SLACK_REPLY)),
+        "the answer is never also posted as a plain message"
+    );
+    let authorization = start_stream
         .headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))

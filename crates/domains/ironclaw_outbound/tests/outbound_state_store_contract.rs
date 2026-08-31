@@ -3155,3 +3155,1666 @@ async fn cleanup_completion_delete_permission_fault_preserves_snapshot() {
         "a conditional-delete fault must not drop or rewrite the cleanup snapshot"
     );
 }
+
+// ─── Progressive reply publication on the attempt aggregate ─────────────────
+//
+// `docs/internal/design/2026-08-31-progressive-reply-publication.md` §5: the
+// persisted attempt row carries a serde-defaulted `publication` substate with
+// its own lease/fence ownership, monotonic revisions, and one-way settlement.
+// Every scenario below runs against the in-memory backend and the libSQL
+// backend through the same `OutboundStateStorePort` seam.
+
+fn prepared_attempt(scope: &TurnScope, marker: &str, run_id: TurnRunId) -> OutboundDeliveryAttempt {
+    OutboundDeliveryAttempt {
+        delivery_id: OutboundDeliveryId::new(),
+        scope: scope.clone(),
+        candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: Some(run_id),
+            target: reply_ref(marker),
+            kind: OutboundPushKind::FinalReply,
+            projection_ref: ProjectionUpdateRef::new(format!("projection:{marker}:{run_id}"))
+                .unwrap(),
+            requires_reply_target_revalidation: true,
+        },
+        status: OutboundDeliveryStatus::Prepared,
+        attempted_at: now(),
+        failure_kind: None,
+    }
+}
+
+fn publication_target(run_id: TurnRunId, key: &str) -> ReplyPublicationTarget {
+    ReplyPublicationTarget {
+        run_id,
+        key: ReplyPublicationTargetKey::new(key).unwrap(),
+    }
+}
+
+fn publisher(name: &str) -> PublisherId {
+    PublisherId::new(name).unwrap()
+}
+
+fn seconds(count: i64) -> chrono::Duration {
+    chrono::Duration::seconds(count)
+}
+
+const LEASE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn claim_request(
+    delivery_id: OutboundDeliveryId,
+    scope: &TurnScope,
+    owner: &str,
+    now: ironclaw_host_api::Timestamp,
+) -> ClaimReplyPublicationLeaseRequest {
+    ClaimReplyPublicationLeaseRequest {
+        delivery_id,
+        scope: scope.clone(),
+        owner: publisher(owner),
+        ttl: LEASE_TTL,
+        now,
+    }
+}
+
+fn renew_request(
+    delivery_id: OutboundDeliveryId,
+    scope: &TurnScope,
+    owner: &str,
+    fence: u64,
+    now: ironclaw_host_api::Timestamp,
+) -> RenewReplyPublicationLeaseRequest {
+    RenewReplyPublicationLeaseRequest {
+        delivery_id,
+        scope: scope.clone(),
+        owner: publisher(owner),
+        fence,
+        ttl: LEASE_TTL,
+        now,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_request(
+    delivery_id: OutboundDeliveryId,
+    scope: &TurnScope,
+    fence: u64,
+    desired_revision: u64,
+    published_revision: u64,
+    terminal_revision: Option<u64>,
+    generation: Option<u64>,
+    checkpoint: Option<ironclaw_extension_contracts::reply::ReplySinkCheckpoint>,
+    evidence: ReplyPublicationEvidence,
+    now: ironclaw_host_api::Timestamp,
+) -> AdvanceReplyPublicationRequest {
+    AdvanceReplyPublicationRequest {
+        delivery_id,
+        scope: scope.clone(),
+        fence,
+        desired_revision,
+        published_revision,
+        terminal_revision,
+        generation,
+        checkpoint,
+        evidence,
+        now,
+    }
+}
+
+fn settle_request(
+    delivery_id: OutboundDeliveryId,
+    scope: &TurnScope,
+    fence: u64,
+    settlement: ReplyPublicationSettlement,
+    now: ironclaw_host_api::Timestamp,
+) -> SettleReplyPublicationRequest {
+    SettleReplyPublicationRequest {
+        delivery_id,
+        scope: scope.clone(),
+        fence,
+        settlement,
+        now,
+    }
+}
+
+fn checkpoint(payload: &str) -> ironclaw_extension_contracts::reply::ReplySinkCheckpoint {
+    ironclaw_extension_contracts::reply::ReplySinkCheckpoint::new(1, payload).unwrap()
+}
+
+fn evidence(provider_ref: &str, read_back_verified: bool) -> ReplyPublicationEvidence {
+    ReplyPublicationEvidence {
+        provider_refs: ironclaw_extension_contracts::reply::ReplyProviderRefs::new(vec![
+            ironclaw_extension_contracts::reply::ReplyProviderRef::new(provider_ref).unwrap(),
+        ])
+        .unwrap(),
+        read_back_verified,
+        last_outcome: None,
+        generation_changed: false,
+    }
+}
+
+fn acquired(claim: ReplyPublicationClaim) -> ReplyPublicationRecord {
+    match claim {
+        ReplyPublicationClaim::Acquired(record) => record,
+        other => panic!("expected an acquired lease, got {other:?}"),
+    }
+}
+
+async fn open_and_claim(
+    store: &impl OutboundStateStorePort,
+    scope: &TurnScope,
+    marker: &str,
+    run_id: TurnRunId,
+    owner: &str,
+    now: ironclaw_host_api::Timestamp,
+) -> ReplyPublicationRecord {
+    let attempt = prepared_attempt(scope, marker, run_id);
+    store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: attempt.clone(),
+            target: publication_target(run_id, marker),
+            descriptor: None,
+            now,
+        })
+        .await
+        .unwrap();
+    acquired(
+        store
+            .claim_reply_publication_lease(claim_request(attempt.delivery_id, scope, owner, now))
+            .await
+            .unwrap(),
+    )
+}
+
+async fn run_reply_publication_contract(store: &impl OutboundStateStorePort) {
+    reply_publication_open_is_idempotent_and_rejects_a_different_target(store).await;
+    reply_publication_lease_claim_holds_reenters_and_takes_over_after_expiry(store).await;
+    reply_publication_lease_renewal_requires_owner_and_fence(store).await;
+    reply_publication_advance_is_monotonic_fenced_and_lease_bound(store).await;
+    reply_publication_settlement_is_guarded_and_one_way(store).await;
+    reply_publication_rows_are_left_alone_by_crash_recovery(store).await;
+    pre_publication_attempt_rows_keep_the_one_shot_lifecycle(store).await;
+}
+
+#[tokio::test]
+async fn reply_publication_contract_holds_on_the_in_memory_backend() {
+    let store = build_outbound_store_for_backend(Arc::new(InMemoryBackend::new()));
+    run_reply_publication_contract(&store).await;
+}
+
+#[tokio::test]
+async fn reply_publication_contract_holds_on_libsql_and_survives_reopen() {
+    let directory = tempfile::tempdir().expect("temporary libSQL directory");
+    let database_path = directory.path().join("outbound-reply-publication.db");
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let t0 = now();
+
+    let survivor = {
+        let database = Arc::new(
+            libsql::Builder::new_local(&database_path)
+                .build()
+                .await
+                .expect("build first libSQL database"),
+        );
+        let root = Arc::new(
+            LibSqlRootFilesystem::new(database).expect("build first libSQL root filesystem"),
+        );
+        root.run_migrations()
+            .await
+            .expect("migrate first libSQL filesystem");
+        let store = OutboundStateStore::new(build_scoped_fs(root, TEST_OUTBOUND_ROOT));
+        run_reply_publication_contract(&store).await;
+
+        let claimed =
+            open_and_claim(&store, &scope, "libsql-survivor", run_id, "worker-a", t0).await;
+        store
+            .advance_reply_publication(advance_request(
+                claimed.attempt.delivery_id,
+                &scope,
+                claimed.publication.fence,
+                2,
+                1,
+                Some(2),
+                Some(3),
+                Some(checkpoint("libsql-cp-1")),
+                evidence("libsql-msg-1", false),
+                t0 + seconds(1),
+            ))
+            .await
+            .unwrap()
+    };
+
+    let reopened_database = Arc::new(
+        libsql::Builder::new_local(&database_path)
+            .build()
+            .await
+            .expect("reopen libSQL database"),
+    );
+    let reopened_root = Arc::new(
+        LibSqlRootFilesystem::new(reopened_database).expect("reopen libSQL root filesystem"),
+    );
+    reopened_root
+        .run_migrations()
+        .await
+        .expect("migrate reopened libSQL filesystem");
+    let reopened = OutboundStateStore::new(build_scoped_fs(reopened_root, TEST_OUTBOUND_ROOT));
+
+    assert_eq!(
+        reopened
+            .load_reply_publication(scope.clone(), survivor.attempt.delivery_id)
+            .await
+            .unwrap(),
+        Some(survivor.clone()),
+        "publication state (lease, fence, revisions, checkpoint, evidence) survives a reopen"
+    );
+    assert_eq!(
+        reopened
+            .list_reply_publications(scope.clone(), run_id)
+            .await
+            .unwrap(),
+        vec![survivor.clone()]
+    );
+    // After a restart the old lease expires and a new publisher takes over
+    // with a bumped fence — the crash-recovery path for publication rows.
+    let taken = acquired(
+        reopened
+            .claim_reply_publication_lease(claim_request(
+                survivor.attempt.delivery_id,
+                &scope,
+                "worker-b",
+                t0 + seconds(120),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(taken.publication.fence, survivor.publication.fence + 1);
+    assert_eq!(
+        taken.publication.checkpoint,
+        survivor.publication.checkpoint
+    );
+    assert_eq!(taken.publication.published_revision, 1);
+}
+
+async fn reply_publication_open_is_idempotent_and_rejects_a_different_target(
+    store: &impl OutboundStateStorePort,
+) {
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let attempt = prepared_attempt(&scope, "reply-publication-open", run_id);
+    let delivery_id = attempt.delivery_id;
+    let target = publication_target(run_id, "slack:C1:171.1");
+    let t0 = now();
+
+    let opened = store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: attempt.clone(),
+            target: target.clone(),
+            descriptor: None,
+            now: t0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(opened.attempt, attempt);
+    assert_eq!(opened.publication.target, target);
+    assert_eq!(opened.publication.fence, 0);
+    assert_eq!(opened.publication.lease, None);
+    assert_eq!(opened.publication.desired_revision, 0);
+    assert_eq!(opened.publication.published_revision, 0);
+    assert_eq!(opened.publication.terminal_revision, None);
+    assert_eq!(opened.publication.generation, None);
+    assert_eq!(opened.publication.checkpoint, None);
+    assert_eq!(
+        opened.publication.evidence,
+        ReplyPublicationEvidence::default()
+    );
+    assert_eq!(opened.publication.status, ReplyPublicationStatus::Active);
+    assert_eq!(opened.publication.updated_at, t0);
+
+    // A replay with the same target (even at a later clock) returns the
+    // existing record unchanged.
+    let replayed = store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: attempt.clone(),
+            target: target.clone(),
+            descriptor: None,
+            now: t0 + seconds(5),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replayed, opened);
+
+    // A different key or a different run under the same delivery id conflicts.
+    let other_key = store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: attempt.clone(),
+            target: publication_target(run_id, "slack:C1:171.2"),
+            descriptor: None,
+            now: t0,
+        })
+        .await;
+    assert!(matches!(
+        other_key,
+        Err(OutboundError::ReplyPublicationTargetMismatch)
+    ));
+    let other_run = store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: attempt.clone(),
+            target: publication_target(TurnRunId::new(), "slack:C1:171.1"),
+            descriptor: None,
+            now: t0,
+        })
+        .await;
+    assert!(matches!(
+        other_run,
+        Err(OutboundError::ReplyPublicationTargetMismatch)
+    ));
+    assert_eq!(
+        store
+            .load_reply_publication(scope.clone(), delivery_id)
+            .await
+            .unwrap(),
+        Some(opened.clone()),
+        "a rejected open leaves the existing publication untouched"
+    );
+
+    // A plain attempt row recorded through the one-shot path is never adopted.
+    let plain = prepared_attempt(&scope, "reply-publication-open-plain", run_id);
+    store.record_delivery_attempt(plain.clone()).await.unwrap();
+    let adopt = store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: plain.clone(),
+            target: publication_target(run_id, "plain"),
+            descriptor: None,
+            now: t0,
+        })
+        .await;
+    assert!(matches!(
+        adopt,
+        Err(OutboundError::ReplyPublicationTargetMismatch)
+    ));
+    assert_eq!(
+        store
+            .load_reply_publication(scope.clone(), plain.delivery_id)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // Only a `Prepared` attempt can open a publication; nothing is written
+    // for a rejected open.
+    let mut sending = prepared_attempt(&scope, "reply-publication-open-sending", run_id);
+    sending.status = OutboundDeliveryStatus::Sending;
+    let rejected = store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: sending.clone(),
+            target: publication_target(run_id, "sending"),
+            descriptor: None,
+            now: t0,
+        })
+        .await;
+    assert!(matches!(
+        rejected,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+    assert_eq!(
+        store
+            .load_delivery_attempt(scope.clone(), sending.delivery_id)
+            .await
+            .unwrap(),
+        None
+    );
+
+    // Point reads and run listings are scope-exact; the plain row is not a
+    // publication; the attempt row itself stays an ordinary delivery attempt.
+    assert_eq!(
+        store
+            .load_reply_publication(sibling_turn_scope(), delivery_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .list_reply_publications(scope.clone(), run_id)
+            .await
+            .unwrap(),
+        vec![opened.clone()]
+    );
+    assert!(
+        store
+            .list_reply_publications(scope.clone(), TurnRunId::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .list_reply_publications(sibling_turn_scope(), run_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .load_delivery_attempt(scope.clone(), delivery_id)
+            .await
+            .unwrap(),
+        Some(attempt.clone())
+    );
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert!(attempts.iter().any(|listed| listed == &attempt));
+    assert!(attempts.iter().any(|listed| listed == &plain));
+}
+
+async fn reply_publication_lease_claim_holds_reenters_and_takes_over_after_expiry(
+    store: &impl OutboundStateStorePort,
+) {
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let attempt = prepared_attempt(&scope, "reply-publication-claim", run_id);
+    let delivery_id = attempt.delivery_id;
+    let t0 = now();
+    store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: attempt.clone(),
+            target: publication_target(run_id, "claim"),
+            descriptor: None,
+            now: t0,
+        })
+        .await
+        .unwrap();
+
+    // A lease needs a positive ttl.
+    let zero_ttl = store
+        .claim_reply_publication_lease(ClaimReplyPublicationLeaseRequest {
+            delivery_id,
+            scope: scope.clone(),
+            owner: publisher("worker-a"),
+            ttl: std::time::Duration::ZERO,
+            now: t0,
+        })
+        .await;
+    assert!(matches!(
+        zero_ttl,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+
+    // First claim: fence bumps to 1, the attempt moves Prepared -> Sending.
+    let first = acquired(
+        store
+            .claim_reply_publication_lease(claim_request(delivery_id, &scope, "worker-a", t0))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(first.publication.fence, 1);
+    assert_eq!(
+        first.publication.lease,
+        Some(ReplyPublicationLease {
+            owner: publisher("worker-a"),
+            expires_at: t0 + seconds(30),
+        })
+    );
+    assert_eq!(first.attempt.status, OutboundDeliveryStatus::Sending);
+    assert_eq!(first.attempt.failure_kind, None);
+    assert_eq!(first.publication.updated_at, t0);
+    assert_eq!(first.publication.status, ReplyPublicationStatus::Active);
+
+    // Another publisher is held off while the lease is live.
+    let held = store
+        .claim_reply_publication_lease(claim_request(
+            delivery_id,
+            &scope,
+            "worker-b",
+            t0 + seconds(1),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        held,
+        ReplyPublicationClaim::Held {
+            owner: publisher("worker-a"),
+            expires_at: t0 + seconds(30),
+        }
+    );
+
+    // The owner re-enters with the same fence and an extended expiry.
+    let reentered = acquired(
+        store
+            .claim_reply_publication_lease(claim_request(
+                delivery_id,
+                &scope,
+                "worker-a",
+                t0 + seconds(10),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(reentered.publication.fence, 1);
+    assert_eq!(
+        reentered.publication.lease,
+        Some(ReplyPublicationLease {
+            owner: publisher("worker-a"),
+            expires_at: t0 + seconds(40),
+        })
+    );
+    assert_eq!(reentered.attempt.status, OutboundDeliveryStatus::Sending);
+
+    // Once the lease expires a new owner takes over with a bumped fence; the
+    // attempt stays `Sending` (the one-shot claim is not re-run).
+    let taken = acquired(
+        store
+            .claim_reply_publication_lease(claim_request(
+                delivery_id,
+                &scope,
+                "worker-b",
+                t0 + seconds(41),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(taken.publication.fence, 2);
+    assert_eq!(
+        taken.publication.lease,
+        Some(ReplyPublicationLease {
+            owner: publisher("worker-b"),
+            expires_at: t0 + seconds(71),
+        })
+    );
+    assert_eq!(taken.attempt.status, OutboundDeliveryStatus::Sending);
+    let stale_owner = store
+        .claim_reply_publication_lease(claim_request(
+            delivery_id,
+            &scope,
+            "worker-a",
+            t0 + seconds(42),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        stale_owner,
+        ReplyPublicationClaim::Held {
+            owner: publisher("worker-b"),
+            expires_at: t0 + seconds(71),
+        }
+    );
+    assert_eq!(
+        store
+            .load_reply_publication(scope.clone(), delivery_id)
+            .await
+            .unwrap(),
+        Some(taken)
+    );
+
+    // Unknown ids and plain attempt rows carry no publication; a foreign
+    // scope never sees the row as a publication.
+    let missing = store
+        .claim_reply_publication_lease(claim_request(
+            OutboundDeliveryId::new(),
+            &scope,
+            "worker-a",
+            t0,
+        ))
+        .await;
+    assert!(matches!(
+        missing,
+        Err(OutboundError::ReplyPublicationNotFound)
+    ));
+    let plain = prepared_attempt(&scope, "reply-publication-claim-plain", run_id);
+    store.record_delivery_attempt(plain.clone()).await.unwrap();
+    let plain_claim = store
+        .claim_reply_publication_lease(claim_request(plain.delivery_id, &scope, "worker-a", t0))
+        .await;
+    assert!(matches!(
+        plain_claim,
+        Err(OutboundError::ReplyPublicationNotFound)
+    ));
+    let wrong_scope = store
+        .claim_reply_publication_lease(claim_request(
+            delivery_id,
+            &sibling_turn_scope(),
+            "worker-c",
+            t0 + seconds(100),
+        ))
+        .await;
+    assert!(matches!(
+        wrong_scope,
+        Err(OutboundError::SubscriptionScopeMismatch | OutboundError::ReplyPublicationNotFound)
+    ));
+}
+
+async fn reply_publication_lease_renewal_requires_owner_and_fence(
+    store: &impl OutboundStateStorePort,
+) {
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let t0 = now();
+    let held = open_and_claim(
+        store,
+        &scope,
+        "reply-publication-renew",
+        run_id,
+        "worker-a",
+        t0,
+    )
+    .await;
+    let delivery_id = held.attempt.delivery_id;
+    assert_eq!(held.publication.fence, 1);
+
+    assert!(
+        store
+            .renew_reply_publication_lease(renew_request(
+                delivery_id,
+                &scope,
+                "worker-a",
+                1,
+                t0 + seconds(5),
+            ))
+            .await
+            .unwrap(),
+        "the owner renews with its fence"
+    );
+    let renewed = store
+        .load_reply_publication(scope.clone(), delivery_id)
+        .await
+        .unwrap()
+        .expect("publication persisted");
+    assert_eq!(renewed.publication.fence, 1);
+    assert_eq!(
+        renewed.publication.lease,
+        Some(ReplyPublicationLease {
+            owner: publisher("worker-a"),
+            expires_at: t0 + seconds(35),
+        })
+    );
+    assert_eq!(renewed.publication.updated_at, t0 + seconds(5));
+
+    for (owner, fence) in [("worker-b", 1), ("worker-a", 0), ("worker-a", 2)] {
+        assert!(
+            !store
+                .renew_reply_publication_lease(renew_request(
+                    delivery_id,
+                    &scope,
+                    owner,
+                    fence,
+                    t0 + seconds(6),
+                ))
+                .await
+                .unwrap(),
+            "renewal by {owner} with fence {fence} must be refused"
+        );
+    }
+    assert_eq!(
+        store
+            .load_reply_publication(scope.clone(), delivery_id)
+            .await
+            .unwrap(),
+        Some(renewed),
+        "refused renewals leave the lease untouched"
+    );
+
+    // A missing publication is an error; a stale fence never is.
+    let missing = store
+        .renew_reply_publication_lease(renew_request(
+            OutboundDeliveryId::new(),
+            &scope,
+            "worker-a",
+            1,
+            t0,
+        ))
+        .await;
+    assert!(matches!(
+        missing,
+        Err(OutboundError::ReplyPublicationNotFound)
+    ));
+
+    // After an expiry takeover the old owner's renewals are refused and the
+    // new owner's accepted; the fence — not the clock — is the guard, so the
+    // holder can still renew a lease that lapsed without a takeover.
+    let taken = acquired(
+        store
+            .claim_reply_publication_lease(claim_request(
+                delivery_id,
+                &scope,
+                "worker-b",
+                t0 + seconds(36),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(taken.publication.fence, 2);
+    assert!(
+        !store
+            .renew_reply_publication_lease(renew_request(
+                delivery_id,
+                &scope,
+                "worker-a",
+                1,
+                t0 + seconds(37),
+            ))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .renew_reply_publication_lease(renew_request(
+                delivery_id,
+                &scope,
+                "worker-b",
+                2,
+                t0 + seconds(37),
+            ))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .renew_reply_publication_lease(renew_request(
+                delivery_id,
+                &scope,
+                "worker-b",
+                2,
+                t0 + seconds(500),
+            ))
+            .await
+            .unwrap(),
+        "a lapsed lease nobody took over still belongs to the fenced owner"
+    );
+    assert_eq!(
+        store
+            .load_reply_publication(scope, delivery_id)
+            .await
+            .unwrap()
+            .expect("publication persisted")
+            .publication
+            .lease,
+        Some(ReplyPublicationLease {
+            owner: publisher("worker-b"),
+            expires_at: t0 + seconds(530),
+        })
+    );
+}
+
+async fn reply_publication_advance_is_monotonic_fenced_and_lease_bound(
+    store: &impl OutboundStateStorePort,
+) {
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let t0 = now();
+    let held = open_and_claim(
+        store,
+        &scope,
+        "reply-publication-advance",
+        run_id,
+        "worker-a",
+        t0,
+    )
+    .await;
+    let delivery_id = held.attempt.delivery_id;
+
+    // A stale fence is rejected before anything else is inspected.
+    let stale = store
+        .advance_reply_publication(advance_request(
+            delivery_id,
+            &scope,
+            0,
+            1,
+            0,
+            None,
+            None,
+            None,
+            ReplyPublicationEvidence::default(),
+            t0,
+        ))
+        .await;
+    assert!(
+        matches!(
+            stale,
+            Err(OutboundError::StaleReplyPublisher {
+                expected_fence: 0,
+                actual_fence: 1,
+            })
+        ),
+        "got {stale:?}"
+    );
+
+    // Forward progress records revisions, generation, checkpoint, evidence.
+    let first = store
+        .advance_reply_publication(advance_request(
+            delivery_id,
+            &scope,
+            1,
+            3,
+            1,
+            None,
+            Some(7),
+            Some(checkpoint("cp-1")),
+            evidence("msg-1", false),
+            t0 + seconds(1),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.publication.desired_revision, 3);
+    assert_eq!(first.publication.published_revision, 1);
+    assert_eq!(first.publication.terminal_revision, None);
+    assert_eq!(first.publication.generation, Some(7));
+    assert_eq!(first.publication.checkpoint, Some(checkpoint("cp-1")));
+    assert_eq!(first.publication.evidence, evidence("msg-1", false));
+    assert_eq!(first.publication.updated_at, t0 + seconds(1));
+    assert_eq!(first.publication.fence, 1);
+    assert_eq!(first.publication.lease, held.publication.lease);
+    assert_eq!(first.publication.status, ReplyPublicationStatus::Active);
+    assert_eq!(first.attempt.status, OutboundDeliveryStatus::Sending);
+
+    // Regressions: desired backwards, published backwards, published past
+    // desired.
+    for (desired, published) in [(2, 1), (3, 0), (4, 5)] {
+        let regressed = store
+            .advance_reply_publication(advance_request(
+                delivery_id,
+                &scope,
+                1,
+                desired,
+                published,
+                None,
+                Some(7),
+                None,
+                evidence("msg-1", false),
+                t0 + seconds(2),
+            ))
+            .await;
+        assert!(
+            matches!(
+                regressed,
+                Err(OutboundError::ReplyPublicationRevisionRegressed { .. })
+            ),
+            "desired {desired} / published {published} must be refused, got {regressed:?}"
+        );
+    }
+
+    // The terminal revision is set once, cannot exceed the desired revision,
+    // and every later request must carry the same value. A `None` checkpoint
+    // keeps the previous one.
+    let beyond_desired = store
+        .advance_reply_publication(advance_request(
+            delivery_id,
+            &scope,
+            1,
+            4,
+            2,
+            Some(5),
+            Some(7),
+            None,
+            evidence("msg-1", false),
+            t0 + seconds(2),
+        ))
+        .await;
+    assert!(matches!(
+        beyond_desired,
+        Err(OutboundError::InvalidRequest { .. })
+    ));
+    let terminal = store
+        .advance_reply_publication(advance_request(
+            delivery_id,
+            &scope,
+            1,
+            4,
+            2,
+            Some(4),
+            Some(7),
+            None,
+            evidence("msg-1", false),
+            t0 + seconds(2),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(terminal.publication.terminal_revision, Some(4));
+    assert_eq!(terminal.publication.checkpoint, Some(checkpoint("cp-1")));
+    for changed_terminal in [Some(5), None] {
+        let refused = store
+            .advance_reply_publication(advance_request(
+                delivery_id,
+                &scope,
+                1,
+                4,
+                3,
+                changed_terminal,
+                Some(7),
+                None,
+                evidence("msg-1", false),
+                t0 + seconds(3),
+            ))
+            .await;
+        assert!(
+            matches!(refused, Err(OutboundError::InvalidRequest { .. })),
+            "terminal revision {changed_terminal:?} must be refused once set, got {refused:?}"
+        );
+    }
+    let mut richer = evidence("msg-2", true);
+    richer.generation_changed = true;
+    richer.last_outcome =
+        Some(ironclaw_extension_contracts::reply::ReplyOutcomeReason::new("rate limited once"));
+    let progressed = store
+        .advance_reply_publication(advance_request(
+            delivery_id,
+            &scope,
+            1,
+            4,
+            3,
+            Some(4),
+            Some(8),
+            Some(checkpoint("cp-2")),
+            richer.clone(),
+            t0 + seconds(3),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(progressed.publication.published_revision, 3);
+    assert_eq!(progressed.publication.generation, Some(8));
+    assert_eq!(progressed.publication.checkpoint, Some(checkpoint("cp-2")));
+    assert_eq!(progressed.publication.evidence, richer);
+
+    // Re-applying the same revisions is accepted (idempotent re-apply).
+    let replayed = store
+        .advance_reply_publication(advance_request(
+            delivery_id,
+            &scope,
+            1,
+            4,
+            3,
+            Some(4),
+            Some(8),
+            None,
+            richer.clone(),
+            t0 + seconds(4),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replayed.publication.published_revision, 3);
+    assert_eq!(replayed.publication.updated_at, t0 + seconds(4));
+
+    // Releasing the lease keeps the fence; guarded writes then need a lease.
+    let stale_release = store
+        .release_reply_publication_lease(ReleaseReplyPublicationLeaseRequest {
+            delivery_id,
+            scope: scope.clone(),
+            fence: 0,
+        })
+        .await;
+    assert!(matches!(
+        stale_release,
+        Err(OutboundError::StaleReplyPublisher { .. })
+    ));
+    store
+        .release_reply_publication_lease(ReleaseReplyPublicationLeaseRequest {
+            delivery_id,
+            scope: scope.clone(),
+            fence: 1,
+        })
+        .await
+        .unwrap();
+    let released = store
+        .load_reply_publication(scope.clone(), delivery_id)
+        .await
+        .unwrap()
+        .expect("publication persisted");
+    assert_eq!(released.publication.lease, None);
+    assert_eq!(released.publication.fence, 1);
+    assert_eq!(released.publication.published_revision, 3);
+    let unleased = store
+        .advance_reply_publication(advance_request(
+            delivery_id,
+            &scope,
+            1,
+            4,
+            4,
+            Some(4),
+            Some(8),
+            None,
+            richer.clone(),
+            t0 + seconds(5),
+        ))
+        .await;
+    assert!(matches!(
+        unleased,
+        Err(OutboundError::ReplyPublicationLeaseRequired)
+    ));
+
+    // Re-claiming bumps the fence: the old fence is stale, the new one writes.
+    let reclaimed = acquired(
+        store
+            .claim_reply_publication_lease(claim_request(
+                delivery_id,
+                &scope,
+                "worker-a",
+                t0 + seconds(6),
+            ))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(reclaimed.publication.fence, 2);
+    let old_fence = store
+        .advance_reply_publication(advance_request(
+            delivery_id,
+            &scope,
+            1,
+            4,
+            4,
+            Some(4),
+            Some(8),
+            None,
+            richer.clone(),
+            t0 + seconds(7),
+        ))
+        .await;
+    assert!(matches!(
+        old_fence,
+        Err(OutboundError::StaleReplyPublisher {
+            expected_fence: 1,
+            actual_fence: 2,
+        })
+    ));
+    let done = store
+        .advance_reply_publication(advance_request(
+            delivery_id,
+            &scope,
+            2,
+            4,
+            4,
+            Some(4),
+            Some(8),
+            None,
+            richer,
+            t0 + seconds(7),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(done.publication.published_revision, 4);
+    assert_eq!(done.publication.terminal_revision, Some(4));
+
+    // A plain attempt row has nothing to advance.
+    let plain = prepared_attempt(&scope, "reply-publication-advance-plain", run_id);
+    store.record_delivery_attempt(plain.clone()).await.unwrap();
+    let plain_advance = store
+        .advance_reply_publication(advance_request(
+            plain.delivery_id,
+            &scope,
+            0,
+            1,
+            0,
+            None,
+            None,
+            None,
+            ReplyPublicationEvidence::default(),
+            t0,
+        ))
+        .await;
+    assert!(matches!(
+        plain_advance,
+        Err(OutboundError::ReplyPublicationNotFound)
+    ));
+}
+
+async fn reply_publication_settlement_is_guarded_and_one_way(store: &impl OutboundStateStorePort) {
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let t0 = now();
+
+    // `Delivered` requires the terminal revision to be known and applied.
+    let delivered_publication = open_and_claim(
+        store,
+        &scope,
+        "reply-publication-settle-delivered",
+        run_id,
+        "worker-a",
+        t0,
+    )
+    .await;
+    let delivered_id = delivered_publication.attempt.delivery_id;
+    let no_terminal = store
+        .settle_reply_publication(settle_request(
+            delivered_id,
+            &scope,
+            1,
+            ReplyPublicationSettlement::Delivered,
+            t0 + seconds(1),
+        ))
+        .await;
+    assert!(matches!(
+        no_terminal,
+        Err(OutboundError::ReplyPublicationNotTerminal)
+    ));
+    store
+        .advance_reply_publication(advance_request(
+            delivered_id,
+            &scope,
+            1,
+            2,
+            1,
+            Some(2),
+            Some(1),
+            Some(checkpoint("settle-cp")),
+            evidence("settle-msg", true),
+            t0 + seconds(1),
+        ))
+        .await
+        .unwrap();
+    let terminal_pending = store
+        .settle_reply_publication(settle_request(
+            delivered_id,
+            &scope,
+            1,
+            ReplyPublicationSettlement::Delivered,
+            t0 + seconds(2),
+        ))
+        .await;
+    assert!(matches!(
+        terminal_pending,
+        Err(OutboundError::ReplyPublicationNotTerminal)
+    ));
+    store
+        .advance_reply_publication(advance_request(
+            delivered_id,
+            &scope,
+            1,
+            2,
+            2,
+            Some(2),
+            Some(1),
+            None,
+            evidence("settle-msg", true),
+            t0 + seconds(2),
+        ))
+        .await
+        .unwrap();
+    let stale = store
+        .settle_reply_publication(settle_request(
+            delivered_id,
+            &scope,
+            0,
+            ReplyPublicationSettlement::Delivered,
+            t0 + seconds(3),
+        ))
+        .await;
+    assert!(matches!(
+        stale,
+        Err(OutboundError::StaleReplyPublisher { .. })
+    ));
+    let delivered = store
+        .settle_reply_publication(settle_request(
+            delivered_id,
+            &scope,
+            1,
+            ReplyPublicationSettlement::Delivered,
+            t0 + seconds(3),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        delivered.publication.status,
+        ReplyPublicationStatus::Settled(ReplyPublicationSettlement::Delivered)
+    );
+    assert_eq!(delivered.publication.lease, None);
+    assert_eq!(delivered.publication.fence, 1);
+    assert_eq!(delivered.publication.updated_at, t0 + seconds(3));
+    assert_eq!(
+        delivered.publication.checkpoint,
+        Some(checkpoint("settle-cp"))
+    );
+    assert_eq!(delivered.attempt.status, OutboundDeliveryStatus::Delivered);
+    assert_eq!(delivered.attempt.failure_kind, None);
+    assert_eq!(
+        store
+            .load_delivery_attempt(scope.clone(), delivered_id)
+            .await
+            .unwrap()
+            .map(|attempt| attempt.status),
+        Some(OutboundDeliveryStatus::Delivered)
+    );
+
+    // Settlement is one-way: no second settle, no advance, no new lease.
+    let again = store
+        .settle_reply_publication(settle_request(
+            delivered_id,
+            &scope,
+            1,
+            ReplyPublicationSettlement::Unknown,
+            t0 + seconds(4),
+        ))
+        .await;
+    assert!(matches!(again, Err(OutboundError::ReplyPublicationSettled)));
+    let advance_after = store
+        .advance_reply_publication(advance_request(
+            delivered_id,
+            &scope,
+            1,
+            3,
+            2,
+            Some(2),
+            Some(1),
+            None,
+            evidence("settle-msg", true),
+            t0 + seconds(4),
+        ))
+        .await;
+    assert!(matches!(
+        advance_after,
+        Err(OutboundError::ReplyPublicationSettled)
+    ));
+    for owner in ["worker-a", "worker-b"] {
+        let claim = store
+            .claim_reply_publication_lease(claim_request(
+                delivered_id,
+                &scope,
+                owner,
+                t0 + seconds(100),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(claim, ReplyPublicationClaim::Settled(delivered.clone()));
+    }
+    assert!(
+        !store
+            .renew_reply_publication_lease(renew_request(
+                delivered_id,
+                &scope,
+                "worker-a",
+                1,
+                t0 + seconds(4),
+            ))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .load_reply_publication(scope.clone(), delivered_id)
+            .await
+            .unwrap(),
+        Some(delivered.clone()),
+        "nothing after settlement mutates the record"
+    );
+
+    // `Unknown` and `Failed(kind)` settle any active publication, terminal
+    // known or not, and need only the fence — not a live lease.
+    let unknown_publication = open_and_claim(
+        store,
+        &scope,
+        "reply-publication-settle-unknown",
+        run_id,
+        "worker-a",
+        t0,
+    )
+    .await;
+    let unknown_id = unknown_publication.attempt.delivery_id;
+    store
+        .release_reply_publication_lease(ReleaseReplyPublicationLeaseRequest {
+            delivery_id: unknown_id,
+            scope: scope.clone(),
+            fence: 1,
+        })
+        .await
+        .unwrap();
+    let unknown = store
+        .settle_reply_publication(settle_request(
+            unknown_id,
+            &scope,
+            1,
+            ReplyPublicationSettlement::Unknown,
+            t0 + seconds(5),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        unknown.publication.status,
+        ReplyPublicationStatus::Settled(ReplyPublicationSettlement::Unknown)
+    );
+    assert_eq!(unknown.attempt.status, OutboundDeliveryStatus::Unknown);
+    assert_eq!(unknown.attempt.failure_kind, None);
+
+    let failed_publication = open_and_claim(
+        store,
+        &scope,
+        "reply-publication-settle-failed",
+        run_id,
+        "worker-a",
+        t0,
+    )
+    .await;
+    let failed_id = failed_publication.attempt.delivery_id;
+    let failed = store
+        .settle_reply_publication(settle_request(
+            failed_id,
+            &scope,
+            1,
+            ReplyPublicationSettlement::Failed(DeliveryFailureKind::Rejected),
+            t0 + seconds(6),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        failed.publication.status,
+        ReplyPublicationStatus::Settled(ReplyPublicationSettlement::Failed(
+            DeliveryFailureKind::Rejected
+        ))
+    );
+    assert_eq!(failed.publication.lease, None);
+    assert_eq!(failed.attempt.status, OutboundDeliveryStatus::Failed);
+    assert_eq!(
+        failed.attempt.failure_kind,
+        Some(DeliveryFailureKind::Rejected)
+    );
+
+    // The run listing returns every publication regardless of status, and
+    // the attempt rows keep reporting the settled delivery statuses.
+    let listed = store
+        .list_reply_publications(scope.clone(), run_id)
+        .await
+        .unwrap();
+    let mut listed_ids: Vec<_> = listed
+        .iter()
+        .map(|record| record.attempt.delivery_id)
+        .collect();
+    listed_ids.sort_by_key(|id| id.to_string());
+    let mut expected_ids = vec![delivered_id, unknown_id, failed_id];
+    expected_ids.sort_by_key(|id| id.to_string());
+    assert_eq!(listed_ids, expected_ids);
+    assert!(listed.contains(&delivered));
+    assert!(listed.contains(&unknown));
+    assert!(listed.contains(&failed));
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    let status_of = |id: OutboundDeliveryId| {
+        attempts
+            .iter()
+            .find(|attempt| attempt.delivery_id == id)
+            .map(|attempt| (attempt.status, attempt.failure_kind))
+    };
+    assert_eq!(
+        status_of(delivered_id),
+        Some((OutboundDeliveryStatus::Delivered, None))
+    );
+    assert_eq!(
+        status_of(unknown_id),
+        Some((OutboundDeliveryStatus::Unknown, None))
+    );
+    assert_eq!(
+        status_of(failed_id),
+        Some((
+            OutboundDeliveryStatus::Failed,
+            Some(DeliveryFailureKind::Rejected)
+        ))
+    );
+}
+
+async fn reply_publication_rows_are_left_alone_by_crash_recovery(
+    store: &impl OutboundStateStorePort,
+) {
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let t0 = now();
+    let held = open_and_claim(
+        store,
+        &scope,
+        "reply-publication-recovery",
+        run_id,
+        "worker-a",
+        t0,
+    )
+    .await;
+    let delivery_id = held.attempt.delivery_id;
+    assert_eq!(held.attempt.status, OutboundDeliveryStatus::Sending);
+
+    // A `Sending` attempt that carries a publication is not an interrupted
+    // one-shot send: recovery reports `false` and leaves the row untouched.
+    assert!(
+        !store
+            .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap(),
+        "publication rows recover through lease expiry, never by being marked Unknown"
+    );
+    assert_eq!(
+        store
+            .load_reply_publication(scope.clone(), delivery_id)
+            .await
+            .unwrap(),
+        Some(held.clone())
+    );
+    let listed = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|attempt| attempt.delivery_id == delivery_id),
+        Some(&held.attempt),
+        "publication rows still appear in the attempt listing"
+    );
+
+    // The one-shot contract is unchanged for a plain interrupted send.
+    let plain = prepared_attempt(&scope, "reply-publication-recovery-plain", run_id);
+    store.record_delivery_attempt(plain.clone()).await.unwrap();
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: plain.delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
+                delivery_id: plain.delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .load_delivery_attempt(scope, plain.delivery_id)
+            .await
+            .unwrap()
+            .map(|attempt| attempt.status),
+        Some(OutboundDeliveryStatus::Unknown)
+    );
+}
+
+async fn pre_publication_attempt_rows_keep_the_one_shot_lifecycle(
+    store: &impl OutboundStateStorePort,
+) {
+    let scope = turn_scope();
+    let run_id = TurnRunId::new();
+    let t0 = now();
+    let attempt = prepared_attempt(&scope, "reply-publication-legacy", run_id);
+    let delivery_id = attempt.delivery_id;
+    store
+        .record_delivery_attempt(attempt.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .load_reply_publication(scope.clone(), delivery_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        store
+            .list_reply_publications(scope.clone(), run_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let renew = store
+        .renew_reply_publication_lease(renew_request(delivery_id, &scope, "worker-a", 0, t0))
+        .await;
+    assert!(matches!(
+        renew,
+        Err(OutboundError::ReplyPublicationNotFound)
+    ));
+    let settle = store
+        .settle_reply_publication(settle_request(
+            delivery_id,
+            &scope,
+            0,
+            ReplyPublicationSettlement::Unknown,
+            t0,
+        ))
+        .await;
+    assert!(matches!(
+        settle,
+        Err(OutboundError::ReplyPublicationNotFound)
+    ));
+    let release = store
+        .release_reply_publication_lease(ReleaseReplyPublicationLeaseRequest {
+            delivery_id,
+            scope: scope.clone(),
+            fence: 0,
+        })
+        .await;
+    assert!(matches!(
+        release,
+        Err(OutboundError::ReplyPublicationNotFound)
+    ));
+
+    // The one-shot lifecycle is exactly as before, and never grows a
+    // publication.
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Delivered,
+            updated_at: t0 + seconds(1),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+    let delivered = store
+        .load_delivery_attempt(scope.clone(), delivery_id)
+        .await
+        .unwrap()
+        .expect("attempt persisted");
+    assert_eq!(delivered.status, OutboundDeliveryStatus::Delivered);
+    assert_eq!(
+        store
+            .load_reply_publication(scope.clone(), delivery_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        store
+            .list_reply_publications(scope, run_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// The exact bytes a pre-change store wrote — the attempt alone, no
+/// `publication` key — must load, run the one-shot lifecycle unchanged, and
+/// keep serializing without a `publication` key when rewritten.
+#[tokio::test]
+async fn legacy_delivery_attempt_rows_without_a_publication_substate_behave_unchanged() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let filesystem = build_scoped_fs(Arc::clone(&backend), TEST_OUTBOUND_ROOT);
+    let store = OutboundStateStore::new(Arc::clone(&filesystem));
+    let scope = turn_scope();
+    let resource_scope = scope.to_resource_scope();
+    let attempt = prepared_attempt(&scope, "legacy-row", TurnRunId::new());
+    let delivery_id = attempt.delivery_id;
+    let path = ScopedPath::new(format!("/outbound/deliveries/{delivery_id}.json")).unwrap();
+    let legacy_bytes = serde_json::to_vec(&attempt).unwrap();
+    filesystem
+        .put(
+            &resource_scope,
+            &path,
+            Entry::bytes(legacy_bytes).with_content_type(ContentType::json()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .load_delivery_attempt(scope.clone(), delivery_id)
+            .await
+            .unwrap(),
+        Some(attempt.clone())
+    );
+    assert_eq!(
+        store
+            .load_reply_publication(scope.clone(), delivery_id)
+            .await
+            .unwrap(),
+        None
+    );
+    let claim = store
+        .claim_reply_publication_lease(claim_request(delivery_id, &scope, "worker-a", now()))
+        .await;
+    assert!(matches!(
+        claim,
+        Err(OutboundError::ReplyPublicationNotFound)
+    ));
+
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
+                delivery_id,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    let recovered = store
+        .load_delivery_attempt(scope.clone(), delivery_id)
+        .await
+        .unwrap()
+        .expect("legacy row persisted");
+    assert_eq!(recovered.status, OutboundDeliveryStatus::Unknown);
+
+    let rewritten = filesystem
+        .get(&resource_scope, &path)
+        .await
+        .unwrap()
+        .expect("legacy row persisted");
+    let rewritten_json: serde_json::Value = serde_json::from_slice(&rewritten.entry.body).unwrap();
+    assert!(rewritten_json.get("publication").is_none());
+    assert_eq!(rewritten_json, serde_json::to_value(&recovered).unwrap());
+
+    // A freshly recorded attempt serializes byte-for-byte as the attempt
+    // alone, so older readers keep decoding new rows.
+    let fresh = prepared_attempt(&scope, "fresh-row", TurnRunId::new());
+    store.record_delivery_attempt(fresh.clone()).await.unwrap();
+    let fresh_path =
+        ScopedPath::new(format!("/outbound/deliveries/{}.json", fresh.delivery_id)).unwrap();
+    let stored = filesystem
+        .get(&resource_scope, &fresh_path)
+        .await
+        .unwrap()
+        .expect("fresh row persisted");
+    assert_eq!(stored.entry.body, serde_json::to_vec(&fresh).unwrap());
+}

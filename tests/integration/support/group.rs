@@ -259,6 +259,13 @@ pub(crate) struct GroupSharedStorage {
     /// Retained so integration tests can assert production loop milestones
     /// without adding event-specific hooks to the runtime path.
     pub(crate) milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
+    /// The reply projection the group's ONE planned runtime composes every
+    /// run's safe reply document into (the production milestone decorator,
+    /// `ReplyProjectionMilestoneSink`, wraps the sink above). Tests that wire
+    /// their own run-delivery observer build their publication service over
+    /// it, so channel replies are published from the same live document the
+    /// composed runtime would use — not only from terminal facts.
+    pub(crate) reply_projection: Arc<ironclaw_assistant::reply_projection::ReplyProjection>,
     /// Enabler (c): the `trace_scope_key(tenant, owner)` the production
     /// trace-capture sink was seeded with when `.with_trace_capture()` opted
     /// in; `None` otherwise. Recorded at wiring time so a test asserts against
@@ -1072,7 +1079,7 @@ impl RebornIntegrationGroupBuilder {
         } else {
             (None, None)
         };
-        let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
+        let recorded_milestone_sink: Arc<dyn LoopHostMilestoneSink> =
             if let Some(event_sink) = &durable_event_sink {
                 let durable_scope =
                     DurableLoopHostMilestoneScope::from_thread_scope(&group_thread_scope)?;
@@ -1086,6 +1093,17 @@ impl RebornIntegrationGroupBuilder {
             } else {
                 milestone_sink.clone()
             };
+        // Production decorator position: every milestone is recorded (and
+        // durably logged) first, then composed into the group's reply
+        // projection, exactly as `build_reborn_runtime` wires it.
+        let reply_projection =
+            Arc::new(ironclaw_assistant::reply_projection::ReplyProjection::new());
+        let runtime_milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
+            ironclaw_assistant::reply_projection::ReplyProjectionMilestoneSink::new(
+                recorded_milestone_sink,
+                Arc::clone(&reply_projection),
+            ),
+        );
         let (
             capability_factory,
             capability_surface_resolver,
@@ -1514,6 +1532,7 @@ impl RebornIntegrationGroupBuilder {
                 durable_event_sink,
                 security_audit_sink,
                 milestone_sink: milestone_sink_for_assertions,
+                reply_projection: Arc::clone(&reply_projection),
                 trace_capture_scope: trace_capture.map(|(_, scope)| scope),
                 budget_governor,
                 budget_account,

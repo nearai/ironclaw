@@ -1,12 +1,15 @@
 //! The generic channel capability contracts (overview.md §4.2).
 //!
 //! An extension package is a protocol translator and may implement any subset
-//! of three one-way methods: receive a complete vendor message, send a reply,
-//! and deliver out of band. The host owns everything around those translations
-//! (route table, verification recipes, replay, admission, target policy,
-//! attempt persistence, retry, drain). It also owns authenticated-session
-//! ingress and stream replies, so those manifest modes intentionally require
-//! no adapter implementation. The package never reports metadata (the resolved
+//! of three one-way axes: receive a complete vendor message, answer a run
+//! (as progressive semantic revisions through a [`crate::reply::ReplySink`],
+//! or as the terminal materialized reply through the [`crate::reply::ReplySink`] a declared `[channel.reply]` binds — whichever
+//! `[channel.reply] transport` declares), and deliver out of band. The host
+//! owns everything around those translations (route table, verification
+//! recipes, replay, admission, target policy, the reply journal and its
+//! publication, attempt persistence, retry, drain). It also owns
+//! authenticated-session ingress, so that manifest mode intentionally requires
+//! no ingress implementation. The package never reports metadata (the resolved
 //! manifest is the authority) and never touches the delivery store.
 //!
 //! These DTOs are the seam between generic host pipelines and concrete
@@ -24,6 +27,7 @@ use crate::external::{
     ExternalActorId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ProductAttachmentDescriptor,
 };
+use crate::reply::ReplySink;
 use crate::tool_adapter::RestrictedEgress;
 
 /// Why an adapter is forwarding a group/supergroup/channel message into the
@@ -64,45 +68,15 @@ pub trait ChannelIngress: Send + Sync {
     ) -> Result<InboundOutcome, ChannelError>;
 }
 
-/// **Reply** — answering the run's input, source-routed. Pairs with
-/// `[channel.reply]`.
-///
-/// A channel declaring `transport = "stream"` implements **nothing here**:
-/// the host publishes to the durable projection pipeline and the adapter is
-/// never called. That absence is meaningful rather than a mystery — it is
-/// what `stream` means.
-#[async_trait]
-pub trait ChannelReply: Send + Sync {
-    /// Render and send one run answer back to where its input came from.
-    /// Owns vendor formatting, provider-specific message splitting, target
-    /// syntax, and safe error mapping. Never
-    /// touches the delivery store.
-    async fn send_reply(
-        &self,
-        envelope: OutboundEnvelope,
-        egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError>;
-
-    /// Whether this adapter actually delivers an
-    /// [`OutboundVisibility::EphemeralTo`] reply privately, through a vendor
-    /// endpoint that shows it to that one actor. Defaults to `false`, so a
-    /// host decision that
-    /// depends on privacy — such as whether a connect notice may carry a
-    /// setup link into a shared conversation (#7681) — fails closed for every
-    /// adapter that has not declared the capability. Delivery itself stays
-    /// fail-open: an adapter that returns `false` still posts the reply
-    /// publicly rather than dropping it.
-    fn supports_private_delivery(&self) -> bool {
-        false
-    }
-}
-
 /// **Delivery** — reaching someone out of band, target-resolved. Pairs with
-/// `[channel.delivery]`.
+/// `[channel.delivery]`. Source-routed system notices (a connect nudge, a
+/// busy hint, a working indicator on a one-shot channel) also ride this half
+/// with the originating conversation as the target: they are host notices
+/// *about* a conversation, not the run's answer.
 ///
-/// Orthogonal to [`ChannelReply`], not an alternative: a channel may
-/// implement both (one run streams an answer into an open tab *and* fires a
-/// push), either, or neither.
+/// Orthogonal to the reply half ([`crate::reply::ReplySink`]), not an
+/// alternative: a channel may implement both (one run streams an answer into
+/// an open tab *and* fires a push), either, or neither.
 #[async_trait]
 pub trait ChannelDelivery: Send + Sync {
     /// Render and send one out-of-band delivery to an already-resolved,
@@ -113,6 +87,18 @@ pub trait ChannelDelivery: Send + Sync {
         envelope: OutboundEnvelope,
         egress: &dyn RestrictedEgress,
     ) -> Result<DeliveryReport, ChannelError>;
+
+    /// Whether this adapter actually delivers an
+    /// [`OutboundVisibility::EphemeralTo`] notice privately, through a vendor
+    /// endpoint that shows it to that one actor. Defaults to `false`, so a
+    /// host decision that depends on privacy — such as whether a connect
+    /// notice may carry a setup link into a shared conversation (#7681) —
+    /// fails closed for every adapter that has not declared the capability.
+    /// Delivery itself stays fail-open: an adapter that returns `false` still
+    /// posts the notice publicly rather than dropping it.
+    fn supports_private_delivery(&self) -> bool {
+        false
+    }
 
     /// Optional: provision the direct conversation for one proven external
     /// actor. This is deliberately not target search; the host supplies the
@@ -131,10 +117,13 @@ pub trait ChannelDelivery: Send + Sync {
 /// Eleven methods on one trait became three core translation methods across
 /// three traits plus one optional, typed direct-target provisioning hook. This
 /// is what the host holds instead of a single `Arc<dyn ChannelAdapter>` whose
-/// unsupported methods were discovered at call time. A `None` here is the
-/// required fact for host-owned modes (`authenticated_session` ingress and
-/// `stream` reply); `check_binding` proves every manifest axis agrees with its
-/// implementation at activation.
+/// unsupported methods were discovered at call time. A `None` ingress is the
+/// required fact for the host-owned `authenticated_session` mode; the reply
+/// slot holds the one [`ReplySink`] a declared `[channel.reply]` requires —
+/// whatever its transport, which only sets the reconcile cadence
+/// ([`ReplyTransport::reconciles_at`](crate::channel::ReplyTransport::reconciles_at));
+/// `check_binding` proves every manifest axis agrees with its implementation
+/// at activation.
 ///
 /// What left the trait entirely, and where it went:
 /// - `activate`/`cleanup` → `[channel.ingress.registration]` /
@@ -153,7 +142,11 @@ pub trait ChannelDelivery: Send + Sync {
 #[derive(Clone, Default)]
 pub struct ChannelSurfaces {
     pub ingress: Option<Arc<dyn ChannelIngress>>,
-    pub reply: Option<Arc<dyn ChannelReply>>,
+    /// The reply half: the sink that reconciles this channel's provider
+    /// toward the run's reply. Progressive (`stream`) or terminal-only
+    /// (`message`) is the manifest's call, not the binding's.
+    // arch-exempt: optional_arc, a channel binds only the halves its manifest declares and activation checks the set (`check_channel_halves`), plan docs/internal/design/2026-08-31-progressive-reply-publication.md
+    pub reply: Option<Arc<dyn ReplySink>>,
     pub delivery: Option<Arc<dyn ChannelDelivery>>,
 }
 
@@ -163,7 +156,9 @@ impl ChannelSurfaces {
         self
     }
 
-    pub fn with_reply(mut self, reply: Arc<dyn ChannelReply>) -> Self {
+    /// Bind the reply sink. Replaces any previously bound one: the slot
+    /// holds exactly one.
+    pub fn with_reply(mut self, reply: Arc<dyn ReplySink>) -> Self {
         self.reply = Some(reply);
         self
     }
@@ -489,7 +484,7 @@ pub struct OutboundEnvelope {
 /// Because it is a hint, a host decision that depends on the delivery actually
 /// staying private (such as whether a connect notice may carry a setup link
 /// into a shared conversation) must consult
-/// [`ChannelReply::supports_private_delivery`] and fail closed, never infer
+/// [`ChannelDelivery::supports_private_delivery`] and fail closed, never infer
 /// privacy from having requested it.
 #[derive(Debug, Clone, Default)]
 pub enum OutboundVisibility {

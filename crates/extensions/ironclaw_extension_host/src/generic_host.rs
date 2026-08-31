@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel_adapter::{
-    ChannelDelivery, ChannelError, ChannelIngress, ChannelReply, ChannelSurfaces, DeliveryReport,
-    InboundOutcome, OutboundEnvelope, VerifiedInbound,
+    ChannelDelivery, ChannelError, ChannelIngress, ChannelSurfaces, DeliveryReport, InboundOutcome,
+    OutboundEnvelope, VerifiedInbound,
 };
 use ironclaw_extension_contracts::extension::ExtensionHostAssemblyConfig;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -407,11 +407,22 @@ impl ExtensionLoader for CompositionExtensionLoader {
             ) {
                 (Some(_), Some(surfaces)) => surfaces.clone(),
                 // Until a real adapter is assembled, the bridge stands in —
-                // but only for the halves this manifest declares, because the
-                // per-axis binding rule now checks declaration against code.
-                // A bridge with a half nobody declared would fail activation,
-                // which is the rule doing its job.
-                (Some(channel), None) => host_served_bridge(channel),
+                // but only for the ingress/delivery halves this manifest
+                // declares, because the per-axis binding rule checks
+                // declaration against code. A reply half is never bridged:
+                // nothing host-owned can answer a run on the extension's
+                // behalf, so a declared `[channel.reply]` with no assembled
+                // adapter fails activation closed rather than binding a stub.
+                (Some(channel), None) => {
+                    if channel.supports_reply() {
+                        return Err(BindError::ChannelHalfMismatch {
+                            axis: "reply",
+                            detail: "a declared [channel.reply] needs a real bound reply sink; \
+                                     the transitional host bridge cannot answer a run",
+                        });
+                    }
+                    host_served_bridge(channel)
+                }
                 (None, _) => ChannelSurfaces::default(),
             },
         })))
@@ -725,9 +736,8 @@ fn host_served_bridge(
     if expected.ingress {
         surfaces = surfaces.with_ingress(bridge.clone());
     }
-    if expected.reply {
-        surfaces = surfaces.with_reply(bridge.clone());
-    }
+    // Deliberately no reply half: see the caller. `expected.reply` is
+    // checked there and fails activation before this bridge is built.
     if expected.delivery {
         surfaces = surfaces.with_delivery(bridge);
     }
@@ -741,17 +751,6 @@ impl ChannelIngress for HostServedChannelBridge {
         _request: VerifiedInbound<'_>,
         _egress: &dyn RestrictedEgress,
     ) -> Result<InboundOutcome, ChannelError> {
-        Err(ChannelError::Unsupported)
-    }
-}
-
-#[async_trait]
-impl ChannelReply for HostServedChannelBridge {
-    async fn send_reply(
-        &self,
-        _envelope: OutboundEnvelope,
-        _egress: &dyn RestrictedEgress,
-    ) -> Result<DeliveryReport, ChannelError> {
         Err(ChannelError::Unsupported)
     }
 }

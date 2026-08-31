@@ -401,6 +401,15 @@ pub(crate) struct RebornRuntimeStores {
     /// are consumed by `build_reborn_runtime` when the channel host assembly
     /// starts.
     pub(crate) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
+    /// The binary-bound product projection reply sink, if a channel binding
+    /// carries one; `build_reborn_runtime` binds the live projection publisher
+    /// into it once the projection graph exists.
+    pub(crate) projection_reply_sink:
+        Option<std::sync::Arc<ironclaw_assistant::projection::reply_sink::ProjectionReplySink>>,
+    /// The channel whose `[channel.reply]` the host serves (the
+    /// authenticated-session channel); reply publication registers it as a
+    /// target for every run.
+    pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
     /// Manifest-declared deployment channel surfaces, independent of user
     /// installation/activation state.
     pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,

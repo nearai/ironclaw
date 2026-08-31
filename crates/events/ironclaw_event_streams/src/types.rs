@@ -201,6 +201,11 @@ pub enum ThreadLiveProjectionItem {
         /// non-failures and pre-existing producers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_detail: Option<String>,
+        /// Bounded, sanitized input summary the producer already had in hand
+        /// (a reply document's activity detail). Additive; when absent the
+        /// product conversion falls back to the display-preview source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_summary: Option<String>,
     },
     WorkSummary {
         id: String,

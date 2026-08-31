@@ -822,7 +822,18 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // host-side like `guidance_doc`'s, and nothing here schedules,
         // dispatches, or invokes anything. Count read from this test's own
         // failure message.
-        ("ironclaw_extension_contracts", 11_451),
+        // 11_451 -> 12_928 (2026-08-31, progressive reply publication): the
+        // `reply` module — the channel-neutral reply vocabulary
+        // (`ReplyDocument`/`ReplyChange`/`ReplyRevision`, the reducer, the
+        // bounded display/answer/reasoning newtypes, the sink checkpoint and
+        // evidence bounds), the single `ReplySink` seam that replaced
+        // `ChannelReply` for every reply transport, the reconcile-point
+        // cadence rule, plus the conformance drive and recording sink in
+        // `test_support` and the inline test module this ratchet also counts.
+        // Vocabulary and reducer only: publication state, cadence workers, and
+        // rendering live in `ironclaw_outbound`, `ironclaw_assistant`, and the
+        // channel packages. Count read from this test's own failure message.
+        ("ironclaw_extension_contracts", 12_928),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt
