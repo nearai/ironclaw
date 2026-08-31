@@ -124,7 +124,7 @@ fn fold_text(value: &str, max: usize) -> String {
     while end > 0 && !stripped.is_char_boundary(end) {
         end -= 1;
     }
-    stripped[..end].to_string()
+    stripped[..end].to_string() // safety: `end` walked back to a char boundary above.
 }
 
 macro_rules! bounded_text {
@@ -764,6 +764,7 @@ impl ReplyDocument {
         while end > 0 && !delta.is_char_boundary(end) {
             end -= 1;
         }
+        // safety: `end` walked back to a char boundary above.
         self.answer.text.0.push_str(&delta[..end]);
         self.answer.truncated = true;
     }
@@ -788,7 +789,7 @@ fn char_boundary_prefix(text: &str, max_bytes: usize) -> &str {
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    &text[..end]
+    &text[..end] // safety: `end` walked back to a char boundary above.
 }
 
 /// The kind of work a status line describes.
