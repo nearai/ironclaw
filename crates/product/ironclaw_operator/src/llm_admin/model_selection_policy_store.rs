@@ -133,6 +133,8 @@ impl<F: RootFilesystem + ?Sized> ModelSelectionPolicyStore
                                     .filter(|entry| next.allowed_models.contains(&entry.id))
                                     .collect()
                             })
+                            // silent-ok: an absent policy has no model metadata to preserve;
+                            // CAS and decode failures propagate through `map_cas_update_error`.
                             .unwrap_or_default();
                     }
                     Ok(CasApply::new(next.clone(), next))
