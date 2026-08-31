@@ -3054,6 +3054,42 @@ async fn observer_busy_hint_deduplicates_per_conversation_event_pair() {
 }
 
 #[tokio::test]
+async fn observer_queued_busy_hint_does_not_tell_the_user_to_resend() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        false,
+        None,
+        Duration::from_millis(20),
+    );
+    let active_run = TurnRunId::new();
+    let queued = ProductInboundAck::DeferredBusy {
+        accepted_message_ref: AcceptedMessageRef::new("msg:queued").expect("ref"),
+        active_run_id: active_run,
+        busy: None,
+    };
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-queued"),
+            queued,
+        )
+        .await;
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1, "one queued hint");
+    assert!(
+        texts[0].contains("fold that into the current task"),
+        "queued steering must be acknowledged as folded in, got {}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].to_ascii_lowercase().contains("resend"),
+        "queued steering must not tell the user to resend, got {}",
+        texts[0]
+    );
+}
+
+#[tokio::test]
 async fn observer_auth_prompt_includes_setup_link_only_in_direct_chat() {
     // Direct chat: the OAuth URL survives.
     let harness = build_harness(

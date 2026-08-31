@@ -78,17 +78,14 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
             .budget()
             .wall_clock_limit(&state)
             .map(|duration| u32::try_from(duration.as_secs()).unwrap_or(u32::MAX));
-        let wall_clock_limit_seconds = match (policy.max_wall_clock_seconds, strategy_wall_clock) {
-            (Some(policy_cap), Some(strategy_cap)) => Some(policy_cap.min(strategy_cap)),
-            (policy_cap, strategy_cap) => policy_cap.or(strategy_cap),
-        };
-        // Boundary check: the wall-clock ceiling is evaluated only on stage
-        // entry (once per loop iteration), not continuously. A single
-        // in-flight model or capability call that overruns the ceiling is
-        // not interrupted mid-call — the run only stops once control returns
-        // to this stage on the NEXT iteration. This is consistent with the
-        // budget stage's enforcement granularity generally (a hard stop
-        // after the next checkpoint boundary, not a preemptive cutoff).
+        let wall_clock_limit_seconds =
+            effective_wall_clock_limit_seconds(policy.max_wall_clock_seconds, strategy_wall_clock);
+        // Boundary check: this stage evaluates the wall-clock ceiling on
+        // entry (once per outer-loop iteration). A single in-flight model or
+        // capability call that overruns the ceiling is not interrupted
+        // mid-call. Model-stage recovery retries also consult the same
+        // ceiling between attempts so a sick provider cannot hold the
+        // one-active-run lock by retrying inside one iteration.
         if let Some(limit_seconds) = wall_clock_limit_seconds {
             let now = chrono::Utc::now();
             // First pass arms the clock (initial state carries no timestamp
@@ -137,5 +134,17 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
         // the existing explained terminal failure.
         self.hard_budget_exit(ctx, state, LoopFailureKind::IterationLimit)
             .await
+    }
+}
+
+/// Intersects the resolved-profile wall-clock cap with the loop family's
+/// strategy cap. `None` on both sides means unbounded.
+pub(super) fn effective_wall_clock_limit_seconds(
+    policy_cap: Option<u32>,
+    strategy_cap: Option<u32>,
+) -> Option<u32> {
+    match (policy_cap, strategy_cap) {
+        (Some(policy_cap), Some(strategy_cap)) => Some(policy_cap.min(strategy_cap)),
+        (policy_cap, strategy_cap) => policy_cap.or(strategy_cap),
     }
 }

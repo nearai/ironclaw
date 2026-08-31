@@ -192,6 +192,87 @@ async fn model_retry_returns_to_outer_loop_when_call_budget_is_exhausted() {
     }
 }
 
+/// Occupancy insurance absorbed by the same `ModelStage` retry loop as the
+/// model-call budget check: a wall-clock cap that `BudgetStage` already
+/// passed at the start of the iteration can still expire while recovery
+/// retries `stream_model` inside this stage. Without a per-attempt check
+/// the retry storm keeps the one-active-run lock alive (heartbeats refresh
+/// the process lease). This pins: when the armed start is already past the
+/// cap at the moment of an attempt, the attempt is converted to
+/// `ModelStep::RetryIteration` instead of dispatching — re-entering the
+/// outer loop, where `BudgetStage` then hard-stops through its existing
+/// `WallClockLimit` exit. No new exit path is introduced.
+#[tokio::test]
+async fn model_retry_returns_to_outer_loop_when_wall_clock_is_exhausted() {
+    let host = MockHost::new(Vec::new())
+        .with_max_wall_clock_seconds(60)
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model unavailable",
+        )]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    // Already past the cap when ModelStage starts (this is the in-stage
+    // retry-storm hole: BudgetStage is not in this test). The first
+    // attempt must not dispatch.
+    state
+        .budget_ledger
+        .set_run_started_at_for_test(Some(chrono::Utc::now() - chrono::Duration::seconds(120)));
+
+    let step = ModelStage
+        .process(
+            ctx,
+            ModelInput {
+                state,
+                messages: Vec::new(),
+                inline_messages: Vec::new(),
+                surface_version: surface_version(),
+                capability_view: LoopModelCapabilityView {
+                    visible_capability_ids: Vec::new(),
+                },
+            },
+        )
+        .await
+        .expect("model stage");
+
+    let retried_state = match step {
+        ModelStep::RetryIteration(state) => state,
+        other => panic!(
+            "an exhausted wall-clock budget mid-retry must re-enter the outer loop, got {}",
+            match other {
+                ModelStep::Response(..) => "Response",
+                ModelStep::RetryIteration(_) => unreachable!(),
+                ModelStep::Exit(_) => "Exit",
+            }
+        ),
+    };
+    assert_eq!(
+        host.model_requests().len(),
+        0,
+        "an expired wall-clock cap must not dispatch another provider attempt"
+    );
+
+    match BudgetStage
+        .process(
+            ctx,
+            BudgetInput {
+                state: *retried_state,
+            },
+        )
+        .await
+        .expect("budget stage")
+    {
+        BudgetStep::Exit(LoopExit::Failed(failed)) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::WallClockLimit);
+        }
+        other => panic!("an exhausted wall-clock budget must hard-stop, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn model_unrecoverable_host_error_preserves_inline_sanitized_cause() {
     let cause = "credential provider refused the configured model identity";

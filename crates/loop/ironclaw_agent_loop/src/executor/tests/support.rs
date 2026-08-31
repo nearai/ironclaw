@@ -272,6 +272,14 @@ impl MockHost {
         self
     }
 
+    pub(super) fn with_max_wall_clock_seconds(mut self, seconds: u32) -> Self {
+        self.context
+            .resolved_run_profile
+            .resource_budget_policy
+            .max_wall_clock_seconds = Some(seconds);
+        self
+    }
+
     pub(super) fn with_failing_progress_port(mut self) -> Self {
         self.fail_progress_port = true;
         self

@@ -49,6 +49,11 @@ async fn default_interactive_profile_resolves_stable_driver_and_redacted_snapsho
         snapshot.personal_context_policy,
         PersonalContextPolicy::Excluded
     );
+    assert_eq!(
+        snapshot.resource_budget_policy.max_wall_clock_seconds,
+        Some(ironclaw_loop_contracts::ResourceBudgetPolicy::INTERACTIVE_MAX_WALL_CLOCK_SECONDS),
+        "interactive turns must fail closed on occupancy so a stuck model path cannot lock the thread"
+    );
     assert!(snapshot.steering_policy.allow_steering);
     // Interactive coding opts into driver-specific completion nudges.
     assert!(snapshot.steering_policy.allow_driver_specific_nudges);
