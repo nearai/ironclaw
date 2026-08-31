@@ -51,6 +51,7 @@ export type SelectMenuAlign = keyof typeof alignClasses;
 export type SelectMenuSize = keyof typeof sizeClasses;
 
 export type SelectMenuOption = {
+  accessibleDescription?: string;
   adornment?: ReactNode;
   disabled?: boolean;
   label?: string;
@@ -269,6 +270,9 @@ export function SelectMenu({
   const selectedIndex = selectedOptionIndex(options, value);
   const selectedOption = selectedIndex >= 0 ? options[selectedIndex] : null;
   const selectedLabel = optionLabel(selectedOption, placeholder);
+  const selectedDescriptionId = selectedOption?.accessibleDescription
+    ? `${idRef.current}-selected-description`
+    : undefined;
   const listboxId = `${idRef.current}-listbox`;
   const activeOptionId =
     open && activeIndex >= 0 && activeIndex < visibleOptions.length
@@ -417,6 +421,7 @@ export function SelectMenu({
         aria-expanded={open ? "true" : "false"}
         aria-label={effectiveAriaLabel}
         aria-labelledby={ariaLabelledBy}
+        aria-describedby={selectedDescriptionId}
         {...buttonListboxProps}
         disabled={interactionDisabled}
         onClick={() =>
@@ -452,6 +457,12 @@ export function SelectMenu({
           )}
         />
       </button>
+
+      {selectedOption?.accessibleDescription && (
+        <span id={selectedDescriptionId} className="sr-only">
+          {selectedOption.accessibleDescription}
+        </span>
+      )}
 
       {open && (
         <div
@@ -492,12 +503,19 @@ export function SelectMenu({
             {visibleOptions.map((option, index) => {
               const isSelected = option.value === value;
               const isActive = index === activeIndex;
+              const optionDescriptionId = option.accessibleDescription
+                ? `${idRef.current}-option-${index}-description`
+                : undefined;
               return (
                 <button
                   key={option.value}
                   id={`${idRef.current}-option-${index}`}
                   type="button"
                   role="option"
+                  {...(option.accessibleDescription
+                    ? { "aria-label": optionLabel(option) }
+                    : {})}
+                  aria-describedby={optionDescriptionId}
                   aria-selected={isSelected ? "true" : "false"}
                   aria-disabled={option.disabled ? "true" : "false"}
                   disabled={option.disabled}
@@ -528,6 +546,11 @@ export function SelectMenu({
                       name="check"
                       className="h-3.5 w-3.5 shrink-0 text-[var(--v2-accent-text)]"
                     />
+                  )}
+                  {option.accessibleDescription && (
+                    <span id={optionDescriptionId} className="sr-only">
+                      {option.accessibleDescription}
+                    </span>
                   )}
                 </button>
               );

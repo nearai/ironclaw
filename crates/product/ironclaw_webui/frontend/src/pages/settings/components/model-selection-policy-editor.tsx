@@ -14,7 +14,10 @@ import {
   modelEntryFor,
   normalizeModelCatalog,
 } from "../lib/model-capabilities";
-import { ModelCapabilityBadges } from "./model-capability-badges";
+import {
+  ModelCapabilityBadges,
+  modelCapabilityDescription,
+} from "./model-capability-badges";
 
 const MAX_POLICY_MODELS = 128;
 const MAX_MODEL_ID_BYTES = 256;
@@ -72,8 +75,12 @@ export function ModelSelectionPolicyEditor({ providerState }) {
   const [discoveredEntries, setDiscoveredEntries] = React.useState([]);
   const [manualModel, setManualModel] = React.useState("");
   const [status, setStatus] = React.useState(null);
+  const fetchGenerationRef = React.useRef(0);
+  const activeProviderIdRef = React.useRef(providerState.activeProviderId);
+  activeProviderIdRef.current = providerState.activeProviderId;
 
   React.useEffect(() => {
+    fetchGenerationRef.current += 1;
     const policyMatchesActive =
       policy && policy.provider_id === providerState.activeProviderId;
     const initialAllowed = normalizedModels(
@@ -91,6 +98,9 @@ export function ModelSelectionPolicyEditor({ providerState }) {
     setDiscoveredEntries(policyCatalog.modelEntries);
     setManualModel("");
     setStatus(null);
+    return () => {
+      fetchGenerationRef.current += 1;
+    };
   }, [policySignature]);
 
   const saveMutation = useMutation({
@@ -137,11 +147,15 @@ export function ModelSelectionPolicyEditor({ providerState }) {
     ...allowedModels,
     activeModel,
   ]);
-  const defaultOptions = allowedModels.map((model) => ({
-    value: model,
-    label: model,
-    adornment: <ModelCapabilityBadges entry={modelEntryFor(discoveredEntries, model)} />,
-  }));
+  const defaultOptions = allowedModels.map((model) => {
+    const entry = modelEntryFor(discoveredEntries, model);
+    return {
+      value: model,
+      label: model,
+      accessibleDescription: modelCapabilityDescription(entry, t),
+      adornment: <ModelCapabilityBadges entry={entry} />,
+    };
+  });
 
   const addManualModel = () => {
     const model = manualModel.trim();
@@ -179,6 +193,11 @@ export function ModelSelectionPolicyEditor({ providerState }) {
 
   const fetchModels = async () => {
     if (!activeProvider) return;
+    const providerId = activeProvider.id;
+    const generation = ++fetchGenerationRef.current;
+    const requestIsCurrent = () =>
+      fetchGenerationRef.current === generation &&
+      activeProviderIdRef.current === providerId;
     setStatus(null);
     try {
       const result = await providerState.listModels({
@@ -187,6 +206,7 @@ export function ModelSelectionPolicyEditor({ providerState }) {
         base_url: activeProvider.base_url || undefined,
         model: activeModel || undefined,
       });
+      if (!requestIsCurrent()) return;
       const catalog = normalizeModelCatalog(result);
       if (!result.ok || catalog.models.length === 0) {
         setStatus({
@@ -202,6 +222,7 @@ export function ModelSelectionPolicyEditor({ providerState }) {
         text: t("llm.modelsFetched", { count: catalog.models.length }),
       });
     } catch (error) {
+      if (!requestIsCurrent()) return;
       setStatus({
         tone: "error",
         text: requestErrorMessage(error, t("llm.modelsLoadFailed")),

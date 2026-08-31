@@ -55,7 +55,7 @@ export function ProviderCard({
         {missingLabel}
       </span>)
     : (<span className="hidden min-w-0 items-center gap-2 sm:inline-flex">
-        <span className="truncate font-mono text-[11px] text-[var(--v2-text-faint)]">
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--v2-text-faint)]">
           {adapterLabel(provider.adapter)} · {model || provider.default_model || t("llm.none")}
         </span>
         <ModelCapabilityBadges entry={modelEntry} />
@@ -218,7 +218,7 @@ export function ProviderCard({
             <div>
               <div className="font-mono uppercase text-[10px] text-[var(--v2-text-faint)]">{t("llm.model")}</div>
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-                <span className="truncate font-mono">{model || t("llm.none")}</span>
+                <span className="min-w-0 flex-1 truncate font-mono">{model || t("llm.none")}</span>
                 <ModelCapabilityBadges entry={modelEntry} />
               </div>
             </div>

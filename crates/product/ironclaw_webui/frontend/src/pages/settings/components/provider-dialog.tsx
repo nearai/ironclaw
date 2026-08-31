@@ -10,7 +10,10 @@ import {
 } from "../lib/llm-providers";
 import { useProviderDialogForm } from "../hooks/useProviderDialogForm";
 import { modelEntryFor } from "../lib/model-capabilities";
-import { ModelCapabilityBadges } from "./model-capability-badges";
+import {
+  ModelCapabilityBadges,
+  modelCapabilityDescription,
+} from "./model-capability-badges";
 
 const PROVIDER_SELECT_BUTTON_CLASS_NAME =
   "h-[44px] rounded-[14px] border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3.5 text-[var(--v2-text-strong)] md:h-[50px] md:rounded-[16px] md:px-4";
@@ -41,14 +44,18 @@ export function ProviderDialog({
   const { form, apiKey, models, modelEntries, message, busy, isBuiltin, isEditing } = formState;
   const modelOptions = React.useMemo(() => {
     const typedModel = String(form.model || "").trim();
-    const fetchedOptions = models.map((model) => ({
-      value: model,
-      label: model,
-      adornment: <ModelCapabilityBadges entry={modelEntryFor(modelEntries, model)} />,
-    }));
+    const fetchedOptions = models.map((model) => {
+      const entry = modelEntryFor(modelEntries, model);
+      return {
+        value: model,
+        label: model,
+        accessibleDescription: modelCapabilityDescription(entry, t),
+        adornment: <ModelCapabilityBadges entry={entry} />,
+      };
+    });
     if (!typedModel || models.includes(typedModel)) return fetchedOptions;
     return [{ value: typedModel, label: typedModel }, ...fetchedOptions];
-  }, [form.model, modelEntries, models]);
+  }, [form.model, modelEntries, models, t]);
 
   if (!open) return null;
 

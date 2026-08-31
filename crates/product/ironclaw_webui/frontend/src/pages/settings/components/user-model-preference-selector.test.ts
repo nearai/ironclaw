@@ -61,6 +61,8 @@ function componentProps(node, component) {
 
 const MODEL_CAPABILITY_CONTEXT = {
   ModelCapabilityBadges: "ModelCapabilityBadges",
+  modelCapabilityDescription: (entry) =>
+    entry?.input_modalities?.includes("text") ? "Text" : undefined,
   modelCapabilities: (entry) =>
     entry?.input_modalities?.includes("text") ? ["text"] : [],
   modelEntryFor: (entries, model) =>

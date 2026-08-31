@@ -162,6 +162,7 @@ function renderProviderManagement({
     ConfirmDialog,
     Icon: "Icon",
     ModelCapabilityBadges: "ModelCapabilityBadges",
+    modelCapabilityDescription: () => "Text, Image input",
     InlineNotice: "InlineNotice",
     ProviderCard,
     ProviderDialog: "ProviderDialog",
@@ -286,6 +287,7 @@ function createProviderCardHarness() {
     Card: "Card",
     Icon: "Icon",
     ModelCapabilityBadges: "ModelCapabilityBadges",
+    modelCapabilityDescription: () => "Text, Image input",
     React: createReactStateStub(state),
     adapterLabel: (adapter) => adapter,
     html,
@@ -384,6 +386,7 @@ test("ProviderDialog enables search on the fetched model selector", () => {
     React: { useMemo: (factory) => factory() },
     SelectMenu,
     ModelCapabilityBadges: "ModelCapabilityBadges",
+    modelCapabilityDescription: () => "Text, Image input",
     modelEntryFor: (entries, model) => entries.find((entry) => entry.id === model),
     ADAPTER_OPTIONS: [],
     adapterLabel: (adapter) => adapter,
@@ -441,6 +444,7 @@ test("ProviderDialog enables search on the fetched model selector", () => {
   assert.equal(modelSelectProps.searchPlaceholder, "llm.searchModels");
   const modelB = modelSelectProps.options.find((option) => option.value === "model-b");
   assert.ok(modelB.adornment, "fetched model options carry capability adornments");
+  assert.equal(modelB.accessibleDescription, "Text, Image input");
 });
 
 test("ProviderManagement groups filtered providers through the render caller", () => {
@@ -577,6 +581,30 @@ test("ProviderCard renders model capabilities when metadata is available", () =>
     findComponentNodes(rendered, "ModelCapabilityBadges").length,
     2,
     "capabilities are visible in both the desktop summary and expanded details"
+  );
+});
+
+test("ProviderCard lets long model text shrink beside capability badges", () => {
+  const harness = createProviderCardHarness();
+  const rendered = harness.render({
+    provider: builtinProvider("nearai", {
+      default_model: "provider/with-a-very-long-model-identifier",
+    }),
+    modelEntry: {
+      id: "provider/with-a-very-long-model-identifier",
+      input_modalities: ["text", "image"],
+      output_modalities: ["text"],
+    },
+  });
+  const shrinkableModelTextClasses = collectScalars(rendered).filter(
+    (value) =>
+      typeof value === "string" &&
+      value.includes("min-w-0 flex-1 truncate font-mono")
+  );
+
+  assert.ok(
+    shrinkableModelTextClasses.length >= 2,
+    "both provider model labels should be shrinkable"
   );
 });
 

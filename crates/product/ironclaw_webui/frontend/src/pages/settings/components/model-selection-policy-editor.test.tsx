@@ -58,6 +58,18 @@ async function renderEditor(state) {
   return { container, queryClient, root };
 }
 
+async function rerenderEditor(rendered, state) {
+  await act(async () => {
+    rendered.root.render(
+      <QueryClientProvider client={rendered.queryClient}>
+        <I18nProvider>
+          <ModelSelectionPolicyEditor providerState={state} />
+        </I18nProvider>
+      </QueryClientProvider>
+    );
+  });
+}
+
 function setInputValue(input, value) {
   const setter = Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
@@ -204,6 +216,69 @@ test("fetched capabilities render and only allowed entries are saved", async () 
     act(() => rendered.root.unmount());
     rendered.container.remove();
     requests.setPolicy.mockReset();
+  }
+});
+
+test("fetch ignores results from a provider that is no longer active", async () => {
+  let resolveFirstFetch;
+  const firstFetch = new Promise((resolve) => {
+    resolveFirstFetch = resolve;
+  });
+  const rendered = await renderEditor(
+    providerState({ listModels: vi.fn(() => firstFetch) })
+  );
+  try {
+    const fetchModels = Array.from(
+      rendered.container.querySelectorAll<HTMLButtonElement>("button")
+    ).find((button) => button.textContent === "Fetch models");
+    assert.ok(fetchModels);
+    await act(async () => fetchModels.click());
+
+    await rerenderEditor(rendered, {
+      activeProviderId: "anthropic",
+      selectedModel: "claude",
+      providers: [
+        {
+          id: "anthropic",
+          adapter: "anthropic",
+          default_model: "claude",
+          can_list_models: true,
+        },
+      ],
+      userModelPolicy: null,
+      listModels: vi.fn(),
+    });
+
+    await act(async () => {
+      resolveFirstFetch({
+        ok: true,
+        models: ["stale-vision-model"],
+        model_entries: [
+          {
+            id: "stale-vision-model",
+            input_modalities: ["text", "image"],
+            output_modalities: ["text"],
+          },
+        ],
+      });
+      await firstFetch;
+    });
+
+    assert.equal(
+      rendered.container.querySelector(
+        '[data-testid="settings-model-policy-model-stale-vision-model"]'
+      ),
+      null,
+      "a late response must not repopulate the next provider's catalog"
+    );
+    assert.ok(
+      rendered.container.querySelector(
+        '[data-testid="settings-model-policy-model-claude"]'
+      )
+    );
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
   }
 });
 

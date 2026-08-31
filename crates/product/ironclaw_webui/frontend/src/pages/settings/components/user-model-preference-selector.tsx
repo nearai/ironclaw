@@ -9,7 +9,10 @@ import {
   modelEntryFor,
   normalizeModelCatalog,
 } from "../lib/model-capabilities";
-import { ModelCapabilityBadges } from "./model-capability-badges";
+import {
+  ModelCapabilityBadges,
+  modelCapabilityDescription,
+} from "./model-capability-badges";
 
 export function UserModelPreferenceSelector() {
   const t = useT();
@@ -39,6 +42,7 @@ export function UserModelPreferenceSelector() {
     return {
       value,
       label,
+      accessibleDescription: modelCapabilityDescription(entry, t),
       ...(adornment ? { adornment } : {}),
     };
   };

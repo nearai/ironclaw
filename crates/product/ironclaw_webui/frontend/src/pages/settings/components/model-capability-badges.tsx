@@ -24,6 +24,18 @@ const CAPABILITY_PRESENTATION = {
   },
 } as const;
 
+type Translate = (key: string, params?: Record<string, unknown>) => string;
+
+export function modelCapabilityDescription(
+  entry: ModelCatalogEntry | null | undefined,
+  t: Translate,
+): string | undefined {
+  const labels = modelCapabilities(entry).map((capability) =>
+    t(CAPABILITY_PRESENTATION[capability].labelKey)
+  );
+  return labels.length > 0 ? labels.join(", ") : undefined;
+}
+
 export function ModelCapabilityBadges({
   entry,
   className = "",
