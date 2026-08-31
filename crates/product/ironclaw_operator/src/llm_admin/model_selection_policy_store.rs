@@ -248,4 +248,84 @@ mod tests {
 
         assert!(loaded.model_entries.is_empty());
     }
+
+    #[tokio::test]
+    async fn filesystem_cas_preserves_only_allowed_entries_for_the_same_provider() {
+        let filesystem = filesystem();
+        let policy_caller = caller("tenant-a", "admin");
+        let initial = ModelSelectionPolicy {
+            provider_id: "provider-a".to_string(),
+            workspace_default: "model-a".to_string(),
+            allowed_models: vec!["model-a".to_string(), "model-b".to_string()],
+            model_entries: vec![
+                LlmModelCatalogEntry {
+                    id: "model-a".to_string(),
+                    input_modalities: vec![LlmModelModality::Text, LlmModelModality::Image],
+                    output_modalities: vec![LlmModelModality::Text],
+                },
+                LlmModelCatalogEntry {
+                    id: "model-b".to_string(),
+                    input_modalities: vec![LlmModelModality::Text],
+                    output_modalities: vec![LlmModelModality::Text, LlmModelModality::Image],
+                },
+            ],
+        };
+        FilesystemModelSelectionPolicyStore::new(Arc::clone(&filesystem))
+            .update(
+                &policy_caller,
+                &initial,
+                ModelSelectionPolicyUpdateMode::Replace,
+            )
+            .await
+            .expect("seed policy");
+
+        let legacy_same_provider = ModelSelectionPolicy {
+            provider_id: "provider-a".to_string(),
+            workspace_default: "model-b".to_string(),
+            allowed_models: vec!["model-b".to_string()],
+            model_entries: Vec::new(),
+        };
+        let retained = FilesystemModelSelectionPolicyStore::new(Arc::clone(&filesystem))
+            .update(
+                &policy_caller,
+                &legacy_same_provider,
+                ModelSelectionPolicyUpdateMode::PreserveExistingModelEntries,
+            )
+            .await
+            .expect("preserve same-provider metadata");
+        assert_eq!(
+            retained.model_entries,
+            vec![initial.model_entries[1].clone()]
+        );
+        assert_eq!(
+            FilesystemModelSelectionPolicyStore::new(Arc::clone(&filesystem))
+                .read(&policy_caller)
+                .await
+                .expect("reopen same-provider policy"),
+            Some(retained),
+        );
+
+        let legacy_other_provider = ModelSelectionPolicy {
+            provider_id: "provider-b".to_string(),
+            workspace_default: "model-b".to_string(),
+            allowed_models: vec!["model-b".to_string()],
+            model_entries: Vec::new(),
+        };
+        let isolated = FilesystemModelSelectionPolicyStore::new(Arc::clone(&filesystem))
+            .update(
+                &policy_caller,
+                &legacy_other_provider,
+                ModelSelectionPolicyUpdateMode::PreserveExistingModelEntries,
+            )
+            .await
+            .expect("isolate provider metadata");
+        assert!(isolated.model_entries.is_empty());
+        assert_eq!(
+            FilesystemModelSelectionPolicyStore::new(filesystem)
+                .read(&policy_caller)
+                .await
+                .expect("reopen cross-provider policy"),
+            Some(isolated),
+        );
+    }
 }
