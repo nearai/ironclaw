@@ -24,29 +24,35 @@ pub(super) struct FakeAuthChallengeProvider {
 }
 
 impl FakeAuthChallengeProvider {
-    pub(super) fn assert_single_call(&self) {
+    /// Exactly `expected` challenge fetches, each carrying the gate's scope
+    /// and owner. On a stream channel the challenge is deliberately fetched
+    /// twice per gate — once by the observer deciding serviceability, once by
+    /// the publication's attention enricher composing the document copy —
+    /// and never once per poll iteration.
+    pub(super) fn assert_calls(&self, expected: usize) {
         let calls = self
             .calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let [(scope, owner_user_id, run_id, gate_ref, credential_requirements)] = calls.as_slice()
-        else {
-            panic!(
-                "expected one auth challenge provider call, got {}",
-                calls.len()
-            );
-        };
-        assert_eq!(scope.tenant_id.as_str(), TENANT); // safety: test-only fake provider assertion.
-        assert_eq!(scope.agent_id.as_ref().map(AgentId::as_str), Some(AGENT)); // safety: test-only fake provider assertion.
-        let project_id = scope.project_id.as_ref().map(ProjectId::as_str);
-        assert_eq!(project_id, Some(PROJECT)); // safety: test-only fake provider assertion.
-        let explicit_owner_user_id = scope.explicit_owner_user_id().map(UserId::as_str);
-        assert_eq!(explicit_owner_user_id, Some(USER)); // safety: test-only fake provider assertion.
-        assert_eq!(owner_user_id.as_str(), USER); // safety: test-only fake provider assertion.
-        assert!(!run_id.to_string().is_empty()); // safety: test-only fake provider assertion.
-        assert_eq!(gate_ref, AUTH_GATE); // safety: test-only fake provider assertion.
-        assert!(credential_requirements.is_empty()); // safety: test-only fake provider assertion.
+        assert_eq!(
+            calls.len(),
+            expected,
+            "expected {expected} auth challenge provider call(s), got {}",
+            calls.len()
+        );
+        for (scope, owner_user_id, run_id, gate_ref, credential_requirements) in &calls {
+            assert_eq!(scope.tenant_id.as_str(), TENANT); // safety: test-only fake provider assertion.
+            assert_eq!(scope.agent_id.as_ref().map(AgentId::as_str), Some(AGENT)); // safety: test-only fake provider assertion.
+            let project_id = scope.project_id.as_ref().map(ProjectId::as_str);
+            assert_eq!(project_id, Some(PROJECT)); // safety: test-only fake provider assertion.
+            let explicit_owner_user_id = scope.explicit_owner_user_id().map(UserId::as_str);
+            assert_eq!(explicit_owner_user_id, Some(USER)); // safety: test-only fake provider assertion.
+            assert_eq!(owner_user_id.as_str(), USER); // safety: test-only fake provider assertion.
+            assert!(!run_id.to_string().is_empty()); // safety: test-only fake provider assertion.
+            assert_eq!(gate_ref, AUTH_GATE); // safety: test-only fake provider assertion.
+            assert!(credential_requirements.is_empty()); // safety: test-only fake provider assertion.
+        }
     }
 }
 
