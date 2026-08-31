@@ -1,3 +1,6 @@
+// arch-exempt: large_file, the native-Agent stream port of these Slack DM
+// journeys belongs beside the journeys it re-points; decomposition of this
+// suite is owned by plan #5905
 //! Slack-fixture E2E tests of the GENERIC channel host assembly (P6 S6.4).
 //!
 //! Ported from the retired `slack_serve/e2e_tests.rs` suite: the 24
@@ -32,6 +35,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_assistant::reply_projection::ReplyProjection;
+use ironclaw_assistant::reply_publication::{
+    KernelTerminalReplyFacts, ReplyPublicationDeps, ReplyPublicationService,
+    ReplyPublicationSettings, TurnCoordinatorStopRequester,
+};
 use ironclaw_assistant::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
@@ -423,6 +431,44 @@ impl Harness {
     fn slack_deletes(&self) -> Vec<serde_json::Value> {
         self.egress.bodies_for("/api/chat.delete")
     }
+
+    /// The run's answer no longer rides `chat.postMessage`: Slack declares
+    /// `[channel.reply] transport = "stream"`, so the publication service
+    /// reconciles it onto the native Agent stream. These are the three calls
+    /// that carry it.
+    fn slack_stream_starts(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.startStream")
+    }
+
+    fn slack_stream_appends(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.appendStream")
+    }
+
+    fn slack_stream_stops(&self) -> Vec<serde_json::Value> {
+        self.egress.bodies_for("/api/chat.stopStream")
+    }
+
+    /// Everything the stream published, oldest first — the text a reader sees
+    /// in the thread once the stream settles.
+    fn slack_streamed_text(&self) -> String {
+        let mut text = String::new();
+        for body in self
+            .slack_stream_starts()
+            .into_iter()
+            .chain(self.slack_stream_appends())
+            .chain(self.slack_stream_stops())
+        {
+            let Some(chunks) = body["chunks"].as_array() else {
+                continue;
+            };
+            for chunk in chunks {
+                if let Some(piece) = chunk["text"].as_str() {
+                    text.push_str(piece);
+                }
+            }
+        }
+        text
+    }
 }
 
 /// Options every harness variant composes; the core builder is the single
@@ -652,7 +698,11 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                 operator_user_id: identity.operator_user_id.clone(),
             },
             delivery: Some(ironclaw_assistant::ChannelWorkflowDeliveryServices {
-                project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+                reply_publication: test_reply_publication(
+                    &delivery_coordinator,
+                    Arc::new(coordinator.clone()),
+                    Arc::new(threads.clone()),
+                ),
                 coordinator: delivery_coordinator,
                 outbound_store,
                 route_store: Arc::clone(&route_store),
@@ -1632,7 +1682,11 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
-        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+        reply_publication: test_reply_publication(
+            &fixture.delivery_coordinator,
+            Arc::clone(&coordinator),
+            Arc::new(threads.clone()),
+        ),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1913,7 +1967,11 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
-        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+        reply_publication: test_reply_publication(
+            &fixture.delivery_coordinator,
+            Arc::clone(&coordinator),
+            Arc::new(threads.clone()),
+        ),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -2041,7 +2099,11 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
-        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+        reply_publication: test_reply_publication(
+            &fixture.delivery_coordinator,
+            Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
+            Arc::new(threads.clone()),
+        ),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
@@ -4238,6 +4300,33 @@ fn slack_response_for_approved(
             return response(br#"{"ok":false,"error":"missing_post_type"}"#);
         }
     }
+    // The native Agent stream the run's answer rides (`[channel.reply]
+    // transport = "stream"`). Shapes follow the documented responses so the
+    // sink's evidence parsing sees real `ts` values.
+    if path == "/api/agents.sessions.setStatus" {
+        return response(br#"{"ok":true,"status":"processing"}"#);
+    }
+    if path == "/api/chat.startStream"
+        || path == "/api/chat.appendStream"
+        || path == "/api/chat.stopStream"
+    {
+        let body = serde_json::from_slice::<serde_json::Value>(&approved.body).ok();
+        let channel = body
+            .as_ref()
+            .and_then(|body| body.get("channel").and_then(serde_json::Value::as_str))
+            .unwrap_or("DTEST")
+            .to_string();
+        let ts = body
+            .as_ref()
+            .and_then(|body| body.get("ts").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .unwrap_or_else(|| stable_slack_test_ts(&approved.body));
+        let payload = serde_json::json!({ "ok": true, "channel": channel, "ts": ts });
+        return response(payload.to_string().as_bytes());
+    }
+    if path == "/api/conversations.replies" {
+        return response(br#"{"ok":true,"messages":[]}"#);
+    }
     if path == "/api/chat.postMessage" || path == "/api/chat.postEphemeral" {
         let body: serde_json::Value = match serde_json::from_slice(&approved.body) {
             Ok(body) => body,
@@ -6403,4 +6492,28 @@ async fn ssl_check_form_gets_empty_200_without_admission() {
     assert!(harness.slack_messages().is_empty());
     assert!(harness.command_executions.invokes().is_empty());
     assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+/// The reply publication service every delivery graph now owns: the run's
+/// answer is published through it rather than sent by the observer, so these
+/// host tests wire the same kernel-backed ports production wires (the turn
+/// coordinator for terminal facts and stop requests) instead of a double.
+fn test_reply_publication(
+    delivery_coordinator: &Arc<DeliveryCoordinator>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    thread_service: Arc<dyn SessionThreadService>,
+) -> Arc<ReplyPublicationService> {
+    ReplyPublicationService::start(ReplyPublicationDeps {
+        coordinator: Arc::clone(delivery_coordinator),
+        projection: Arc::new(ReplyProjection::new()),
+        terminal_facts: Arc::new(KernelTerminalReplyFacts::new(
+            Arc::clone(&turn_coordinator),
+            thread_service,
+        )),
+        stop_requests: Arc::new(TurnCoordinatorStopRequester::new(turn_coordinator)),
+        attention: None,
+        project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
+        session_channel: None,
+        settings: ReplyPublicationSettings::default(),
+    })
 }
