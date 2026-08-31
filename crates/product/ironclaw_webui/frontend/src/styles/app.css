@@ -102,11 +102,11 @@
   color-scheme: light;
 
   /* Canvas / surfaces */
-  --v2-canvas:        #f4f7fb;
+  --v2-canvas:        #fcfcfc;
   --v2-canvas-strong: #ffffff;
   --v2-surface:       #ffffff;
-  --v2-surface-soft:  #eef4fa;
-  --v2-surface-muted: #e4edf5;
+  --v2-surface-soft:  #f7f6f6;
+  --v2-surface-muted: #f2f0f0;
 
   /* Elevation — the light theme lifts surfaces tonally, not with shadow, so
      the resting steps are flat and only true overlays cast.
@@ -120,54 +120,57 @@
      Tailwind's own `shadow-none` uses. */
   --v2-elevation-0: 0 0 #0000;
   --v2-elevation-1: 0 0 #0000;
-  --v2-elevation-2: 0 4px 12px -4px rgba(19, 45, 68, 0.14);
-  --v2-elevation-3: 0 16px 40px -12px rgba(19, 45, 68, 0.22);
+  --v2-elevation-2: 0 4px 12px -4px rgba(0, 0, 0, 0.10);
+  --v2-elevation-3: 0 16px 40px -12px rgba(0, 0, 0, 0.16);
 
   /* Card tokens — used by Card component */
-  --v2-card-bg:     rgba(255, 255, 255, 0.92);
-  --v2-card-border: rgba(19, 45, 68, 0.12);
-  /* Was `none`; now the resting elevation step, which is `none` in this
-     theme. Same computed value, one fewer place to edit in Phase 3a. */
+  --v2-card-bg:     #ffffff;
+  --v2-card-border: rgba(0, 0, 0, 0.07);
+  /* Resting elevation step — `none` in this theme, so light cards are
+     separated by their hairline border, which is what Gemini light does. */
   --v2-card-shadow: var(--v2-elevation-1);
 
   /* Panel border (nav items, dividers, form borders) */
-  --v2-panel-border: rgba(19, 45, 68, 0.12);
+  --v2-panel-border: rgba(0, 0, 0, 0.08);
 
   /* Rail (input bg in dark) */
-  --v2-rail:    #edf3f8;
+  --v2-rail:    #ffffff;
   --v2-input-bg: #ffffff;
 
   /* Typography */
-  --v2-text:        #243244;
-  --v2-text-strong: #0f1720;
-  --v2-text-muted:  #5f7183;
-  --v2-text-faint:  #8a9aab;
+  --v2-text:        #1f1f1f;
+  --v2-text-strong: #141414;
+  --v2-text-muted:  #565857;
+  --v2-text-faint:  #6c6e6d;
   --v2-inverse:     #ffffff;
   --v2-ink:         #0f1720;
   --v2-chat-readable-max-width: 85%;
 
   /* Controls */
-  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%235f7183%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
+  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%23565857%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
 
   /* Accent — signal blue */
-  --v2-accent:       #2e9de2;
-  --v2-accent-strong:#1678bd;
-  --v2-accent-soft:  rgba(76, 167, 230, 0.12);
-  --v2-accent-text:  #10649e;
+  --v2-accent:       #9dd2ff;
+  --v2-accent-strong:#8ac7fb;
+  --v2-accent-soft:  rgba(11, 87, 208, 0.10);
+  --v2-accent-text:  #0b57d0;
+  /* Text/icon colour ON an accent fill. Required because the light accent is a
+     tonal container, not a saturated fill — white on #9dd2ff is 1.7:1. */
+  --v2-accent-on:    #041e49;
 
   /* NEAR AI primary brand blue (near.ai/brand) — the process indicator mark.
      A brand constant, defined once and inherited by every theme. */
   --near-blue: #0091fd;
 
   /* Semantic colours */
-  --v2-positive-soft: rgba(32, 210, 154, 0.13);
-  --v2-positive-text: #087a5d;
-  --v2-warning-soft:  rgba(245, 193, 91, 0.18);
+  --v2-positive-soft: rgba(13, 101, 45, 0.10);
+  --v2-positive-text: #0d652d;
+  --v2-warning-soft:  rgba(139, 91, 0, 0.10);
   --v2-warning-text:  #8b5b00;
-  --v2-danger-soft:   rgba(255, 100, 128, 0.12);
-  --v2-danger-text:   #b42342;
-  --v2-info-soft:     rgba(76, 167, 230, 0.12);
-  --v2-info-text:     #146fae;
+  --v2-danger-soft:   rgba(179, 38, 30, 0.10);
+  --v2-danger-text:   #b3261e;
+  --v2-info-soft:     rgba(11, 87, 208, 0.10);
+  --v2-info-text:     #0b57d0;
 
   background: var(--v2-canvas);
 }
@@ -176,11 +179,11 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --v2-canvas:        var(--bg-canvas, #111114);
-  --v2-canvas-strong: #0d0d10;
-  --v2-surface:       var(--bg-surface, #1b1b1f);
-  --v2-surface-soft:  var(--bg-surface-subtle, rgba(255, 255, 255, 0.03));
-  --v2-surface-muted: rgba(255, 255, 255, 0.07);
+  --v2-canvas:        var(--bg-canvas, #0f0f0f);
+  --v2-canvas-strong: #0a0a0a;
+  --v2-surface:       var(--bg-surface, #1f1f1f);
+  --v2-surface-soft:  var(--bg-surface-subtle, #171717);
+  --v2-surface-muted: #232425;
 
   /* Elevation — dark surfaces read as raised through cast shadow, so every
      step above the ground carries one. Step 1 keeps the exact value
@@ -188,42 +191,43 @@
      `0 0 #0000` rather than `none` for the compositing reason spelled out in
      the light stanza. */
   --v2-elevation-0: 0 0 #0000;
-  --v2-elevation-1: 0 10px 30px rgba(0, 0, 0, 0.18);
+  --v2-elevation-1: 0 1px 3px rgba(0, 0, 0, 0.5);
   --v2-elevation-2: 0 12px 32px -8px rgba(0, 0, 0, 0.42);
   --v2-elevation-3: 0 24px 56px -16px rgba(0, 0, 0, 0.58);
 
   /* Card tokens in dark: transparent border + drop shadow */
-  --v2-card-bg:     #1b1b1f;
+  --v2-card-bg:     #171717;
   --v2-card-border: rgba(255, 255, 255, 0);
   --v2-card-shadow: var(--v2-elevation-1);
 
-  --v2-panel-border: rgba(255, 255, 255, 0.1);
+  --v2-panel-border: rgba(255, 255, 255, 0.09);
 
-  --v2-rail:     #151519;
-  --v2-input-bg: #151519;
+  --v2-rail:     #1f1f1f;
+  --v2-input-bg: #1e1f20;
 
-  --v2-text:        rgba(255, 255, 255, 0.82);
-  --v2-text-strong: var(--text-primary, #ffffff);
-  --v2-text-muted:  var(--text-secondary, rgba(255, 255, 255, 0.6));
-  --v2-text-faint:  var(--text-tertiary, rgba(255, 255, 255, 0.45));
+  --v2-text:        #d6d6d6;
+  --v2-text-strong: var(--text-primary, #e3e3e3);
+  --v2-text-muted:  var(--text-secondary, #9aa0a6);
+  --v2-text-faint:  var(--text-tertiary, #898b8e);
   --v2-inverse:     var(--text-inverse, #111111);
-  --v2-ink:         var(--accent-primary, #4ca7e6);
+  --v2-ink:         var(--accent-primary, #203b9c);
 
   --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%23ffffff%27%20stroke-opacity%3D%270.55%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
 
-  --v2-accent:        var(--accent-primary,        #4ca7e6);
-  --v2-accent-strong: var(--accent-primary-strong, #2882c8);
-  --v2-accent-soft:   rgba(76, 167, 230, 0.14);
-  --v2-accent-text:   var(--text-brand,            #8fc8f2);
+  --v2-accent-on:     #ffffff;
+  --v2-accent:        var(--accent-primary,        #203b9c);
+  --v2-accent-strong: var(--accent-primary-strong, #182d78);
+  --v2-accent-soft:   rgba(32, 59, 156, 0.24);
+  --v2-accent-text:   var(--text-brand,            #a8c7fa);
 
-  --v2-positive-soft: rgba(32, 210, 154, 0.13);
-  --v2-positive-text: var(--text-positive, #20d29a);
+  --v2-positive-soft: rgba(109, 213, 140, 0.14);
+  --v2-positive-text: var(--text-positive, #6dd58c);
   --v2-warning-soft:  rgba(245, 193, 91, 0.14);
   --v2-warning-text:  var(--accent-warning, #f5c15b);
-  --v2-danger-soft:   rgba(255, 100, 128, 0.13);
-  --v2-danger-text:   var(--text-danger, #ff6480);
-  --v2-info-soft:     rgba(76, 167, 230, 0.14);
-  --v2-info-text:     var(--accent-primary-soft, #8fc8f2);
+  --v2-danger-soft:   rgba(242, 184, 181, 0.14);
+  --v2-danger-text:   var(--text-danger, #f2b8b5);
+  --v2-info-soft:     rgba(32, 59, 156, 0.24);
+  --v2-info-text:     var(--accent-primary-soft, #a8c7fa);
 }
 
 :root[data-theme="light"] {
