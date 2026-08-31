@@ -623,11 +623,26 @@ pub trait ModelSelectionPolicyStore: Send + Sync {
         caller: &ProductSurfaceCaller,
     ) -> Result<Option<ModelSelectionPolicy>, ModelSelectionPolicyStoreError>;
 
-    async fn write(
+    /// Atomically replace the policy, optionally carrying forward capability
+    /// metadata from the latest same-provider record.
+    ///
+    /// Implementations must apply the update against a versioned snapshot and
+    /// retry bounded CAS conflicts. `PreserveExistingModelEntries` exists for
+    /// legacy clients that omit the metadata field; it must never be
+    /// implemented as a separate read followed by a blind write.
+    async fn update(
         &self,
         caller: &ProductSurfaceCaller,
         policy: &ModelSelectionPolicy,
-    ) -> Result<(), ModelSelectionPolicyStoreError>;
+        mode: ModelSelectionPolicyUpdateMode,
+    ) -> Result<ModelSelectionPolicy, ModelSelectionPolicyStoreError>;
+}
+
+/// Capability-metadata behavior for an atomic model-policy update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSelectionPolicyUpdateMode {
+    Replace,
+    PreserveExistingModelEntries,
 }
 
 /// Opaque store failure; backend details remain on the implementing side.

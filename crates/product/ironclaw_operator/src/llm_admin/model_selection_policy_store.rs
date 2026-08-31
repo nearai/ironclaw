@@ -3,12 +3,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    CasApply, CasUpdateError, ContentType, Entry, FilesystemError, RootFilesystem,
+    ScopedFilesystem, cas_update,
+};
 use ironclaw_host_api::{ids::InvocationId, path::ScopedPath, resource::ResourceScope};
 use ironclaw_product_contracts::{
     operator_llm::{
         MODEL_SELECTION_POLICY_MAX_BYTES, ModelSelectionPolicy, ModelSelectionPolicyStore,
-        ModelSelectionPolicyStoreError,
+        ModelSelectionPolicyStoreError, ModelSelectionPolicyUpdateMode,
     },
     surface::ProductSurfaceCaller,
 };
@@ -39,6 +42,41 @@ impl<F: RootFilesystem + ?Sized> FilesystemModelSelectionPolicyStore<F> {
         }
         .tenant_shared_managed_scope()
     }
+
+    fn decode_policy(bytes: &[u8]) -> Result<ModelSelectionPolicy, ModelSelectionPolicyStoreError> {
+        if bytes.len() > MODEL_SELECTION_POLICY_MAX_BYTES {
+            return Err(ModelSelectionPolicyStoreError::InvalidData);
+        }
+        serde_json::from_slice(bytes).map_err(|error| {
+            tracing::error!(error = %error, "user model policy record is invalid");
+            ModelSelectionPolicyStoreError::InvalidData
+        })
+    }
+
+    fn encode_policy(
+        policy: &ModelSelectionPolicy,
+    ) -> Result<Entry, ModelSelectionPolicyStoreError> {
+        let bytes = serde_json::to_vec(policy).map_err(|error| {
+            tracing::error!(error = %error, "user model policy serialization failed");
+            ModelSelectionPolicyStoreError::InvalidData
+        })?;
+        if bytes.len() > MODEL_SELECTION_POLICY_MAX_BYTES {
+            return Err(ModelSelectionPolicyStoreError::InvalidData);
+        }
+        Ok(Entry::bytes(bytes).with_content_type(ContentType::json()))
+    }
+}
+
+fn map_cas_update_error(
+    error: CasUpdateError<ModelSelectionPolicyStoreError>,
+) -> ModelSelectionPolicyStoreError {
+    match error {
+        CasUpdateError::Apply(error) => error,
+        error => {
+            tracing::error!(error = ?error, "atomic user model policy update failed");
+            ModelSelectionPolicyStoreError::Unavailable
+        }
+    }
 }
 
 #[async_trait]
@@ -64,31 +102,45 @@ impl<F: RootFilesystem + ?Sized> ModelSelectionPolicyStore
                 return Err(ModelSelectionPolicyStoreError::Unavailable);
             }
         };
-        serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-            tracing::error!(error = %error, "user model policy record is invalid");
-            ModelSelectionPolicyStoreError::InvalidData
-        })
+        Self::decode_policy(&bytes).map(Some)
     }
 
-    async fn write(
+    async fn update(
         &self,
         caller: &ProductSurfaceCaller,
         policy: &ModelSelectionPolicy,
-    ) -> Result<(), ModelSelectionPolicyStoreError> {
-        let bytes =
-            serde_json::to_vec(policy).map_err(|_| ModelSelectionPolicyStoreError::InvalidData)?;
-        if bytes.len() > MODEL_SELECTION_POLICY_MAX_BYTES {
-            return Err(ModelSelectionPolicyStoreError::InvalidData);
-        }
+        mode: ModelSelectionPolicyUpdateMode,
+    ) -> Result<ModelSelectionPolicy, ModelSelectionPolicyStoreError> {
         let path = Self::path()?;
         let scope = Self::scope(caller);
-        self.filesystem
-            .write_bytes(&scope, &path, bytes)
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "user model policy write failed");
-                ModelSelectionPolicyStoreError::Unavailable
-            })
+        let requested = policy.clone();
+        cas_update(
+            &self.filesystem,
+            &scope,
+            &path,
+            Self::decode_policy,
+            Self::encode_policy,
+            move |current| {
+                let mut next = requested.clone();
+                async move {
+                    if mode == ModelSelectionPolicyUpdateMode::PreserveExistingModelEntries {
+                        next.model_entries = current
+                            .filter(|stored| stored.provider_id == next.provider_id)
+                            .map(|stored| {
+                                stored
+                                    .model_entries
+                                    .into_iter()
+                                    .filter(|entry| next.allowed_models.contains(&entry.id))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                    }
+                    Ok(CasApply::new(next.clone(), next))
+                }
+            },
+        )
+        .await
+        .map_err(map_cas_update_error)
     }
 }
 
@@ -146,7 +198,11 @@ mod tests {
     async fn policy_is_shared_by_users_inside_one_tenant_and_isolated_across_tenants() {
         let store = store();
         store
-            .write(&caller("tenant-a", "admin"), &policy("provider-a"))
+            .update(
+                &caller("tenant-a", "admin"),
+                &policy("provider-a"),
+                ModelSelectionPolicyUpdateMode::Replace,
+            )
             .await
             .expect("write policy");
 
