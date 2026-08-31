@@ -45,6 +45,32 @@ run_batch() {
   )
 }
 
+mkdir -p "${sandbox}/aliases/lib"
+cp "${under_test}" "${sandbox}/aliases/reborn-coverage-lane-run.sh"
+cp "${repo_root}/scripts/ci/lib/integration_test_inventory.py" \
+  "${sandbox}/aliases/lib/integration_test_inventory.py"
+cat >"${sandbox}/aliases/Cargo.toml" <<'TOML'
+test = [
+  { name = "reborn_integration_before", path = "tests/integration/alias.rs" },
+  { name = "reborn_integration_after", path = "tests/integration/alias.rs" },
+]
+TOML
+aliases_log="${sandbox}/aliases.log"
+if ! (
+  cd "${sandbox}/aliases"
+  PATH="${sandbox}/bin:/usr/bin:/bin" \
+    INTEGRATION_BATCH_LOG="${aliases_log}" \
+    CI=true REBORN_COV_COLLECT=false REBORN_COV_LANES_JSON='[0]' \
+    bash "${sandbox}/aliases/reborn-coverage-lane-run.sh"
+); then
+  echo "FAIL: aliased integration targets did not execute" >&2
+  status=1
+elif ! grep -q -- '--test reborn_integration_before' "${aliases_log}" ||
+     ! grep -q -- '--test reborn_integration_after' "${aliases_log}"; then
+  echo "FAIL: execution inventory dropped a Cargo target sharing a source path" >&2
+  status=1
+fi
+
 mkdir -p "${sandbox}/topology/lib"
 cp "${under_test}" "${sandbox}/topology/reborn-coverage-lane-run.sh"
 cat >"${sandbox}/topology/lib/integration_test_inventory.py" <<'STUB'

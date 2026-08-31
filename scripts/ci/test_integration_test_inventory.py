@@ -65,6 +65,25 @@ test = [
                     "tests/integration/second.rs": 1,
                 },
             )
+            document = inventory.inventory_document(root)
+            self.assertEqual(
+                [test["name"] for test in document["tests"]],
+                [
+                    "reborn_group_shared",
+                    "reborn_integration_after",
+                    "reborn_integration_before",
+                ],
+                "execution inventory must preserve every unique Cargo target name",
+            )
+            self.assertEqual(
+                {test["name"]: test["lane"] for test in document["tests"]},
+                {
+                    "reborn_group_shared": "groups",
+                    "reborn_integration_after": 1,
+                    "reborn_integration_before": 1,
+                },
+                "targets sharing a source path must share that path's planner lane",
+            )
 
             (root / "Cargo.toml").write_text(
                 'test = [{ name = "new_test", path = "tests/integration/new_test.rs" }]\n',
