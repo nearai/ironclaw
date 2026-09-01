@@ -82,6 +82,24 @@ pub(crate) const TOOL_SEARCH_INLINE_RESULT_LIMIT: usize = 3;
 /// headroom.
 const COMPACT_DESCRIPTION_MAX_BYTES: usize = 160;
 
+/// Description cap for **rank 1 only** — the rank `TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE` tells
+/// the model to invoke.
+///
+/// This catalog encodes routing guidance in description *tails*, and a flat 160 B cap amputates
+/// exactly that half. `builtin.http.save`'s description
+/// (`crates/kernel/ironclaw_host_runtime/src/first_party_tools/http.rs`, `WEB_SEARCH_PREFERENCE`)
+/// runs 559 B and ends "For general web research or retrieving human-facing web pages, prefer an
+/// available `web_search` tool" — the sentence that answers "which tool do I use for this?". At
+/// 160 B the model sees "...Use this capability for structure" and never learns the answer. A
+/// pinchbench trace at a791c14e59 caught the consequence: `task_eu_regulation_research` issued 9
+/// searches hunting for a web tool, never saw that sentence, abandoned the tool path and fell back
+/// to 322 `builtin.shell` calls (vs 61), scoring 0.00 against 0.89.
+///
+/// Rank 1 alone gets the larger cap because rank 1 is the entry the model is directed to act on,
+/// and because the budget cannot afford it for all three: at 640 B each the reply reaches ~3,720 B
+/// and the ladder degrades it, losing rank 1's schema. Asymmetric, deliberately.
+const RANK_ONE_DESCRIPTION_MAX_BYTES: usize = 640;
+
 /// Cap on how many `required` parameter names ride in a degraded compact entry
 /// (`RequiredParamsShape::Capped`). Untrusted, hosted-MCP tool schemas can declare an
 /// arbitrarily large `required` array — #7984 measured 20 names x 40 chars producing a
@@ -275,6 +293,17 @@ fn compact_result_entry(result: &CatalogSearchResult) -> Value {
     compact_result_entry_shaped(result, RequiredParamsShape::Full)
 }
 
+/// Rank 1's compact entry: identical to `compact_result_entry` except the description keeps its
+/// routing tail (`RANK_ONE_DESCRIPTION_MAX_BYTES`). Used for the entry rank-1 guidance points at.
+fn rank_one_compact_entry(result: &CatalogSearchResult) -> Value {
+    let mut entry = compact_result_entry_shaped(result, RequiredParamsShape::Full);
+    entry["description"] = Value::String(truncate_preview(
+        &result.description,
+        RANK_ONE_DESCRIPTION_MAX_BYTES,
+    ));
+    entry
+}
+
 /// The per-entry `required`-field degradation rungs `bounded_search_output` tries in order.
 /// Untrusted, hosted-MCP tool schemas can declare an arbitrarily large `required` array (#7984
 /// measured 20 names x 40 chars alone producing a 6,332 B RAW compact reply, over the ceiling
@@ -430,10 +459,22 @@ fn bounded_search_output(query: &str, results: Vec<CatalogSearchResult>) -> Valu
 
     // Rung a: rank 1 complete, ranks 2-3 compact with `required` full — the measured object IS
     // the returned object, no probe/clone-and-swap step for the fit check to disagree with.
+    //
+    // Rank 1 keeps its description tail (`RANK_ONE_DESCRIPTION_MAX_BYTES`): it is the entry both
+    // guidance strings point the model at, and this catalog puts "use X instead" routing at the
+    // END of descriptions, which a 160 B cap amputates. Ranks 2-3 stay at the tighter cap —
+    // affording the larger one for all three overruns the ceiling and costs rank 1 its schema.
     let compact_full: Vec<Value> = results
         .iter()
         .take(TOOL_SEARCH_INLINE_RESULT_LIMIT)
-        .map(compact_result_entry)
+        .enumerate()
+        .map(|(rank, result)| {
+            if rank == 0 {
+                rank_one_compact_entry(result)
+            } else {
+                compact_result_entry(result)
+            }
+        })
         .collect();
     let mut complete = compact_full.clone();
     complete[0]["schema_complete"] = Value::Bool(true);
@@ -4706,16 +4747,31 @@ mod tests {
             Value::Bool(false),
             "test setup must exercise the compact-fallback branch, not the schema-complete one"
         );
+        // Rank 1 keeps its routing tail: the fixture's 200 B description is under
+        // RANK_ONE_DESCRIPTION_MAX_BYTES, so it rides untruncated. This is the half of the rule
+        // that matters for tool selection -- this catalog puts "use X instead" at the END of a
+        // description, and truncating rank 1 to 160 B amputates exactly that.
         assert_eq!(
             output["results"][0]["description"]
                 .as_str()
                 .expect("description is a string")
                 .len(),
+            200,
+            "rank 1 must keep its FULL description (under RANK_ONE_DESCRIPTION_MAX_BYTES) -- this \
+             catalog puts routing guidance at the END of a description, so truncating rank 1 \
+             amputates the sentence that answers which tool to use"
+        );
+        // Ranks 2-3 stay on the tighter cap and DO cross truncate_preview's <= boundary
+        // (util.rs:34-38): 200 B in, 160 B cap, +3 B ellipsis = 163 B out. Affording rank 1's
+        // larger cap for all three ranks overruns the ceiling and costs rank 1 its schema -- the
+        // asymmetry is deliberate; if this drifts, re-check the budget arithmetic, not this line.
+        assert_eq!(
+            output["results"][1]["description"]
+                .as_str()
+                .expect("description is a string")
+                .len(),
             163,
-            "the fixture must actually cross truncate_preview's <= boundary (util.rs:34-38) -- a \
-             163 B description is the true worst case this test and the Goal section's arithmetic \
-             are built on; if this drifts back to 160 B the fixture is silently exercising the \
-             untruncated case again, not the worst case"
+            "ranks 2-3 stay capped at COMPACT_DESCRIPTION_MAX_BYTES + 3"
         );
         let bytes = serde_json::to_vec(&output).expect("reply serializes").len();
         assert!(
