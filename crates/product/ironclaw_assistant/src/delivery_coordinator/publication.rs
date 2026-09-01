@@ -273,14 +273,26 @@ impl DeliveryCoordinator {
     /// and subscribe it to the projection. One-time — composition calls it
     /// right after wiring the turn and thread services (the coordinator
     /// itself is built earlier, before those exist). Returns `false` when
-    /// publication was already started.
+    /// publication was already started (or, impossibly, when the publisher
+    /// id was rejected — logged at error level, never a panic).
     pub fn start_reply_publication(self: &Arc<Self>, wiring: ReplyPublicationWiring) -> bool {
-        let publisher_id = PublisherId::new(format!("publisher-{}", uuid::Uuid::new_v4().simple()))
-            .unwrap_or_else(|_| {
-                // A v4 uuid in simple form is 32 hex characters: always within the
-                // identifier grammar. Kept total for the type system's sake.
-                PublisherId::new("publisher").unwrap_or_else(|_| unreachable!("static id"))
-            });
+        let publisher_id =
+            match PublisherId::new(format!("publisher-{}", uuid::Uuid::new_v4().simple())) {
+                Ok(publisher_id) => publisher_id,
+                Err(error) => {
+                    // `publisher-` plus a simple-form v4 uuid is 42 bytes of
+                    // `[a-z0-9-]` — always inside the identifier grammar
+                    // (1..=128 bytes of alphanumerics and `.`/`_`/`:`/`-`).
+                    // If the grammar ever tightens, refuse to start rather
+                    // than panic inside composition wiring.
+                    tracing::error!(
+                        target: "ironclaw::reborn::reply_publication",
+                        %error,
+                        "reply publication publisher id was rejected; publication not started"
+                    );
+                    return false;
+                }
+            };
         let publication = Arc::new(ReplyPublication {
             coordinator: Arc::downgrade(self),
             projection: Arc::clone(&wiring.projection),

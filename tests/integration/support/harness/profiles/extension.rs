@@ -76,7 +76,14 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
         )
         .with_durable_capability_io()
         .with_seed_extension_credentials()
-        .with_recording_network_egress(network_egress),
+        .with_recording_network_egress(network_egress)
+        // The real Slack and Telegram packages declare `[channel.reply]`;
+        // activation fails closed unless the deployment binds their reply
+        // sinks, exactly as the shipping binary does — so lifecycle
+        // scenarios that install them bind the real adapters like the
+        // delivery profile.
+        .with_channel_extension_binding(slack_channel_extension_binding())
+        .with_channel_extension_binding(telegram_channel_extension_binding()),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),
