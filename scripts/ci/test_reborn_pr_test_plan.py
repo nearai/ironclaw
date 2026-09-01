@@ -239,13 +239,21 @@ class RebornPrTestPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         planner._sandbox_crate_directory.cache_clear()
         self.original_bucket_packages = planner._bucket_packages
+        self.original_cargo_required_packages = getattr(
+            planner, "_cargo_required_packages", None
+        )
         planner._bucket_packages = lambda packages: (
             [{"name": "selected", "packages": packages}] if packages else []
         )
+        planner._cargo_required_packages = lambda metadata, packages: set()
         self.canonical = ["alpha", "beta", "gamma"]
 
     def tearDown(self) -> None:
         planner._bucket_packages = self.original_bucket_packages
+        if self.original_cargo_required_packages is None:
+            del planner._cargo_required_packages
+        else:
+            planner._cargo_required_packages = self.original_cargo_required_packages
         planner._sandbox_crate_directory.cache_clear()
 
     def plan(
@@ -357,6 +365,84 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertEqual(plan["affected_packages"], ["alpha"])
         self.assertNotIn("exact_targets", plan["crate_buckets"][0])
 
+    def test_full_package_buckets_partition_cargo_required_packages(self) -> None:
+        with mock.patch.object(
+            planner, "_cargo_required_packages", return_value={"beta"}
+        ):
+            selected = self.plan("pull_request", ["crates/alpha/src/lib.rs"])
+            exhaustive = self.plan("workflow_dispatch", [])
+
+        self.assertEqual(selected["crate_buckets"][0]["cargo_packages"], ["beta"])
+        self.assertEqual(exhaustive["crate_buckets"][0]["cargo_packages"], ["beta"])
+
+    def test_exact_target_bucket_keeps_the_existing_cargo_contract(self) -> None:
+        with mock.patch.object(
+            planner, "_cargo_required_packages", return_value={"alpha"}
+        ):
+            plan = self.plan("pull_request", ["crates/alpha/tests/contract.rs"])
+
+        bucket = plan["crate_buckets"][0]
+        self.assertEqual(
+            bucket["exact_targets"],
+            [{"package": "alpha", "kind": "test", "name": "contract"}],
+        )
+        self.assertNotIn("cargo_packages", bucket)
+
+    def test_manifest_harness_false_requires_whole_package_cargo(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        manifest = root / "Cargo.toml"
+        manifest.write_text(
+            '[[test]]\nname = "custom"\npath = "tests/custom.rs"\nharness = false\n',
+            encoding="utf-8",
+        )
+        package = {
+            "name": "alpha",
+            "manifest_path": str(manifest),
+            "targets": [{"kind": ["test"], "test": True}],
+        }
+
+        self.assertTrue(planner._manifest_requires_cargo(package))
+
+    def test_unknown_test_target_kind_requires_whole_package_cargo(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        manifest = root / "Cargo.toml"
+        manifest.write_text('[package]\nname = "alpha"\n', encoding="utf-8")
+        package = {
+            "name": "alpha",
+            "manifest_path": str(manifest),
+            "targets": [{"kind": ["future-test-kind"], "test": True}],
+        }
+
+        self.assertTrue(planner._manifest_requires_cargo(package))
+
+    def test_ordinary_libtest_package_is_nextest_compatible(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        manifest = root / "Cargo.toml"
+        manifest.write_text(
+            '[[test]]\nname = "ordinary"\npath = "tests/ordinary.rs"\n',
+            encoding="utf-8",
+        )
+        package = {
+            "name": "alpha",
+            "manifest_path": str(manifest),
+            "targets": [{"kind": ["test"], "test": True}],
+        }
+
+        self.assertFalse(planner._manifest_requires_cargo(package))
+
+    def test_malformed_selected_manifest_fails_with_package_context(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        manifest = root / "Cargo.toml"
+        manifest.write_text("[[test]\n", encoding="utf-8")
+        package = {
+            "name": "alpha",
+            "manifest_path": str(manifest),
+            "targets": [],
+        }
+
+        with self.assertRaisesRegex(ValueError, "alpha.*Cargo.toml"):
+            planner._manifest_requires_cargo(package)
+
     def test_high_fanout_package_keeps_consumers_in_bounded_jobs(self) -> None:
         wide = metadata()
         for index in range(5):
@@ -380,12 +466,15 @@ class RebornPrTestPlanTests(unittest.TestCase):
             {"name": package, "packages": [package]} for package in packages
         ]
 
-        plan = planner.build_plan(
-            event="pull_request",
-            changed_paths=["crates/alpha/src/lib.rs"],
-            metadata=wide,
-            canonical_packages=canonical,
-        )
+        with mock.patch.object(
+            planner, "_cargo_required_packages", return_value={"consumer_0"}
+        ):
+            plan = planner.build_plan(
+                event="pull_request",
+                changed_paths=["crates/alpha/src/lib.rs"],
+                metadata=wide,
+                canonical_packages=canonical,
+            )
 
         self.assertEqual(plan["affected_packages"], canonical)
         self.assertEqual(len(plan["crate_buckets"]), 3)
@@ -398,13 +487,30 @@ class RebornPrTestPlanTests(unittest.TestCase):
             canonical,
         )
         self.assertIn("without omitting packages", plan["reasons"][-1])
-
-        merge_group_plan = planner.build_plan(
-            event="merge_group",
-            changed_paths=["crates/alpha/src/lib.rs"],
-            metadata=wide,
-            canonical_packages=canonical,
+        self.assertEqual(
+            [
+                bucket["name"]
+                for bucket in plan["crate_buckets"]
+                if bucket.get("cargo_packages") == ["consumer_0"]
+            ],
+            [
+                next(
+                    bucket["name"]
+                    for bucket in plan["crate_buckets"]
+                    if "consumer_0" in bucket["packages"]
+                )
+            ],
         )
+
+        with mock.patch.object(
+            planner, "_cargo_required_packages", return_value={"consumer_0"}
+        ):
+            merge_group_plan = planner.build_plan(
+                event="merge_group",
+                changed_paths=["crates/alpha/src/lib.rs"],
+                metadata=wide,
+                canonical_packages=canonical,
+            )
         self.assertEqual(len(merge_group_plan["crate_buckets"]), len(canonical))
         self.assertEqual(
             sorted(
@@ -2395,7 +2501,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertIn("--test reborn_integration_sandbox_shell_turn", workflow)
         self.assertIn(
-            '"${feature_args[@]}" --ignore-rust-version --all-targets',
+            'cargo test "${cargo_package_args[@]}"',
             workflow,
         )
         self.assertIn(
@@ -2403,6 +2509,22 @@ class RebornPrTestPlanTests(unittest.TestCase):
             '                "${package_args[@]}" "${feature_args[@]}"',
             workflow,
         )
+        crate_job = workflow.split("\n  crate-tests:\n", 1)[1].split(
+            "\n  reborn-root-tests:\n", 1
+        )[0]
+        integration_job = workflow.split(
+            "  reborn-integration-coverage:", 1
+        )[1].split("  coverage-report:", 1)[0]
+        self.assertIn("CARGO_PACKAGES:", crate_job)
+        self.assertIn("cargo-nextest@0.9.143", crate_job)
+        self.assertIn(
+            "taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20",
+            crate_job,
+        )
+        self.assertIn("cargo nextest run --profile ci", crate_job)
+        self.assertIn("--test-threads 4 --all-targets", crate_job)
+        self.assertIn('if [[ "$(jq \'length\' <<< "${EXACT_TARGETS}")" -gt 0 ]]', crate_job)
+        self.assertIn("run-hermetic-deterministic-suite.sh command", crate_job)
         self.assertNotIn('coverage/${package}.lcov', workflow)
         self.assertIn(
             "max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}",
@@ -2424,9 +2546,6 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "max-parallel: ${{ github.event_name == 'pull_request' && 1 || 5 }}",
             workflow,
         )
-        integration_job = workflow.split("  reborn-integration-coverage:", 1)[1].split(
-            "  coverage-report:", 1
-        )[0]
         self.assertIn(
             "timeout-minutes: ${{ github.event_name == 'push' && 120 || 300 }}",
             integration_job,
@@ -2504,6 +2623,39 @@ class RebornPrTestPlanTests(unittest.TestCase):
             '"${incremental_env[@]}" cargo test \\\n'
             '                    -p "${package}" "--${kind}" "${name}"',
             workflow,
+        )
+
+    def test_nextest_process_local_tests_are_serialized_across_processes(self) -> None:
+        config = tomllib.loads(
+            (ROOT / ".config/nextest.toml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            config["test-groups"]["ironclaw-smoke-process-local"]["max-threads"],
+            1,
+        )
+        self.assertEqual(
+            config["test-groups"]["composition-budget-process-local"][
+                "max-threads"
+            ],
+            1,
+        )
+        ci_overrides = config["profile"]["ci"]["overrides"]
+        self.assertTrue(
+            any(
+                override.get("filter") == 'package(ironclaw) & binary(smoke)'
+                and override.get("test-group")
+                == "ironclaw-smoke-process-local"
+                for override in ci_overrides
+            )
+        )
+        self.assertTrue(
+            any(
+                override.get("filter")
+                == 'package(ironclaw_composition) & binary(budget_e2e)'
+                and override.get("test-group")
+                == "composition-budget-process-local"
+                for override in ci_overrides
+            )
         )
 
     def test_integration_batch_shape_matches_event(self) -> None:

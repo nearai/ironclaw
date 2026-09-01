@@ -79,6 +79,14 @@ DIFF_EVENTS = {"pull_request", "merge_group"}
 FULL_EVENTS = {"push", "workflow_call", "workflow_dispatch", "schedule"}
 ALL_ROOT_PARTITIONS = (0, 1, 2, 3)
 ALL_INTEGRATION_LANES = (*range(INTEGRATION_PARTITION_COUNT), "groups")
+NEXTEST_LIBTEST_TARGET_KINDS = {
+    "lib",
+    "bin",
+    "test",
+    "bench",
+    "example",
+    "proc-macro",
+}
 # Doc-fact contract tests (#7378) read `docs/` pages from inside owning
 # crates, so a published-page edit can fail a cargo test. Route those edits
 # to exactly the doc-fact test binaries (no reverse-dependency widening —
@@ -829,16 +837,89 @@ def _affected_packages(changed: set[str], reverse: dict[str, set[str]]) -> set[s
     return affected
 
 
+def _manifest_requires_cargo(package: dict[str, Any]) -> bool:
+    """Whether a whole package needs Cargo's in-process test semantics."""
+    name = str(package.get("name", "<unknown>"))
+    manifest_path = Path(str(package.get("manifest_path", "")))
+    try:
+        manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(
+            f"cannot classify test runner for {name} at {manifest_path}: {error}"
+        ) from error
+
+    manifest_targets: list[dict[str, Any]] = []
+    for table in ("lib", "bin", "test", "bench", "example"):
+        value = manifest.get(table, [])
+        if isinstance(value, dict):
+            manifest_targets.append(value)
+        elif isinstance(value, list):
+            manifest_targets.extend(
+                target for target in value if isinstance(target, dict)
+            )
+    if any(target.get("harness") is False for target in manifest_targets):
+        return True
+
+    for target in package.get("targets", []):
+        if not target.get("test", False):
+            continue
+        kinds = set(target.get("kind", []))
+        if not kinds or not kinds <= NEXTEST_LIBTEST_TARGET_KINDS:
+            return True
+    return False
+
+
+def _cargo_required_packages(
+    metadata: dict[str, Any], packages: set[str]
+) -> set[str]:
+    by_name = {str(package["name"]): package for package in metadata["packages"]}
+    missing = sorted(packages - by_name.keys())
+    if missing:
+        raise ValueError(
+            "selected packages are missing from Cargo metadata: " + ", ".join(missing)
+        )
+    return {
+        package
+        for package in packages
+        if _manifest_requires_cargo(by_name[package])
+    }
+
+
+def _annotate_cargo_packages(
+    buckets: list[dict[str, Any]], metadata: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Add the Cargo-only subset after every bucket's package list is final."""
+    full_package_names = {
+        str(package)
+        for bucket in buckets
+        if not bucket.get("exact_targets")
+        for package in bucket.get("packages", [])
+    }
+    cargo_required = _cargo_required_packages(metadata, full_package_names)
+    annotated: list[dict[str, Any]] = []
+    for bucket in buckets:
+        candidate = dict(bucket)
+        if not candidate.get("exact_targets"):
+            cargo_packages = sorted(set(candidate["packages"]) & cargo_required)
+            if cargo_packages:
+                candidate["cargo_packages"] = cargo_packages
+        annotated.append(candidate)
+    return annotated
+
+
 def _full_plan(
     reason: str,
     canonical_packages: list[str],
+    metadata: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "mode": "full",
         "reasons": [reason],
         "changed_packages": [],
         "affected_packages": canonical_packages,
-        "crate_buckets": _bucket_packages(canonical_packages),
+        "crate_buckets": _annotate_cargo_packages(
+            _bucket_packages(canonical_packages), metadata
+        ),
         "root_partitions": list(ALL_ROOT_PARTITIONS),
         "integration_lanes": list(ALL_INTEGRATION_LANES),
         "run_qa_replay": True,
@@ -866,6 +947,7 @@ def _unclassified_path_plan(
     event: str,
     reason: str,
     canonical_packages: list[str],
+    metadata: dict[str, Any],
 ) -> dict[str, Any]:
     """Fail PR feedback loudly; widen an otherwise valid queue diff."""
     if event == "merge_group":
@@ -873,6 +955,7 @@ def _unclassified_path_plan(
             f"merge-group scope could not classify {reason}; running the "
             "exhaustive plan",
             canonical_packages,
+            metadata,
         )
     raise ValueError(reason)
 
@@ -887,9 +970,11 @@ def build_plan(
 ) -> dict[str, Any]:
     """Build a deterministic test plan, rejecting or widening unknown inputs."""
     if event in FULL_EVENTS:
-        return _full_plan(f"{event} requires exhaustive coverage", canonical_packages)
+        return _full_plan(
+            f"{event} requires exhaustive coverage", canonical_packages, metadata
+        )
     if event not in DIFF_EVENTS:
-        return _full_plan(f"unknown event {event!r}", canonical_packages)
+        return _full_plan(f"unknown event {event!r}", canonical_packages, metadata)
 
     paths = {path.strip().replace("\\", "/") for path in changed_paths if path.strip()}
     if not paths:
@@ -906,6 +991,7 @@ def build_plan(
                 f"merge-group global or topology input changed: {global_risk}; "
                 "running the exhaustive plan",
                 canonical_packages,
+                metadata,
             )
 
     package_directories, reverse = _workspace_packages(metadata)
@@ -923,6 +1009,7 @@ def build_plan(
                 "merge-group workspace topology input changed: "
                 f"{changed_manifest}; running the exhaustive plan",
                 canonical_packages,
+                metadata,
             )
     production_packages: set[str] = set()
     direct_test_packages: set[str] = set()
@@ -1305,6 +1392,7 @@ def build_plan(
                     "a crate path maps to no workspace package (deletion or "
                     f"rename): {path}; this PR runs the exhaustive plan",
                     canonical_packages,
+                    metadata,
                 )
             directory = next(
                 directory
@@ -1336,6 +1424,7 @@ def build_plan(
                 event=event,
                 reason=f"unmapped Reborn test path: {path}",
                 canonical_packages=canonical_packages,
+                metadata=metadata,
             )
         if path.startswith("tests/e2e/"):
             # The browser/E2E suite has its own workflow (`reborn-e2e.yml`,
@@ -1350,22 +1439,26 @@ def build_plan(
                 event=event,
                 reason=f"unmapped test or CI path: {path}",
                 canonical_packages=canonical_packages,
+                metadata=metadata,
             )
         return _unclassified_path_plan(
             event=event,
             reason=f"unclassified pull-request path: {path}",
             canonical_packages=canonical_packages,
+            metadata=metadata,
         )
 
     if nextest_config_changed:
         return _full_plan(
             "nextest runner config changed; this PR runs the exhaustive plan",
             canonical_packages,
+            metadata,
         )
     if shared_reborn_action_changed:
         return _full_plan(
             "shared reborn action changed; this PR runs the exhaustive plan",
             canonical_packages,
+            metadata,
         )
 
     canonical_set = set(canonical_packages)
@@ -1404,6 +1497,7 @@ def build_plan(
             f"coalesced {original_bucket_count} affected crate buckets into "
             f"{len(buckets)} PR jobs without omitting packages"
         )
+    buckets = _annotate_cargo_packages(buckets, metadata)
     active = bool(
         buckets
         or root_partitions

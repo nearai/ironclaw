@@ -385,10 +385,17 @@ jobs:
         if: needs.changes.outputs.run_coverage == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
+      - name: Install cargo-nextest
+        if: needs.changes.outputs.run_coverage != 'true'
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest@0.9.143
+
       - name: Run crate tests
         env:
           BUCKET_NAME: ${{ matrix.bucket.name }}
           BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
+          CARGO_PACKAGES: ${{ toJSON(matrix.bucket.cargo_packages || fromJSON('[]')) }}
           EXACT_TARGETS: ${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}
           COLLECT_COVERAGE: ${{ needs.changes.outputs.run_coverage }}
         run: |
@@ -399,15 +406,37 @@ jobs:
           export IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
           package_args=()
           feature_args=()
+          nextest_package_args=()
+          nextest_feature_args=()
+          cargo_package_args=()
+          cargo_feature_args=()
           incremental_env=()
+          if ! jq -e --argjson packages "${BUCKET_PACKAGES}" '
+            type == "array" and length == (unique | length) and
+            all(.[]; $packages | index(.) != null)
+          ' <<< "${CARGO_PACKAGES}" >/dev/null; then
+            echo "cargo_packages must be a unique subset of bucket packages" >&2
+            exit 1
+          fi
           while IFS= read -r package; do
             package_args+=(-p "$package")
+            if jq -e --arg package "$package" 'index($package) != null' \
+              <<< "${CARGO_PACKAGES}" >/dev/null; then
+              cargo_package_args+=(-p "$package")
+              subset_feature_args_name=cargo_feature_args
+            else
+              nextest_package_args+=(-p "$package")
+              subset_feature_args_name=nextest_feature_args
+            fi
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
             if [[ -n "${feature_flags}" ]]; then
               features="${feature_flags#--features }"
               IFS=, read -ra package_features <<< "${features}"
               for feature in "${package_features[@]}"; do
                 feature_args+=(--features "${package}/${feature}")
+                declare -n subset_feature_args="${subset_feature_args_name}"
+                subset_feature_args+=(--features "${package}/${feature}")
+                unset -n subset_feature_args
               done
             fi
             if [[ "$package" == "ironclaw_composition" ]]; then
@@ -427,6 +456,10 @@ jobs:
           else
             echo "::group::cargo test affected bucket ${BUCKET_NAME}"
             if [[ "$(jq 'length' <<< "${EXACT_TARGETS}")" -gt 0 ]]; then
+              if [[ "$(jq 'length' <<< "${CARGO_PACKAGES}")" -gt 0 ]]; then
+                echo "exact_targets and cargo_packages are mutually exclusive" >&2
+                exit 1
+              fi
               while IFS=$'\t' read -r package kind name; do
                 target_feature_args=()
                 feature_flags="$(scripts/ci/package-feature-flags.sh "${package}")"
@@ -443,10 +476,20 @@ jobs:
                   <<< "${EXACT_TARGETS}"
               )
             else
-              scripts/ci/run-hermetic-deterministic-suite.sh command \
-                timeout --signal=INT --kill-after=30s 28m \
-                "${incremental_env[@]}" cargo test "${package_args[@]}" \
-                  "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
+              if [[ "${#nextest_package_args[@]}" -gt 0 ]]; then
+                scripts/ci/run-hermetic-deterministic-suite.sh command \
+                  timeout --signal=INT --kill-after=30s 28m \
+                  "${incremental_env[@]}" cargo nextest run --profile ci \
+                    "${nextest_package_args[@]}" "${nextest_feature_args[@]}" \
+                    --test-threads 4 --all-targets --ignore-rust-version
+              fi
+              if [[ "${#cargo_package_args[@]}" -gt 0 ]]; then
+                scripts/ci/run-hermetic-deterministic-suite.sh command \
+                  timeout --signal=INT --kill-after=30s 28m \
+                  "${incremental_env[@]}" cargo test "${cargo_package_args[@]}" \
+                    "${cargo_feature_args[@]}" --ignore-rust-version \
+                    --all-targets -- --nocapture
+              fi
             fi
             echo "::endgroup::"
           fi
