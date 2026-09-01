@@ -715,16 +715,7 @@ pub(crate) async fn build_runtime_channel_host(
             admin_users,
             reply_projection,
             session_reply_channel: services.session_reply_channel.clone(),
-            start_reply_publication: {
-                #[cfg(any(test, feature = "test-support"))]
-                {
-                    !services.defer_reply_publication_for_test
-                }
-                #[cfg(not(any(test, feature = "test-support")))]
-                {
-                    true
-                }
-            },
+            start_reply_publication: services.start_reply_publication_at_build,
         },
     );
     let assembly = Arc::clone(&started.assembly);

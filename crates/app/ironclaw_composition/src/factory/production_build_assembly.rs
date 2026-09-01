@@ -16,8 +16,7 @@ pub(super) async fn build_production_shaped(
         native_extension_factories,
         channel_extension_bindings,
         session_reply_channel,
-        #[cfg(any(test, feature = "test-support"))]
-        defer_reply_publication_for_test,
+        start_reply_publication_at_build,
         first_party_registrars,
         credential_account_visibility_policy,
         #[cfg(any(test, feature = "test-support"))]
@@ -87,8 +86,7 @@ pub(super) async fn build_production_shaped(
         native_extension_factories,
         channel_extension_bindings,
         session_reply_channel,
-        #[cfg(any(test, feature = "test-support"))]
-        defer_reply_publication_for_test,
+        start_reply_publication_at_build,
         first_party_bundles,
         first_party_registrars,
         credential_account_visibility_policy,
@@ -403,8 +401,7 @@ pub(super) struct RebornProductionBuildContext {
         Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     pub(super) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
     pub(super) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
-    #[cfg(any(test, feature = "test-support"))]
-    pub(super) defer_reply_publication_for_test: bool,
+    pub(super) start_reply_publication_at_build: bool,
     pub(super) first_party_bundles: Vec<ironclaw_extension_host::FirstPartyPackageBundle>,
     pub(super) first_party_registrars:
         Vec<Arc<dyn ironclaw_extension_host::FirstPartyHandlerRegistrar>>,

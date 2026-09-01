@@ -128,6 +128,12 @@ approval/auth context      ─┘
 - The `LoopHostMilestoneSink` decorator position formerly held by
   `LiveProgressMilestoneSink` feeds this module; skill-activation live items
   stay on `LiveProjectionPublisher` unchanged.
+- Gate attention in production carries only the KIND: the loop announces
+  `GateBlocked { kind }` and no milestone ever carries the gate ref (the
+  contract's `blocked(gate_ref, …)` publisher has no production caller).
+  The publisher's enrichment therefore resolves the ref from the run's
+  durable state (`get_run_state`) and stamps it before composing the
+  approval/auth copy.
 - Disclosure: `ReplyAudience::Private` (authenticated session, direct chat)
   keeps reasoning summaries, previews, and attention action URLs;
   `ReplyAudience::Shared` (channels/groups) strips them. Audience is decided by
@@ -191,11 +197,17 @@ tenant, off the existing tenant index — the boot-time recovery read). Crash
 recovery: `recover_interrupted_delivery_attempt` leaves publication rows
 alone — they recover through lease expiry and takeover, never by being marked
 `Unknown`. Wake-up after a crash has two durable halves and no outbox: the
-coordinator observes terminal process-journal commits and acknowledges one
-only after the run's open publications have workers again (an error leaves
-the durable cursor unacknowledged and the journal redelivers), and
+coordinator observes terminal process-journal commits — every terminal
+status, `RecoveryRequired` included (terminal in the process contract,
+rendered as a failed reply) — and acknowledges one only after the run's
+open publications have workers again (an error leaves the durable cursor
+unacknowledged and the journal redelivers), and
 `resume_reply_publications` sweeps the attempt index at boot for the crash
-window after an acknowledgement.
+window after an acknowledgement. Each target's stored ingress reply context
+is snapshotted at registration and persisted on the descriptor: the
+per-conversation store is latest-wins, and a newer top-level DM must never
+re-thread an older run's reply — a resume publishes with the snapshot, not
+a fresh read.
 
 Worker rules (inside the coordinator family): one task per `(reply, target)`;
 different replies publish concurrently; replaceable revisions coalesce under
@@ -216,6 +228,12 @@ together — a plain attempt row is a different aggregate). Worker: one tokio
 task per `(run, exact target)`, woken by the projection; it always publishes
 the latest snapshot (natural coalescing) under `min_progress_interval`
 pacing for `Progress` and never delays `ControlCritical`/`Terminal`. The
+answer's *first* visible text is itself control-critical (a fast run reaches
+its terminal commit inside the pacing window, and pacing the first text away
+would jump a stream from "working" straight to the finalized answer), and
+the pacing sleep stays wake-responsive — a revision arriving mid-window
+re-evaluates its reconcile point immediately instead of waiting the window
+out. The
 durable order of one reconcile is fixed: load the row; prepare everything
 provider-independent (channel + sink resolution, the stored reply context,
 disclosure and gate-prompt enrichment, terminal attachment materialization)
@@ -233,7 +251,11 @@ permanent), materializes workspace attachments only for the terminal
 reconcile under the attachment budgets (missing/denied → `Failed(Rejected)`,
 unavailable reader → retried then `Failed(TransportUnavailable)`), and
 settles `Unknown` after the terminal attempt budget when the provider stays
-ambiguous. `Unauthorized` settles `Failed(AuthorizationRevoked)` fail-closed
+ambiguous — and immediately, without any retry, when an ambiguous outcome
+carries no checkpoint and none was ever persisted (nothing exists to
+reconcile from, so a retry would blindly repeat the exact provider side
+effect: a first Telegram send fails closed rather than possibly doubling).
+`Unauthorized` settles `Failed(AuthorizationRevoked)` fail-closed
 — `.claude/rules/lifecycle.md`'s rule that an authentication rejection is
 terminal until the credential changes; restoring the channel's credentials
 goes through the extension's ordinary reconnect/setup flow, and a settled
@@ -283,7 +305,10 @@ Cutover status: done. `DeliveryIntent::FinalReply` no longer exists; the
 observer registers the originating conversation as a publication target
 (`ReplyTargetRegistration`, audience from the trigger class) before it
 watches the run, and a channel that cannot publish a reply gets the neutral
-failure notice rather than a fallback send. On a `stream` channel the
+failure notice rather than a fallback send. A failed run produces exactly
+ONE terminal user-visible reply: the publication's terminal document carries
+the failure summary, and the observer posts the conventional
+`RUN_FAILED_MESSAGE` notice only when no publication actually delivered. On a `stream` channel the
 observer skips the working indicator, nudges, and gate-prompt sends
 (`progressive`), keeping the source reactions, inbox mirrors, and the
 unserviceable-auth cancel. Every remaining coordinator send — prompts,
@@ -312,7 +337,10 @@ regardless of route; the coordinator is transport-blind.
   depends on `ironclaw_assistant`). The coordinator registers that
   channel as a target for every run at its first revision (private
   audience), so WebUI live progress is the same publication path Slack
-  uses.
+  uses. The composition test fixture
+  (`with_test_authenticated_session_channel`) mirrors the binary's exact
+  shape — delivery-only surfaces plus the session-reply naming — so the
+  composed `webui_v2_e2e` SSE journeys exercise this wiring end to end.
 - The projection checkpoint fingerprints the answer text (a same-length
   rewrite republishes) and maps `ReplyStatusKind` and activity provenance
   back onto the live item fields the browser already renders.
@@ -322,9 +350,10 @@ regardless of route; the coordinator is transport-blind.
 - App manifest: `features.agent_view` (`agent_description`, `suggested_prompts`),
   Messages tab enabled/writable, bot scopes + `assistant:write` (+ optional
   `chat:write.customize`), bot events + `app_home_opened`,
-  `app_context_changed`, `assistant_thread_started`,
-  `assistant_thread_context_changed`, `agent_session_stopped`,
-  `agent_session_title_changed`.
+  `app_context_changed`, `agent_session_stopped`,
+  `agent_session_title_changed`. (The legacy `assistant_thread_*` events are
+  absent on purpose: Slack's Agent View validator rejects subscribing to
+  them; the payload parser keeps compatibility arms for older installs.)
 - Ingress: `agent_session_stopped` → the channel's declared `stop` command;
   the other agent events are authenticated no-ops; every normalized message
   carries a Slack `reply_context`.
@@ -354,7 +383,18 @@ regardless of route; the coordinator is transport-blind.
   ambiguous `chat.startStream` marks the checkpoint and the sink never
   opens a second stream — nor posts the terminal text conventionally beside
   a possible ghost stream — so the host settles `Unknown` rather than ever
-  duplicating content.
+  duplicating content. An ambiguous no-text `chat.stopStream` is verified
+  by its own re-send: `message_not_in_streaming_state` on the retry proves
+  a close already landed and the terminal revision applies. Attachment
+  uploads track per-file confirmed progress in the checkpoint, and an
+  ambiguous `files.completeUploadExternal` latches
+  `attachment_upload_ambiguous` — nothing is ever re-uploaded; the host
+  settles `Unknown` instead of possibly doubling files.
+- The native Agent Stop event resolves the SAME conversation binding the
+  run bound: for a top-level DM that binding is topic-less (the Agent
+  session thread rides only the reply context), so the normalized stop
+  keeps the DM conversation topic-less and carries the session thread in
+  its reply context.
 - As built: manifest `[channel.reply] transport = "stream"` + the five agent
   endpoints as exact-path bot-token egress; `src/reply_sink/` renders the
   document (status line, markdown text by char offset, `task_update` from

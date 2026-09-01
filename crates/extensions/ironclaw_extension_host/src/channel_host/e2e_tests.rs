@@ -3537,16 +3537,28 @@ impl RecordingTurnCoordinator {
                     requested_model_profile_id: None,
                 },
             ),
-            (TurnStatus::BlockedApproval | TurnStatus::BlockedAuth, Some(gate_ref)) => self
-                .publish_milestone(
-                    scope,
-                    actor,
-                    run_id,
-                    LoopHostMilestoneKind::Blocked {
-                        gate_ref: LoopGateRef::new(gate_ref.as_str()).expect("loop gate ref"), // safety: static test gate refs carry the loop prefix.
-                        checkpoint_id: TurnCheckpointId::new(),
-                    },
-                ),
+            // Production-faithful: the loop announces only the KIND — the
+            // gate ref never rides a milestone (`.blocked(...)` has no
+            // production caller); the publisher must fetch it from the
+            // run's durable state at enrichment time.
+            (TurnStatus::BlockedApproval, _) => self.publish_milestone(
+                scope,
+                actor,
+                run_id,
+                LoopHostMilestoneKind::GateBlocked {
+                    iteration: 1,
+                    gate_kind: ironclaw_loop_contracts::LoopGateKind::Approval,
+                },
+            ),
+            (TurnStatus::BlockedAuth, _) => self.publish_milestone(
+                scope,
+                actor,
+                run_id,
+                LoopHostMilestoneKind::GateBlocked {
+                    iteration: 1,
+                    gate_kind: ironclaw_loop_contracts::LoopGateKind::Auth,
+                },
+            ),
             _ => {}
         }
     }
@@ -3564,6 +3576,62 @@ impl RecordingTurnCoordinator {
                 exit_id: LoopExitId::new(format!("exit:{run_id}")).expect("loop exit id"), // safety: run-id exit refs carry the loop prefix.
             },
         );
+    }
+
+    /// Flip the active run to a hard `Failed` (no finalized message) and
+    /// publish the loop's terminal milestone — the scripted stand-in for a
+    /// run that dies mid-flight.
+    async fn fail_active_run(&self) -> Result<(), ProductSurfaceFailure> {
+        let run_id =
+            self.active_run_id()
+                .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
+                    reason: "missing active run".into(),
+                })?;
+        let (scope, actor, accepted_message_ref) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let run = state.runs.get(&run_id).ok_or_else(|| {
+                ProductSurfaceFailure::TurnResumeRejected {
+                    reason: "missing run state".into(),
+                }
+            })?;
+            let actor =
+                run.actor
+                    .clone()
+                    .ok_or_else(|| ProductSurfaceFailure::TurnResumeRejected {
+                        reason: "missing run actor".into(),
+                    })?;
+            (run.scope.clone(), actor, run.accepted_message_ref.clone())
+        };
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.runs.insert(
+                run_id,
+                turn_state(
+                    scope.clone(),
+                    actor.clone(),
+                    run_id,
+                    TurnStatus::Failed,
+                    None,
+                    accepted_message_ref,
+                ),
+            );
+        }
+        self.publish_milestone(
+            &scope,
+            &actor,
+            run_id,
+            LoopHostMilestoneKind::Failed {
+                reason_kind: ironclaw_loop_contracts::LoopFailureKind::ModelError,
+                exit_id: LoopExitId::new(format!("exit:{run_id}")).expect("loop exit id"), // safety: run-id exit refs carry the loop prefix.
+            },
+        );
+        Ok(())
     }
 
     fn blocked_run_id(&self) -> Option<TurnRunId> {
@@ -6775,4 +6843,103 @@ fn start_test_reply_publication(
             settings: ReplyPublicationSettings::default(),
         })
     );
+}
+
+const DM_AGENT_STOP: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-agent-stop",
+  "event":{"type":"agent_session_stopped","channel":"D123","user":"U123","thread_ts":"1710000000.000001","event_ts":"1710000001.000900"}
+}"#;
+
+/// Slack's native Agent Stop button arrives as a message-less
+/// `agent_session_stopped` whose `thread_ts` names the Agent session thread.
+/// A top-level DM run binds a TOPIC-LESS conversation (the session thread
+/// rides only the reply context), so the stop must resolve that same
+/// topic-less binding — regression for the thread-topic fingerprint mismatch
+/// that routed Stop to a different conversation and found nothing to stop.
+#[tokio::test]
+async fn native_agent_stop_reaches_the_top_level_dm_runs_thread() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "done".into(),
+    })
+    .await;
+    let seed = harness.post_event(DM_FINAL).await;
+    assert_eq!(seed.status(), StatusCode::OK);
+    harness.drain().await;
+    let dm_thread = harness
+        .coordinator
+        .submitted_scopes()
+        .last()
+        .expect("the top-level DM message submitted a run")
+        .thread_id
+        .clone();
+
+    let response = harness.post_event(DM_AGENT_STOP).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let invokes = harness.command_executions.invokes();
+    let stops: Vec<_> = invokes
+        .iter()
+        .filter(|(operation, _, _)| operation == "product.stop.command")
+        .collect();
+    assert_eq!(
+        stops.len(),
+        1,
+        "the stop event executes exactly one stop command: {invokes:?}"
+    );
+    assert_eq!(stops[0].1, USER, "the stop runs as the bound session actor");
+    assert_eq!(
+        stops[0].2["thread_id"].as_str(),
+        Some(dm_thread.to_string().as_str()),
+        "the stop resolves the top-level DM's own topic-less binding"
+    );
+}
+
+/// A failed DM run produces exactly ONE terminal user-visible failure on the
+/// wire: the reply publication closes the Agent stream with the failure
+/// summary, and the conventional `RUN_FAILED` notice stays suppressed while
+/// that reply delivered — never two failure messages.
+#[tokio::test]
+async fn a_failed_dm_run_shows_exactly_one_terminal_failure_on_the_wire() {
+    let harness = build_harness(TurnMode::Running).await;
+    let response = harness.post_event(DM_FINAL).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    wait_for_slack_stream_starts(&harness, 1).await;
+
+    harness
+        .coordinator
+        .fail_active_run()
+        .await
+        .expect("the active run flips to Failed");
+    harness.drain().await;
+    wait_for_slack_stream_stops(&harness, 1).await;
+
+    let streamed = harness.slack_streamed_text();
+    let failure_needle = "didn't finish";
+    assert!(
+        streamed.contains(failure_needle),
+        "the stream closes with the failure summary: {streamed:?}"
+    );
+    assert_eq!(
+        streamed.matches(failure_needle).count(),
+        1,
+        "the failure copy appears once in the stream: {streamed:?}"
+    );
+    let duplicate_notices: Vec<_> = harness
+        .slack_messages()
+        .into_iter()
+        .filter(|body| {
+            body["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(failure_needle))
+        })
+        .collect();
+    assert!(
+        duplicate_notices.is_empty(),
+        "no conventional failure notice lands beside the delivered reply: {duplicate_notices:?}"
+    );
+    assert_eq!(harness.slack_stream_stops().len(), 1);
 }

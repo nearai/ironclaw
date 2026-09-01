@@ -610,6 +610,30 @@ fn agent_session_stopped_normalizes_to_the_declared_stop_command() {
         }
     }));
     assert_eq!(dm_stop.trigger, ProductTriggerReason::DirectChat);
+    // A top-level DM run binds a TOPIC-LESS conversation (the Agent session
+    // thread lives only in the reply context), so the stop must resolve the
+    // same topic-less binding — a thread topic here would fingerprint a
+    // different conversation and the stop would find nothing to cancel.
+    assert_eq!(dm_stop.conversation.conversation_id(), "D0123ABC456");
+    assert_eq!(
+        dm_stop.conversation.topic_id(),
+        None,
+        "a DM stop stays on the top-level DM conversation binding"
+    );
+    let dm_stop_context = crate::reply_context::SlackReplyContext::from_bytes(
+        dm_stop
+            .message
+            .reply_context
+            .as_deref()
+            .expect("dm stop carries a reply context"),
+    )
+    .expect("dm stop reply context parses");
+    assert_eq!(
+        dm_stop_context.thread_ts.as_deref(),
+        Some("1782234671.392669"),
+        "the Agent session thread is preserved in the reply context"
+    );
+    assert!(dm_stop_context.is_dm);
 
     // A stop without the fields the command needs is dropped with the
     // missing field named, never admitted half-built.

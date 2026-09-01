@@ -53,6 +53,7 @@ const LOG_TARGET: &str = "ironclaw::reborn::reply_publication";
 struct Published {
     attention: Option<(ReplyAttentionKind, Option<String>)>,
     finalized: bool,
+    has_text: bool,
     at: Option<tokio::time::Instant>,
 }
 
@@ -144,7 +145,15 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
         {
             let elapsed = last.elapsed();
             if elapsed < publication.settings.min_progress_interval {
-                tokio::time::sleep(publication.settings.min_progress_interval - elapsed).await;
+                // Stay wake-responsive inside the pacing window: a revision
+                // arriving mid-window may be control-critical (the answer's
+                // first text, an attention transition, the terminal) and must
+                // re-evaluate immediately; ordinary progress falls back into
+                // the remainder of the window on the next pass.
+                tokio::select! {
+                    _ = tokio::time::sleep(publication.settings.min_progress_interval - elapsed) => {}
+                    _ = target.wake.notified() => {}
+                }
                 continue;
             }
         }
@@ -395,6 +404,7 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
             }
             published.attention = attention_signature(snapshot);
             published.finalized = snapshot.document.answer.finalized;
+            published.has_text = !snapshot.document.answer.text.as_str().is_empty();
             published.at = Some(tokio::time::Instant::now());
             *attempts = 0;
             if terminal {
@@ -456,6 +466,14 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
             checkpoint,
         } => {
             *attempts = attempts.saturating_add(1);
+            // A retry is safe only when SOME checkpoint exists for the sink
+            // to reconcile from — the one it just handed back, or one a
+            // previous applied reconcile persisted. With neither, repeating
+            // the call would blindly repeat the exact provider side effect
+            // (a first message-transport send, a first stream open), so the
+            // publication fails closed as `Unknown` instead.
+            let has_read_back_state =
+                checkpoint.is_some() || record.publication.checkpoint.is_some();
             record_outcome(
                 coordinator,
                 target,
@@ -470,7 +488,9 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
                 },
             )
             .await;
-            if terminal && *attempts >= publication.settings.terminal_attempt_budget {
+            if !has_read_back_state
+                || (terminal && *attempts >= publication.settings.terminal_attempt_budget)
+            {
                 settle(
                     coordinator,
                     target,
@@ -584,24 +604,11 @@ async fn prepare(
             generation: channel.generation,
         });
     }
-    let reply_context = match coordinator
-        .reply_context_for_publication(&channel, registration.conversation.as_ref())
-        .await
-    {
-        Ok(bytes) => bytes.and_then(|bytes| match ReplyContextBytes::new(bytes) {
-            Ok(context) => Some(context),
-            Err(error) => {
-                tracing::debug!(target: LOG_TARGET, %error, "stored reply context exceeds the seam bound; publishing without it");
-                None
-            }
-        }),
-        Err(error) => {
-            tracing::debug!(target: LOG_TARGET, %error, "reply context unavailable; retrying later");
-            return Err(Step::Later {
-                delay: publication.settings.retry_backoff,
-            });
-        }
-    };
+    // The reply context is the per-run SNAPSHOT taken at registration (and
+    // persisted on the durable descriptor for resumes) — never a fresh read
+    // of the latest-wins per-conversation store, which a newer message in
+    // the same conversation may have overwritten.
+    let reply_context = target.reply_context.clone();
     let reply_target = ReplyTarget {
         scope: registration.scope.clone(),
         actor: registration.actor.clone(),
@@ -817,6 +824,11 @@ fn reconcile_point(
         ReplyReconcilePoint::Opened
     } else if attention_signature(snapshot) != published.attention
         || snapshot.document.answer.finalized != published.finalized
+        // The answer's first visible text: a fast run reaches its terminal
+        // commit inside the progress pacing window, and pacing the first
+        // text away would jump the stream from "working" straight to the
+        // finalized answer. Pacing applies to text-to-text growth only.
+        || (!published.has_text && !snapshot.document.answer.text.as_str().is_empty())
     {
         ReplyReconcilePoint::ControlCritical
     } else {

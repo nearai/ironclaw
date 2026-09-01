@@ -172,6 +172,15 @@ pub struct ReplyPublicationTargetDescriptor {
     pub thread_anchor: Option<ReplyThreadAnchor>,
     pub audience: ReplyAudience,
     pub transport: ReplyTransport,
+    /// The adapter's stored ingress reply context (ING-11) as it stood when
+    /// the target was registered — snapshotted per run because the
+    /// per-conversation store is latest-wins and a newer top-level DM in the
+    /// same conversation would otherwise re-thread an older run's reply.
+    /// Bounded to the seam's reply-context limit at registration. `None`
+    /// means the target had no stored context when it was registered; a
+    /// resume never re-reads the mutable store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_context: Option<Vec<u8>>,
 }
 
 /// Who may write publication state right now, and until when. The fence on

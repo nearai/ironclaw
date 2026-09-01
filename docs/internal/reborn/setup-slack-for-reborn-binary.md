@@ -182,10 +182,12 @@ card → `chat.stopStream`). The app therefore needs:
 - Bot scopes `assistant:write` and `chat:write` (every session and streaming
   method requires `chat:write`).
 - Bot event subscriptions `app_home_opened`, `app_context_changed`,
-  `message.im`, `assistant_thread_started`, `assistant_thread_context_changed`,
-  `agent_session_stopped` (this is what makes Slack show the **Stop** button;
-  pressing it is normalized into the channel's `stop` command), and
-  `agent_session_title_changed`.
+  `message.im`, `agent_session_stopped` (this is what makes Slack show the
+  **Stop** button; pressing it is normalized into the channel's `stop`
+  command), and `agent_session_title_changed`. Do not subscribe to the
+  legacy `assistant_thread_*` events — Slack's Agent View validator rejects
+  a manifest that carries them (the parser still tolerates them arriving
+  from older installs).
 
 Two things to know before switching an existing app:
 
@@ -251,9 +253,9 @@ https://<public-host>/webhooks/extensions/slack/events
   - `app_mention`
   - `message.im`
   - The Agent family (see Native Agent above): `app_home_opened`,
-    `app_context_changed`, `assistant_thread_started`,
-    `assistant_thread_context_changed`, `agent_session_stopped`,
-    `agent_session_title_changed`
+    `app_context_changed`, `agent_session_stopped`,
+    `agent_session_title_changed` — and NOT the rejected legacy
+    `assistant_thread_*` pair
   - Optional: `message.channels`
   - Optional: `message.groups`
   - Optional: `message.mpim`
@@ -343,8 +345,6 @@ settings:
       - message.mpim
       - app_home_opened
       - app_context_changed
-      - assistant_thread_started
-      - assistant_thread_context_changed
       - agent_session_stopped
       - agent_session_title_changed
   org_deploy_enabled: false
@@ -487,5 +487,4 @@ This is by design: `/ironclaw` requires a direct conversation, so an invocation 
 - Sessions: https://docs.slack.dev/reference/methods/agents.sessions.setStatus,
   https://docs.slack.dev/reference/methods/agents.sessions.rename
 - Events: https://docs.slack.dev/reference/events/agent_session_stopped,
-  https://docs.slack.dev/reference/events/agent_session_title_changed,
-  https://docs.slack.dev/reference/events/assistant_thread_started
+  https://docs.slack.dev/reference/events/agent_session_title_changed

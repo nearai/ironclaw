@@ -57,9 +57,7 @@ mod agent_api;
 mod checkpoint;
 mod plan;
 
-use agent_api::{
-    SlackAgentApi, SlackApiFailure, outcome_for_failure, outcome_for_part, outcome_for_slack_error,
-};
+use agent_api::{SlackAgentApi, SlackApiFailure, outcome_for_failure, outcome_for_part};
 use checkpoint::{
     SlackAppliedState, SlackReplyCheckpoint, SlackSessionStatus, SlackStreamState,
     SlackTerminalState, char_prefix, encode_checkpoint, load_checkpoint, normalize_for_match,
@@ -608,24 +606,50 @@ impl Reconciler<'_> {
         if !self.request.materialized_attachments.is_empty()
             && !self.checkpoint.attachments_delivered
         {
+            if self.checkpoint.attachment_upload_ambiguous {
+                // An earlier completion went unanswered: the files may
+                // already be visible, and Slack read-back cannot prove a
+                // negative here, so nothing is ever re-uploaded. The host
+                // records the ambiguity and settles `Unknown`.
+                return ReplySinkOutcome::Ambiguous {
+                    reason: ReplyOutcomeReason::new(
+                        "an earlier slack attachment completion went unanswered;                          not re-uploading the files",
+                    ),
+                };
+            }
             let files: Vec<&WorkspaceFile> = self.request.materialized_attachments.iter().collect();
-            let outcomes = crate::attachment_transfer::send_files(
-                self.api.egress,
-                self.api.credential,
-                &route.channel,
-                route.thread_ts.as_deref(),
-                &files,
-            )
-            .await;
-            for outcome in outcomes {
-                match outcome {
-                    PartDeliveryOutcome::Sent { vendor_message_ref } => {
-                        if let Some(reference) = vendor_message_ref {
-                            self.record_ref(&reference);
+            // One file per provider batch so confirmed progress is durable in
+            // the checkpoint: a retry resumes after the last CONFIRMED file
+            // instead of re-sending the whole list.
+            let start = usize::try_from(self.checkpoint.attachments_progress)
+                .unwrap_or(usize::MAX)
+                .min(files.len());
+            for index in start..files.len() {
+                let outcomes = crate::attachment_transfer::send_files(
+                    self.api.egress,
+                    self.api.credential,
+                    &route.channel,
+                    route.thread_ts.as_deref(),
+                    &files[index..=index],
+                )
+                .await;
+                for outcome in outcomes {
+                    match outcome {
+                        PartDeliveryOutcome::Sent { vendor_message_ref } => {
+                            if let Some(reference) = vendor_message_ref {
+                                self.record_ref(&reference);
+                            }
                         }
+                        PartDeliveryOutcome::Ambiguous { reason } => {
+                            self.checkpoint.attachment_upload_ambiguous = true;
+                            return ReplySinkOutcome::Ambiguous {
+                                reason: ReplyOutcomeReason::new(reason),
+                            };
+                        }
+                        failed => return outcome_for_part(failed),
                     }
-                    failed => return outcome_for_part(failed),
                 }
+                self.checkpoint.attachments_progress = (index + 1) as u64;
             }
             self.checkpoint.attachments_delivered = true;
         }
@@ -718,20 +742,20 @@ impl Reconciler<'_> {
                     "stopped_by_user" | "message_not_in_streaming_state"
                 ) =>
             {
-                if matches!(document.outcome, Some(ReplyOutcome::Cancelled)) {
-                    // The person pressed stop and Slack already ended the
-                    // stream; Slack leaves the session to us.
+                if error == "stopped_by_user"
+                    && !matches!(document.outcome, Some(ReplyOutcome::Cancelled))
+                {
+                    Err(ReplySinkOutcome::StoppedByUser)
+                } else {
+                    // The stream is no longer streaming: an earlier close of
+                    // ours whose response was lost (verified by exactly this
+                    // answer on the re-send — a no-text close leaves nothing
+                    // for read-back to compare), or the person's stop button
+                    // already ended it. Either way the close this terminal
+                    // revision wanted exists; Slack leaves the session to us.
                     self.ensure_session_status(route, SlackSessionStatus::Active, true)
                         .await?;
                     Ok(false)
-                } else if error == "stopped_by_user" {
-                    Err(ReplySinkOutcome::StoppedByUser)
-                } else {
-                    Err(outcome_for_slack_error(
-                        SlackWebApiMethod::ChatStopStream,
-                        &error,
-                        None,
-                    ))
                 }
             }
             Err(failure) => Err(outcome_for_failure(

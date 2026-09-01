@@ -141,14 +141,24 @@ fn the_documented_app_manifest_declares_the_native_agent_surface() {
         "message.im",
         "app_home_opened",
         "app_context_changed",
-        "assistant_thread_started",
-        "assistant_thread_context_changed",
         "agent_session_stopped",
         "agent_session_title_changed",
     ] {
         assert!(
             events.contains(&event),
             "bot_events must include {event}: {events:?}"
+        );
+    }
+    // Slack's live Agent View validator rejects the legacy assistant_thread_*
+    // subscriptions; the importable manifest must never carry them (the
+    // payload parser keeps compatibility arms for workspaces that still do).
+    for legacy in [
+        "assistant_thread_started",
+        "assistant_thread_context_changed",
+    ] {
+        assert!(
+            !events.contains(&legacy),
+            "bot_events must not include the rejected legacy event {legacy}: {events:?}"
         );
     }
 }

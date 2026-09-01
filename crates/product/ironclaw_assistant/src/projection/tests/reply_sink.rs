@@ -298,3 +298,115 @@ async fn projection_reply_sink_fails_closed_until_composition_binds_the_publishe
     let (items, _) = fixture.drain_items(None).await;
     assert!(items.is_empty());
 }
+
+/// `append_reasoning` grows the OPEN tail segment in place — the segment
+/// count never moves — so the checkpoint must track the tail's content, not
+/// only how many segments exist. Every delta republishes the same stable
+/// item id (the browser upserts one thinking card), the closing replacement
+/// publishes the final text under that id, and an unchanged document
+/// publishes nothing.
+#[tokio::test]
+async fn open_reasoning_deltas_republish_one_stable_thinking_item() {
+    let fixture = sink_fixture("reply-sink-open-reasoning");
+    let mut document = ReplyDocument::default();
+    document.append_reasoning(&ReplyReasoningText::new("Reading the config").unwrap());
+
+    let report = fixture
+        .sink
+        .reconcile(fixture.request(1, document.clone(), None), &NoEgress)
+        .await
+        .unwrap();
+    assert!(report.outcome.is_applied());
+    let checkpoint = report.checkpoint.clone().expect("checkpoint");
+    let (items, cursor) = fixture.drain_items(None).await;
+    let thinking: Vec<(String, String)> = items
+        .iter()
+        .filter_map(|item| match item {
+            ProductProjectionItem::Thinking { id, body, .. } => Some((id.clone(), body.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking.len(), 1, "first fragment publishes: {items:?}");
+    let (stable_id, body) = thinking[0].clone();
+    assert_eq!(body, "Reading the config");
+
+    // A later fragment grows the SAME open segment in place.
+    document.append_reasoning(&ReplyReasoningText::new(", then the mounts").unwrap());
+    let report = fixture
+        .sink
+        .reconcile(
+            fixture.request(2, document.clone(), Some(checkpoint)),
+            &NoEgress,
+        )
+        .await
+        .unwrap();
+    assert!(report.outcome.is_applied());
+    let checkpoint = report.checkpoint.clone().expect("checkpoint");
+    let (items, cursor) = fixture.drain_items(cursor).await;
+    let thinking: Vec<(String, String)> = items
+        .iter()
+        .filter_map(|item| match item {
+            ProductProjectionItem::Thinking { id, body, .. } => Some((id.clone(), body.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        thinking,
+        vec![(
+            stable_id.clone(),
+            "Reading the config, then the mounts".to_string()
+        )],
+        "the grown open segment republishes under its stable id"
+    );
+
+    // Nothing changed: nothing republishes.
+    let report = fixture
+        .sink
+        .reconcile(
+            fixture.request(3, document.clone(), Some(checkpoint)),
+            &NoEgress,
+        )
+        .await
+        .unwrap();
+    assert!(report.outcome.is_applied());
+    let checkpoint = report.checkpoint.clone().expect("checkpoint");
+    let (items, cursor) = fixture.drain_items(cursor).await;
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, ProductProjectionItem::Thinking { .. })),
+        "an unchanged open segment is not republished: {items:?}"
+    );
+
+    // The closing replacement lands as the final text of the same item.
+    document.close_reasoning(ReplyReasoningText::new("Checked config and mounts.").unwrap());
+    document.append_reasoning(&ReplyReasoningText::new("Next: the manifest").unwrap());
+    let report = fixture
+        .sink
+        .reconcile(
+            fixture.request(4, document.clone(), Some(checkpoint)),
+            &NoEgress,
+        )
+        .await
+        .unwrap();
+    assert!(report.outcome.is_applied());
+    let (items, _) = fixture.drain_items(cursor).await;
+    let thinking: Vec<(String, String)> = items
+        .iter()
+        .filter_map(|item| match item {
+            ProductProjectionItem::Thinking { id, body, .. } => Some((id.clone(), body.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        thinking.contains(&(stable_id.clone(), "Checked config and mounts.".to_string())),
+        "closure replaces the first item's text: {thinking:?}"
+    );
+    let second: Vec<_> = thinking.iter().filter(|(id, _)| id != &stable_id).collect();
+    assert_eq!(
+        second.len(),
+        1,
+        "the next open segment is its own item: {thinking:?}"
+    );
+    assert_eq!(second[0].1, "Next: the manifest");
+}

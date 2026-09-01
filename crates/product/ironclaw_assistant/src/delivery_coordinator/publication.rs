@@ -45,16 +45,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::external::ExternalConversationRef;
-use ironclaw_extension_contracts::reply::{ReplyAudience, ReplyThreadAnchor};
+use ironclaw_extension_contracts::reply::{ReplyAudience, ReplyContextBytes, ReplyThreadAnchor};
 use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_outbound::{
     OutboundDeliveryId, PublisherId, ReplyPublicationRecord, ReplyPublicationSettlement,
     ReplyPublicationTargetDescriptor, ReplyPublicationTargetKey,
 };
-use ironclaw_processes::{
-    ProcessJournalCommit, ProcessJournalCommitObserver, ProcessKind, ProcessLifecycleStatus,
-};
+use ironclaw_processes::{ProcessJournalCommit, ProcessJournalCommitObserver, ProcessKind};
 use ironclaw_product_contracts::prompt_source::{
     ApprovalPromptContextSource, BlockedAuthPromptSource,
 };
@@ -197,6 +195,11 @@ impl RunKey {
 pub(crate) struct TargetState {
     pub(crate) registration: ReplyTargetRegistration,
     pub(crate) transport: ReplyTransport,
+    /// The stored ingress reply context as snapshotted when this target was
+    /// registered (and persisted on the durable descriptor). Per-run on
+    /// purpose: the per-conversation store is latest-wins, and a newer
+    /// top-level DM must never re-thread an older run's reply.
+    pub(crate) reply_context: Option<ReplyContextBytes>,
     pub(crate) delivery_id: OutboundDeliveryId,
     pub(crate) key: ReplyPublicationTargetKey,
     pub(crate) wake: Notify,
@@ -481,10 +484,13 @@ impl ProcessJournalCommitObserver for DeliveryCoordinator {
             return Ok(());
         };
         let snapshot = &commit.state;
+        // Every terminal status counts — `RecoveryRequired` included: it is
+        // terminal in the process contract, the terminal reducer renders it
+        // as a failed reply, and skipping it would strand a lost publisher's
+        // open publication until the next boot sweep.
         if snapshot.process_kind != ProcessKind::AgentTurn
             || snapshot.parent_process_id.is_some()
             || !snapshot.status.is_terminal()
-            || snapshot.status == ProcessLifecycleStatus::RecoveryRequired
         {
             return Ok(());
         }
@@ -660,6 +666,15 @@ impl ReplyPublication {
             existing.wake.notify_one();
             return Ok(existing);
         }
+        // Snapshot the stored ingress reply context NOW, at registration —
+        // this run's message just stored it — and persist it with the
+        // descriptor. The per-conversation store is latest-wins, so reading
+        // it again at reconcile time would let a newer message in the same
+        // conversation re-thread this run's reply.
+        let reply_context_bytes = coordinator
+            .reply_context_for_publication(&channel, registration.conversation.as_ref())
+            .await?;
+        let reply_context = validate_reply_context(reply_context_bytes.clone());
         let record = coordinator
             .open_reply_publication(OpenReplyPublication {
                 scope: registration.scope.clone(),
@@ -674,6 +689,7 @@ impl ReplyPublication {
                     thread_anchor: registration.thread_anchor.clone(),
                     audience: registration.audience,
                     transport,
+                    reply_context: reply_context_bytes,
                 },
             })
             .await?;
@@ -681,6 +697,7 @@ impl ReplyPublication {
             run_key,
             registration,
             transport,
+            reply_context,
             record.attempt.delivery_id,
             key,
         ))
@@ -691,12 +708,14 @@ impl ReplyPublication {
         run_key: RunKey,
         registration: ReplyTargetRegistration,
         transport: ReplyTransport,
+        reply_context: Option<ReplyContextBytes>,
         delivery_id: OutboundDeliveryId,
         key: ReplyPublicationTargetKey,
     ) -> Arc<TargetState> {
         let target = Arc::new(TargetState {
             registration,
             transport,
+            reply_context,
             delivery_id,
             key,
             wake: Notify::new(),
@@ -808,10 +827,14 @@ impl ReplyPublication {
                 thread_anchor: descriptor.thread_anchor,
                 audience: descriptor.audience,
             };
+            // Resume with the SNAPSHOT the registration persisted — never a
+            // fresh read of the mutable per-conversation store.
+            let reply_context = validate_reply_context(descriptor.reply_context);
             self.spawn_target(
                 key.clone(),
                 registration,
                 descriptor.transport,
+                reply_context,
                 record.attempt.delivery_id,
                 record.publication.target.key.clone(),
             );
@@ -917,6 +940,22 @@ impl ReplyPublication {
             reason: "the run's terminal commit has not landed".to_string(),
         })
     }
+}
+
+/// The snapshot's seam-bounded form; an oversized or absent snapshot
+/// publishes without a context (never a substituted one).
+fn validate_reply_context(bytes: Option<Vec<u8>>) -> Option<ReplyContextBytes> {
+    bytes.and_then(|bytes| match ReplyContextBytes::new(bytes) {
+        Ok(context) => Some(context),
+        Err(error) => {
+            tracing::debug!(
+                target: "ironclaw::reborn::reply_publication",
+                %error,
+                "stored reply context exceeds the seam bound; publishing without it"
+            );
+            None
+        }
+    })
 }
 
 fn is_terminal(status: TurnStatus) -> bool {

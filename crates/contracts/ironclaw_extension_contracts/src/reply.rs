@@ -841,8 +841,10 @@ pub enum ReplyReconcilePoint {
     Opened,
     /// Intermediate desired state; only `stream` sinks see these.
     Progress,
-    /// An input-required transition (attention required or cleared) or the
-    /// canonical answer arriving before the terminal fact.
+    /// An input-required transition (attention required or cleared), the
+    /// canonical answer arriving before the terminal fact, or the answer's
+    /// first visible text — none of these wait out the progress pacing
+    /// window.
     ControlCritical,
     /// The terminal materialization.
     Terminal,

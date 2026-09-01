@@ -816,6 +816,15 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
             "/api/files.completeUploadExternal",
             "/api/reactions.add",
             "/api/reactions.remove",
+            // The native Agent reply surface (stream reply transport). Every
+            // path is exact — the sink never calls a method the manifest does
+            // not name (`tests/agent_app_manifest_lockstep.rs` in the slack
+            // package pins the sink half of that contract).
+            "/api/chat.startStream",
+            "/api/chat.appendStream",
+            "/api/chat.stopStream",
+            "/api/agents.sessions.setStatus",
+            "/api/agents.sessions.rename",
         ]
     );
     assert_eq!(api_post.request_body_limit_bytes, Some(256 * 1024));

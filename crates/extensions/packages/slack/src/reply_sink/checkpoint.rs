@@ -47,6 +47,17 @@ pub(super) struct SlackReplyCheckpoint {
     pub(super) terminal_posted_chunks: u64,
     #[serde(default)]
     pub(super) attachments_delivered: bool,
+    /// How many terminal attachments (in request order) Slack has confirmed
+    /// shared — files before this index are never re-sent by a retry.
+    #[serde(default)]
+    pub(super) attachments_progress: u64,
+    /// A `files.completeUploadExternal` crossed into transport without an
+    /// answer: the files may already be shared, and re-completing (or
+    /// re-uploading) could show them twice. While set, no attachment is ever
+    /// sent again; the publication stays `Ambiguous` until the host settles
+    /// it `Unknown`.
+    #[serde(default)]
+    pub(super) attachment_upload_ambiguous: bool,
     /// The extension generation this presentation was minted under.
     #[serde(default)]
     pub(super) generation: u64,

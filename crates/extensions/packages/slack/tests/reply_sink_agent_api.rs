@@ -1142,3 +1142,115 @@ async fn an_unreadable_read_back_for_a_text_carrying_pending_stays_ambiguous_wit
     assert_applied(&report);
     assert!(report.evidence.read_back_verified);
 }
+
+#[tokio::test]
+async fn an_ambiguous_attachment_completion_is_never_re_uploaded() {
+    let mut harness = Harness::dm();
+    harness.attachments = vec![WorkspaceFile {
+        path: ScopedPath::new("/workspace/report.txt").expect("path"),
+        filename: Some("report.txt".to_string()),
+        mime_type: "text/plain".to_string(),
+        bytes: b"hello".to_vec(),
+    }];
+    harness.append("Hello");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    harness
+        .document
+        .finalize_answer(answer("Hello"), Vec::new());
+    harness.document.complete();
+
+    // `files.completeUploadExternal` reaches Slack but its response is lost:
+    // the files may already be shared.
+    harness.fake.inject(Fault::TransportAfterAccept {
+        method: SlackWebApiMethod::FilesCompleteUploadExternal,
+    });
+    let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
+        "got {:?}",
+        report.outcome
+    );
+    assert_eq!(
+        harness.checkpoint_json()["attachment_upload_ambiguous"],
+        Value::Bool(true),
+        "the checkpoint remembers the unanswered completion"
+    );
+    let upload_calls = |calls: &[String]| {
+        calls
+            .iter()
+            .filter(|call| {
+                matches!(
+                    call.as_str(),
+                    "files.getUploadURLExternal" | "upload" | "files.completeUploadExternal"
+                )
+            })
+            .count()
+    };
+    let uploads_before = upload_calls(&harness.fake.calls());
+
+    // The terminal retry must not touch the upload flow again: an unverified
+    // ambiguous completion is never automatically re-uploaded, and the host
+    // settles the publication `Unknown` instead of duplicating files.
+    let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
+        "got {:?}",
+        report.outcome
+    );
+    assert_eq!(
+        upload_calls(&harness.fake.calls()),
+        uploads_before,
+        "no ticket, byte upload, or completion goes out again: {:?}",
+        harness.fake.calls()
+    );
+}
+
+/// An ambiguous `chat.stopStream` that carried no new answer text leaves
+/// read-back nothing to compare — the re-send is the verification: Slack
+/// answering `message_not_in_streaming_state` proves a close already landed,
+/// so the terminal revision applies instead of failing permanently.
+#[tokio::test]
+async fn an_ambiguous_no_text_stream_close_is_verified_by_the_resend_answer() {
+    let mut harness = Harness::dm();
+    harness.append("Hello");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+
+    // The close reaches Slack (the stream really stops) but the response is
+    // lost. No new answer text rides it, so the pending is text-less.
+    harness
+        .document
+        .finalize_answer(answer("Hello"), Vec::new());
+    harness.document.complete();
+    harness.fake.inject(Fault::TransportAfterAccept {
+        method: SlackWebApiMethod::ChatStopStream,
+    });
+    let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
+        "got {:?}",
+        report.outcome
+    );
+
+    // The terminal retry re-sends the close; Slack's
+    // `message_not_in_streaming_state` proves the first close landed, and
+    // the revision applies — never a permanent failure, never a duplicate.
+    let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
+    assert_applied(&report);
+    assert_eq!(
+        harness
+            .fake
+            .calls()
+            .iter()
+            .filter(|call| call.as_str() == "chat.stopStream")
+            .count(),
+        2,
+        "one lost close, one verifying re-send: {:?}",
+        harness.fake.calls()
+    );
+    let ts = harness.stream_ts();
+    assert_eq!(
+        harness.fake.stream(&ts).expect("stream").text,
+        "Hello",
+        "the stream holds exactly the text that was streamed — nothing doubled"
+    );
+}

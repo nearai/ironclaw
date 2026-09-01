@@ -27,7 +27,8 @@ use ironclaw_threads::{MessageContent, SessionThreadService};
 use ironclaw_turns::TurnCoordinator;
 
 use super::{
-    DenyAllEgress, FakeTurnKernel, FixedReplyContext, SinkResolver, harness, settings, wait_until,
+    DenyAllEgress, FakeTurnKernel, FixedReplyContext, SinkResolver, harness, harness_with_settings,
+    settings, wait_until,
 };
 use crate::delivery_coordinator::publication::ReplyPublicationWiring;
 use crate::delivery_coordinator::{
@@ -372,6 +373,8 @@ async fn the_boot_sweep_resumes_an_open_publication_without_any_journal_signal()
     let second_sink = Arc::new(RecordingReplySink::new("boot-sweep-2"));
     let second_kernel = Arc::new(FakeTurnKernel::default());
     second_kernel.set_status(TurnStatus::Completed);
+    // The mutable per-conversation store moved on after the crash; the
+    // resume must publish with the snapshot the registration persisted.
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&first.store),
         Arc::new(AnySinkResolver {
@@ -379,7 +382,7 @@ async fn the_boot_sweep_resumes_an_open_publication_without_any_journal_signal()
                 as Arc<dyn ironclaw_extension_contracts::reply::ReplySink>,
             transport: ReplyTransport::Stream,
         }),
-        Arc::new(FixedReplyContext(Some(b"vendor-ctx".to_vec()))),
+        Arc::new(FixedReplyContext(Some(b"stale-after-crash".to_vec()))),
         Arc::new(NoDeliveryRegistrations),
         DeliveryRetryPolicy {
             max_attempts: 1,
@@ -420,6 +423,94 @@ async fn the_boot_sweep_resumes_an_open_publication_without_any_journal_signal()
         "the resumed publication publishes the terminal revision once"
     );
     assert_eq!(requests[0].point, ReplyReconcilePoint::Terminal);
+    assert_eq!(
+        requests[0]
+            .reply_context
+            .as_ref()
+            .map(|context| context.as_bytes()),
+        Some(b"vendor-ctx".as_slice()),
+        "the resume publishes with the registration-time snapshot, not a fresh store read"
+    );
+}
+
+/// A run's reply context is captured when its target is registered and rides
+/// the durable descriptor: a newer message in the same conversation that
+/// overwrites the latest-wins per-conversation store must not re-thread an
+/// older run's reply.
+struct MutableReplyContext(Mutex<Vec<u8>>);
+
+#[async_trait]
+impl DeliveryReplyContextSource for MutableReplyContext {
+    async fn reply_context(
+        &self,
+        _extension_id: &ExtensionId,
+        _installation_id: &AdapterInstallationId,
+        _conversation_fingerprint: &str,
+    ) -> Result<Option<Vec<u8>>, DeliveryReplyContextError> {
+        Ok(Some(self.0.lock().unwrap().clone()))
+    }
+}
+
+#[tokio::test]
+async fn a_newer_dm_cannot_rethread_an_older_runs_reply() {
+    let base = harness("ctx-snapshot", ReplyTransport::Message, None);
+    let context = Arc::new(MutableReplyContext(Mutex::new(b"session-root-A".to_vec())));
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&base.store),
+        Arc::new(AnySinkResolver {
+            sink: Arc::clone(&base.sink) as Arc<dyn ironclaw_extension_contracts::reply::ReplySink>,
+            transport: ReplyTransport::Message,
+        }),
+        Arc::clone(&context) as Arc<dyn DeliveryReplyContextSource>,
+        Arc::new(NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+        },
+    ));
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
+        projection: Arc::clone(&base.projection),
+        turn_coordinator: Arc::clone(&base.kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&base.threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
+        project_filesystem: Arc::new(crate::NoProjectFilesystem),
+        session_channel: None,
+        settings: settings(),
+    }));
+    // DM A registers while its own context is the stored one.
+    coordinator
+        .register_reply_target(base.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+    // DM B arrives in the same conversation and overwrites the store before
+    // A's reply ever reaches the provider.
+    *context.0.lock().unwrap() = b"session-root-B".to_vec();
+    base.complete_with("the answer to A").await;
+    coordinator
+        .reply_run_terminal(&base.scope, base.run_id)
+        .await;
+    let settled = wait_until(|| async {
+        base.publications()
+            .await
+            .into_iter()
+            .find(|record| !record.publication.status.is_active())
+    })
+    .await;
+    assert_eq!(
+        settled.publication.status,
+        ReplyPublicationStatus::Settled(ReplyPublicationSettlement::Delivered)
+    );
+    let requests = base.sink.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .reply_context
+            .as_ref()
+            .map(|context| context.as_bytes()),
+        Some(b"session-root-A".as_slice()),
+        "run A publishes with run A's own session root, not the newer DM's"
+    );
 }
 
 /// The journal observer id is the durable cursor key: renaming it would
@@ -493,40 +584,10 @@ async fn the_terminal_commit_is_acknowledged_only_after_recovery_ran() {
         session_channel: None,
         settings: settings(),
     }));
-    let scope = &first.scope;
-    let commit = ironclaw_processes::ProcessJournalCommit {
-        state: ironclaw_processes::JournaledProcessSnapshot {
-            process_id: ironclaw_host_api::ids::ProcessId::from_uuid(first.run_id.as_uuid()),
-            process_kind: ironclaw_processes::ProcessKind::AgentTurn,
-            scope: ironclaw_host_api::resource::ResourceScope {
-                tenant_id: scope.tenant_id.clone(),
-                user_id: first.actor.user_id.clone(),
-                agent_id: scope.agent_id.clone(),
-                project_id: scope.project_id.clone(),
-                mission_id: None,
-                thread_id: Some(scope.thread_id.clone()),
-                invocation_id: ironclaw_host_api::ids::InvocationId::new(),
-            },
-            status: ironclaw_processes::ProcessLifecycleStatus::Completed,
-            suspension: None,
-            checkpoint_ref: None,
-            checkpoint_kind: None,
-            input_ref: None,
-            failure: None,
-            journal_cursor: ironclaw_processes::ProcessJournalCursor(1),
-            lease: None,
-            crash_reclaim_count: 0,
-            created_at: chrono::Utc::now(),
-            owner_user_id: Some(first.actor.user_id.clone()),
-            parent_process_id: None,
-            concurrency_class: None,
-            root_process_id: None,
-            metadata: serde_json::Value::Null,
-        },
-        kind: ironclaw_processes::ProcessJournalKind::Completed,
-        occurred_at: Some(chrono::Utc::now()),
-        sanitized_reason: None,
-    };
+    let commit = terminal_commit(
+        &first,
+        ironclaw_processes::ProcessLifecycleStatus::Completed,
+    );
     coordinator
         .observe_process_commit(commit)
         .await
@@ -546,4 +607,271 @@ async fn the_terminal_commit_is_acknowledged_only_after_recovery_ran() {
         ReplyPublicationStatus::Settled(ReplyPublicationSettlement::Delivered)
     );
     assert_eq!(second_sink.requests().len(), 1);
+}
+
+/// An ambiguous outcome with NO checkpoint anywhere — none handed back, none
+/// previously persisted — cannot be reconciled by read-back: retrying would
+/// blindly repeat the exact provider side effect, so the publication settles
+/// `Unknown` after the single attempt (design doc §5).
+struct CheckpointlessAmbiguousSink {
+    calls: Mutex<u32>,
+}
+
+#[async_trait]
+impl ironclaw_extension_contracts::reply::ReplySink for CheckpointlessAmbiguousSink {
+    async fn reconcile(
+        &self,
+        _request: ironclaw_extension_contracts::reply::ReplyReconcileRequest,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<
+        ironclaw_extension_contracts::reply::ReplySinkReport,
+        ironclaw_extension_contracts::channel_adapter::ChannelError,
+    > {
+        *self.calls.lock().unwrap() += 1;
+        Ok(ironclaw_extension_contracts::reply::ReplySinkReport {
+            outcome: ironclaw_extension_contracts::reply::ReplySinkOutcome::Ambiguous {
+                reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(
+                    "transport failed after the send with nothing to read back",
+                ),
+            },
+            checkpoint: None,
+            evidence: ironclaw_extension_contracts::reply::ReplySinkEvidence::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_checkpointless_ambiguous_outcome_settles_unknown_without_a_retry() {
+    let base = harness("ambiguous-no-ckpt", ReplyTransport::Message, None);
+    let sink = Arc::new(CheckpointlessAmbiguousSink {
+        calls: Mutex::new(0),
+    });
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&base.store),
+        Arc::new(AnySinkResolver {
+            sink: Arc::clone(&sink) as Arc<dyn ironclaw_extension_contracts::reply::ReplySink>,
+            transport: ReplyTransport::Message,
+        }),
+        Arc::new(FixedReplyContext(Some(b"vendor-ctx".to_vec()))),
+        Arc::new(NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+        },
+    ));
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
+        projection: Arc::clone(&base.projection),
+        turn_coordinator: Arc::clone(&base.kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&base.threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
+        project_filesystem: Arc::new(crate::NoProjectFilesystem),
+        session_channel: None,
+        settings: settings(),
+    }));
+    coordinator
+        .register_reply_target(base.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+    base.complete_with("answer").await;
+    coordinator
+        .reply_run_terminal(&base.scope, base.run_id)
+        .await;
+    let settled = wait_until(|| async {
+        base.publications()
+            .await
+            .into_iter()
+            .find(|record| !record.publication.status.is_active())
+    })
+    .await;
+    assert_eq!(
+        settled.publication.status,
+        ReplyPublicationStatus::Settled(ReplyPublicationSettlement::Unknown),
+        "no read-back state anywhere means fail closed, not retry"
+    );
+    assert_eq!(
+        *sink.calls.lock().unwrap(),
+        1,
+        "the ambiguous side effect is never blindly repeated"
+    );
+}
+
+/// One top-level agent-turn terminal journal commit for the harness's run.
+fn terminal_commit(
+    harness: &super::Harness,
+    status: ironclaw_processes::ProcessLifecycleStatus,
+) -> ironclaw_processes::ProcessJournalCommit {
+    let scope = &harness.scope;
+    ironclaw_processes::ProcessJournalCommit {
+        state: ironclaw_processes::JournaledProcessSnapshot {
+            process_id: ironclaw_host_api::ids::ProcessId::from_uuid(harness.run_id.as_uuid()),
+            process_kind: ironclaw_processes::ProcessKind::AgentTurn,
+            scope: ironclaw_host_api::resource::ResourceScope {
+                tenant_id: scope.tenant_id.clone(),
+                user_id: harness.actor.user_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                mission_id: None,
+                thread_id: Some(scope.thread_id.clone()),
+                invocation_id: ironclaw_host_api::ids::InvocationId::new(),
+            },
+            status,
+            suspension: None,
+            checkpoint_ref: None,
+            checkpoint_kind: None,
+            input_ref: None,
+            failure: None,
+            journal_cursor: ironclaw_processes::ProcessJournalCursor(1),
+            lease: None,
+            crash_reclaim_count: 0,
+            created_at: chrono::Utc::now(),
+            owner_user_id: Some(harness.actor.user_id.clone()),
+            parent_process_id: None,
+            concurrency_class: None,
+            root_process_id: None,
+            metadata: serde_json::Value::Null,
+        },
+        kind: ironclaw_processes::ProcessJournalKind::Failed,
+        occurred_at: Some(chrono::Utc::now()),
+        sanitized_reason: None,
+    }
+}
+
+/// `RecoveryRequired` is terminal in the process contract: its commit must
+/// resume an orphaned publication like any other terminal status, rendered
+/// as a failed reply — skipping it would strand the reply until the next
+/// boot sweep.
+#[tokio::test]
+async fn a_recovery_required_terminal_commit_also_resumes_the_publication() {
+    use ironclaw_processes::ProcessJournalCommitObserver as _;
+    let first = harness("recovery-required", ReplyTransport::Stream, None);
+    first
+        .coordinator
+        .register_reply_target(first.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+    first.text("half an answer");
+    wait_until(|| async { (!first.sink.requests().is_empty()).then_some(()) }).await;
+    first.coordinator.shutdown_reply_publication().await;
+    // The lost run ends RecoveryRequired (an expired lease) — no finalized
+    // transcript row exists.
+    first.kernel.set_status(TurnStatus::RecoveryRequired);
+
+    let second_sink = Arc::new(RecordingReplySink::new("recovery-required-2"));
+    let second_kernel = Arc::new(FakeTurnKernel::default());
+    second_kernel.set_status(TurnStatus::RecoveryRequired);
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&first.store),
+        Arc::new(AnySinkResolver {
+            sink: Arc::clone(&second_sink)
+                as Arc<dyn ironclaw_extension_contracts::reply::ReplySink>,
+            transport: ReplyTransport::Stream,
+        }),
+        Arc::new(FixedReplyContext(Some(b"vendor-ctx".to_vec()))),
+        Arc::new(NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+        },
+    ));
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
+        projection: Arc::new(ReplyProjection::new()),
+        turn_coordinator: Arc::clone(&second_kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&first.threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
+        project_filesystem: Arc::new(crate::NoProjectFilesystem),
+        session_channel: None,
+        settings: settings(),
+    }));
+    let commit = terminal_commit(
+        &first,
+        ironclaw_processes::ProcessLifecycleStatus::RecoveryRequired,
+    );
+    coordinator
+        .observe_process_commit(commit)
+        .await
+        .expect("recovery ran before the acknowledgement");
+    let settled = wait_until(|| async {
+        first
+            .publications()
+            .await
+            .into_iter()
+            .find(|record| !record.publication.status.is_active())
+    })
+    .await;
+    assert_eq!(
+        settled.publication.status,
+        ReplyPublicationStatus::Settled(ReplyPublicationSettlement::Delivered),
+        "the failed-reply terminal document was published and the publication settled"
+    );
+    let requests = second_sink.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        matches!(
+            requests[0].revision.document.outcome,
+            Some(ironclaw_extension_contracts::reply::ReplyOutcome::Failed { .. })
+        ),
+        "a RecoveryRequired run publishes as a failed reply: {:?}",
+        requests[0].revision.document.outcome
+    );
+}
+
+// ─── Cadence exemption: the answer's first text is control-critical ────────
+
+/// A fast run can reach its terminal commit well inside the progress pacing
+/// window. If the answer's first text were an ordinary `Progress` reconcile,
+/// the pacing sleep would swallow it and the user's stream would jump from
+/// "working" straight to the finalized answer. The first visible text is a
+/// control-critical transition and publishes immediately; the window paces
+/// only text-to-text growth after that.
+#[tokio::test]
+async fn the_answers_first_text_is_not_delayed_by_the_progress_pacing_window() {
+    let mut paced = settings();
+    paced.min_progress_interval = Duration::from_secs(120);
+    let harness = harness_with_settings(
+        "first-text-immediate",
+        ironclaw_extension_contracts::channel::ReplyTransport::Stream,
+        paced,
+    );
+    harness
+        .coordinator
+        .register_reply_target(
+            harness.registration(ironclaw_extension_contracts::reply::ReplyAudience::Private),
+        )
+        .await
+        .unwrap();
+    // A pre-text revision consumes the run's un-throttled `Opened` publish.
+    harness.projection.observe_milestone(&harness.milestone(
+        ironclaw_loop_contracts::LoopHostMilestoneKind::IterationStarted { iteration: 1 },
+    ));
+    wait_until(|| async { (!harness.sink.requests().is_empty()).then_some(()) }).await;
+    // A second pre-text revision wakes the worker into the pacing window —
+    // the shape a real run produces (model-started activity right after the
+    // opening publish). The worker must stay wake-responsive inside that
+    // window, or the text below sits until the window elapses.
+    harness.projection.observe_milestone(&harness.milestone(
+        ironclaw_loop_contracts::LoopHostMilestoneKind::ModelStarted {
+            requested_model_profile_id: None,
+        },
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    harness.text("partial answer");
+    let requests = wait_until(|| async {
+        let requests = harness.sink.requests();
+        requests
+            .iter()
+            .any(|request| request.revision.document.answer.text.as_str() == "partial answer")
+            .then_some(requests)
+    })
+    .await;
+    let first_text = requests
+        .iter()
+        .find(|request| request.revision.document.answer.text.as_str() == "partial answer")
+        .unwrap();
+    assert_eq!(
+        first_text.point,
+        ReplyReconcilePoint::ControlCritical,
+        "the answer's first text publishes as a control-critical point, exempt from progress pacing"
+    );
 }

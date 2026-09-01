@@ -151,11 +151,13 @@ pub enum SlackIgnoreReason {
     /// `app_context_changed`: the person switched the channel/context the
     /// Agent container tracks. Context is re-read from the next message.
     AppContextChanged,
-    /// `assistant_thread_started`: Slack opened a new Agent session thread.
-    /// The session begins when the person sends its first message.
+    /// `assistant_thread_started` (legacy — Slack's Agent View validator
+    /// rejects subscribing to it, so the canonical app manifest does not;
+    /// kept for workspaces whose older app still delivers it). The session
+    /// begins when the person sends its first message.
     AssistantThreadStarted,
-    /// `assistant_thread_context_changed`: the session's tracked context
-    /// moved. Context is re-read from the next message.
+    /// `assistant_thread_context_changed` (legacy, same as above). Context
+    /// is re-read from the next message.
     AssistantThreadContextChanged,
     /// `agent_session_title_changed`: the person renamed the session. The
     /// title is Slack-side presentation; nothing durable changes here.
@@ -264,10 +266,12 @@ pub fn normalize_slack_event(
         SLACK_AGENT_SESSION_STOPPED_EVENT => {
             return normalize_agent_session_stopped(installation_id, team_id, event);
         }
-        // The rest of the Agent event family an Agent app must subscribe to
-        // (`docs.slack.dev/ai/developing-agents`). Each is an authenticated
-        // no-op with its own reason, so the drop log names the event Slack
-        // sent rather than filing it under "unsupported".
+        // The rest of the Agent event family (plus two legacy
+        // assistant_thread_* events the canonical manifest no longer
+        // subscribes to — Slack's Agent View validator rejects them — kept
+        // as parser compatibility for older installations). Each is an
+        // authenticated no-op with its own reason, so the drop log names
+        // the event Slack sent rather than filing it under "unsupported".
         "app_home_opened" => {
             return Ok(SlackInboundEvent::Ignore {
                 reason: SlackIgnoreReason::AppHomeOpened,
@@ -341,8 +345,15 @@ fn normalize_agent_session_stopped(
         reason: err.to_string(),
     })?;
     let actor = build_actor_ref(user)?;
-    let conversation = build_conversation_ref(team_id, channel, thread_ts, None)?;
     let is_dm = is_dm_channel(channel, None);
+    // Mirror the message-normalization shape exactly: a top-level DM turn
+    // binds a TOPIC-LESS conversation (the Agent session thread rides only
+    // the reply context), so the stop command must resolve the same
+    // topic-less binding — a thread topic here would fingerprint a different
+    // conversation and the stop would find nothing to stop. Channel sessions
+    // stay thread-topical, matching how mentions self-root.
+    let conversation_thread = if is_dm { None } else { thread_ts };
+    let conversation = build_conversation_ref(team_id, channel, conversation_thread, None)?;
     let trigger = if is_dm {
         ProductTriggerReason::DirectChat
     } else {

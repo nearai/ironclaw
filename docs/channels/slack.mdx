@@ -281,8 +281,6 @@ test-pinned to be identical to that file, so either can be imported.
         "message.mpim",
         "app_home_opened",
         "app_context_changed",
-        "assistant_thread_started",
-        "assistant_thread_context_changed",
         "agent_session_stopped",
         "agent_session_title_changed"
       ]
@@ -300,9 +298,10 @@ This is a starting point, not a minimum. The `user` scopes exist for per-user
 authorization — searching and posting as the person rather than as the bot. If you only
 want the bot to participate in channels, you can drop the `user` block and the redirect
 URL with it. The `agent_view` block, `assistant:write`, `chat:write`, and the Agent
-events (`app_home_opened`, `app_context_changed`, `assistant_thread_started`,
-`assistant_thread_context_changed`, `agent_session_stopped`,
+events (`app_home_opened`, `app_context_changed`, `agent_session_stopped`,
 `agent_session_title_changed`) are not optional: they are how replies reach Slack.
+(The legacy `assistant_thread_*` events are deliberately absent — Slack's Agent
+View validator rejects manifests that subscribe to them.)
 </Note>
 
 `assistant:write` is added by Slack when the Agents feature is enabled and is declared

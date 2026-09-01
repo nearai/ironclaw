@@ -924,7 +924,7 @@ impl HostRuntimeCapabilityHarness {
         // publication start must carry the group's kernel handles — the
         // group wires it (channel-host-for-test or the builder helper)
         // instead of the build.
-        runtime_input = runtime_input.with_deferred_reply_publication_for_test();
+        ironclaw_composition::test_support::defer_reply_publication_for_test(&mut runtime_input);
         if workspace_scoped_per_caller {
             // The same raise `serve` applies unconditionally: agent tool
             // grants, approval leases, and attachment handles resolve the

@@ -755,16 +755,25 @@ impl RunDeliveryObserver {
                             )
                             .await;
                         } else {
-                            self.services
-                                .post_notice(
-                                    DeliveryIntent::FailureNotice,
-                                    scope.clone(),
-                                    Some(run_id),
-                                    envelope.external_conversation_ref(),
-                                    prompts::RUN_FAILED_MESSAGE,
-                                    format!("run-failed:{run_id}"),
-                                )
-                                .await;
+                            // Reply publication owns the run's terminal
+                            // answer — a failed run's failure copy included
+                            // (the terminal document renders the sanitized
+                            // failure summary through the bound sink). The
+                            // conventional failure notice is only the
+                            // fallback for a reply that never reached the
+                            // channel, or two failure messages would land.
+                            if !self.reply_delivered(&scope, run_id).await {
+                                self.services
+                                    .post_notice(
+                                        DeliveryIntent::FailureNotice,
+                                        scope.clone(),
+                                        Some(run_id),
+                                        envelope.external_conversation_ref(),
+                                        prompts::RUN_FAILED_MESSAGE,
+                                        format!("run-failed:{run_id}"),
+                                    )
+                                    .await;
+                            }
                             self.set_source_reaction(
                                 &scope,
                                 run_id,
@@ -1007,6 +1016,38 @@ impl RunDeliveryObserver {
             poll_interval = poll_interval
                 .saturating_mul(2)
                 .min(std::time::Duration::from_secs(5));
+        }
+    }
+
+    /// Whether the run's reply publication actually delivered its terminal
+    /// document to this channel — the check behind the single-terminal-reply
+    /// rule: the sink's rendered failure copy and the conventional
+    /// `RUN_FAILED_MESSAGE` notice must never both land. Fail-open toward
+    /// the notice (an unreadable store must not leave the user in silence).
+    async fn reply_delivered(&self, scope: &ironclaw_turns::TurnScope, run_id: TurnRunId) -> bool {
+        match self
+            .services
+            .coordinator
+            .list_reply_publications(scope.clone(), run_id)
+            .await
+        {
+            Ok(records) => records.iter().any(|record| {
+                matches!(
+                    record.publication.status,
+                    ironclaw_outbound::ReplyPublicationStatus::Settled(
+                        ironclaw_outbound::ReplyPublicationSettlement::Delivered
+                    )
+                )
+            }),
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw::reborn::run_delivery",
+                    %run_id,
+                    %error,
+                    "could not read the run's reply publications; posting the failure notice"
+                );
+                false
+            }
         }
     }
 

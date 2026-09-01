@@ -150,12 +150,39 @@ pub(super) async fn enrich_attention(
     let Some(attention) = document.attention.as_mut() else {
         return;
     };
-    let Some(gate_ref) = attention
+    let gate_ref = match attention
         .gate_ref
         .as_ref()
         .and_then(|gate_ref| TurnGateRef::new(gate_ref.as_str()).ok())
-    else {
-        return;
+    {
+        Some(gate_ref) => gate_ref,
+        None => {
+            // Production gate paths announce only `GateBlocked { kind }`
+            // before the blocked exit — the ref never rides a milestone.
+            // It lives on the run's durable state, so fetch it there and
+            // stamp it, or the approval/auth copy below could never be
+            // composed and the sink would see a ref-less attention.
+            let state = match turn_coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: target.scope.clone(),
+                    run_id: target.run_id,
+                })
+                .await
+            {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::debug!(target: LOG_TARGET, run_id = %target.run_id, %error, "attention enrichment: run state unavailable for the gate ref");
+                    return;
+                }
+            };
+            let Some(gate_ref) = state.gate_ref else {
+                return;
+            };
+            if let Some(display) = display_text(gate_ref.as_str()) {
+                attention.gate_ref = Some(display);
+            }
+            gate_ref
+        }
     };
     let direct_message = target.audience == ReplyAudience::Private;
     match attention.kind {

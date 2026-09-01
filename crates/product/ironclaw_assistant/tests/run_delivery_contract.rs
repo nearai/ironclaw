@@ -1953,13 +1953,28 @@ async fn observer_replaces_working_indicator_with_failure_notice_and_x_reaction(
         )
         .await;
 
-    // Working indicator, then a distinct, non-empty failure notice — not silence.
-    let texts = harness.adapter.texts();
-    assert_eq!(texts.len(), 2, "working indicator then failure notice");
+    // Reply publication owns the terminal failure copy: the sink's terminal
+    // document carries the failure summary, and it is the ONE user-visible
+    // terminal reply — the conventional RUN_FAILED notice must not also land.
+    let requests = harness.reply_sink.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "one terminal reconcile publishes the failure"
+    );
     assert!(
-        !texts[1].is_empty() && texts[1] != texts[0],
-        "the failure notice is distinct from the working indicator, got {:?}",
-        texts[1]
+        matches!(
+            requests[0].revision.document.outcome,
+            Some(ironclaw_extension_contracts::reply::ReplyOutcome::Failed { .. })
+        ),
+        "the terminal document is the failed reply: {:?}",
+        requests[0].revision.document.outcome
+    );
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        1,
+        "only the working indicator rides the delivery half — a delivered          reply means no second failure message: {texts:?}"
     );
     assert_eq!(
         harness.adapter.retracted_refs().len(),
@@ -1987,6 +2002,64 @@ async fn observer_replaces_working_indicator_with_failure_notice_and_x_reaction(
             ),
         ],
         "a failed run swaps 👀 for ❌"
+    );
+}
+
+/// The other half of the single-terminal-reply rule: when the reply
+/// publication cannot deliver (the sink fails permanently), the conventional
+/// failure notice is the fallback that keeps the user out of silence —
+/// exactly one terminal user-visible message either way.
+#[tokio::test]
+async fn observer_posts_the_failure_notice_only_when_the_reply_did_not_deliver() {
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Failed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    // Every reconcile of the terminal failure document is refused by the
+    // provider: the publication settles Failed and delivers nothing.
+    harness.reply_sink.script(std::iter::repeat_n(
+        ironclaw_extension_contracts::reply::ReplySinkOutcome::Permanent {
+            reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(
+                "channel refused the reply",
+            ),
+        },
+        8,
+    ));
+    let run_id = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-fail-fallback",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "working indicator, then the fallback failure notice: {texts:?}"
+    );
+    assert!(
+        !texts[1].is_empty() && texts[1] != texts[0],
+        "the failure notice is distinct from the working indicator, got {:?}",
+        texts[1]
     );
 }
 

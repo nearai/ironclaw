@@ -347,8 +347,11 @@ fn live_capability_activity_status(
     }
 }
 
-fn thinking_id(run_id: TurnRunId, sequence: u64) -> String {
-    format!("thinking:{run_id}:{sequence}")
+/// Stable per-(run, reasoning-segment) item id, so a growing open segment
+/// and its eventual closed replacement upsert one browser item instead of
+/// appending duplicates.
+fn thinking_id(run_id: TurnRunId, segment_index: u64) -> String {
+    format!("thinking:{run_id}:{segment_index}")
 }
 
 fn legacy_text_id(run_id: TurnRunId) -> String {
@@ -399,8 +402,15 @@ struct ProjectionReplyCheckpoint {
     answer_fingerprint: u64,
     #[serde(default)]
     answer_finalized: bool,
+    /// How many CLOSED reasoning segments have been published with their
+    /// final text (the open tail is tracked by fingerprint below, because
+    /// `append_reasoning` grows it in place without changing the count).
     #[serde(default)]
     reasoning_segments: usize,
+    /// Fingerprint of the open tail segment as last published; 0 when no
+    /// open tail was published.
+    #[serde(default)]
+    open_reasoning_fingerprint: u64,
     /// The highest activity `updated_ordinal` already published.
     #[serde(default)]
     activity_ordinal: u64,
@@ -466,10 +476,25 @@ impl LiveProjectionPublisher {
         let scope = &target.scope;
         let run_id = target.run_id;
 
-        for segment in document
-            .reasoning
+        // Closed segments publish once with their final text; the open tail
+        // republishes (under its stable per-segment id, so the browser
+        // upserts) whenever its in-place-grown text changes, and once more
+        // when `close_reasoning` replaces it.
+        let segments = &document.reasoning;
+        let closed_count = if document.reasoning_open {
+            segments.len().saturating_sub(1)
+        } else {
+            segments.len()
+        };
+        // Clamp: a checkpoint written before the open-tail tracking existed
+        // counted the open tail too; treating it as closed would suppress
+        // its final text.
+        let published_closed = checkpoint.reasoning_segments.min(closed_count);
+        for (index, segment) in segments
             .iter()
-            .skip(checkpoint.reasoning_segments)
+            .enumerate()
+            .take(closed_count)
+            .skip(published_closed)
         {
             let sequence = self.next_live_sequence();
             self.publish_live_item(
@@ -477,13 +502,34 @@ impl LiveProjectionPublisher {
                 scope,
                 sequence,
                 ThreadLiveProjectionItem::Thinking {
-                    id: thinking_id(run_id, sequence),
+                    id: thinking_id(run_id, index as u64),
                     run_id,
                     body: segment.as_str().to_string(),
                 },
             );
         }
-        checkpoint.reasoning_segments = document.reasoning.len();
+        checkpoint.reasoning_segments = closed_count;
+        if document.reasoning_open
+            && let Some(open) = segments.last()
+        {
+            let open_fingerprint = text_fingerprint(open.as_str());
+            if open_fingerprint != checkpoint.open_reasoning_fingerprint {
+                let sequence = self.next_live_sequence();
+                self.publish_live_item(
+                    owner,
+                    scope,
+                    sequence,
+                    ThreadLiveProjectionItem::Thinking {
+                        id: thinking_id(run_id, closed_count as u64),
+                        run_id,
+                        body: open.as_str().to_string(),
+                    },
+                );
+                checkpoint.open_reasoning_fingerprint = open_fingerprint;
+            }
+        } else {
+            checkpoint.open_reasoning_fingerprint = 0;
+        }
 
         let answer = document.answer.text.as_str();
         let answer_fingerprint = text_fingerprint(answer);
