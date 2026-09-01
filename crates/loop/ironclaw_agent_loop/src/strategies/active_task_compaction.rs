@@ -43,12 +43,10 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
     fn should_compact(
         &self,
         state: &LoopExecutionState,
-        _ctx: &LoopRunContext,
+        ctx: &LoopRunContext,
     ) -> CompactionDecision {
-        if !self
-            .base
-            .can_evaluate(state, self.base.prompt_context_budget)
-        {
+        let budget = self.base.effective_budget(ctx);
+        if !self.base.can_evaluate(state, budget) {
             return CompactionDecision::Skip;
         }
 
@@ -62,10 +60,7 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
                 prompt_fingerprint,
                 preserve_from_sequence,
             )
-            .map(|sequence| {
-                self.base
-                    .trigger_at(state, self.base.prompt_context_budget, sequence)
-            })
+            .map(|sequence| self.base.trigger_at(state, budget, sequence))
             .unwrap_or(CompactionDecision::Skip);
         }
         active_task_preserving_user_boundary(
@@ -75,10 +70,7 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
             self.minimum_tail_messages,
             self.minimum_compacted_messages,
         )
-        .map(|sequence| {
-            self.base
-                .trigger_at(state, self.base.prompt_context_budget, sequence)
-        })
+        .map(|sequence| self.base.trigger_at(state, budget, sequence))
         .unwrap_or(CompactionDecision::Skip)
     }
 }
@@ -463,6 +455,38 @@ mod tests {
         let mut strategy = active_task_preserving_strategy(0);
         strategy.minimum_compacted_messages = 0;
         strategy.minimum_tail_messages = active_task_message_index().len() + 1;
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
+
+    #[test]
+    fn active_task_strategy_honors_the_run_context_budget() {
+        // The strategy's own budget (100/10 -> 90 visible) leaves headroom
+        // for this 80-token index, so it would not compact. The run's model
+        // has a far smaller real window, which puts the prompt over.
+        let context = crate::test_support::test_run_context("active-task-budget-override")
+            .with_resolved_context_budget(PromptContextTokenBudget::new(50, 5, 0));
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(active_task_message_index());
+        let strategy = active_task_preserving_strategy(1);
+
+        assert!(matches!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger { .. }
+        ));
+    }
+
+    #[test]
+    fn active_task_strategy_falls_back_to_its_own_budget_without_a_resolved_one() {
+        let context = crate::test_support::test_run_context("active-task-budget-fallback");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt =
+            CompactionPromptSnapshot::from_message_index(active_task_message_index());
+        let strategy = active_task_preserving_strategy(1);
 
         assert_eq!(
             strategy.should_compact(&state, &context),

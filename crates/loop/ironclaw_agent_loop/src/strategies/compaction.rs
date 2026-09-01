@@ -53,6 +53,14 @@ impl DefaultCompactionStrategy {
     pub const DEFAULT_PRESERVE_TAIL_TOKENS: u64 = 8_000;
     pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
 
+    /// The budget this run actually runs with: the one resolved from the
+    /// run's model when present, otherwise this strategy's compiled-in
+    /// default.
+    pub(super) fn effective_budget(&self, ctx: &LoopRunContext) -> PromptContextTokenBudget {
+        ctx.resolved_context_budget
+            .unwrap_or(self.prompt_context_budget)
+    }
+
     pub(super) fn can_evaluate(
         &self,
         state: &LoopExecutionState,
@@ -116,9 +124,10 @@ impl CompactionStrategy for DefaultCompactionStrategy {
     fn should_compact(
         &self,
         state: &LoopExecutionState,
-        _ctx: &LoopRunContext,
+        ctx: &LoopRunContext,
     ) -> CompactionDecision {
-        if !self.can_evaluate(state, self.prompt_context_budget) {
+        let budget = self.effective_budget(ctx);
+        if !self.can_evaluate(state, budget) {
             return CompactionDecision::Skip;
         }
         let prompt_fingerprint = state.compaction_prompt.fingerprint();
@@ -127,11 +136,11 @@ impl CompactionStrategy for DefaultCompactionStrategy {
                 == Some(CompactionInitiator::WindowEviction)
             {
                 return eligible_window_eviction_boundary(state, prompt_fingerprint, None)
-                    .map(|sequence| self.trigger_at(state, self.prompt_context_budget, sequence))
+                    .map(|sequence| self.trigger_at(state, budget, sequence))
                     .unwrap_or(CompactionDecision::Skip);
             }
             return latest_eligible_user_boundary(state, prompt_fingerprint)
-                .map(|sequence| self.trigger_at(state, self.prompt_context_budget, sequence))
+                .map(|sequence| self.trigger_at(state, budget, sequence))
                 .unwrap_or(CompactionDecision::Skip);
         }
 
@@ -142,7 +151,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
             0,
             |_| true,
         )
-        .map(|sequence| self.trigger_at(state, self.prompt_context_budget, sequence))
+        .map(|sequence| self.trigger_at(state, budget, sequence))
         .unwrap_or(CompactionDecision::Skip)
     }
 }
@@ -992,6 +1001,77 @@ mod tests {
         assert_eq!(
             strategy.should_force_compact(&state),
             Some(CompactionInitiator::CapabilityResultOverflow)
+        );
+    }
+
+    /// Four alternating messages summing to `tokens`, so the index both
+    /// trips the threshold and offers a compactable user boundary outside
+    /// the preserved tail. A single entry trips the threshold but can never
+    /// Trigger — there is no boundary to drop through.
+    fn state_with_observed_prompt_tokens(
+        tokens: u64,
+        context: &LoopRunContext,
+    ) -> LoopExecutionState {
+        let each = tokens / 4;
+        let mut state = LoopExecutionState::initial_for_run(context);
+        state.compaction_state = CompactionStrategyState::default();
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: each,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: each,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: each,
+            },
+            MessageIndexEntry {
+                sequence: 4,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: each,
+            },
+        ]);
+        state
+    }
+
+    #[test]
+    fn run_context_budget_overrides_the_strategy_default_for_compaction() {
+        // The strategy's own budget would not trigger, but the run's model
+        // has a far smaller real window, so this prompt is already over.
+        let strategy = DefaultCompactionStrategy {
+            prompt_context_budget: PromptContextTokenBudget::new(128_000, 20_000, 0),
+            preserve_tail_tokens: 10,
+            deadline_ms: 30_000,
+        };
+        let ctx = crate::test_support::test_run_context("compaction-budget-override")
+            .with_resolved_context_budget(PromptContextTokenBudget::new(40_000, 5_000, 0));
+        let state = state_with_observed_prompt_tokens(50_000, &ctx);
+
+        assert!(matches!(
+            strategy.should_compact(&state, &ctx),
+            CompactionDecision::Trigger { .. }
+        ));
+    }
+
+    #[test]
+    fn absent_run_context_budget_falls_back_to_the_strategy_default() {
+        let strategy = DefaultCompactionStrategy {
+            prompt_context_budget: PromptContextTokenBudget::new(128_000, 20_000, 0),
+            preserve_tail_tokens: 10,
+            deadline_ms: 30_000,
+        };
+        let ctx = crate::test_support::test_run_context("compaction-budget-fallback");
+        let state = state_with_observed_prompt_tokens(50_000, &ctx);
+
+        assert_eq!(
+            strategy.should_compact(&state, &ctx),
+            CompactionDecision::Skip
         );
     }
 }
