@@ -16,7 +16,10 @@ test("standard extension tab containers use the shared Panel component", () => {
 
     assert.doesNotMatch(
       source,
-      /\bv2-panel\b/,
+      // Deliberately not \b: `-` is a word boundary, so the design token
+      // `--v2-panel-border` would match. This guards the legacy `.v2-panel`
+      // class, not the token.
+      /(?<![-\w])v2-panel(?![-\w])/,
       `${relativePath} must not use the legacy panel styling shim`,
     );
     assert.match(

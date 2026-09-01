@@ -81,17 +81,17 @@ export function InferenceTab({
         <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("inference.provider")}</h3>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
-            <div className="text-xs text-[var(--v2-text-muted)]">{t("inference.backend")}</div>
+            <div className="text-ui-sm text-[var(--v2-text-muted)]">{t("inference.backend")}</div>
             <div className="mt-1 flex items-center gap-2">
-              <span className="font-mono text-lg font-semibold text-[var(--v2-text-strong)]">{backend || t("inference.none")}</span>
+              <span className="font-mono text-title-sm font-semibold text-[var(--v2-text-strong)]">{backend || t("inference.none")}</span>
               {hasActiveProvider
                 ? (<Badge tone="positive" label={t("inference.active")} size="sm" />)
                 : (<Badge tone="muted" label={t("llm.notConfigured")} size="sm" />)}
             </div>
           </div>
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
-            <div className="text-xs text-[var(--v2-text-muted)]">{t("inference.model")}</div>
-            <div className="mt-1 font-mono text-lg font-semibold text-[var(--v2-text-strong)]">
+            <div className="text-ui-sm text-[var(--v2-text-muted)]">{t("inference.model")}</div>
+            <div className="mt-1 font-mono text-title-sm font-semibold text-[var(--v2-text-strong)]">
               {model || t("inference.none")}
             </div>
           </div>

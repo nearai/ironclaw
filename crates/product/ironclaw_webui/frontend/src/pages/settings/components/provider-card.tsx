@@ -171,7 +171,7 @@ export function ProviderCard({
             ].join(" ")}
           />
           <span className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-            <span className="min-w-0 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+            <span className="min-w-0 truncate text-ui font-semibold text-[var(--v2-text-strong)]">
               {provider.name || provider.id}
             </span>
             <span className="font-mono text-[11px] text-[var(--v2-text-faint)]">{provider.id}</span>
@@ -201,7 +201,7 @@ export function ProviderCard({
       {expanded &&
       (
         <div data-testid="llm-provider-details" className="border-t border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-4 sm:px-5">
-          <div className="grid gap-3 text-xs text-[var(--v2-text-muted)] sm:grid-cols-3">
+          <div className="grid gap-3 text-ui-sm text-[var(--v2-text-muted)] sm:grid-cols-3">
             <div>
               <div className="font-mono uppercase text-[10px] text-[var(--v2-text-faint)]">{t("llm.adapter")}</div>
               <div className="mt-1 truncate">{adapterLabel(provider.adapter)}</div>

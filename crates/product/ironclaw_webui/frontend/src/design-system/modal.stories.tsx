@@ -27,7 +27,7 @@ function ModalDemo({ open: initialOpen = false, size = "md", withFooter = true }
         closeLabel="Close"
       >
         <ModalBody>
-          <p className="text-sm leading-6 text-[var(--v2-text-muted)]">
+          <p className="text-ui leading-6 text-[var(--v2-text-muted)]">
             This permanently removes the workspace and everything in it. This action cannot be
             undone.
           </p>

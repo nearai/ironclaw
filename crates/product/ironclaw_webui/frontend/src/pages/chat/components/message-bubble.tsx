@@ -41,12 +41,12 @@ const AttachmentPreviewModal = React.lazy(() =>
    disclosure (see ThinkingDisclosure). */
 const ROLE_STYLES = {
   [CHAT_MESSAGE_ROLES.USER]:
-    "ml-auto rounded-[18px] border border-signal/25 bg-signal/10 px-4 py-3 text-iron-100",
-  [CHAT_MESSAGE_ROLES.ASSISTANT]: "mr-auto px-1 text-iron-100",
+    "ml-auto rounded-[18px] border border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] px-4 py-3 text-[var(--v2-text-strong)]",
+  [CHAT_MESSAGE_ROLES.ASSISTANT]: "mr-auto px-1 text-[var(--v2-text-strong)]",
   [CHAT_MESSAGE_ROLES.SYSTEM]:
-    "mx-auto rounded-[18px] border border-copper/20 bg-copper/10 px-4 py-3 text-center text-copper",
+    "mx-auto rounded-[18px] border border-[color-mix(in_srgb,var(--v2-warning-text)_35%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-4 py-3 text-center text-[var(--v2-warning-text)]",
   [CHAT_MESSAGE_ROLES.ERROR]:
-    "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
+    "mr-auto rounded-[18px] border border-red-400/25 bg-[var(--v2-danger-soft)] px-4 py-3 text-left text-[var(--v2-danger-text)]",
 };
 
 type CommandDescriptor = {
@@ -98,7 +98,7 @@ function ThinkingDisclosure({
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open ? "true" : "false"}
-        className="v2-button inline-flex items-center gap-1.5 border-0 bg-transparent px-1 py-1 text-xs font-medium text-iron-400 hover:text-iron-200"
+        className="v2-button inline-flex items-center gap-1.5 border-0 bg-transparent px-1 py-1 text-ui-sm font-medium text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
       >
         <Icon name="spark" className="h-3.5 w-3.5" />
         <span>{open ? t("chat.hideReasoning") : t("chat.reasoning")}</span>
@@ -109,7 +109,7 @@ function ThinkingDisclosure({
       </button>
       {open &&
       (
-        <div className="mt-1 border-l-2 border-white/10 pl-3 text-iron-300">
+        <div className="mt-1 border-l-2 border-[var(--v2-panel-border)] pl-3 text-[var(--v2-text-muted)]">
           <MarkdownRenderer
             content={content}
             className="text-[13px]"
@@ -288,11 +288,11 @@ function MessageBubbleImpl({
         <div className="flex flex-wrap gap-2">
           {imgs.map((img, i) =>
             img.data_url
-              ? (<img key={i} src={img.data_url} className="max-h-64 rounded-lg border border-iron-700 object-cover" alt={t("chat.generatedImageAlt")} />)
+              ? (<img key={i} src={img.data_url} className="max-h-64 rounded-lg border border-[var(--v2-panel-border)] object-cover" alt={t("chat.generatedImageAlt")} />)
               : (
-                  <div key={i} className="rounded-lg border border-iron-700 bg-iron-900/70 px-4 py-3 text-sm text-iron-200">
+                  <div key={i} className="rounded-lg border border-[var(--v2-panel-border)] bg-iron-900/70 px-4 py-3 text-ui text-[var(--v2-text-strong)]">
                     <div>{t("chat.generatedImageUnavailable")}</div>
-                    {img.path && (<div className="mt-1 font-mono text-xs text-iron-300">{img.path}</div>)}
+                    {img.path && (<div className="mt-1 font-mono text-ui-sm text-[var(--v2-text-muted)]">{img.path}</div>)}
                   </div>
                 )
           )}
@@ -363,7 +363,7 @@ function MessageBubbleImpl({
       <div className={["flex min-w-0 flex-col", bubbleWidthClass].join(" ")}>
         <div
           className={[
-            "text-base leading-7",
+            "text-ui-lg leading-7",
             contentWidthClass,
             roleStyle,
           ].join(" ")}
@@ -383,14 +383,14 @@ function MessageBubbleImpl({
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className={contentOpacityClass}>{content}</span></div>)}
 
           {status === "error" && (
-            <div className={["mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300", contentOpacityClass].join(" ")}>
+            <div className={["mt-2 flex flex-wrap items-center gap-2 text-ui-sm text-[var(--v2-danger-text)]", contentOpacityClass].join(" ")}>
               <span>{errorKey ? t(errorKey) : error}</span>
             </div>
           )}
 
           {showQueuedStatus && (
             <div className="mt-2 flex justify-end">
-              <span className="rounded border border-iron-700 bg-iron-900/70 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-iron-300">
+              <span className="rounded border border-[var(--v2-panel-border)] bg-iron-900/70 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-normal text-[var(--v2-text-muted)]">
                 {t("chat.queued")}
               </span>
             </div>
@@ -398,7 +398,7 @@ function MessageBubbleImpl({
 
           {images && images.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-2">
-              {images.map((src, i) => (<img key={i} src={src} className="max-h-48 rounded-lg border border-iron-700 object-cover" alt={t("chat.messageAttachmentAlt")} />))}
+              {images.map((src, i) => (<img key={i} src={src} className="max-h-48 rounded-lg border border-[var(--v2-panel-border)] object-cover" alt={t("chat.messageAttachmentAlt")} />))}
             </div>
           )}
 
@@ -427,7 +427,7 @@ function MessageBubbleImpl({
       {showMetaRow && (
         <div
           className={[
-            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400",
+            "mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-[var(--v2-text-muted)]",
             isUser
               ? "self-end justify-end"
               : isNotice
@@ -447,7 +447,7 @@ function MessageBubbleImpl({
                 onClick={copy}
                 title={copied ? t("common.copied") : t("chat.copyMessage")}
                 aria-label={copied ? t("common.copied") : t("chat.copyMessage")}
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-[var(--v2-text-strong)]"
               >
                 <Icon name={copied ? "check" : "copy"} className="h-3.5 w-3.5" />
               </button>
@@ -460,7 +460,7 @@ function MessageBubbleImpl({
                 title={artifactDownloading === "run" ? t("common.loading") : t("chat.downloadRunArtifact")}
                 aria-label={artifactDownloading === "run" ? t("common.loading") : t("chat.downloadRunArtifact")}
                 data-testid="download-run-artifact"
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-[var(--v2-text-strong)] disabled:opacity-50"
               >
                 <Icon name="download" className="h-3.5 w-3.5" />
               </button>
@@ -473,7 +473,7 @@ function MessageBubbleImpl({
                 title={artifactDownloading === "thread" ? t("common.loading") : t("chat.downloadThreadArtifact")}
                 aria-label={artifactDownloading === "thread" ? t("common.loading") : t("chat.downloadThreadArtifact")}
                 data-testid="download-thread-artifact"
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-[var(--v2-text-strong)] disabled:opacity-50"
               >
                 <Icon name="layers" className="h-3.5 w-3.5" />
               </button>
@@ -484,7 +484,7 @@ function MessageBubbleImpl({
                 onClick={() => onRetry?.(message)}
                 title={t("chat.retryMessage")}
                 aria-label={t("chat.retryMessage")}
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-red-300 hover:text-red-200"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-[var(--v2-danger-text)] hover:text-[var(--v2-danger-text)]"
               >
                 <Icon name="retry" className="h-3.5 w-3.5" />
               </button>

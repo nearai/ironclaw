@@ -50,7 +50,7 @@ export function ThemeOption({
       <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] text-[var(--v2-accent-text)]">
         <Icon name={icon} className="h-4 w-4" />
       </span>
-      <span className="min-w-0 flex-1 text-sm font-semibold">{label}</span>
+      <span className="min-w-0 flex-1 text-ui font-semibold">{label}</span>
       {checked && (<Icon name="check" className="h-4 w-4 shrink-0 text-[var(--v2-accent-text)]" />)}
     </label>
   );
@@ -129,10 +129,10 @@ export function AppearanceTab({
               <Icon name="terminal" className="h-4 w-4" />
             </span>
             <div className="min-w-0">
-              <h3 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+              <h3 className="text-ui font-semibold text-[var(--v2-text-strong)]">
                 {label}
               </h3>
-              <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
+              <p className="mt-1 text-ui leading-6 text-[var(--v2-text-muted)]">
                 {description}
               </p>
             </div>

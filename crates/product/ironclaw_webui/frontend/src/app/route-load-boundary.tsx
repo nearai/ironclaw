@@ -10,7 +10,7 @@ export function RouteLoading() {
     <div
       role="status"
       aria-live="polite"
-      className="grid min-h-48 place-items-center px-6 py-12 text-sm text-[var(--v2-text-muted)]"
+      className="grid min-h-48 place-items-center px-6 py-12 text-ui text-[var(--v2-text-muted)]"
     >
       {t("app.loadingPage")}
     </div>
@@ -30,10 +30,10 @@ export function RouteLoadError({ onRetry }: RouteLoadErrorProps) {
         role="alert"
         className="w-full max-w-md rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-6 text-center shadow-sm"
       >
-        <h2 className="text-lg font-semibold text-[var(--v2-text-strong)]">
+        <h2 className="text-title-sm font-semibold text-[var(--v2-text-strong)]">
           {t("app.pageLoadFailedTitle")}
         </h2>
-        <p className="mt-2 text-sm text-[var(--v2-text-muted)]">
+        <p className="mt-2 text-ui text-[var(--v2-text-muted)]">
           {t("app.pageLoadFailedDescription")}
         </p>
         <Button type="button" className="mt-5" onClick={onRetry}>

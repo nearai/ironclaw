@@ -59,7 +59,7 @@ export function SkillCard({
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium text-[var(--v2-text)]">{name}</span>
+            <span className="text-ui font-medium text-[var(--v2-text)]">{name}</span>
             <Badge
               tone={String(trust).toLowerCase() === "trusted" ? "positive" : "muted"}
               label={trust}
@@ -75,7 +75,7 @@ export function SkillCard({
           </div>
 
           {skill.description &&
-          (<div className="mt-1 text-xs text-[var(--v2-text-muted)]">{skill.description}</div>)}
+          (<div className="mt-1 text-ui-sm text-[var(--v2-text-muted)]">{skill.description}</div>)}
 
           {isEditing
             ? (
@@ -83,7 +83,7 @@ export function SkillCard({
                   <Textarea
                     rows={12}
                     value={draft}
-                    className="font-mono text-xs leading-5"
+                    className="font-mono text-ui-sm leading-5"
                     onInput={(event) => setDraft(event.currentTarget.value)}
                   />
                 </div>
@@ -169,7 +169,7 @@ export function SkillCard({
         </div>
       </div>
       {editError &&
-      (<p className="mt-2 text-xs text-[var(--v2-danger-text)]">{editError}</p>)}
+      (<p className="mt-2 text-ui-sm text-[var(--v2-danger-text)]">{editError}</p>)}
     </div>
   );
 }
@@ -181,15 +181,15 @@ function SkillMetadata({ skill }) {
     <>
     {skill.keywords?.length > 0 &&
     (
-      <div className="mt-2 text-xs text-[var(--v2-text-muted)]">
+      <div className="mt-2 text-ui-sm text-[var(--v2-text-muted)]">
         <span className="text-[var(--v2-text-faint)]">{t("skills.activatesOn")}:</span>
         {skill.keywords.join(", ")}
       </div>
     )}
     {skill.usage_hint &&
-    (<div className="mt-2 text-xs text-[var(--v2-text-muted)]">{skill.usage_hint}</div>)}
+    (<div className="mt-2 text-ui-sm text-[var(--v2-text-muted)]">{skill.usage_hint}</div>)}
     {skill.setup_hint &&
-    (<div className="mt-2 text-xs text-[var(--v2-warning-text)]">{skill.setup_hint}</div>)}
+    (<div className="mt-2 text-ui-sm text-[var(--v2-warning-text)]">{skill.setup_hint}</div>)}
     {(skill.has_requirements || skill.has_scripts || skill.install_source_url) &&
     (
       <div className="mt-2 flex flex-wrap gap-1.5">

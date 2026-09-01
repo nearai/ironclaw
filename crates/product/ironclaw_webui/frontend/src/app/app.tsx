@@ -61,7 +61,7 @@ function AuthLoading() {
   const t = useT();
   return (
     <main className="grid min-h-[100dvh] place-items-center bg-[var(--v2-canvas)] px-6">
-      <div className="text-sm text-[var(--v2-text-muted)]">{t("app.checkingSession")}</div>
+      <div className="text-ui text-[var(--v2-text-muted)]">{t("app.checkingSession")}</div>
     </main>
   );
 }
@@ -80,10 +80,10 @@ function AuthSessionError({ onRetry, onSignOut }: AuthSessionErrorProps) {
         data-testid="session-check-error"
         className="w-full max-w-md rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-6 text-center shadow-sm"
       >
-        <h1 className="text-lg font-semibold text-[var(--v2-text-strong)]">
+        <h1 className="text-title-sm font-semibold text-[var(--v2-text-strong)]">
           {t("app.sessionCheckFailedTitle")}
         </h1>
-        <p className="mt-2 text-sm text-[var(--v2-text-muted)]">
+        <p className="mt-2 text-ui text-[var(--v2-text-muted)]">
           {t("app.sessionCheckFailedDescription")}
         </p>
         <div className="mt-5 flex flex-col justify-center gap-2 sm:flex-row">

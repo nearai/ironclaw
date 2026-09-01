@@ -58,7 +58,7 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
           <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
             {t("llm.providers")}
           </h3>
-          <p className="mt-1 text-sm text-[var(--v2-text-muted)]">{t("llm.providersDesc")}</p>
+          <p className="mt-1 text-ui text-[var(--v2-text-muted)]">{t("llm.providersDesc")}</p>
         </div>
         <Button type="button" variant="secondary" size="sm" className="gap-2" onClick={() => actions.openDialog(null)}>
           <Icon name="plus" className="h-3.5 w-3.5" />
@@ -80,7 +80,7 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
       <ProviderLoginStatus login={login} />
 
       {state.isLoading
-        ? (<div className="text-sm text-[var(--v2-text-muted)]">{t("common.loading")}</div>)
+        ? (<div className="text-ui text-[var(--v2-text-muted)]">{t("common.loading")}</div>)
         : state.error
         ? (
           <InlineNotice tone="danger" role="alert">

@@ -93,13 +93,13 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
             onInput={(e) => setQuery(e.currentTarget.value)}
             onKeyDown={onKeyDown}
             placeholder={t("command.placeholder")}
-            className="h-12 w-full border-0 bg-transparent text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)]"
+            className="h-12 w-full border-0 bg-transparent text-ui text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)]"
           />
           <kbd className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--v2-text-faint)]">esc</kbd>
         </div>
         <ul className="max-h-[50vh] overflow-y-auto p-1.5">
           {filtered.length === 0 &&
-          (<li className="px-3 py-6 text-center text-sm text-[var(--v2-text-faint)]">{t("command.noMatches")}</li>)}
+          (<li className="px-3 py-6 text-center text-ui text-[var(--v2-text-faint)]">{t("command.noMatches")}</li>)}
           {filtered.map((command, index) => {
             const showGroup = command.group !== lastGroup;
             lastGroup = command.group;
@@ -113,7 +113,7 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
                     onMouseEnter={() => setActive(index)}
                     onClick={() => exec(command)}
                     className={[
-                      "flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-sm",
+                      "flex w-full items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-left text-ui",
                       index === active
                         ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
                         : "text-[var(--v2-text)] hover:bg-[var(--v2-surface-soft)]",

@@ -52,10 +52,10 @@ function TokenBanner({ token, onDismiss }) {
       onDismiss={onDismiss}
       dismissLabel={t("common.dismiss")}
     >
-      <p className="font-semibold text-iron-100">{t("admin.users.tokenCreated")}</p>
-      <p className="mt-1 text-xs text-iron-300">{t("admin.users.tokenCreatedDesc")}</p>
+      <p className="font-semibold text-[var(--v2-text-strong)]">{t("admin.users.tokenCreated")}</p>
+      <p className="mt-1 text-ui-sm text-[var(--v2-text-muted)]">{t("admin.users.tokenCreatedDesc")}</p>
       <div className="mt-3 flex items-center gap-2">
-        <code className="min-w-0 flex-1 truncate rounded-md border border-iron-700 bg-iron-800/70 px-3 py-2 font-mono text-xs text-iron-100">
+        <code className="min-w-0 flex-1 truncate rounded-md border border-[var(--v2-panel-border)] bg-iron-800/70 px-3 py-2 font-mono text-ui-sm text-[var(--v2-text-strong)]">
           {token}
         </code>
         <Button variant="secondary" onClick={handleCopy}>
@@ -99,7 +99,7 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
 
   return (
     <Panel className="p-5 sm:p-6">
-      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.users.createUser")}</h3>
+      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.users.createUser")}</h3>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-3">
           <FormField
@@ -131,18 +131,18 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
             />
           </FormField>
           <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.users.role")}</label>
+            <label className="mb-1 block text-ui-sm text-[var(--v2-text-muted)]">{t("admin.users.role")}</label>
             <SelectMenu
               value={role}
               options={roleOptions}
               onChange={setRole}
               ariaLabel={t("admin.users.role")}
               className="w-full"
-              buttonClassName="h-9 rounded-md border-iron-700 bg-iron-800/70 px-3 font-sans text-sm text-iron-100"
+              buttonClassName="h-9 rounded-md border-[var(--v2-panel-border)] bg-iron-800/70 px-3 font-sans text-ui text-[var(--v2-text-strong)]"
             />
           </div>
         </div>
-        {error && (<p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p>)}
+        {error && (<p className="text-ui text-[var(--v2-danger-text)]">{error.message}</p>)}
         <div className="flex gap-2">
           <Button type="submit" disabled={isCreating}>
             {isCreating ? t("admin.users.creating") : t("admin.users.createUser")}
@@ -167,12 +167,12 @@ export function UserRow({
 }) {
   const t = useT();
   return (
-    <div className="flex items-center justify-between gap-4 border-t border-iron-700 py-3.5 first:border-0 first:pt-0">
+    <div className="flex items-center justify-between gap-4 border-t border-[var(--v2-panel-border)] py-3.5 first:border-0 first:pt-0">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => onSelect(user.id)}
-            className="text-sm font-medium text-signal hover:underline"
+            className="text-ui font-medium text-[var(--v2-accent-text)] hover:underline"
           >
             {user.display_name || user.id}
           </button>
@@ -180,26 +180,26 @@ export function UserRow({
           <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
         </div>
         <div className="mt-0.5 flex flex-wrap gap-x-4 gap-y-0.5">
-          {user.email && (<span className="font-mono text-xs text-iron-300">{user.email}</span>)}
-          <span className="font-mono text-xs text-iron-700">{truncateId(user.id)}</span>
+          {user.email && (<span className="font-mono text-ui-sm text-[var(--v2-text-muted)]">{user.email}</span>)}
+          <span className="font-mono text-ui-sm text-[var(--v2-text-muted)]">{truncateId(user.id)}</span>
         </div>
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <span className="hidden font-mono text-xs text-iron-300 sm:inline">
+        <span className="hidden font-mono text-ui-sm text-[var(--v2-text-muted)] sm:inline">
           {user.job_count != null ? t("admin.users.jobsCount", { count: user.job_count }) : ""}
           {user.total_cost != null ? ` · ${formatCost(user.total_cost)}` : ""}
         </span>
-        <span className="hidden text-xs text-iron-700 lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
+        <span className="hidden text-ui-sm text-[var(--v2-text-muted)] lg:inline">{formatRelativeTime(user.last_active_at, t)}</span>
         <div className="flex gap-1">
           {user.status === "active"
-            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={(event) => onSuspend(user, event.currentTarget)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
-            : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-signal/30 hover:text-signal disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
+            ? (<button data-testid="admin-user-suspend" disabled={isActionPending} aria-busy={isSuspending || undefined} onClick={(event) => onSuspend(user, event.currentTarget)} className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] hover:text-[var(--v2-danger-text)] disabled:cursor-not-allowed disabled:opacity-50">{isSuspending ? t("common.loading") : t("admin.users.suspend")}</button>)
+            : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] hover:text-[var(--v2-accent-text)] disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
           <button
             data-testid="admin-user-role"
             disabled={isActionPending}
             aria-busy={isUpdating || undefined}
             onClick={() => onChangeRole(user.id, user.role === "admin" ? "member" : "admin")}
-            className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-iron-700 hover:text-iron-100 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-md border border-[var(--v2-panel-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--v2-text-muted)] hover:border-[var(--v2-panel-border)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {isUpdating
               ? t("common.saving")
@@ -302,7 +302,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
       <Panel className="p-5 sm:p-6">
         <Skeleton className="mb-4 h-3 w-24 rounded" />
         {[1, 2, 3].map((i) => (
-          <div key={i} className="flex items-center justify-between border-t border-iron-700 py-3.5 first:border-0">
+          <div key={i} className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-3.5 first:border-0">
             <Skeleton className="h-4 w-32 rounded" />
             <Skeleton className="h-6 w-20 rounded-full" />
           </div>
@@ -315,10 +315,10 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
     return (
       <Panel className="p-6 sm:p-8">
         <div className="flex items-center gap-3">
-          <Icon name="lock" className="h-5 w-5 text-iron-700" />
-          <h3 className="text-lg font-semibold text-iron-100">{t("users.adminRequired")}</h3>
+          <Icon name="lock" className="h-5 w-5 text-[var(--v2-text-muted)]" />
+          <h3 className="text-title-sm font-semibold text-[var(--v2-text-strong)]">{t("users.adminRequired")}</h3>
         </div>
-        <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
+        <p className="mt-2 max-w-md text-ui leading-6 text-[var(--v2-text-muted)]">
           {t("users.adminRequiredDesc")}
         </p>
       </Panel>
@@ -343,7 +343,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
 
       <Panel className="p-5 sm:p-6">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
             {t("admin.users.title", { count: filtered.length, total: users.length })}
           </h3>
           <div className="flex items-center gap-2">
@@ -365,8 +365,8 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
                     className={[
                       "rounded-md px-2.5 py-1.5 text-[11px] font-medium",
                       filter === f.value
-                        ? "border border-signal/35 bg-signal/10 text-iron-100"
-                        : "border border-transparent text-iron-300 hover:text-iron-100",
+                        ? "border border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
+                        : "border border-transparent text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]",
                     ].join(" ")}
                   >
                     {f.label}
@@ -389,7 +389,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
         )}
 
         {filtered.length === 0
-          ? (<p className="py-4 text-sm text-iron-300">{t("admin.users.noMatch")}</p>)
+          ? (<p className="py-4 text-ui text-[var(--v2-text-muted)]">{t("admin.users.noMatch")}</p>)
           : filtered.map(
               (user) => (
                 <UserRow
@@ -408,10 +408,10 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
             )}
 
         {(hasMore || loadMoreError) && (
-          <div className="mt-4 flex flex-col items-center gap-2 border-t border-iron-700 pt-4">
+          <div className="mt-4 flex flex-col items-center gap-2 border-t border-[var(--v2-panel-border)] pt-4">
             {loadMoreError && (
               <p
-                className="text-sm text-[var(--v2-danger-text)]"
+                className="text-ui text-[var(--v2-danger-text)]"
                 role="alert"
                 data-testid="admin-users-load-more-error"
               >
@@ -440,7 +440,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
               <>
                 <span>{confirm.message}</span>
                 {suspendError && (
-                  <span className="mt-4 block text-red-200" role="alert" data-testid="admin-user-confirm-error">
+                  <span className="mt-4 block text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-confirm-error">
                     {adminUserActionErrorMessage(suspendError, t)}
                   </span>
                 )}

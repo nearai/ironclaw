@@ -42,8 +42,8 @@ export function SidebarTraceCredits() {
           </span>
         </div>
         <div className="mt-2 flex items-center justify-between gap-2">
-          <span className="text-xs text-[var(--v2-text-muted)]">{t("traceCommons.finalCredit")}</span>
-          <span className="shrink-0 font-mono text-sm text-[var(--v2-text-strong)]">{final}</span>
+          <span className="text-ui-sm text-[var(--v2-text-muted)]">{t("traceCommons.finalCredit")}</span>
+          <span className="shrink-0 font-mono text-ui text-[var(--v2-text-strong)]">{final}</span>
         </div>
         <div className="mt-0.5 text-[11px] text-[var(--v2-text-muted)]">
           {t("traceCommons.cardAccepted", { accepted, submitted })}

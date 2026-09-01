@@ -190,9 +190,9 @@ export function FormField({
         (<Label htmlFor={htmlFor} required={required}>{label}</Label>) }
       {children}
       {error &&
-        (<p className="text-xs text-[var(--v2-danger-text)]" role="alert">{error}</p>)}
+        (<p className="text-ui-sm text-[var(--v2-danger-text)]" role="alert">{error}</p>)}
       {!error && hint &&
-        (<p className="text-xs text-[var(--v2-text-faint)]">{hint}</p>)}
+        (<p className="text-ui-sm text-[var(--v2-text-faint)]">{hint}</p>)}
     </div>
   );
 }

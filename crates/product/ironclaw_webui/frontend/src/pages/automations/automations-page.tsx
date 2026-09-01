@@ -64,7 +64,7 @@ export function AutomationsPage() {
           {automationsState.error &&
           (
             <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+              className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-ui text-[var(--v2-danger-text)]"
             >
               {t("automations.error.loadFailed")}
             </div>
@@ -73,7 +73,7 @@ export function AutomationsPage() {
           (
             <div
               role="status"
-              className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
+              className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-ui text-amber-200"
             >
               {t("automations.error.loadFailed")}
             </div>
@@ -89,10 +89,10 @@ export function AutomationsPage() {
                     role="status"
                     className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3"
                   >
-                    <div className="text-sm font-semibold text-amber-200">
+                    <div className="text-ui font-semibold text-amber-200">
                       {t("automations.schedulerOff.title")}
                     </div>
-                    <div className="mt-0.5 text-xs leading-5 text-amber-200/80">
+                    <div className="mt-0.5 text-ui-sm leading-5 text-amber-200/80">
                       {t("automations.schedulerOff.description")}
                     </div>
                   </div>

@@ -50,11 +50,11 @@ export function WorkspacePage() {
               <div className="flex items-center gap-2">
                 <h1
                   data-testid="workspace-heading"
-                  className="text-lg font-semibold text-white"
+                  className="text-title-sm font-semibold text-[var(--v2-text-strong)]"
                 >{t("workspace.title")}</h1>
                 <StatusPill tone="muted" label={t("workspace.readOnly")} />
               </div>
-              <p className="mt-0.5 text-sm text-iron-400">{t("workspace.subtitle")}</p>
+              <p className="mt-0.5 text-ui text-[var(--v2-text-muted)]">{t("workspace.subtitle")}</p>
             </div>
             <Button
               variant="secondary"

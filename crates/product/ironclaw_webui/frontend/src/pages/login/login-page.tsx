@@ -51,7 +51,7 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
           >
             {t("login.console")}
           </h1>
-          <p className="mt-4 text-sm leading-6 text-[var(--v2-text-muted)]">
+          <p className="mt-4 text-ui leading-6 text-[var(--v2-text-muted)]">
             {t("login.secureSub")}
           </p>
         </div>
@@ -98,7 +98,7 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
           {error &&
             (<p
               className={cn(
-                "rounded-[10px] border px-3 py-2 text-sm",
+                "rounded-[10px] border px-3 py-2 text-ui",
                 "border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))]",
                 "bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]"
               )}
@@ -127,7 +127,7 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
             viewing it from a non-local origin has no use for a CLI hint
             they can't run — so this also requires `isLoopbackBrowserOrigin()`. */}
         {oauthProviders.length === 0 && isLoopbackBrowserOrigin() &&
-          (<p className="mt-6 text-center text-xs text-[var(--v2-text-faint)]">
+          (<p className="mt-6 text-center text-ui-sm text-[var(--v2-text-faint)]">
             {t("login.localDevHint")}{" "}
             <code className="rounded bg-[var(--v2-surface-soft)] px-1 py-0.5 font-mono">
               ironclaw status

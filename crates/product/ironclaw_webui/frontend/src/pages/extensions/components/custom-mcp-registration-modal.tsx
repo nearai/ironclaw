@@ -174,7 +174,7 @@ export function CustomMcpRegistrationModal({
       size="lg"
     >
       <ModalBody>
-        <p className="mb-4 text-sm text-[var(--v2-text-muted)]">
+        <p className="mb-4 text-ui text-[var(--v2-text-muted)]">
           {step === 1
             ? t("extensions.customMcpPhase.connection")
             : step === 2
@@ -189,12 +189,12 @@ export function CustomMcpRegistrationModal({
             <span
               key={value}
               className={`h-1.5 flex-1 rounded-full ${
-                value <= step ? "bg-signal" : "bg-[var(--v2-panel-border)]"
+                value <= step ? "bg-[var(--v2-accent)] text-[var(--v2-accent-on)]" : "bg-[var(--v2-panel-border)]"
               }`}
             />
           ))}
         </div>
-        <ol className="mb-5 grid grid-cols-3 gap-2 text-xs text-[var(--v2-text-muted)]">
+        <ol className="mb-5 grid grid-cols-3 gap-2 text-ui-sm text-[var(--v2-text-muted)]">
           <li className={step === 1 ? "text-[var(--v2-text-strong)]" : ""}>
             {t("extensions.customMcpPhase.connectionLabel")}
           </li>
@@ -215,11 +215,11 @@ export function CustomMcpRegistrationModal({
               hint={t("extensions.customMcpNameHint")}
               error={showConnectionErrors ? errors.name : ""}
             />
-            <p className="-mt-2 mb-3 text-sm text-[var(--v2-text-muted)]">
+            <p className="-mt-2 mb-3 text-ui text-[var(--v2-text-muted)]">
               {t("extensions.customMcpIdGenerated", { id: effectiveDesiredId })}
             </p>
             <details className="mb-3 rounded-md border border-[var(--v2-panel-border)] p-3">
-              <summary className="cursor-pointer text-sm font-medium text-[var(--v2-text-strong)]">
+              <summary className="cursor-pointer text-ui font-medium text-[var(--v2-text-strong)]">
                 {t("extensions.customMcpAdvanced")}
               </summary>
               <div className="mt-3">
@@ -246,10 +246,10 @@ export function CustomMcpRegistrationModal({
           </>
         ) : step === 2 ? (
           <>
-            <p className="mb-3 text-sm text-[var(--v2-text-muted)]">
+            <p className="mb-3 text-ui text-[var(--v2-text-muted)]">
               {t("extensions.customMcpReviewHint")}
             </p>
-            <dl className="rounded-md border border-[var(--v2-panel-border)] p-3 text-sm">
+            <dl className="rounded-md border border-[var(--v2-panel-border)] p-3 text-ui">
               <div className="flex gap-3 py-1">
                 <dt className="w-28 shrink-0 text-[var(--v2-text-muted)]">{t("extensions.customMcpName")}</dt>
                 <dd className="break-all text-[var(--v2-text-strong)]">{desiredName.trim()}</dd>
@@ -265,11 +265,11 @@ export function CustomMcpRegistrationModal({
             </dl>
             {authSelectionRequired && (
               <fieldset className="mt-4 rounded-md border border-[var(--v2-panel-border)] p-3">
-                <legend className="px-1 text-sm font-medium text-[var(--v2-text-strong)]">
+                <legend className="px-1 text-ui font-medium text-[var(--v2-text-strong)]">
                   {t("extensions.customMcpAuthHint")}
                 </legend>
                 {(["oauth", "bearer"] as const).map((kind) => (
-                  <label key={kind} className="mb-2 flex items-center gap-2 text-sm last:mb-0">
+                  <label key={kind} className="mb-2 flex items-center gap-2 text-ui last:mb-0">
                     <input
                       type="radio"
                       name="custom-mcp-auth"
@@ -288,13 +288,13 @@ export function CustomMcpRegistrationModal({
             <h3 className="font-semibold text-[var(--v2-text-strong)]">
               {t("extensions.customMcpReady")}
             </h3>
-            <p className="mt-2 text-sm text-[var(--v2-text-muted)]">
+            <p className="mt-2 text-ui text-[var(--v2-text-muted)]">
               {t("extensions.customMcpReadyHint")}
             </p>
           </div>
         ) : null}
         {error && (
-          <p role="alert" className="mt-3 text-sm text-[var(--v2-danger-text)]">
+          <p role="alert" className="mt-3 text-ui text-[var(--v2-danger-text)]">
             {error}
           </p>
         )}
@@ -340,7 +340,7 @@ function Field({
   const hintId = React.useId();
   const errorId = React.useId();
   return (
-    <label className="mb-3 block text-sm font-medium">
+    <label className="mb-3 block text-ui font-medium">
       {label}
       <input
         type={type}
@@ -351,8 +351,8 @@ function Field({
         aria-describedby={error ? errorId : hint ? hintId : undefined}
         className="mt-1 h-10 w-full rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3"
       />
-      {hint && !error && <span id={hintId} className="mt-1 block text-xs font-normal text-[var(--v2-text-muted)]">{hint}</span>}
-      {error && <span id={errorId} role="alert" className="mt-1 block text-xs font-normal text-[var(--v2-danger-text)]">{error}</span>}
+      {hint && !error && <span id={hintId} className="mt-1 block text-ui-sm font-normal text-[var(--v2-text-muted)]">{hint}</span>}
+      {error && <span id={errorId} role="alert" className="mt-1 block text-ui-sm font-normal text-[var(--v2-danger-text)]">{error}</span>}
     </label>
   );
 }

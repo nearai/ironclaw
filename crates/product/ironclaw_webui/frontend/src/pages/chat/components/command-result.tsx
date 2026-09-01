@@ -126,7 +126,7 @@ function ResultFields({ fields }) {
       {fields.map((field) => (
         <div
           key={field.label}
-          className="grid grid-cols-[6.5rem_1fr] items-start gap-3 px-4 py-2 text-sm"
+          className="grid grid-cols-[6.5rem_1fr] items-start gap-3 px-4 py-2 text-ui"
         >
           <dt className="text-left text-[var(--v2-text-muted)]">{field.label}</dt>
           <dd className="min-w-0 text-left">
@@ -151,7 +151,7 @@ function ResultLines({ lines }) {
       {lines.map((line, index) => (
         <li
           key={index}
-          className="whitespace-pre-wrap break-words py-1.5 text-left text-sm leading-6 text-[var(--v2-text)]"
+          className="whitespace-pre-wrap break-words py-1.5 text-left text-ui leading-6 text-[var(--v2-text)]"
         >
           {line}
         </li>
@@ -175,7 +175,7 @@ function CommandResultHeader({ title, badge = null }) {
   return (
     <div className="flex items-center gap-2 border-b border-[var(--v2-panel-border)] px-4 py-2.5">
       <Icon name="terminal" className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-faint)]" />
-      <h3 className="min-w-0 flex-1 truncate text-left text-sm font-semibold text-[var(--v2-text-strong)]">
+      <h3 className="min-w-0 flex-1 truncate text-left text-ui font-semibold text-[var(--v2-text-strong)]">
         {title}
       </h3>
       {badge != null && (
@@ -208,7 +208,7 @@ function CommandNotice({ icon, message, testId }) {
     <div
       data-testid={testId}
       role="status"
-      className="mx-auto flex w-full max-w-lg items-start gap-2.5 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-left text-sm leading-6 text-[var(--v2-text-muted)]"
+      className="mx-auto flex w-full max-w-lg items-start gap-2.5 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-left text-ui leading-6 text-[var(--v2-text-muted)]"
     >
       <Icon name={icon} className="mt-0.5 h-4 w-4 shrink-0 text-[var(--v2-text-faint)]" />
       <span className="whitespace-pre-wrap break-words">{message}</span>
@@ -222,15 +222,15 @@ function CommandListRows({ commands }) {
       {commands.map((command) => (
         <li key={command.name}>
           <div className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left">
-            <span className="shrink-0 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-xs leading-4 text-[var(--v2-text-strong)]">
+            <span className="shrink-0 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-1.5 py-0.5 font-mono text-ui-sm leading-4 text-[var(--v2-text-strong)]">
               /{command.name}
             </span>
             <span className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-sm font-medium text-[var(--v2-text-strong)]">
+              <span className="truncate text-ui font-medium text-[var(--v2-text-strong)]">
                 {command.title}
               </span>
               {command.description && (
-                <span className="truncate text-xs text-[var(--v2-text-muted)]">
+                <span className="truncate text-ui-sm text-[var(--v2-text-muted)]">
                   {command.description}
                 </span>
               )}

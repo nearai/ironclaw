@@ -273,7 +273,7 @@ test("SelectMenu supports a compact reusable size", () => {
   );
 
   assert.ok(classTokens.has("min-w-[7.5rem]"));
-  assert.ok(classTokens.has("text-xs"));
+  assert.ok(classTokens.has("text-ui-sm"));
   assert.ok(classTokens.has("h-8"));
   assert.ok(classTokens.has("px-2"));
   assert.ok(!classTokens.has("px-2.5"));
@@ -283,7 +283,7 @@ test("SelectMenu supports a compact reusable size", () => {
   firstValueAfter(rendered, "onClick=")();
   rendered = harness.render({ size: "sm" });
   classes = collectScalars(rendered).filter((value) => typeof value === "string");
-  assert.ok(classes.some((value) => value.includes("px-2 py-1.5 text-xs")));
+  assert.ok(classes.some((value) => value.includes("px-2 py-1.5 text-ui-sm")));
 });
 
 test("SelectMenu opens, selects an option, and closes after selection", () => {

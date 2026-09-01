@@ -207,19 +207,19 @@ export function ModelSelectionPolicyEditor({ providerState }) {
           <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
             {t("llm.policyTitle")}
           </h3>
-          <p className="mt-2 max-w-2xl text-sm text-[var(--v2-text-muted)]">
+          <p className="mt-2 max-w-2xl text-ui text-[var(--v2-text-muted)]">
             {t("llm.policyDesc")}
           </p>
         </div>
         {activeProvider && (
-          <span className="font-mono text-xs text-[var(--v2-text-muted)]">
+          <span className="font-mono text-ui-sm text-[var(--v2-text-muted)]">
             {activeProvider.id}
           </span>
         )}
       </div>
 
       {noActiveProvider ? (
-        <p className="text-sm text-[var(--v2-warning-text)]">
+        <p className="text-ui text-[var(--v2-warning-text)]">
           {t("llm.policyNoActiveProvider")}
         </p>
       ) : (
@@ -264,14 +264,14 @@ export function ModelSelectionPolicyEditor({ providerState }) {
           </div>
 
           <div>
-            <div className="mb-2 text-xs font-medium text-[var(--v2-text-muted)]">
+            <div className="mb-2 text-ui-sm font-medium text-[var(--v2-text-muted)]">
               {t("llm.policyAllowedModels")}
             </div>
             <div className="max-h-52 space-y-1 overflow-y-auto rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-2">
               {candidates.map((model) => (
                 <label
                   key={model}
-                  className="flex cursor-pointer items-center gap-3 rounded px-2 py-2 text-sm text-[var(--v2-text-strong)] hover:bg-white/[0.04]"
+                  className="flex cursor-pointer items-center gap-3 rounded px-2 py-2 text-ui text-[var(--v2-text-strong)] hover:bg-[var(--v2-surface-soft)]"
                 >
                   <input
                     type="checkbox"
@@ -280,7 +280,7 @@ export function ModelSelectionPolicyEditor({ providerState }) {
                     disabled={saveMutation.isPending}
                     onChange={(event) => toggleModel(model, event.currentTarget.checked)}
                   />
-                  <span className="min-w-0 break-all font-mono text-xs">{model}</span>
+                  <span className="min-w-0 break-all font-mono text-ui-sm">{model}</span>
                 </label>
               ))}
             </div>
@@ -288,7 +288,7 @@ export function ModelSelectionPolicyEditor({ providerState }) {
 
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
             <div>
-              <div className="mb-2 text-xs font-medium text-[var(--v2-text-muted)]">
+              <div className="mb-2 text-ui-sm font-medium text-[var(--v2-text-muted)]">
                 {t("llm.policyWorkspaceDefault")}
               </div>
               <SelectMenu
@@ -322,7 +322,7 @@ export function ModelSelectionPolicyEditor({ providerState }) {
       <div
         data-testid="settings-model-policy-status"
         className={[
-          "mt-3 min-h-5 text-xs",
+          "mt-3 min-h-5 text-ui-sm",
           status?.tone === "error"
             ? "text-[var(--v2-danger-text)]"
             : status?.tone === "success"

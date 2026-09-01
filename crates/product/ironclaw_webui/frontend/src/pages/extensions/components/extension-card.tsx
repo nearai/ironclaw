@@ -240,7 +240,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
     >
       <div className="flex items-start gap-2">
         <Badge tone={tone} label={label} size="sm" />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-[var(--v2-text-strong)]">
           {displayName}
         </span>
         {overflowActions.length > 0 &&
@@ -262,7 +262,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       {ext.activation_error &&
       (
         <div
-          className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-1.5 text-xs text-[var(--v2-danger-text)]"
+          className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-1.5 text-ui-sm text-[var(--v2-danger-text)]"
         >
           {ext.activation_error}
         </div>
@@ -271,7 +271,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       {needsReconnect &&
       (
         <div
-          className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-warning-text)_36%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-1.5 text-xs text-[var(--v2-warning-text)]"
+          className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-warning-text)_36%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-1.5 text-ui-sm text-[var(--v2-warning-text)]"
         >
           {t(authAccountReasonLabelKey(channelAccount))}
         </div>
@@ -281,7 +281,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       (
         <div
           data-testid="extension-scope-update"
-          className="mt-2 flex items-center justify-between gap-2 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]"
+          className="mt-2 flex items-center justify-between gap-2 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-ui-sm leading-5 text-[var(--v2-text-muted)]"
         >
           <span>{t("extensions.updateAccessHint")}</span>
           <Button
@@ -297,7 +297,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
 
       {onboardingHint &&
       (
-        <div className="mt-2 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]">
+        <div className="mt-2 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-ui-sm leading-5 text-[var(--v2-text-muted)]">
           {onboardingHint}
         </div>
       )}
@@ -370,7 +370,7 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
           label={statusLabel || t("extensions.state.available") || "available"}
           size="sm"
         />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+        <span className="min-w-0 flex-1 truncate text-ui font-semibold text-[var(--v2-text-strong)]">
           {displayName}
         </span>
       </div>

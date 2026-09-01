@@ -92,7 +92,7 @@ const appCssSource = readFileSync(
 test("conversation message bubbles use readable typography", () => {
   assert.match(
     messageBubbleSource,
-    /['"`]text-base\s+leading-7['"`]/,
+    /['"`]text-ui-lg\s+leading-7['"`]/,
     "chat message content should render at a readable base size",
   );
   assert.doesNotMatch(
@@ -574,7 +574,7 @@ test("error messages render as inline chat bubbles, not centered notices", async
   );
   assert.match(
     html,
-    /mr-auto[^"]*text-left text-red-200/,
+    /mr-auto[^"]*text-left text-\[var\(--v2-danger-text\)\]/,
     "error role should align with the assistant-side chat stream",
   );
   assert.doesNotMatch(
@@ -623,7 +623,7 @@ test("message timestamp and actions share an always-visible meta row", () => {
   );
   assert.match(
     messageBubbleSource,
-    /mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-iron-400/,
+    /mt-1 flex min-h-7 w-max v2-chat-readable-width flex-nowrap items-center gap-3 px-1 text-\[var\(--v2-text-muted\)\]/,
     "timestamp and controls should remain visible without being constrained to the bubble width",
   );
   assert.doesNotMatch(
@@ -679,7 +679,7 @@ test("optimistic message opacity does not fade attached image previews", () => {
     "optimistic pending state should dim only textual message content",
   );
 
-  const contentBubbleClassArrayStart = messageBubbleSource.indexOf('"text-base leading-7"');
+  const contentBubbleClassArrayStart = messageBubbleSource.indexOf('"text-ui-lg leading-7"');
   const contentBubbleClassArray = messageBubbleSource.slice(
     contentBubbleClassArrayStart,
     messageBubbleSource.indexOf('].join(" ")}', contentBubbleClassArrayStart),
@@ -692,7 +692,7 @@ test("optimistic message opacity does not fade attached image previews", () => {
 
   assert.match(
     messageBubbleSource,
-    /images && images\.length > 0 && \([\s\S]*<img key=\{i\} src=\{src\} className="max-h-48 rounded-lg border border-iron-700 object-cover"/,
+    /images && images\.length > 0 && \([\s\S]*<img key=\{i\} src=\{src\} className="max-h-48 rounded-lg border border-\[var\(--v2-panel-border\)\] object-cover"/,
     "inline image previews should render outside the optimistic text opacity wrapper",
   );
   assert.match(

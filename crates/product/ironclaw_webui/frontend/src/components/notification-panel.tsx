@@ -45,7 +45,7 @@ function NotificationRow({ message, unread, onOpen, onArchive }) {
       </span>
       <span className="min-w-0">
         <span className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+          <span className="min-w-0 flex-1 truncate text-ui font-semibold text-[var(--v2-text-strong)]">
             {message.title}
           </span>
           {unread &&
@@ -54,7 +54,7 @@ function NotificationRow({ message, unread, onOpen, onArchive }) {
             className="h-2 w-2 shrink-0 rounded-full bg-[var(--v2-danger-text)]"
           />)}
         </span>
-        <span className="mt-0.5 block truncate text-sm text-[var(--v2-text)]">
+        <span className="mt-0.5 block truncate text-ui text-[var(--v2-text)]">
           {message.body}
         </span>
         <span className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-[var(--v2-text-faint)]">
@@ -162,10 +162,10 @@ export function NotificationPanel({
           >
             <div className="flex items-center justify-between gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3">
               <div className="min-w-0">
-                <h2 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                <h2 className="text-ui font-semibold text-[var(--v2-text-strong)]">
                   {t("notifications.title")}
                 </h2>
-                <p className="mt-0.5 text-xs text-[var(--v2-text-muted)]">
+                <p className="mt-0.5 text-ui-sm text-[var(--v2-text-muted)]">
                   {unreadCount > 0
                     ? t("notifications.unreadCount", { count: unreadCount })
                     : t("notifications.allCaughtUp")}
@@ -208,7 +208,7 @@ export function NotificationPanel({
                   data-testid="notification-error-banner"
                   className="flex items-center justify-between gap-2 border-b border-[var(--v2-border)] bg-[var(--v2-surface-muted)] px-4 py-2"
                 >
-                  <span className="text-sm text-[var(--v2-text-muted)]">
+                  <span className="text-ui text-[var(--v2-text-muted)]">
                     {t("notifications.errorTitle")}
                   </span>
                   <Button
@@ -224,7 +224,7 @@ export function NotificationPanel({
               {isLoading && messages.length === 0
                 ? (
                     <div className="px-4 py-8 text-center" role="status">
-                      <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                      <div className="text-ui font-semibold text-[var(--v2-text-strong)]">
                         {t("notifications.loadingTitle")}
                       </div>
                     </div>
@@ -232,10 +232,10 @@ export function NotificationPanel({
                 : error && messages.length === 0
                   ? (
                       <div className="px-4 py-8 text-center" role="alert">
-                        <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                        <div className="text-ui font-semibold text-[var(--v2-text-strong)]">
                           {t("notifications.errorTitle")}
                         </div>
-                        <div className="mt-1 text-sm text-[var(--v2-text-muted)]">
+                        <div className="mt-1 text-ui text-[var(--v2-text-muted)]">
                           {t("notifications.errorDescription")}
                         </div>
                         <Button
@@ -252,10 +252,10 @@ export function NotificationPanel({
                   : messages.length === 0
                 ? (
                     <div className="px-4 py-8 text-center">
-                      <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                      <div className="text-ui font-semibold text-[var(--v2-text-strong)]">
                         {t("notifications.emptyTitle")}
                       </div>
-                      <div className="mt-1 text-sm text-[var(--v2-text-muted)]">
+                      <div className="mt-1 text-ui text-[var(--v2-text-muted)]">
                         {t("notifications.emptyDescription")}
                       </div>
                     </div>
@@ -284,7 +284,7 @@ export function NotificationPanel({
               {pageLimitReached && (
                 <div
                   data-testid="notification-page-limit"
-                  className="border-t border-[var(--v2-panel-border)] px-4 py-2.5 text-center text-xs text-[var(--v2-text-muted)]"
+                  className="border-t border-[var(--v2-panel-border)] px-4 py-2.5 text-center text-ui-sm text-[var(--v2-text-muted)]"
                 >
                   {t("notifications.pageLimit")}
                 </div>

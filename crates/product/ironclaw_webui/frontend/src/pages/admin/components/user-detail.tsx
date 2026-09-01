@@ -24,9 +24,9 @@ import {
 
 function DetailRow({ label, children }) {
   return (
-    <div className="flex items-start justify-between gap-4 border-t border-white/[0.06] py-3 first:border-0 first:pt-0">
-      <span className="text-xs text-iron-300">{label}</span>
-      <span className="text-right text-sm text-iron-100">{children}</span>
+    <div className="flex items-start justify-between gap-4 border-t border-[var(--v2-panel-border)] py-3 first:border-0 first:pt-0">
+      <span className="text-ui-sm text-[var(--v2-text-muted)]">{label}</span>
+      <span className="text-right text-ui text-[var(--v2-text-strong)]">{children}</span>
     </div>
   );
 }
@@ -163,7 +163,7 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
     <div className="space-y-5">
       <button
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-iron-300 hover:text-white"
+        className="flex items-center gap-1.5 text-ui-sm text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
       >
         <span>←</span>
         <span>{t("admin.users.backToUsers")}</span>
@@ -172,7 +172,7 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
       <Panel className="p-5 sm:p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <h2 className="text-2xl font-semibold tracking-tight text-white">{user.display_name || user.id}</h2>
+            <h2 className="text-title-lg font-semibold tracking-tight text-[var(--v2-text-strong)]">{user.display_name || user.id}</h2>
             <div className="mt-2 flex items-center gap-2">
               <StatusPill tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
               <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
@@ -204,22 +204,22 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
 
       <div className="grid gap-5 lg:grid-cols-2">
         <Panel className="p-5 sm:p-6">
-          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.profile")}</h3>
+          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.user.profile")}</h3>
           <DetailRow label={t("admin.user.id")}>
-            <span className="font-mono text-xs">{user.id}</span>
+            <span className="font-mono text-ui-sm">{user.id}</span>
           </DetailRow>
           <DetailRow label={t("admin.user.email")}>{user.email || t("admin.user.notSet")}</DetailRow>
           <DetailRow label={t("admin.user.created")}>{formatRelativeTime(user.created_at, t)}</DetailRow>
           <DetailRow label={t("admin.user.lastLogin")}>{formatRelativeTime(user.last_login_at, t)}</DetailRow>
           {user.created_by && (
             <DetailRow label={t("admin.user.createdBy")}>
-              <span className="font-mono text-xs">{truncateId(user.created_by)}</span>
+              <span className="font-mono text-ui-sm">{truncateId(user.created_by)}</span>
             </DetailRow>
           )}
         </Panel>
 
         <Panel className="p-5 sm:p-6">
-          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.summary")}</h3>
+          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.user.summary")}</h3>
           <DetailRow label={t("admin.user.jobs")}>{user.job_count ?? 0}</DetailRow>
           <DetailRow label={t("admin.user.totalCost")}>{formatCost(user.total_cost)}</DetailRow>
           <DetailRow label={t("admin.user.lastActive")}>{formatRelativeTime(user.last_active_at, t)}</DetailRow>
@@ -227,10 +227,10 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
       </div>
 
       <Panel className="p-5 sm:p-6">
-        <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.roleManagement")}</h3>
+        <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.user.roleManagement")}</h3>
         <div className="flex items-end gap-3">
           <div>
-            <label className="mb-1 block text-xs text-iron-300">{t("admin.user.currentRole")}</label>
+            <label className="mb-1 block text-ui-sm text-[var(--v2-text-muted)]">{t("admin.user.currentRole")}</label>
             <SelectMenu
               value={role || user.role}
               options={roleOptions}
@@ -238,7 +238,7 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
               disabled={isActionPending}
               ariaLabel={t("admin.user.currentRole")}
               className="!min-w-0 w-36"
-              buttonClassName="h-9 rounded-md border-white/12 bg-white/[0.04] px-3 font-sans text-sm text-iron-100"
+              buttonClassName="h-9 rounded-md border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 font-sans text-ui text-[var(--v2-text-strong)]"
             />
           </div>
           <Button data-testid="admin-user-detail-save-role" onClick={handleSaveRole} loading={isUpdating} disabled={isActionPending || !role || role === user.role}>
@@ -246,7 +246,7 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
           </Button>
         </div>
         {updateError && (
-          <p className="mt-4 text-sm text-red-200" role="alert" data-testid="admin-user-detail-role-error">
+          <p className="mt-4 text-ui text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-detail-role-error">
             {adminUserActionErrorMessage(updateError, t)}
           </p>
         )}
@@ -265,7 +265,7 @@ export function UserDetailView({ onBack, userQuery, adminState, threadScrapingEn
               {t("admin.users.deleteUserDesc", { name: user.display_name || user.id })}
             </span>
             {deleteError && (
-              <span className="mt-4 block text-red-200" role="alert" data-testid="admin-user-delete-error">
+              <span className="mt-4 block text-[var(--v2-danger-text)]" role="alert" data-testid="admin-user-delete-error">
                 {adminUserActionErrorMessage(deleteError, t)}
               </span>
             )}

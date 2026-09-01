@@ -145,8 +145,8 @@ export function SkillsTab({ searchQuery = "" }) {
     if (skills.length === 0) {
       body = (
         <Card padding="lg">
-          <h3 className="text-lg font-semibold text-[var(--v2-text-strong)]">{t("skills.noInstalled")}</h3>
-          <p className="mt-2 max-w-md text-sm leading-6 text-[var(--v2-text-muted)]">
+          <h3 className="text-title-sm font-semibold text-[var(--v2-text-strong)]">{t("skills.noInstalled")}</h3>
+          <p className="mt-2 max-w-md text-ui leading-6 text-[var(--v2-text-muted)]">
             {t("skills.noInstalledDesc")}
           </p>
         </Card>
@@ -214,12 +214,12 @@ function LearnedAutoActivateCard({ enabled, isSaving, onToggle }) {
     <Card padding="md" style={cardStyle}>
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <div className="text-sm font-medium text-[var(--v2-text-strong)]">
+          <div className="text-ui font-medium text-[var(--v2-text-strong)]">
             {enabled
               ? t("skills.defaultAutoActivationEnabled")
               : t("skills.defaultAutoActivationDisabled")}
           </div>
-          <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
+          <div className="mt-1 text-ui-sm text-[var(--v2-text-muted)]">
             {enabled
               ? t("skills.defaultAutoActivationOnDesc")
               : t("skills.defaultAutoActivationOffDesc")}

@@ -22,7 +22,9 @@ test("the root and semantic control type scale stay stable across viewports (#67
   const appCss = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
 
   assert.match(appCss, /--text-ui-sm:\s*0\.75rem;/);
-  assert.match(appCss, /--text-ui:\s*0\.8125rem;/);
+  // 0.875rem since the M3 density change (#7781 WS3). The invariant this pins is
+  // that the scale is ONE viewport-independent value, not that value in particular.
+  assert.match(appCss, /--text-ui:\s*0\.875rem;/);
   assert.match(appCss, /--text-ui-lg:\s*1rem;/);
   assert.match(appCss, /html\s*\{[^}]*font-size:\s*16px;/s);
   assert.match(
