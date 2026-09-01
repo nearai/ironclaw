@@ -1192,6 +1192,7 @@ registerPack("es", {
   "common.deleteChat": "Eliminar chat",
   "chat.deleteFailed": "No se pudo eliminar esta conversación.",
   "chat.cancelFailed": "No se pudo detener esta ejecución. Puede que siga en curso. Inténtalo de nuevo.",
+  "chat.runStopped": "Detenido",
   "chat.deleteBusy": "No se puede eliminar una conversación mientras se está ejecutando. Detenla primero y vuelve a intentarlo.",
   "command.placeholder": "Escriba un comando o busque...",
   "routine.searchPlaceholder": "Buscar nombre de rutina, activador o acción",

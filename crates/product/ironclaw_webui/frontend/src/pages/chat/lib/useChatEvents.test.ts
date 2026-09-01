@@ -42,6 +42,7 @@ import {
 import { groupMessages } from "./message-groups";
 
 const ENGLISH_FAILURE_COPY = {
+  "chat.runStopped": "Stopped",
   "chat.failure.connectionLost":
     "Connection to the server was lost. Please reconnect and try again.",
   "chat.failure.run": "The run failed before producing a reply.",
@@ -81,7 +82,12 @@ function useChatEventsSourceForTest() {
       continue;
     }
     lines.push(
-      line.replace("export function useChatEvents", "function useChatEvents"),
+      line
+        .replace("export function useChatEvents", "function useChatEvents")
+        .replace(
+          "export function appendRunStoppedMessage",
+          "function appendRunStoppedMessage",
+        ),
     );
   }
   return `${lines.join("\n")}\nglobalThis.__testExports = { useChatEvents };`;
@@ -251,6 +257,9 @@ function createUseChatEventsHarness({
     setCurrentActiveRun(run) {
       activeRun = run;
       activeRunRef.current = run;
+    },
+    markLocallyStopped(runId) {
+      runTrackingRef.current.locallyStoppedRuns.current.add(runId);
     },
     replaceMessages(next) {
       messages = next;
@@ -2635,6 +2644,7 @@ test("useChatEvents: stale terminal run status does not clear newer run", () => 
     threadId: "thread-1",
     status: "running",
   });
+  assert.deepEqual(harness.messages, [], "a stale cancellation adds no notice");
 });
 
 test("useChatEvents: stale terminal status before newer projection does not clear newer run", () => {
@@ -2959,7 +2969,17 @@ test("useChatEvents: run failure preserves completed durable timeline phases", (
 });
 
 test("useChatEvents: terminal cancellation settles the run as not successful", () => {
-  const harness = createUseChatEventsHarness();
+  class FixedDate extends Date {
+    constructor(...args) {
+      super(args.length > 0 ? args[0] : "2025-01-02T03:04:05.000Z");
+    }
+
+    static now() {
+      return Date.parse("2025-01-02T03:04:05.000Z");
+    }
+  }
+
+  const harness = createUseChatEventsHarness({ DateImpl: FixedDate });
 
   harness.handleEvent({
     type: "projection_update",
@@ -2969,6 +2989,16 @@ test("useChatEvents: terminal cancellation settles the run as not successful", (
       },
     },
   });
+  harness.replaceMessages([
+    {
+      id: "text-live-run-1",
+      role: "assistant",
+      content: "unfinished draft",
+      turnRunId: "run-1",
+      isFinalReply: false,
+      isStreaming: true,
+    },
+  ]);
   harness.handleEvent({
     type: "projection_update",
     frame: {
@@ -2979,6 +3009,127 @@ test("useChatEvents: terminal cancellation settles the run as not successful", (
   });
 
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: false }]);
+  assert.deepEqual(plain(harness.messages), [
+    {
+      id: "stopped-run-1",
+      role: "system",
+      content: "Stopped",
+      timestamp: "2025-01-02T03:04:05.000Z",
+      turnRunId: "run-1",
+      runStatus: "cancelled",
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "cancelled" } }],
+      },
+    },
+  });
+  assert.equal(harness.messages.length, 1, "terminal replay stays deduplicated");
+});
+
+test("useChatEvents: a locally stopped run ignores buffered live frames until terminal cancellation settles", () => {
+  const harness = createUseChatEventsHarness();
+  harness.markLocallyStopped("run-1");
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          {
+            thinking: {
+              id: "run-1:late",
+              run_id: "run-1",
+              body: "late reasoning",
+            },
+          },
+          {
+            text: {
+              id: "text:run-1",
+              run_id: "run-1",
+              body: "late draft",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.messages, []);
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "cancelled" } },
+          {
+            text: {
+              id: "text:run-1",
+              run_id: "run-1",
+              body: "buffered after terminal cancellation",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, content }) => ({ id, content })),
+    [{ id: "stopped-run-1", content: "Stopped" }],
+  );
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-1", success: false },
+  ]);
+});
+
+test("useChatEvents: typed cancellation replaces the unfinished draft with a stopped notice", () => {
+  const harness = createUseChatEventsHarness();
+  harness.replaceMessages([
+    {
+      id: "text-live-run-typed",
+      role: "assistant",
+      content: "unfinished draft",
+      turnRunId: "run-typed",
+      isFinalReply: false,
+      isStreaming: true,
+    },
+  ]);
+
+  harness.handleEvent({
+    type: "cancelled",
+    frame: { run_state: { run_id: "run-typed", status: "Cancelled" } },
+  });
+
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, role, content, turnRunId, runStatus }) => ({
+      id,
+      role,
+      content,
+      turnRunId,
+      runStatus,
+    })),
+    [
+      {
+        id: "stopped-run-typed",
+        role: "system",
+        content: "Stopped",
+        turnRunId: "run-typed",
+        runStatus: "cancelled",
+      },
+    ],
+  );
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-typed", success: false },
+  ]);
 });
 
 test("useChatEvents: typed failed event settles the run as not successful", () => {

@@ -146,6 +146,11 @@ fn milestones_compose_into_a_bounded_safe_reply_document() {
         !document.reasoning_open,
         "answer text closes the reasoning segment"
     );
+    assert_eq!(
+        document.phase,
+        ReplyPhase::Working,
+        "the first answer delta ends the thinking phase"
+    );
     assert_eq!(document.answer.text.as_str(), "Here is what I found.");
     assert!(!document.answer.finalized);
 

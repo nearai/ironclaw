@@ -1191,6 +1191,7 @@ registerPack("zh-CN", {
   "chat.deleteFailed": "无法删除此对话。",
   "chat.deleteBusy": "对话正在运行时无法删除。请先停止它，然后重试。",
   "chat.cancelFailed": "无法停止此任务。它可能仍在运行，请重试。",
+  "chat.runStopped": "已停止",
   "command.placeholder": "在此输入指令或进行查找...",
   "routine.searchPlaceholder": "搜寻常驻例程的名称、触发条件、或者任务行为",
   "routine.unavailable": "暂不支持例程操作",

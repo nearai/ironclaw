@@ -74,6 +74,10 @@ pub const SLACK_REPLY_CHECKPOINT_VERSION: u32 = 1;
 /// split into consecutive chunks of the same request.
 const SLACK_MARKDOWN_CHUNK_MAX_CHARS: usize = 12_000;
 
+/// Slack documents a 256-character limit for `task_update` chunks. Keep each
+/// user-visible task field within that boundary before it reaches the API.
+const SLACK_TASK_FIELD_MAX_CHARS: usize = 256;
+
 /// Sessions "in `processing` time out after one hour". A liveness point
 /// re-asserts `processing` once the last assertion is older than this.
 const SESSION_STATUS_REASSERT_AFTER: Duration = Duration::from_secs(30 * 60);
@@ -934,7 +938,7 @@ fn resolve_route(request: &ReplyReconcileRequest) -> Result<SlackReplyRoute, Rep
 #[cfg(test)]
 mod tests {
     use ironclaw_extension_contracts::reply::{
-        REPLY_SINK_CHECKPOINT_MAX_BYTES, ReplyActivityState,
+        REPLY_SINK_CHECKPOINT_MAX_BYTES, ReplyActivityState, ReplyPhase, ReplyReasoningText,
     };
 
     use super::checkpoint::fingerprint;
@@ -972,6 +976,69 @@ mod tests {
         assert_eq!(normalize_for_match("**bold** _it_ `x` 世界"), "bolditx世界");
         let long = "a".repeat(READ_BACK_TAIL_CHARS + 10);
         assert_eq!(normalized_tail(&long).chars().count(), READ_BACK_TAIL_CHARS);
+    }
+
+    #[test]
+    fn thinking_phase_opens_a_real_task_without_inventing_reasoning() {
+        let document = ReplyDocument {
+            phase: ReplyPhase::Thinking,
+            ..ReplyDocument::default()
+        };
+
+        let plan = plan_chunks(&document, &SlackReplyCheckpoint::default(), 0, "", None)
+            .expect("thinking is append-only");
+
+        assert_eq!(
+            plan.chunks,
+            vec![json!({
+                "type": "task_update",
+                "id": "ironclaw-thinking-0",
+                "title": "Thinking",
+                "status": "in_progress",
+            })],
+            "the semantic phase opens Slack's native timeline immediately without fake prose"
+        );
+    }
+
+    #[test]
+    fn approved_reasoning_updates_then_completes_the_same_slack_task() {
+        let mut document = ReplyDocument {
+            phase: ReplyPhase::Thinking,
+            ..ReplyDocument::default()
+        };
+        document.reasoning =
+            vec![ReplyReasoningText::new("Comparing the two trail profiles").expect("reasoning")];
+        document.reasoning_open = true;
+        let mut checkpoint = SlackReplyCheckpoint::default();
+
+        let in_progress =
+            plan_chunks(&document, &checkpoint, 0, "", None).expect("reasoning is append-only");
+        assert_eq!(
+            in_progress.chunks,
+            vec![json!({
+                "type": "task_update",
+                "id": "ironclaw-thinking-0",
+                "title": "Thinking",
+                "status": "in_progress",
+                "details": "Comparing the two trail profiles",
+            })]
+        );
+        checkpoint.tasks.extend(in_progress.applied.tasks);
+
+        document.phase = ReplyPhase::Working;
+        document.reasoning_open = false;
+        let complete =
+            plan_chunks(&document, &checkpoint, 0, "", None).expect("completion is append-only");
+        assert_eq!(
+            complete.chunks,
+            vec![json!({
+                "type": "task_update",
+                "id": "ironclaw-thinking-0",
+                "title": "Thinking",
+                "status": "complete",
+                "output": "Comparing the two trail profiles",
+            })]
+        );
     }
 
     #[test]

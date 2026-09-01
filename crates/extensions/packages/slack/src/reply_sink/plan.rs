@@ -7,12 +7,12 @@
 
 use ironclaw_extension_contracts::reply::{
     ReplyActivity, ReplyActivityState, ReplyAttention, ReplyAttentionKind, ReplyDocument,
-    ReplyOutcome,
+    ReplyOutcome, ReplyPhase,
 };
 use serde_json::{Value, json};
 
-use super::SLACK_MARKDOWN_CHUNK_MAX_CHARS;
 use super::checkpoint::{SlackAppliedState, SlackReplyCheckpoint, char_prefix, fingerprint};
+use super::{SLACK_MARKDOWN_CHUNK_MAX_CHARS, SLACK_TASK_FIELD_MAX_CHARS};
 
 // ── Chunk planning ───────────────────────────────────────────────────────
 
@@ -51,6 +51,8 @@ pub(super) fn plan_chunks(
         to_hash: from_hash.to_string(),
         ..SlackAppliedState::default()
     };
+
+    append_thinking_tasks(document, checkpoint, &mut chunks, &mut applied);
 
     for activity in &document.activities {
         let id = activity.id.as_str();
@@ -110,6 +112,85 @@ pub(super) fn plan_chunks(
     Ok(ChunkPlan { chunks, applied })
 }
 
+/// Render the semantic thinking phase and product-approved reasoning summaries
+/// as Slack-native timeline tasks. The projection decides what is safe to
+/// disclose; this edge only maps the disclosed document into Slack's shape.
+fn append_thinking_tasks(
+    document: &ReplyDocument,
+    checkpoint: &SlackReplyCheckpoint,
+    chunks: &mut Vec<Value>,
+    applied: &mut SlackAppliedState,
+) {
+    for (index, reasoning) in document.reasoning.iter().enumerate() {
+        let in_progress = document.phase == ReplyPhase::Thinking
+            && document.reasoning_open
+            && index + 1 == document.reasoning.len();
+        append_thinking_task(
+            index,
+            in_progress,
+            Some(reasoning.as_str()),
+            checkpoint,
+            chunks,
+            applied,
+        );
+    }
+
+    let placeholder_index = document.reasoning.len();
+    if document.phase == ReplyPhase::Thinking && !document.reasoning_open {
+        append_thinking_task(placeholder_index, true, None, checkpoint, chunks, applied);
+    } else {
+        let placeholder_id = thinking_task_id(placeholder_index);
+        if checkpoint.tasks.contains_key(&placeholder_id) {
+            append_thinking_task(placeholder_index, false, None, checkpoint, chunks, applied);
+        }
+    }
+}
+
+fn append_thinking_task(
+    index: usize,
+    in_progress: bool,
+    reasoning: Option<&str>,
+    checkpoint: &SlackReplyCheckpoint,
+    chunks: &mut Vec<Value>,
+    applied: &mut SlackAppliedState,
+) {
+    let id = thinking_task_id(index);
+    let status = if in_progress {
+        "in_progress"
+    } else {
+        "complete"
+    };
+    let disclosed = reasoning.map(slack_task_field);
+    let fingerprint = fingerprint(&[status, disclosed.as_deref().unwrap_or("")]);
+    if checkpoint.tasks.get(&id) == Some(&fingerprint) {
+        return;
+    }
+
+    let mut chunk = json!({
+        "type": "task_update",
+        "id": id,
+        "title": "Thinking",
+        "status": status,
+    });
+    if let Some(disclosed) = disclosed {
+        if in_progress {
+            chunk["details"] = json!(disclosed);
+        } else {
+            chunk["output"] = json!(disclosed);
+        }
+    }
+    chunks.push(chunk);
+    applied.tasks.insert(id, fingerprint);
+}
+
+fn thinking_task_id(index: usize) -> String {
+    format!("ironclaw-thinking-{index}")
+}
+
+fn slack_task_field(value: &str) -> String {
+    value.chars().take(SLACK_TASK_FIELD_MAX_CHARS).collect()
+}
+
 fn task_update_chunk(activity: &ReplyActivity) -> Value {
     let (status, fallback_details) = match &activity.state {
         ReplyActivityState::Started => ("in_progress", None),
@@ -119,7 +200,7 @@ fn task_update_chunk(activity: &ReplyActivity) -> Value {
     let mut chunk = json!({
         "type": "task_update",
         "id": activity.id.as_str(),
-        "title": activity.title.as_str(),
+        "title": slack_task_field(activity.title.as_str()),
         "status": status,
     });
     let details = activity
@@ -128,10 +209,10 @@ fn task_update_chunk(activity: &ReplyActivity) -> Value {
         .map(|detail| detail.as_str().to_string())
         .or(fallback_details);
     if let Some(details) = details {
-        chunk["details"] = json!(details);
+        chunk["details"] = json!(slack_task_field(&details));
     }
     if let Some(output) = &activity.output_preview {
-        chunk["output"] = json!(output.as_str());
+        chunk["output"] = json!(slack_task_field(output.as_str()));
     }
     chunk
 }

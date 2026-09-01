@@ -953,6 +953,32 @@ test("mergeFullRefresh keeps run failures beside the prompt that failed", () => 
   assert.equal(firstFailure + 1, secondPrompt);
 });
 
+test("mergeFullRefresh keeps a stopped notice when the durable timeline refreshes", () => {
+  const context = { globalThis: {}, React: createReactStub() };
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  const { mergeFullRefresh } = context.globalThis.__testExports;
+
+  const merged = mergeFullRefresh(
+    [{ id: "msg-user-1", role: "user", turnRunId: "run-1" }],
+    [
+      { id: "msg-user-1", role: "user", turnRunId: "run-1" },
+      {
+        id: "stopped-run-1",
+        role: "system",
+        content: "Stopped",
+        turnRunId: "run-1",
+        runStatus: "cancelled",
+      },
+    ],
+  );
+
+  assert.equal(
+    merged.map(({ id }) => id).join(","),
+    "msg-user-1,stopped-run-1",
+  );
+  assert.equal(merged[1].content, "Stopped");
+});
+
 test("mergeFullRefresh keeps a failed request with its client-only prompt", () => {
   const context = { globalThis: {}, React: createReactStub() };
   vm.runInNewContext(useHistorySourceForTest(), context);

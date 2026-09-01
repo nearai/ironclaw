@@ -514,6 +514,12 @@ fn fold_milestone(run: &mut RunReply, kind: &LoopHostMilestoneKind, folded: &mut
         LoopHostMilestoneKind::ModelTextDelta { safe_text } => {
             let text = sanitize_model_visible_text(safe_text.as_str());
             let stripped = strip_control(&text);
+            if !stripped.is_empty() {
+                folded.note(
+                    run.document
+                        .note_phase(ironclaw_extension_contracts::reply::ReplyPhase::Working),
+                );
+            }
             run.fold_answer(&stripped, folded);
         }
         LoopHostMilestoneKind::ModelCompleted { .. } => run.close_text_phase(),

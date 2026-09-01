@@ -1191,6 +1191,7 @@ registerPack("fr", {
   "common.deleteChat": "Supprimer le chat",
   "chat.deleteFailed": "Impossible de supprimer cette conversation.",
   "chat.cancelFailed": "Impossible d'arrêter cette exécution. Elle est peut-être toujours en cours. Réessayez.",
+  "chat.runStopped": "Arrêté",
   "chat.deleteBusy": "Impossible de supprimer une conversation en cours d'exécution. Arrêtez-la d'abord, puis réessayez.",
   "command.placeholder": "Tapez une commande ou recherchez...",
   "routine.searchPlaceholder": "Rechercher le nom, le déclencheur ou l'action de la routine",

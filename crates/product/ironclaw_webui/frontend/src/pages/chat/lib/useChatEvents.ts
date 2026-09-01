@@ -104,6 +104,7 @@ export function useChatEvents({
       //   promptRunId — run id whose gate prompt is on screen.
       const {
         settledRuns: settledRunsRef,
+        locallyStoppedRuns: locallyStoppedRunsRef,
         latestRunId: latestRunIdRef,
         promptRunId: promptRunIdRef,
       } = runTrackingRef.current;
@@ -116,6 +117,7 @@ export function useChatEvents({
       switch (type) {
         case "accepted": {
           const ack = frame.ack || {};
+          if (isLocallyStoppedRun(locallyStoppedRunsRef, ack.run_id)) return;
           if (ack.run_id) latestRunIdRef.current = ack.run_id;
           noteConnectionInterruptedRunId(ack.run_id);
           setActiveRun?.({
@@ -130,6 +132,9 @@ export function useChatEvents({
         case "running":
         case "capability_progress": {
           const progress = frame.progress || {};
+          const progressRunId =
+            progress.turn_run_id || activeRunRef?.current?.runId || null;
+          if (isLocallyStoppedRun(locallyStoppedRunsRef, progressRunId)) return;
           if (progress.turn_run_id) {
             latestRunIdRef.current = progress.turn_run_id;
             noteConnectionInterruptedRunId(progress.turn_run_id);
@@ -166,6 +171,14 @@ export function useChatEvents({
               batchRunId: null,
             }),
           );
+          if (
+            isLocallyStoppedRun(
+              locallyStoppedRunsRef,
+              scopedActivity?.turn_run_id,
+            )
+          ) {
+            return;
+          }
           upsertToolActivityMessage(
             setMessages,
             toolCardFromActivity(scopedActivity),
@@ -192,6 +205,14 @@ export function useChatEvents({
             }),
           );
           const card = toolCardFromPreview(scopedPreview);
+          if (
+            isLocallyStoppedRun(
+              locallyStoppedRunsRef,
+              scopedPreview?.turn_run_id,
+            )
+          ) {
+            return;
+          }
           upsertToolActivityMessage(setMessages, card, toolActivityStateRef);
           return;
         }
@@ -200,6 +221,9 @@ export function useChatEvents({
         case "auth_required": {
           const pending = gateFromEvent(type, frame.prompt);
           if (pending) {
+            if (isLocallyStoppedRun(locallyStoppedRunsRef, pending.runId)) {
+              return;
+            }
             ensureGateToolActivity(setMessages, pending, toolActivityStateRef);
             setPendingGate(pending);
             setActiveRun?.({
@@ -215,6 +239,7 @@ export function useChatEvents({
         case "final_reply": {
           const reply = frame.reply || {};
           const turnRunId = reply.turn_run_id || null;
+          if (isLocallyStoppedRun(locallyStoppedRunsRef, turnRunId)) return;
           if (turnRunId && latestRunIdRef) {
             latestRunIdRef.current = turnRunId;
           }
@@ -241,6 +266,7 @@ export function useChatEvents({
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
+          appendRunStoppedMessage(setMessages, { runId, t });
           settleRun(settledRunsRef, onRunSettled, runId, false);
           return;
         }
@@ -301,6 +327,7 @@ export function useChatEvents({
             setActiveRun,
             onRunSettled,
             settledRunsRef,
+            locallyStoppedRunsRef,
             latestRunIdRef,
             promptRunIdRef,
             activeRunRef,
@@ -345,6 +372,10 @@ function settleRun(settledRunsRef, onRunSettled, runId, success) {
   if (settledRunsRef.current.has(runId)) return;
   settledRunsRef.current.add(runId);
   onRunSettled(runId, { success });
+}
+
+function isLocallyStoppedRun(locallyStoppedRunsRef, runId) {
+  return Boolean(runId && locallyStoppedRunsRef?.current?.has(runId));
 }
 
 const TERMINAL_RUN_STATUSES = new Set([
@@ -434,6 +465,7 @@ function applyProjectionItems({
   setActiveRun,
   onRunSettled,
   settledRunsRef,
+  locallyStoppedRunsRef,
   latestRunIdRef,
   promptRunIdRef,
   activeRunRef,
@@ -483,6 +515,12 @@ function applyProjectionItems({
         failure_summary: failureSummary,
       } = item.run_status;
       const isTerminalStatus = TERMINAL_RUN_STATUSES.has(status);
+      if (
+        !isTerminalStatus &&
+        isLocallyStoppedRun(locallyStoppedRunsRef, runId)
+      ) {
+        continue;
+      }
       const locallyPinnedRunId =
         activeRunRef?.current?.source === "local" ? activeRunRef.current.runId : null;
       const isStaleLocalRunStatus = Boolean(
@@ -608,6 +646,8 @@ function applyProjectionItems({
             connectionContextForRunFailure,
             t,
           });
+        } else if (status === "cancelled") {
+          appendRunStoppedMessage(setMessages, { runId, t });
         }
       } else if (!PROMPT_RUN_STATUSES.has(status)) {
         clearPendingGateForRun(setPendingGate, runId, promptRunIdRef);
@@ -627,6 +667,9 @@ function applyProjectionItems({
       const textRunId = item.text.run_id || null;
       const finalizedText = item.text.finalized === true;
       const messageId = `${finalizedText ? "msg" : "text"}-${item.text.id}`;
+      if (isLocallyStoppedRun(locallyStoppedRunsRef, textRunId)) {
+        continue;
+      }
       if (
         textRunId &&
         FAILURE_RUN_STATUSES.has(batchRunStatusByRunId.get(textRunId))
@@ -699,6 +742,14 @@ function applyProjectionItems({
     }
 
     if (item.thinking) {
+      if (
+        isLocallyStoppedRun(
+          locallyStoppedRunsRef,
+          item.thinking.run_id || null,
+        )
+      ) {
+        continue;
+      }
       const messageId = `thinking-${item.thinking.id}`;
       setMessages((prev) => {
         const existing = prev.findIndex((m) => m.id === messageId);
@@ -731,6 +782,14 @@ function applyProjectionItems({
             batchRunId: unambiguousBatchRunId,
           }),
         );
+        if (
+          isLocallyStoppedRun(
+            locallyStoppedRunsRef,
+            scopedActivity?.turn_run_id,
+          )
+        ) {
+          continue;
+        }
         upsertToolActivityMessage(
           setMessages,
           toolCardFromActivity(scopedActivity),
@@ -744,6 +803,7 @@ function applyProjectionItems({
       const runId = pendingGate?.runId || null;
       if (
         runId &&
+        !isLocallyStoppedRun(locallyStoppedRunsRef, runId) &&
         !isObsoleteProjectionGate(
           activeRunRef,
           pendingGate,
@@ -840,6 +900,8 @@ function settleTerminalRunAfterResolvedPrompt({
       connectionContextForRunFailure,
       t,
     });
+  } else if (status === "cancelled") {
+    appendRunStoppedMessage(setMessages, { runId, t });
   }
 }
 
@@ -949,6 +1011,27 @@ function withoutStreamingAssistantPhaseForRun(messages, runId) {
       ),
   );
   return next.length === messages.length ? messages : next;
+}
+
+export function appendRunStoppedMessage(setMessages, { runId, t }) {
+  const messageId = `stopped-${runId || "unknown"}`;
+  setMessages((prev) => {
+    const visibleMessages = withoutStreamingAssistantPhaseForRun(prev, runId);
+    if (visibleMessages.some((message) => message.id === messageId)) {
+      return visibleMessages;
+    }
+    return [
+      ...visibleMessages,
+      {
+        id: messageId,
+        role: "system",
+        content: t("chat.runStopped"),
+        timestamp: new Date().toISOString(),
+        turnRunId: runId,
+        runStatus: "cancelled",
+      },
+    ];
+  });
 }
 
 // A projection can report an unknown run failure before the send response maps

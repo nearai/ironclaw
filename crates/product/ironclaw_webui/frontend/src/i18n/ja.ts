@@ -1191,6 +1191,7 @@ registerPack("ja", {
   "common.deleteChat": "チャットを削除",
   "chat.deleteFailed": "この会話を削除できませんでした。",
   "chat.cancelFailed": "この実行を停止できませんでした。まだ実行中の可能性があります。もう一度お試しください。",
+  "chat.runStopped": "停止しました",
   "chat.deleteBusy": "実行中の会話は削除できません。先に停止してから、もう一度お試しください。",
   "command.placeholder": "コマンドを入力するか検索...",
   "routine.searchPlaceholder": "ルーチン名、トリガー、またはアクションを検索",

@@ -23,6 +23,11 @@ export function createRunTrackingState() {
     // Run ids already handed to `onRunSettled`, so SSE replays (reconnect
     // with last-event-id, repeated snapshots) settle each run exactly once.
     settledRuns: { current: new Set() },
+    // Runs whose cancellation request the server accepted. Buffered live
+    // frames can still arrive before the terminal cancellation projection;
+    // fence those frames without marking the run settled early, because the
+    // terminal event still owns the durable timeline refresh.
+    locallyStoppedRuns: { current: new Set() },
     // Most recent run id observed on this thread. Used to reject stale
     // terminal statuses and to scope capability frames that omit a run id.
     latestRunId: { current: null },

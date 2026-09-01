@@ -25,7 +25,8 @@ pub(super) struct SlackReplyCheckpoint {
     pub(super) session_status: SlackSessionStatus,
     #[serde(default)]
     pub(super) stream: Option<SlackStreamState>,
-    /// Activity id → fingerprint of the last `task_update` sent for it.
+    /// Presentation task id → fingerprint of the last `task_update` sent for
+    /// it (activities and the semantic thinking timeline).
     #[serde(default)]
     pub(super) tasks: BTreeMap<String, String>,
     /// Activities with `started_ordinal` below this and no fingerprint entry
