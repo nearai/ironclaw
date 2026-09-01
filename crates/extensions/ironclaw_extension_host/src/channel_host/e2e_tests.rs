@@ -2723,6 +2723,128 @@ async fn slack_in_thread_mentions_each_run_in_their_own_thread_replying_in_the_v
     }
 }
 
+/// Regression for the explicit-mention deduplication collision: Slack may
+/// describe one post with both a `message` callback and an authoritative
+/// `app_mention` callback. If the configured bot member id is stale, the
+/// `message` shape cannot prove which user was mentioned, so it must be ignored
+/// before durable admission rather than consume the identity the later
+/// `app_mention` needs to start the turn.
+#[tokio::test]
+async fn slack_explicit_mention_survives_reply_shaped_twin_arriving_first() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "mention reply".into(),
+    })
+    .await;
+
+    let response = harness.post_event(STALE_ID_THREAD_MESSAGE_TWIN).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness.post_event(STALE_ID_THREAD_APP_MENTION_TWIN).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(STALE_ID_THREAD_MESSAGE_TWIN, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(STALE_ID_THREAD_APP_MENTION_TWIN, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "the authoritative app_mention must start one turn even when its \
+         ambiguous message twin arrived first"
+    );
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1, "the user must receive exactly one reply");
+    assert_eq!(messages[0]["channel"], "C891");
+    assert_eq!(messages[0]["text"], "mention reply");
+    assert_eq!(messages[0]["thread_ts"], "1710000007.000001");
+}
+
+#[tokio::test]
+async fn slack_explicit_mention_remains_single_when_authoritative_twin_arrives_first() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "mention reply".into(),
+    })
+    .await;
+
+    let response = harness.post_event(STALE_ID_THREAD_APP_MENTION_TWIN).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "an app_mention must start a turn without waiting for a message twin"
+    );
+    assert_eq!(harness.slack_messages().len(), 1);
+
+    let response = harness.post_event(STALE_ID_THREAD_MESSAGE_TWIN).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(STALE_ID_THREAD_APP_MENTION_TWIN, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(STALE_ID_THREAD_MESSAGE_TWIN, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "the ambiguous message twin and callback retries must not add a turn"
+    );
+    assert_eq!(
+        harness.slack_messages().len(),
+        1,
+        "the user must receive exactly one threaded reply"
+    );
+}
+
+#[tokio::test]
+async fn slack_text_only_mention_runs_while_ordinary_thread_reply_remains_noop() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "text mention reply".into(),
+    })
+    .await;
+
+    let response = harness.post_event(TEXT_ONLY_THREAD_MENTION).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "a correctly configured message callback must not need an app_mention twin"
+    );
+    assert_eq!(harness.slack_messages().len(), 1);
+
+    let response = harness.post_event(ORDINARY_THREAD_REPLY).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness.post_retry_event(ORDINARY_THREAD_REPLY, 1).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness.post_event(THIRD_PARTY_THREAD_MENTION).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(THIRD_PARTY_THREAD_MENTION, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "ordinary thread chatter, including third-party mentions, must remain silent"
+    );
+    assert_eq!(
+        harness.slack_messages().len(),
+        1,
+        "ordinary thread chatter must not produce another bot reply"
+    );
+}
+
 /// Ephemeral-per-ping: pairing mid-thread. Unpaired carol is nudged in place
 /// while A's thread is ACTIVE (channel-level ephemeral connect notice, no run);
 /// carol pairs through the harness pairing seam; her next message is then served
@@ -4794,6 +4916,45 @@ const IN_THREAD_MENTION_BOB: &str = r#"{
   "api_app_id":"A-slack",
   "event_id":"Ev-inthread-bob",
   "event":{"type":"app_mention","user":"U456","channel":"C890","text":"<@UBOT> bob follows up here","ts":"1710000006.000003","thread_ts":"1710000006.000001"}
+}"#;
+
+// Both callbacks describe the same Slack post (`channel` + `ts`) but have
+// distinct envelope event ids. The configured bot id in this harness is
+// `UBOT`, while the text names `UACTUALBOT`, so only the authoritative
+// `app_mention` callback classifies as `BotMention` before the fix.
+const STALE_ID_THREAD_MESSAGE_TWIN: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-stale-twin-message",
+  "event":{"type":"message","user":"U123","channel":"C891",
+           "text":"<@UACTUALBOT> investigate","thread_ts":"1710000007.000001",
+           "ts":"1710000007.000002"}
+}"#;
+
+const STALE_ID_THREAD_APP_MENTION_TWIN: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-stale-twin-app-mention",
+  "event":{"type":"app_mention","user":"U123","channel":"C891",
+           "text":"<@UACTUALBOT> investigate","thread_ts":"1710000007.000001",
+           "ts":"1710000007.000002"}
+}"#;
+
+const TEXT_ONLY_THREAD_MENTION: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-text-only-mention",
+  "event":{"type":"message","user":"U123","channel":"C894",
+           "text":"<@UBOT> investigate","thread_ts":"1710000010.000001",
+           "ts":"1710000010.000002"}
+}"#;
+
+const ORDINARY_THREAD_REPLY: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-ordinary-thread-reply",
+  "event":{"type":"message","user":"U123","channel":"C894",
+           "text":"thanks everyone","thread_ts":"1710000010.000001",
+           "ts":"1710000010.000003"}
+}"#;
+
+const THIRD_PARTY_THREAD_MENTION: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-third-party-thread-mention",
+  "event":{"type":"message","user":"U123","channel":"C894",
+           "text":"<@U456> thanks","thread_ts":"1710000010.000001",
+           "ts":"1710000010.000004"}
 }"#;
 
 // ── Pairing-mid-thread fixtures (#7377) ──────────────────────────────────────
