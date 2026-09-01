@@ -81,24 +81,26 @@ export function SettingsField({ field, value, onSave, isSaved }) {
                   handleCommit(nextValue);
                 }}
                 ariaLabel={label}
-                className="w-36"
+                className="!min-w-0 w-36"
               />
             )
           : (
-              <Input
-                type={field.type === "float" || field.type === "number" ? "number" : "text"}
-                value={localValue}
-                onChange={(e) => setLocalValue(e.currentTarget.value)}
-                onBlur={(e) => handleCommit(e.currentTarget.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleCommit(e.currentTarget.value)}
-                step={field.step !== undefined ? String(field.step) : field.type === "float" ? "any" : "1"}
-                min={field.min !== undefined ? String(field.min) : undefined}
-                max={field.max !== undefined ? String(field.max) : undefined}
-                placeholder={t("tools.default")}
-                aria-label={label}
-                size="sm"
-                className="w-36 text-right font-mono"
-              />
+              <div className="w-36">
+                <Input
+                  type={field.type === "float" || field.type === "number" ? "number" : "text"}
+                  value={localValue}
+                  onChange={(e) => setLocalValue(e.currentTarget.value)}
+                  onBlur={(e) => handleCommit(e.currentTarget.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleCommit(e.currentTarget.value)}
+                  step={field.step !== undefined ? String(field.step) : field.type === "float" ? "any" : "1"}
+                  min={field.min !== undefined ? String(field.min) : undefined}
+                  max={field.max !== undefined ? String(field.max) : undefined}
+                  placeholder={t("tools.default")}
+                  aria-label={label}
+                  size="sm"
+                  className="text-right font-mono"
+                />
+              </div>
             )}
         <SavedIndicator visible={isSaved} />
       </div>

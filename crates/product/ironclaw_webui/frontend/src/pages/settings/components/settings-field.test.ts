@@ -114,6 +114,7 @@ test("SettingsField uses the shared Input and preserves numeric constraints and 
   const props = componentProps(inputNode, Input);
   assert.equal(props.type, "number");
   assert.equal(props.size, "sm");
+  assert.equal(props.className, "text-right font-mono");
   assert.equal(props.step, "0.1");
   assert.equal(props.min, "0");
   assert.equal(props.max, "1");
@@ -148,6 +149,7 @@ test("SettingsField uses the shared SelectMenu and preserves the default option"
   assert.ok(selectNode, "expected select settings field to render the shared SelectMenu");
   const props = componentProps(selectNode, SelectMenu);
   assert.equal(props.ariaLabel, "Fusion strategy");
+  assert.equal(props.className, "!min-w-0 w-36");
   assert.deepEqual(JSON.parse(JSON.stringify(props.options)), [
     { label: "tools.default", value: "" },
     { label: "rrf", value: "rrf" },
