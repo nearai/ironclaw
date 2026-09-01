@@ -2098,7 +2098,9 @@ mod tests {
     /// independently-maintained copy that a shape-only rename (no size change) could silently break.
     #[test]
     fn tool_search_worst_case_reply_wrapped_observation_fits_the_first_look_ceiling() {
-        use ironclaw_host_api::model_result_preview::MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES;
+        use ironclaw_host_api::model_result_preview::{
+            MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES, MODEL_OBSERVATION_MAX_BYTES,
+        };
 
         /// Locally-derived expectation for the wrapped observation's fixed JSON scaffolding
         /// (schema_version/status/summary/detail tag/artifacts/trust, plus `result_ref` carried
@@ -2135,8 +2137,14 @@ mod tests {
              (94 '\"' characters at 2,482 B) -- if it drops below that, the test is no longer proving \
              what its own doc comment claims"
         );
-        let result_ref =
-            LoopResultRef::new("result:tool-search-worst-case").expect("valid result ref");
+        // Production-length ref, not a short literal. `result_reference_observation` carries the
+        // ref TWICE (`detail.result_ref` and `artifacts[0].artifact_ref`), so its length is a
+        // direct term in the envelope this test measures. Refs minted in a real run are 80 chars
+        // (1,164 of 1,167 observed in a pinchbench trace); a 29-char literal understates the
+        // envelope by ~100 B and would let the allowance look tighter than it is.
+        let ref_id = format!("result:{}", "t".repeat(73));
+        assert_eq!(ref_id.len(), 80, "keep this at the production ref length");
+        let result_ref = LoopResultRef::new(&ref_id).expect("valid result ref");
         let preview = first_look_result_preview(&serialized, &result_ref, None)
             .expect("worst-case reply is <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES, so it takes the verbatim pass-through branch, not the JSON pager");
         let observation =
@@ -2151,7 +2159,18 @@ mod tests {
         // change across magnitudes, a longer/shorter result_ref, a future added observation field)
         // without becoming flaky, while still failing if the allowance is raised without a matching
         // re-measurement.
-        let overhead = observation_bytes.saturating_sub(serialized.len());
+        // Isolate the FIXED envelope from the content-dependent escaping. `observation_bytes`
+        // contains the payload already JSON-string-escaped, so subtracting the RAW length would
+        // fold escaping into the measurement — and the producer charges escaping separately, via
+        // its own exact `json_string_escaped_len`. Subtracting the ESCAPED length is what leaves
+        // the fixed scaffolding this allowance is actually supposed to cover.
+        let escaped_len = serde_json::to_string(&serde_json::Value::String(
+            String::from_utf8_lossy(&serialized).into_owned(),
+        ))
+        .expect("escaped payload serializes")
+        .len()
+            - 2; // the enclosing quotes belong to the envelope, not the payload
+        let overhead = observation_bytes.saturating_sub(escaped_len);
         let slack = OBSERVATION_WRAPPER_ALLOWANCE_FOR_TEST.saturating_sub(overhead);
         assert!(
             overhead <= OBSERVATION_WRAPPER_ALLOWANCE_FOR_TEST,
@@ -2161,9 +2180,19 @@ mod tests {
             slack <= 100,
             "wrapper allowance ({OBSERVATION_WRAPPER_ALLOWANCE_FOR_TEST} B) is {slack} B more than the measured overhead ({overhead} B) -- the allowance is now wastefully generous, eating into rank 1's headroom for no reason; lower it (or justify the growth) rather than leaving slack unexplained"
         );
+        // The WRAPPED observation is bounded by MODEL_OBSERVATION_MAX_BYTES (4 KiB) — the ceiling
+        // above which `result_reference_observation` drops `preview`. It is NOT bounded by
+        // MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES (3 KiB); that one governs the RAW reply, upstream, and
+        // asserting the wrapped size against it is the same raw-vs-wrapped conflation this test
+        // exists to pin. A worst-case reply legitimately wraps to ~3.1 KB and is delivered intact.
         assert!(
-            observation_bytes <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES,
-            "got {observation_bytes} bytes, over the shared first-look ceiling"
+            observation_bytes <= MODEL_OBSERVATION_MAX_BYTES,
+            "got {observation_bytes} bytes, over the observation ceiling ({MODEL_OBSERVATION_MAX_BYTES}) — preview would be dropped"
+        );
+        assert!(
+            serialized.len() <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES,
+            "raw reply {} B is over the first-look ceiling, so it would take the paging path",
+            serialized.len()
         );
     }
 

@@ -10,7 +10,7 @@ use ironclaw_common::truncate_preview;
 use ironclaw_host_api::{
     capability_surface::CapabilitySurfacePolicy,
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId},
-    model_result_preview::MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES,
+    model_result_preview::{MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES, MODEL_OBSERVATION_MAX_BYTES},
     resolution::{Resolution, ResolutionBatch},
     result_meta::FailureKind,
 };
@@ -376,16 +376,24 @@ fn json_string_escaped_len(raw: &str) -> usize {
 /// #7984 defect: a reply that fit under the old raw-byte check could still blow the embedded
 /// observation's budget once escaped.
 ///
-/// **Why checking only this one rule is sufficient AND conservative:** `raw_len <= escaped_len`
-/// always (escaping only ever adds bytes, never removes them), so any candidate passing this
-/// check also satisfies `first_look_result_preview`'s raw-bytes-<=-3,072-B verbatim-pass-through
-/// condition; and `MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES` (3,072 B) is itself well under
-/// `RESULT_OBSERVATION_MAX_BYTES` (4,096 B,
-/// `crates/app/ironclaw_composition/src/runtime/capability_host/result_preview.rs:9`) — a
-/// candidate that fits inside 3,072 B leaves >1 KiB of margin for the observation's own fixed
-/// JSON scaffolding (schema_version/status/summary/detail tag/artifacts/trust, plus `result_ref`
-/// carried twice), so it also fits inside the observation. One rule, both constraints, no new
-/// cross-crate constant.
+/// **Two ceilings, each checked against the quantity it actually governs.** They are different
+/// limits on different values, and collapsing them into one conservative rule silently degrades
+/// replies that would have been delivered intact:
+///
+/// 1. `raw_len <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES` (3,072 B) — `first_look_result_preview`
+///    measures the RAW reply to choose verbatim pass-through over the paging path. Fail this and
+///    the pager replaces `results` with one `omitted` descriptor (the #7928 defect).
+/// 2. `escaped_len + envelope <= MODEL_OBSERVATION_MAX_BYTES` (4,096 B) —
+///    `result_reference_observation` re-embeds the reply as a JSON-escaped string inside
+///    `detail.preview`. Fail this and it drops `preview` entirely, which reaches the model as the
+///    same nothing.
+///
+/// Escaping is content-dependent (~1 extra byte per `"` or `\`, and ordinary JSON is dense with
+/// `"`), so only check 2 can model it — that gap is the review finding this function closes. But
+/// check 2's ceiling is 4,096, NOT 3,072: measuring the *wrapped* size against the *raw* ceiling
+/// costs ~1 KiB of real headroom. Against the observed first-party corpus that alone degraded 7 of
+/// 121 replies out of their rank-1 schema for no delivery reason — every one of them wrapped to
+/// ~3.1 KB, comfortably inside 4,096.
 fn wrapped_reply_fits(candidate: &Value) -> bool {
     let Ok(serialized) = serde_json::to_vec(candidate) else {
         return false;
@@ -393,8 +401,11 @@ fn wrapped_reply_fits(candidate: &Value) -> bool {
     let Ok(raw) = std::str::from_utf8(&serialized) else {
         return false;
     };
+    if serialized.len() > MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES {
+        return false;
+    }
     json_string_escaped_len(raw).saturating_add(OBSERVATION_ENVELOPE_SCAFFOLDING_BYTES)
-        <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES
+        <= MODEL_OBSERVATION_MAX_BYTES
 }
 
 /// Builds the tool_search reply through an ordered degradation ladder — the first candidate whose

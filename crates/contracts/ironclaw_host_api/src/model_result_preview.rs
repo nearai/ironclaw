@@ -38,6 +38,19 @@ pub const MODEL_RESULT_JSON_PAGE_VIEW: &str = "ironclaw.json_page.v1";
 /// MODEL_RESULT_PREVIEW_MAX_BYTES (24 KiB result_read page bound).
 pub const MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES: usize = 3 * 1024;
 
+/// Ceiling the *wrapped* `ModelVisibleToolObservation` is measured against: above
+/// it, `result_reference_observation` drops `detail.preview` entirely and the model
+/// gets a reference-only "use result_read" observation instead of the content.
+///
+/// Distinct from [`MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES`], and the distinction is
+/// load-bearing: that constant bounds the RAW reply (it selects verbatim
+/// pass-through over the paging path), while this one bounds the raw reply once
+/// JSON-string-escaped into `preview` PLUS the observation's own envelope. A
+/// producer sizing itself to ride inline must satisfy both, each against the
+/// quantity it actually governs — checking the wrapped size against the raw
+/// ceiling rejects replies that would have been delivered intact.
+pub const MODEL_OBSERVATION_MAX_BYTES: usize = 4 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ModelResultJsonPageView {
     #[serde(rename = "ironclaw.json_page.v1")]
