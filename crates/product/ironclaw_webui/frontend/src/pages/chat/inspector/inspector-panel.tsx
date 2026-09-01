@@ -56,8 +56,8 @@ function EmptyTab({ title, description }: { title: string; description: string }
   return (
     <div className="grid min-h-48 place-items-center px-5 py-8 text-center">
       <div>
-        <p className="text-sm font-medium text-[var(--v2-text-strong)]">{title}</p>
-        <p className="mt-2 max-w-64 text-xs leading-5 text-[var(--v2-text-muted)]">
+        <p className="text-ui font-medium text-[var(--v2-text-strong)]">{title}</p>
+        <p className="mt-2 max-w-64 text-ui-sm leading-5 text-[var(--v2-text-muted)]">
           {description}
         </p>
       </div>
@@ -147,14 +147,14 @@ function PromptShell({
     <div className="space-y-4 p-4" data-testid="inspector-prompt-content">
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
-          <p className="text-xs text-[var(--v2-text-muted)]">{t("inspector.prompt.estimatedTokens")}</p>
-          <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">
+          <p className="text-ui-sm text-[var(--v2-text-muted)]">{t("inspector.prompt.estimatedTokens")}</p>
+          <p className="mt-1 text-title font-semibold text-[var(--v2-text-strong)]">
             {formatNumber(prompt.total_estimated_tokens, t("inspector.unavailable"))}
           </p>
         </div>
         <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
-          <p className="text-xs text-[var(--v2-text-muted)]">{t("inspector.prompt.contextLimit")}</p>
-          <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">
+          <p className="text-ui-sm text-[var(--v2-text-muted)]">{t("inspector.prompt.contextLimit")}</p>
+          <p className="mt-1 text-title font-semibold text-[var(--v2-text-strong)]">
             {formatNumber(prompt.context_limit, t("inspector.unavailable"))}
           </p>
         </div>
@@ -173,7 +173,7 @@ function PromptShell({
           </div>
         </div>
       )}
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-ui-sm">
         <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.prompt.effectiveModel")}</dt><dd>{prompt.effective_model?.content || t("inspector.unavailable")}</dd></div>
         <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.prompt.requestedModel")}</dt><dd>{prompt.requested_model?.content || t("inspector.default")}</dd></div>
         <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.prompt.messages")}</dt><dd>{prompt.message_count}</dd></div>
@@ -183,7 +183,7 @@ function PromptShell({
       </dl>
       {prompt.active_skills.length > 0 && (
         <div>
-          <p className="text-xs text-[var(--v2-text-faint)]">{t("inspector.prompt.activeSkills")}</p>
+          <p className="text-ui-sm text-[var(--v2-text-faint)]">{t("inspector.prompt.activeSkills")}</p>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {prompt.active_skills.map((skill, index) => (
               <span key={`${skill.content}-${index}`} className="rounded-full bg-[var(--v2-surface-soft)] px-2 py-1 text-[11px]">
@@ -194,14 +194,14 @@ function PromptShell({
         </div>
       )}
       {anyTruncated && (
-        <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]">
+        <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-ui-sm text-[var(--v2-warning-text)]">
           {t("inspector.prompt.truncatedNotice")}
         </p>
       )}
       <div className="space-y-2">
         {prompt.components.map((component, index) => (
           <details key={`${component.label.content}-${index}`} className="rounded-xl border border-[var(--v2-panel-border)]">
-            <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-[var(--v2-text-strong)]">
+            <summary className="cursor-pointer list-none px-3 py-2 text-ui-sm font-medium text-[var(--v2-text-strong)]">
               <span>{component.label.content}</span>
               <span className="ml-2 font-normal text-[var(--v2-text-faint)]">
                 {component.kind} · {t("inspector.prompt.tokenCount", {
@@ -217,7 +217,7 @@ function PromptShell({
         ))}
       </div>
       <details className="rounded-xl border border-[var(--v2-panel-border)]">
-        <summary className="cursor-pointer px-3 py-2 text-xs font-medium">{t("inspector.prompt.fullReconstruction")}</summary>
+        <summary className="cursor-pointer px-3 py-2 text-ui-sm font-medium">{t("inspector.prompt.fullReconstruction")}</summary>
         <div className="border-t border-[var(--v2-panel-border)] p-3">
           <p className="mb-3 text-[11px] leading-5 text-[var(--v2-text-faint)]">
             {t("inspector.prompt.reconstructionNotice")}
@@ -325,11 +325,11 @@ function TurnNavigation({
         aria-label={t("inspector.navigation.previousLabel")}
         disabled={!previousRun}
         onClick={() => previousRun && onSelectRun(previousRun)}
-        className="rounded px-2 py-1 text-xs disabled:opacity-40"
+        className="rounded px-2 py-1 text-ui-sm disabled:opacity-40"
       >
         ← {t("inspector.navigation.previous")}
       </button>
-      <p className="text-center text-xs text-[var(--v2-text-muted)]">
+      <p className="text-center text-ui-sm text-[var(--v2-text-muted)]">
         {t("inspector.navigation.position", {
           current: selectedIndex >= 0 ? selectedIndex + 1 : 0,
           total: runHistory.length,
@@ -341,7 +341,7 @@ function TurnNavigation({
             type="button"
             aria-label={t("inspector.navigation.latestLabel")}
             onClick={() => onSelectRun(latestRun)}
-            className="rounded px-2 py-1 text-xs font-medium text-[var(--v2-accent-text)]"
+            className="rounded px-2 py-1 text-ui-sm font-medium text-[var(--v2-accent-text)]"
           >
             {t("inspector.navigation.latest")}
           </button>
@@ -351,7 +351,7 @@ function TurnNavigation({
           aria-label={t("inspector.navigation.nextLabel")}
           disabled={!nextRun}
           onClick={() => nextRun && onSelectRun(nextRun)}
-          className="rounded px-2 py-1 text-xs disabled:opacity-40"
+          className="rounded px-2 py-1 text-ui-sm disabled:opacity-40"
         >
           {t("inspector.navigation.next")} →
         </button>
@@ -525,12 +525,12 @@ function ToolDetailDisclosure({
         type="button"
         aria-expanded={open}
         onClick={load}
-        className="text-xs font-medium text-[var(--v2-accent-text)]"
+        className="text-ui-sm font-medium text-[var(--v2-accent-text)]"
       >
         {open ? t("inspector.tool.hideDetails") : t("inspector.tool.showDetails")}
       </button>
       {open && (
-        <div className="mt-3 space-y-3 text-xs" data-testid={`inspector-tool-detail-${activityId}`}>
+        <div className="mt-3 space-y-3 text-ui-sm" data-testid={`inspector-tool-detail-${activityId}`}>
           {loading && <p role="status">{t("inspector.tool.loadingDetails")}</p>}
           {unavailable && <p role="status">{t("inspector.tool.unavailableDetails")}</p>}
           {tool && (
@@ -589,13 +589,13 @@ function ActivityEntry({
     <li className="rounded-xl border border-[var(--v2-panel-border)] p-3" data-activity-kind={entry.kind}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-medium text-[var(--v2-text-strong)]">
+          <p className="text-ui-sm font-medium text-[var(--v2-text-strong)]">
             {ACTIVITY_LABEL_KEYS[entry.kind]
               ? t(ACTIVITY_LABEL_KEYS[entry.kind])
               : entry.kind.replaceAll("_", " ")}
           </p>
           {entry.summary?.content && (
-            <p className="mt-1 break-words text-xs text-[var(--v2-text-muted)]">
+            <p className="mt-1 break-words text-ui-sm text-[var(--v2-text-muted)]">
               {summaryKey ? t(summaryKey) : entry.summary.content}
               {entry.summary.truncated ? "…" : ""}
             </p>
@@ -646,8 +646,8 @@ function metricValue(
 function MetricCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-xl border border-[var(--v2-panel-border)] p-3">
-      <p className="text-xs text-[var(--v2-text-muted)]">{label}</p>
-      <p className="mt-1 text-xl font-semibold text-[var(--v2-text-strong)]">{value}</p>
+      <p className="text-ui-sm text-[var(--v2-text-muted)]">{label}</p>
+      <p className="mt-1 text-title font-semibold text-[var(--v2-text-strong)]">{value}</p>
     </div>
   );
 }
@@ -673,7 +673,7 @@ function StreamHealth({
     ? observed.toLocaleTimeString()
     : t("inspector.stream.noUpdates");
   return (
-    <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-xs" data-testid="inspector-stream-health">
+    <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-ui-sm" data-testid="inspector-stream-health">
       <p className="font-medium text-[var(--v2-text-strong)]">{t("inspector.stream.title")}</p>
       <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2">
         <div><dt className="text-[var(--v2-text-faint)]">{t("inspector.stream.state")}</dt><dd data-testid="inspector-stream-state">{t(HEALTH_LABEL_KEYS[health])}</dd></div>
@@ -739,7 +739,7 @@ function StatsShell({
         <MetricCard label={t("inspector.stats.totalLatency")} value={metricValue(stats.total_latency_ms, stats.total_model_calls, t("inspector.unavailable"), " ms")} />
       </div>
       <StreamHealth {...{ health, reconnectCount, receivedUpdateCount, lastUpdateAt }} />
-      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-xs">
+      <div className="rounded-xl border border-[var(--v2-panel-border)] p-3 text-ui-sm">
         <p className="font-medium text-[var(--v2-text-strong)]">{t("inspector.stats.callsPerModel")}</p>
         {stats.calls_per_model.length === 0 ? (
           <p className="mt-2 text-[var(--v2-text-muted)]">{t("inspector.stats.noModelBreakdown")}</p>
@@ -755,7 +755,7 @@ function StatsShell({
         )}
       </div>
       {(partialMetricCount > 0 || stats.calls_per_model_truncated) && (
-        <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]">
+        <p role="status" className="rounded-lg bg-[var(--v2-surface-soft)] px-3 py-2 text-ui-sm text-[var(--v2-warning-text)]">
           {t("inspector.stats.partial", { count: partialMetricCount.toLocaleString() })}
           {stats.calls_per_model_truncated ? ` ${t("inspector.stats.modelBreakdownTruncated")}` : ""}
         </p>
@@ -771,7 +771,7 @@ function StatusNotice({ health, error }: { health: string; error: string | null 
     <div
       role="status"
       data-testid="inspector-status-notice"
-      className="m-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]"
+      className="m-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-ui-sm leading-5 text-[var(--v2-text-muted)]"
     >
       {error ? t(error) : t("inspector.error.disconnected")}
     </div>
@@ -869,10 +869,10 @@ function InspectorPanelCore({
       <header className="border-b border-[var(--v2-panel-border)] px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+            <h2 className="truncate text-ui font-semibold text-[var(--v2-text-strong)]">
               {t("inspector.title")}
             </h2>
-            <div className="mt-1 flex items-center gap-2 text-xs text-[var(--v2-text-muted)]">
+            <div className="mt-1 flex items-center gap-2 text-ui-sm text-[var(--v2-text-muted)]">
               <span
                 className={cn(
                   "h-2 w-2 rounded-full",
@@ -891,7 +891,7 @@ function InspectorPanelCore({
             aria-label={t("inspector.closeLabel")}
             data-testid="inspector-close"
             onClick={() => setOpen(false)}
-            className="rounded-lg px-2 py-1 text-lg leading-none text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)]"
+            className="rounded-lg px-2 py-1 text-title-sm leading-none text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)]"
           >
             ×
           </button>
@@ -913,7 +913,7 @@ function InspectorPanelCore({
             data-testid={`inspector-tab-${tab}`}
             onClick={() => setActiveTab(tab)}
             className={cn(
-              "flex-1 border-b-2 px-2 py-3 text-xs font-medium capitalize",
+              "flex-1 border-b-2 px-2 py-3 text-ui-sm font-medium capitalize",
               preferences.activeTab === tab
                 ? "border-[var(--v2-accent)] text-[var(--v2-accent-text)]"
                 : "border-transparent text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]",

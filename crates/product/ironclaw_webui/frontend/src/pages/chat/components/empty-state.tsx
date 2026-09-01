@@ -62,12 +62,12 @@ export function EmptyState({
     >
       <div className="w-full max-w-5xl text-center">
         <h2
-          className="mx-auto max-w-[16ch] text-4xl font-semibold leading-[1.04] text-white sm:text-5xl lg:text-6xl"
+          className="mx-auto max-w-[16ch] text-4xl font-semibold leading-[1.04] text-[var(--v2-text-strong)] sm:text-5xl lg:text-6xl"
         >
           {t("chat.heroTitle")}
         </h2>
         <p
-          className="mx-auto mt-4 max-w-[64ch] text-base leading-relaxed text-iron-300"
+          className="mx-auto mt-4 max-w-[64ch] text-ui-lg leading-relaxed text-[var(--v2-text-muted)]"
         >
           {t("chat.heroDesc")}
         </p>

@@ -38,11 +38,11 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
             "border-[var(--v2-panel-border)] bg-[var(--v2-surface)]"
           )}
         >
-          <div className="truncate text-sm font-medium text-[var(--v2-text-strong)]">
+          <div className="truncate text-ui font-medium text-[var(--v2-text-strong)]">
             {name}
           </div>
           {profile?.email &&
-          (<div className="mt-1 truncate text-xs text-[var(--v2-text-muted)]">
+          (<div className="mt-1 truncate text-ui-sm text-[var(--v2-text-muted)]">
             {profile.email}
           </div>)}
           {profile?.role &&

@@ -39,15 +39,15 @@ export function ProjectsSummaryStrip({ overview }) {
           <div
             key={card.key}
             data-summary-kind={card.key}
-            className="rounded-2xl border border-white/8 bg-white/[0.03] p-4"
+            className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4"
           >
             <div className="flex items-start justify-between gap-3">
-              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{card.label}</div>
+              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{card.label}</div>
               <StatusPill tone={metricTone[card.key]} label={card.badgeLabel} />
             </div>
             <div
               data-testid="projects-summary-value"
-              className="mt-4 text-3xl font-semibold tracking-tight text-white"
+              className="mt-4 text-display font-semibold tracking-tight text-[var(--v2-text-strong)]"
             >
               {card.value}
             </div>

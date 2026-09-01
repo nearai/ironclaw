@@ -56,7 +56,7 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
           <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
             {t("skills.import")}
           </h3>
-          <p className="mt-1 text-sm text-[var(--v2-text-muted)]">
+          <p className="mt-1 text-ui text-[var(--v2-text-muted)]">
             {t("skills.importDesc")}
           </p>
         </div>
@@ -99,9 +99,9 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
       </FormField>
 
       {formError &&
-      (<p className="mt-3 text-sm text-[var(--v2-danger-text)]">{formError}</p>)}
+      (<p className="mt-3 text-ui text-[var(--v2-danger-text)]">{formError}</p>)}
       {result &&
-      (<p className="mt-3 text-sm text-[var(--v2-positive-text)]">{result}</p>)}
+      (<p className="mt-3 text-ui text-[var(--v2-positive-text)]">{result}</p>)}
 
       <div className="mt-4 flex justify-end">
         <Button type="button" size="sm" disabled={isInstalling} onClick={submit}>

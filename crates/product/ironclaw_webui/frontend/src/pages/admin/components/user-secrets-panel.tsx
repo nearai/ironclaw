@@ -85,10 +85,10 @@ export function UserSecretsPanelView({
   return (
     <Panel className="p-5 sm:p-6" data-testid="admin-user-secrets-panel">
       <div className="mb-4">
-        <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+        <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
           {t("admin.user.secrets.title")}
         </h3>
-        <p className="mt-2 text-sm text-iron-300">
+        <p className="mt-2 text-ui text-[var(--v2-text-muted)]">
           {t("admin.user.secrets.description")}
         </p>
       </div>
@@ -101,13 +101,13 @@ export function UserSecretsPanelView({
           aria-label={t("admin.user.secrets.loading")}
         />
       ) : query.error ? (
-        <p className="text-sm text-red-200" role="alert">
+        <p className="text-ui text-[var(--v2-danger-text)]" role="alert">
           {t("admin.user.secrets.loadFailed", { message: query.error.message })}
         </p>
       ) : (
         <div className="space-y-2">
           {secrets.length === 0 ? (
-            <p className="py-2 text-sm text-iron-300">
+            <p className="py-2 text-ui text-[var(--v2-text-muted)]">
               {t("admin.user.secrets.empty")}
             </p>
           ) : secrets.map((secret) => (
@@ -115,9 +115,9 @@ export function UserSecretsPanelView({
               key={secret.handle}
               data-testid="admin-secret-row"
               data-secret-handle={secret.handle}
-              className="flex items-center justify-between gap-3 rounded-lg border border-iron-700 bg-iron-800/40 px-3 py-2"
+              className="flex items-center justify-between gap-3 rounded-lg border border-[var(--v2-panel-border)] bg-iron-800/40 px-3 py-2"
             >
-              <code className="min-w-0 truncate text-xs text-iron-100">
+              <code className="min-w-0 truncate text-ui-sm text-[var(--v2-text-strong)]">
                 {secret.handle}
               </code>
               <div className="flex shrink-0 items-center gap-1">
@@ -152,7 +152,7 @@ export function UserSecretsPanelView({
       <form onSubmit={handleSubmit} className="mt-5 space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <label htmlFor="admin-secret-handle" className="mb-1 block text-xs text-iron-300">
+            <label htmlFor="admin-secret-handle" className="mb-1 block text-ui-sm text-[var(--v2-text-muted)]">
               {t("admin.user.secrets.handle")}
             </label>
             <Input
@@ -171,7 +171,7 @@ export function UserSecretsPanelView({
             />
           </div>
           <div>
-            <label htmlFor="admin-secret-value" className="mb-1 block text-xs text-iron-300">
+            <label htmlFor="admin-secret-value" className="mb-1 block text-ui-sm text-[var(--v2-text-muted)]">
               {t("admin.user.secrets.value")}
             </label>
             <Input
@@ -191,7 +191,7 @@ export function UserSecretsPanelView({
             />
           </div>
         </div>
-        <p className="text-xs text-iron-300">
+        <p className="text-ui-sm text-[var(--v2-text-muted)]">
           {t("admin.user.secrets.writeOnlyHint")}
         </p>
         <Button
@@ -209,7 +209,7 @@ export function UserSecretsPanelView({
 
       {success && (
         <p
-          className="mt-4 text-sm text-signal"
+          className="mt-4 text-ui text-[var(--v2-accent-text)]"
           role="status"
           data-testid="admin-secret-status"
         >
@@ -217,7 +217,7 @@ export function UserSecretsPanelView({
         </p>
       )}
       {putError && (
-        <p className="mt-4 text-sm text-red-200" role="alert">
+        <p className="mt-4 text-ui text-[var(--v2-danger-text)]" role="alert">
           {t("admin.user.secrets.actionFailed", { message: putError.message })}
         </p>
       )}
@@ -231,11 +231,11 @@ export function UserSecretsPanelView({
         >
           <ModalBody>
             <div data-testid="admin-secret-delete-dialog">
-              <p className="mt-2 text-sm text-iron-300">
+              <p className="mt-2 text-ui text-[var(--v2-text-muted)]">
                 {t("admin.user.secrets.deleteDesc", { handle: pendingDelete })}
               </p>
               {deleteError && (
-                <p className="mt-4 text-sm text-red-200" role="alert">
+                <p className="mt-4 text-ui text-[var(--v2-danger-text)]" role="alert">
                   {t("admin.user.secrets.actionFailed", { message: deleteError.message })}
                 </p>
               )}

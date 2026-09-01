@@ -41,7 +41,7 @@ function Row({ token, note }: { token: string; note: string }) {
   const resolved = useResolved(token);
   return (
     <div className="flex items-baseline justify-between gap-4 rounded-[12px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-3">
-      <span className="font-mono text-xs text-[var(--v2-text-strong)]">{token}</span>
+      <span className="font-mono text-ui-sm text-[var(--v2-text-strong)]">{token}</span>
       <span className="flex min-w-0 items-baseline gap-3">
         <span className="truncate text-[0.6875rem] text-[var(--v2-text-muted)]">{note}</span>
         <span
@@ -112,20 +112,20 @@ export const Motion: Story = {
       <div className="flex items-center gap-4">
         <Spinner className="h-8 w-8 text-[var(--v2-accent-text)]" />
         <div>
-          <div className="font-mono text-xs text-[var(--v2-text-strong)]">.v2-spin</div>
-          <div className="text-xs text-[var(--v2-text-muted)]">
+          <div className="font-mono text-ui-sm text-[var(--v2-text-strong)]">.v2-spin</div>
+          <div className="text-ui-sm text-[var(--v2-text-muted)]">
             0.8s linear infinite — the one always-on animation
           </div>
         </div>
       </div>
-      <p className="text-sm leading-6 text-[var(--v2-text-muted)]">
+      <p className="text-ui leading-6 text-[var(--v2-text-muted)]">
         The app ships a static-motion policy: a global{" "}
-        <code className="rounded bg-[var(--v2-surface-soft)] px-1 font-mono text-xs">
+        <code className="rounded bg-[var(--v2-surface-soft)] px-1 font-mono text-ui-sm">
           {"* { animation: none !important }"}
         </code>{" "}
         rule disables transitions and animations by default. Only a few class-scoped exceptions
-        (notably <code className="font-mono text-xs">.v2-spin</code> for loading spinners) opt back
-        in, and <code className="font-mono text-xs">prefers-reduced-motion</code> re-suppresses even
+        (notably <code className="font-mono text-ui-sm">.v2-spin</code> for loading spinners) opt back
+        in, and <code className="font-mono text-ui-sm">prefers-reduced-motion</code> re-suppresses even
         those.
       </p>
 
@@ -133,11 +133,11 @@ export const Motion: Story = {
         <h3 className="mb-1 font-mono text-[0.6875rem] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
           Motion vocabulary
         </h3>
-        <p className="mb-3 text-sm leading-6 text-[var(--v2-text-muted)]">
+        <p className="mb-3 text-ui leading-6 text-[var(--v2-text-muted)]">
           The tokens below are the vocabulary Phase 4 (#7782 WS4) opts components back into — they
           do not lift the policy above. They exist so an animation says how long and with what curve
-          by NAME: under <code className="font-mono text-xs">prefers-reduced-motion</code> every
-          duration token collapses to <code className="font-mono text-xs">0ms</code> at the token
+          by NAME: under <code className="font-mono text-ui-sm">prefers-reduced-motion</code> every
+          duration token collapses to <code className="font-mono text-ui-sm">0ms</code> at the token
           layer, so a component that takes its duration from one is gated by construction rather
           than by a reviewer noticing.
         </p>

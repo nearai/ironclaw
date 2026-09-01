@@ -57,10 +57,10 @@ function FontRow({ token, label }: { token: string; label: string }) {
   return (
     <div>
       <div className="font-mono text-[0.625rem] text-[var(--v2-text-muted)]">{token}</div>
-      <div className="text-xl" style={{ fontFamily: `var(${token})` }}>
+      <div className="text-title" style={{ fontFamily: `var(${token})` }}>
         {PANGRAM}
       </div>
-      <div className="text-xs text-[var(--v2-text-muted)]">{label}</div>
+      <div className="text-ui-sm text-[var(--v2-text-muted)]">{label}</div>
       <div
         data-testid={`value-${token}`}
         className="truncate font-mono text-[0.625rem] text-[var(--v2-text-faint)]"

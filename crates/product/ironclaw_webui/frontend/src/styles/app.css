@@ -13,7 +13,8 @@
     monospace;
   /* Semantic type scale for shared controls. Keep these viewport-independent. */
   --text-ui-sm: 0.75rem;
-  --text-ui: 0.8125rem;
+  /* Density: M3 body-medium. Was 0.8125rem — the one deliberate size change. */
+  --text-ui: 0.875rem;
   --text-ui-lg: 1rem;
   --color-iron-950: var(--v2-canvas-strong);
   --color-iron-900: var(--v2-surface);
@@ -62,10 +63,19 @@
      Structure only; Phase 3a (#7781 WS3) sets the M3X values and takes the
      density decision these steps make expressible. */
   --text-ui-xs:         0.6875rem;
-  --text-title-sm:      0.9375rem;
-  --text-title:         1.125rem;
+  --text-title-sm:      1.125rem;
+  --text-title:         1.25rem;
   --text-title-lg:      1.5rem;
   --text-display:       2rem;
+  /* M3 line heights, paired with the steps above. */
+  --text-ui-xs--line-height:    1rem;
+  --text-ui-sm--line-height:    1rem;
+  --text-ui--line-height:       1.25rem;
+  --text-ui-lg--line-height:    1.5rem;
+  --text-title-sm--line-height: 1.75rem;
+  --text-title--line-height:    1.75rem;
+  --text-title-lg--line-height: 2rem;
+  --text-display--line-height:  2.5rem;
 
   --radius-chip:        var(--v2-radius-chip);
   --radius-field:       var(--v2-radius-field);
@@ -496,82 +506,6 @@ input:focus, select:focus, textarea:focus {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: color-mix(in srgb, var(--v2-text-muted) 52%, transparent);
-}
-
-/* ── Tailwind colour-alias compat ────────────────────────────────── */
-/* Existing page components use iron-*, signal, copper utility classes. */
-/* These overrides let them respect the current theme without a rebuild. */
-
-.text-white,
-.text-iron-100,
-.text-iron-200,
-[class~="hover:text-white"]:hover      { color: var(--v2-text-strong) !important; }
-
-.text-iron-300,
-.text-iron-400,
-.text-iron-700                         { color: var(--v2-text-muted) !important; }
-
-.text-signal, .text-mint,
-[class~="hover:text-signal"]:hover     { color: var(--v2-accent-text) !important; }
-.text-copper                           { color: var(--v2-warning-text) !important; }
-.text-red-200, .text-red-300,
-[class~="hover:text-red-200"]:hover    { color: var(--v2-danger-text) !important; }
-
-[class~="bg-iron-950"],[class~="bg-iron-950/60"],[class~="bg-iron-950/72"],
-[class~="bg-iron-950/76"],[class~="bg-iron-950/80"],[class~="bg-iron-950/84"],
-[class~="bg-iron-950/88"],[class~="bg-iron-950/90"] {
-  background-color: color-mix(in srgb, var(--v2-canvas-strong) 88%, transparent) !important;
-}
-
-[class~="bg-iron-900"],[class~="bg-iron-900/50"],[class~="bg-iron-900/86"],
-[class~="bg-iron-800"],[class~="bg-iron-800/58"],[class~="bg-iron-700"],
-[class~="bg-iron-700/50"],[class~="bg-white/[0.02]"],[class~="bg-white/[0.03]"],
-[class~="bg-white/[0.035]"],[class~="bg-white/[0.04]"],[class~="bg-white/[0.045]"],
-[class~="bg-white/[0.05]"],[class~="bg-white/[0.06]"],
-[class~="hover:bg-white/[0.035]"]:hover,[class~="hover:bg-white/[0.045]"]:hover,
-[class~="hover:bg-white/[0.05]"]:hover {
-  background-color: var(--v2-surface-soft) !important;
-}
-
-[class~="bg-signal"],[class~="bg-signal/60"] {
-  background-color: var(--v2-accent) !important; color: #ffffff !important;
-}
-[class~="bg-signal/10"],[class~="bg-signal/12"],[class~="bg-signal/15"],
-[class~="hover:bg-signal/10"]:hover,[class~="hover:bg-signal/15"]:hover {
-  background-color: var(--v2-accent-soft) !important;
-}
-[class~="bg-copper"],[class~="bg-copper/10"] {
-  background-color: var(--v2-warning-soft) !important;
-}
-[class~="bg-red-500"],[class~="bg-red-500/10"],[class~="bg-red-500/20"],
-[class~="hover:bg-red-500/30"]:hover {
-  background-color: var(--v2-danger-soft) !important;
-}
-
-[class~="border-white/8"],[class~="border-white/10"],[class~="border-white/12"],
-[class~="border-white/15"],[class~="border-white/20"],[class~="border-white/[0.06]"],
-[class~="border-white/[0.08]"],[class~="border-iron-700"],[class~="border-iron-700/50"],
-[class~="hover:border-white/10"]:hover,[class~="hover:border-white/15"]:hover,
-[class~="hover:border-white/20"]:hover {
-  border-color: var(--v2-panel-border) !important;
-}
-
-[class~="border-signal/25"],[class~="border-signal/30"],[class~="border-signal/35"],
-[class~="border-signal/40"],[class~="border-signal/45"],
-[class~="hover:border-signal/25"]:hover,[class~="hover:border-signal/30"]:hover,
-[class~="hover:border-signal/35"]:hover,[class~="hover:border-signal/40"]:hover,
-[class~="hover:border-signal/45"]:hover,
-[class~="focus:border-signal"]:focus,[class~="focus:border-signal/45"]:focus,
-[class~="focus:border-signal/60"]:focus,[class~="focus:border-signal/70"]:focus {
-  border-color: color-mix(in srgb, var(--v2-accent) 44%, var(--v2-panel-border)) !important;
-}
-
-[class~="border-copper/20"],[class~="border-copper/30"],[class~="border-copper/35"] {
-  border-color: color-mix(in srgb, var(--v2-warning-text) 35%, var(--v2-panel-border)) !important;
-}
-[class~="border-red-300/30"],[class~="border-red-400/20"],[class~="border-red-400/30"],
-[class~="hover:border-red-400/30"]:hover {
-  border-color: color-mix(in srgb, var(--v2-danger-text) 36%, var(--v2-panel-border)) !important;
 }
 
 /* ── Bridge stubs — progressively migrated to Card/Input/Button components ── */

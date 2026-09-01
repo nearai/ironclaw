@@ -21,7 +21,7 @@ const PROFILE = { id: "u_ada", display_name: "Ada Lovelace", email: "ada@ironcla
 function OutletContent() {
   // Placeholder for the routed page that GatewayLayout renders into its Outlet.
   return (
-    <div className="grid h-full place-items-center text-sm text-[var(--v2-text-muted)]">
+    <div className="grid h-full place-items-center text-ui text-[var(--v2-text-muted)]">
       Routed page content (Outlet)
       <Outlet />
     </div>

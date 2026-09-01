@@ -167,11 +167,11 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
         <ProviderLogo id={entry.id} name={name} />
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-semibold text-[var(--v2-text-strong)]">{name}</span>
+            <span className="truncate text-ui font-semibold text-[var(--v2-text-strong)]">{name}</span>
             {configured &&
             (<Badge tone="positive" label={t("onboarding.ready")} size="sm" />)}
           </div>
-          <div className="mt-0.5 truncate text-xs text-[var(--v2-text-muted)]">{t(entry.descKey)}</div>
+          <div className="mt-0.5 truncate text-ui-sm text-[var(--v2-text-muted)]">{t(entry.descKey)}</div>
         </div>
       </div>
       <div className="flex shrink-0 flex-wrap gap-2 sm:justify-end">{actions}</div>
@@ -242,7 +242,7 @@ function OperatorOnboardingPage() {
 
   if (state.isLoading) {
     return (
-      <div className="grid h-full place-items-center text-sm text-[var(--v2-text-muted)]">
+      <div className="grid h-full place-items-center text-ui text-[var(--v2-text-muted)]">
         {t("common.loading")}
       </div>
     );
@@ -252,10 +252,10 @@ function OperatorOnboardingPage() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex min-h-full max-w-2xl flex-col justify-center gap-6 p-6">
         <div className="text-center">
-          <h1 className="text-2xl font-semibold text-[var(--v2-text-strong)]">
+          <h1 className="text-title-lg font-semibold text-[var(--v2-text-strong)]">
             {t("onboarding.title")}
           </h1>
-          <p className="mt-2 text-sm text-[var(--v2-text-muted)]">{t("onboarding.subtitle")}</p>
+          <p className="mt-2 text-ui text-[var(--v2-text-muted)]">{t("onboarding.subtitle")}</p>
         </div>
 
         <div className="flex flex-col gap-3">
@@ -278,7 +278,7 @@ function OperatorOnboardingPage() {
 
         <ProviderLoginStatus login={login} />
 
-        <div className="text-center text-xs text-[var(--v2-text-muted)]">
+        <div className="text-center text-ui-sm text-[var(--v2-text-muted)]">
           {t("onboarding.moreInSettings")}{" "}
           <button
             type="button"

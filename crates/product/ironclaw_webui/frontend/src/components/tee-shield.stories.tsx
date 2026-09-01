@@ -29,11 +29,11 @@ export const LocalhostNull: Story = {
     <div className="flex max-w-md flex-col gap-3">
       <div className="flex items-center gap-3">
         <TeeShield />
-        <span className="text-xs text-[var(--v2-text-muted)]">
+        <span className="text-ui-sm text-[var(--v2-text-muted)]">
           ← TeeShield mounts here (empty on localhost)
         </span>
       </div>
-      <p className="text-xs leading-5 text-[var(--v2-text-muted)]">
+      <p className="text-ui-sm leading-5 text-[var(--v2-text-muted)]">
         On a real *.deployment host it shows a green enclave shield that opens an attestation summary
         (image digest, TLS fingerprint, report data). It is intentionally invisible in local/dev
         environments.

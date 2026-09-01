@@ -39,9 +39,9 @@ const sizeClasses = {
     option: "px-2.5 py-2",
   },
   sm: {
-    root: "min-w-[7.5rem] text-xs",
+    root: "min-w-[7.5rem] text-ui-sm",
     button: "h-8 px-2",
-    option: "px-2 py-1.5 text-xs",
+    option: "px-2 py-1.5 text-ui-sm",
   },
 };
 

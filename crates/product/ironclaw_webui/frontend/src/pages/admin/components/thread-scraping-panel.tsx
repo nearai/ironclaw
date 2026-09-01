@@ -52,10 +52,10 @@ export function ThreadScrapingPanel({ userId }) {
     <Panel className="p-5 sm:p-6" data-testid="admin-thread-scraping">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
             {t("admin.threadScraping.title")}
           </h3>
-          <p className="mt-2 text-sm text-iron-300">{t("admin.threadScraping.description")}</p>
+          <p className="mt-2 text-ui text-[var(--v2-text-muted)]">{t("admin.threadScraping.description")}</p>
         </div>
         {artifact && (
           <Button
@@ -69,10 +69,10 @@ export function ThreadScrapingPanel({ userId }) {
         )}
       </div>
 
-      {errorKey && <p className="mt-4 text-sm text-red-200" role="alert">{t(errorKey)}</p>}
-      {isLoading && <p className="mt-4 text-sm text-iron-300">{t("common.loading")}</p>}
+      {errorKey && <p className="mt-4 text-ui text-[var(--v2-danger-text)]" role="alert">{t(errorKey)}</p>}
+      {isLoading && <p className="mt-4 text-ui text-[var(--v2-text-muted)]">{t("common.loading")}</p>}
       {!isLoading && !errorKey && threads.length === 0 && (
-        <p className="mt-4 text-sm text-iron-300">{t("admin.threadScraping.empty")}</p>
+        <p className="mt-4 text-ui text-[var(--v2-text-muted)]">{t("admin.threadScraping.empty")}</p>
       )}
 
       {threads.length > 0 && (
@@ -87,14 +87,14 @@ export function ThreadScrapingPanel({ userId }) {
                 onClick={() => selectThread(thread.thread_id)}
                 className={`w-full rounded-lg border px-3 py-2 text-left ${
                   selectedThreadId === thread.thread_id
-                    ? "border-signal/45 bg-signal/10"
-                    : "border-white/10 bg-white/[0.03] hover:border-white/20"
+                    ? "border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)]"
+                    : "border-white/10 bg-[var(--v2-surface-soft)] hover:border-white/20"
                 }`}
               >
-                <span className="block truncate text-sm text-iron-100">
+                <span className="block truncate text-ui text-[var(--v2-text-strong)]">
                   {thread.title || t("admin.threadScraping.untitled")}
                 </span>
-                <span className="mt-1 block truncate font-mono text-[10px] text-iron-400">
+                <span className="mt-1 block truncate font-mono text-[10px] text-[var(--v2-text-muted)]">
                   {thread.thread_id}
                 </span>
               </button>
@@ -114,9 +114,9 @@ export function ThreadScrapingPanel({ userId }) {
           </div>
 
           <div className="min-w-0">
-            {isLoadingArtifact && <p className="text-sm text-iron-300">{t("common.loading")}</p>}
+            {isLoadingArtifact && <p className="text-ui text-[var(--v2-text-muted)]">{t("common.loading")}</p>}
             {!isLoadingArtifact && !artifact && (
-              <p className="text-sm text-iron-300">{t("admin.threadScraping.selectThread")}</p>
+              <p className="text-ui text-[var(--v2-text-muted)]">{t("admin.threadScraping.selectThread")}</p>
             )}
             {artifact && (
               <div className="space-y-3">
@@ -139,12 +139,12 @@ export function ThreadScrapingPanel({ userId }) {
                 )}
                 <div className="max-h-[32rem] space-y-3 overflow-y-auto pr-1">
                   {(artifact.messages || []).slice(0, visibleMessageCount).map((message) => (
-                    <div key={message.message_id} className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                      <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-iron-400">
+                    <div key={message.message_id} className="rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
+                      <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] uppercase tracking-wide text-[var(--v2-text-muted)]">
                         <span>{message.kind}</span>
                         {message.run_id && <span>{String(message.run_id).slice(0, 8)}</span>}
                       </div>
-                      <div className="mt-2 whitespace-pre-wrap break-words text-sm text-iron-100">
+                      <div className="mt-2 whitespace-pre-wrap break-words text-ui text-[var(--v2-text-strong)]">
                         {message.content}
                       </div>
                     </div>

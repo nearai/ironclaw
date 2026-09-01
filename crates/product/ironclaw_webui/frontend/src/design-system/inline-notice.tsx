@@ -65,7 +65,7 @@ export function InlineNotice({
       role={role}
       data-tone={tone}
       className={cn(
-        "flex items-start gap-3 rounded-xl border px-4 py-3 text-sm",
+        "flex items-start gap-3 rounded-xl border px-4 py-3 text-ui",
         TONE_STYLES[tone],
         className,
       )}

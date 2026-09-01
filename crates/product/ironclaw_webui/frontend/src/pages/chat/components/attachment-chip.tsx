@@ -74,7 +74,7 @@ export function AttachmentThumbnail({ att }) {
       className="h-9 w-9 shrink-0 rounded object-cover"
     />);
   }
-  return (<Icon name="file" className="h-3.5 w-3.5 shrink-0 text-signal" />);
+  return (<Icon name="file" className="h-3.5 w-3.5 shrink-0 text-[var(--v2-accent-text)]" />);
 }
 
 /* One attachment chip: thumbnail/icon + filename + type/size, plus a trailing
@@ -84,7 +84,7 @@ export function AttachmentThumbnail({ att }) {
    authenticated bytes and saves them directly. With no bytes at all the chip is
    a static row. */
 const ATTACHMENT_CHIP_BASE =
-  "flex items-stretch rounded-md border border-iron-700 bg-iron-900/50 text-xs";
+  "flex items-stretch rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-ui-sm";
 const ATTACHMENT_CHIP_PADDING = "px-3 py-2";
 
 export function AttachmentChip({
@@ -115,7 +115,7 @@ export function AttachmentChip({
     <>
     <AttachmentThumbnail att={att} />
     <span className="truncate">{filename}</span>
-    <span className="ml-auto shrink-0 text-iron-200"
+    <span className="ml-auto shrink-0 text-[var(--v2-text-strong)]"
       >{att.mime_type}{att.size_label ? " / " + att.size_label : ""}</span
     >
     </>
@@ -150,7 +150,7 @@ export function AttachmentChip({
       disabled={downloading}
       aria-label={t("chat.downloadAttachment", { name: filename })}
       data-testid={downloadTestId}
-      className="flex shrink-0 items-center border-l border-iron-700 px-2.5 text-iron-200 transition-colors hover:bg-iron-900/80 hover:text-white disabled:opacity-50"
+      className="flex shrink-0 items-center border-l border-[var(--v2-panel-border)] px-2.5 text-[var(--v2-text-strong)] transition-colors hover:bg-iron-900/80 hover:text-[var(--v2-text-strong)] disabled:opacity-50"
     >
       <Icon name="download" className="h-3.5 w-3.5" />
     </button>)}

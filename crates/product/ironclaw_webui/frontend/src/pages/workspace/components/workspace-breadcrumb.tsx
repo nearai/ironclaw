@@ -15,12 +15,12 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
   return (
     <nav
       aria-label={t("workspace.breadcrumbRoot")}
-      className="flex min-w-0 flex-wrap items-center gap-2 font-mono text-sm"
+      className="flex min-w-0 flex-wrap items-center gap-2 font-mono text-ui"
     >
       <button
         type="button"
         onClick={() => onNavigate("")}
-        className="text-signal hover:underline"
+        className="text-[var(--v2-accent-text)] hover:underline"
       >
         {t("workspace.breadcrumbRoot")}
       </button>
@@ -30,12 +30,12 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
         const label = index === 0 ? areaDisplayName(part, t) : part;
         return (
           <>
-          <span key={target} className="text-iron-400">/</span>
+          <span key={target} className="text-[var(--v2-text-muted)]">/</span>
           <button
             key={`${target}-button`}
             type="button"
             onClick={() => onNavigate(target)}
-            className="max-w-[220px] truncate text-signal hover:underline"
+            className="max-w-[220px] truncate text-[var(--v2-accent-text)] hover:underline"
           >
             {label}
           </button>

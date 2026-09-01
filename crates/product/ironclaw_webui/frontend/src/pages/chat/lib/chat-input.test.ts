@@ -1477,7 +1477,7 @@ test("ChatInput command-menu highlights the typed prefix in the row's name", () 
   });
 
   const modelRow = findCommandOption(tree, "model");
-  const highlight = findNode(modelRow, (node) => node.props?.className === "text-signal");
+  const highlight = findNode(modelRow, (node) => node.props?.className === "text-[var(--v2-accent-text)]");
   assert.ok(highlight, "expected a highlighted-prefix span inside the row");
   assert.equal(extractText(highlight), "mo");
   // The unhighlighted remainder of the name is still present, split apart

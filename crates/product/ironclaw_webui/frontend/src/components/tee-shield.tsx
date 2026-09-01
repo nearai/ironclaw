@@ -64,10 +64,10 @@ export function TeeShield() {
               <Icon name="shield" className="h-4 w-4" />
             </span>
             <div className="min-w-0">
-              <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+              <div className="text-ui font-semibold text-[var(--v2-text-strong)]">
                 {t("tee.title")}
               </div>
-              <div className="text-xs text-[var(--v2-text-muted)]">
+              <div className="text-ui-sm text-[var(--v2-text-muted)]">
                 {t("tee.verified")}
               </div>
             </div>
@@ -87,9 +87,9 @@ export function TeeShield() {
               )
             )}
             {tee.reportLoading &&
-            (<div className="text-xs text-[var(--v2-text-muted)]">{t("tee.loading")}</div>)}
+            (<div className="text-ui-sm text-[var(--v2-text-muted)]">{t("tee.loading")}</div>)}
             {tee.reportError &&
-            (<div className="text-xs text-[var(--v2-danger-text)]">{t("tee.loadFailed")}</div>)}
+            (<div className="text-ui-sm text-[var(--v2-danger-text)]">{t("tee.loadFailed")}</div>)}
           </div>
 
           <div className="mt-3 flex justify-end">

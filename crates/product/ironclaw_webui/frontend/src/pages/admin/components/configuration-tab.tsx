@@ -25,14 +25,14 @@ export function AdminConfigurationTab() {
   return (
     <section className="space-y-5" data-testid="admin-configuration-page">
       <header>
-        <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("nav.admin")}</p>
-        <h1 className="mt-2 text-xl font-semibold text-iron-50">{t("admin.configuration.title")}</h1>
-        <p className="mt-2 max-w-3xl text-sm text-iron-300">
+        <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("nav.admin")}</p>
+        <h1 className="mt-2 text-title font-semibold text-iron-50">{t("admin.configuration.title")}</h1>
+        <p className="mt-2 max-w-3xl text-ui text-[var(--v2-text-muted)]">
           {t("admin.configuration.description")}
         </p>
       </header>
       {state.groups.length === 0 ? (
-        <Panel className="p-6 text-sm text-iron-300">{t("admin.configuration.empty")}</Panel>
+        <Panel className="p-6 text-ui text-[var(--v2-text-muted)]">{t("admin.configuration.empty")}</Panel>
       ) : state.groups.map((group) => (
         <ConfigurationGroup key={group.group_id} group={group} state={state} />
       ))}
@@ -117,15 +117,15 @@ export function ConfigurationGroup({ group, state }) {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-semibold text-iron-50">{group.display_name}</h2>
-              <span className={group.complete ? "text-xs text-signal" : "text-xs text-amber-200"}>
+              <h2 className="text-ui-lg font-semibold text-iron-50">{group.display_name}</h2>
+              <span className={group.complete ? "text-ui-sm text-[var(--v2-accent-text)]" : "text-ui-sm text-amber-200"}>
                 {group.complete
                   ? t("admin.configuration.statusConfigured")
                   : t("admin.configuration.statusRequired")}
               </span>
             </div>
-            {group.description && <p className="mt-1 text-sm text-iron-300">{group.description}</p>}
-            <p className="mt-2 text-xs text-iron-400">
+            {group.description && <p className="mt-1 text-ui text-[var(--v2-text-muted)]">{group.description}</p>}
+            <p className="mt-2 text-ui-sm text-[var(--v2-text-muted)]">
               {t("admin.configuration.usedBy")} {group.used_by.map((extension) => (
                 <span key={extension.package_id} className="mr-2 inline-block">
                   {extension.display_name}{extension.installed
@@ -135,7 +135,7 @@ export function ConfigurationGroup({ group, state }) {
               ))}
             </p>
           </div>
-          <code className="text-[11px] text-iron-400">{group.group_id}</code>
+          <code className="text-[11px] text-[var(--v2-text-muted)]">{group.group_id}</code>
         </div>
 
         <div className="mt-5 grid gap-4 md:grid-cols-2">
@@ -148,7 +148,7 @@ export function ConfigurationGroup({ group, state }) {
               : null;
             return (
               <div key={field.handle}>
-                <label htmlFor={`${group.group_id}-${field.handle}`} className="mb-1 block text-xs text-iron-300">
+                <label htmlFor={`${group.group_id}-${field.handle}`} className="mb-1 block text-ui-sm text-[var(--v2-text-muted)]">
                   {field.label}{field.required ? " *" : ""}
                 </label>
                 <Input
@@ -168,9 +168,9 @@ export function ConfigurationGroup({ group, state }) {
                   }}
                 />
                 {field.description && (
-                  <p id={descriptionId} className="mt-1 text-[11px] text-iron-400">{field.description}</p>
+                  <p id={descriptionId} className="mt-1 text-[11px] text-[var(--v2-text-muted)]">{field.description}</p>
                 )}
-                {hint && <p className="mt-1 text-[11px] text-iron-400">{hint}</p>}
+                {hint && <p className="mt-1 text-[11px] text-[var(--v2-text-muted)]">{hint}</p>}
               </div>
             );
           })}

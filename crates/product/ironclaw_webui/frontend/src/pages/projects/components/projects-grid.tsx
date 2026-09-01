@@ -27,12 +27,12 @@ function ProjectCard({ project, onOpen, t }) {
           onOpen(project.id);
         }
       }}
-      className="group cursor-pointer rounded-xl border border-iron-700 bg-iron-800/60 p-5 transition hover:border-signal/30 hover:bg-iron-800/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/40"
+      className="group cursor-pointer rounded-xl border border-[var(--v2-panel-border)] bg-iron-800/60 p-5 transition hover:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] hover:bg-iron-800/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/40"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="truncate font-serif text-2xl font-semibold tracking-[-0.03em] text-iron-100">{project.name}</h3>
-          <p className="mt-2 line-clamp-3 text-sm leading-6 text-iron-300">
+          <h3 className="truncate font-serif text-title-lg font-semibold tracking-[-0.03em] text-[var(--v2-text-strong)]">{project.name}</h3>
+          <p className="mt-2 line-clamp-3 text-ui leading-6 text-[var(--v2-text-muted)]">
             {project.description || t("projects.noDescription")}
           </p>
         </div>
@@ -46,7 +46,7 @@ function ProjectCard({ project, onOpen, t }) {
         ? (
             <div className="mt-4 flex flex-wrap gap-2">
               {project.goals.slice(0, 3).map((goal, index) => (
-                <span key={index} className="rounded-full border border-iron-700 px-3 py-1 text-xs text-iron-200">
+                <span key={index} className="rounded-full border border-[var(--v2-panel-border)] px-3 py-1 text-ui-sm text-[var(--v2-text-strong)]">
                   {goal}
                 </span>
               ))}
@@ -55,12 +55,12 @@ function ProjectCard({ project, onOpen, t }) {
         : null}
 
       <div className="mt-5 flex items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm text-iron-300">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 text-ui text-[var(--v2-text-muted)]">
           <StatusPill tone="muted" label={formatProjectRole(project.role, t)} />
           <time
             data-testid="project-updated-at"
             dateTime={project.updated_at || undefined}
-            className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]"
+            className="text-ui-sm uppercase tracking-[0.16em] text-[var(--v2-text-muted)]"
           >
             {t("projects.snapshot.updated", { date: formatProjectDate(project.updated_at, t) })}
           </time>
@@ -97,13 +97,13 @@ function GeneralProjectCard({ project, onOpen, t }) {
           onOpen(project.id);
         }
       }}
-      className="cursor-pointer overflow-hidden p-5 transition hover:border-signal/30 sm:p-6"
+      className="cursor-pointer overflow-hidden p-5 transition hover:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] sm:p-6"
     >
       <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
         <div className="max-w-3xl">
-          <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-signal">{t("projects.general.label")}</div>
-          <h2 className="mt-3 font-serif text-4xl font-semibold tracking-[-0.04em] text-iron-100">{t("projects.general.title")}</h2>
-          <p className="mt-3 text-sm leading-6 text-iron-200">
+          <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--v2-accent-text)]">{t("projects.general.label")}</div>
+          <h2 className="mt-3 font-serif text-4xl font-semibold tracking-[-0.04em] text-[var(--v2-text-strong)]">{t("projects.general.title")}</h2>
+          <p className="mt-3 text-ui leading-6 text-[var(--v2-text-strong)]">
             {t("projects.general.desc")}
           </p>
         </div>
@@ -116,7 +116,7 @@ function GeneralProjectCard({ project, onOpen, t }) {
           <time
             data-testid="project-updated-at"
             dateTime={project.updated_at || undefined}
-            className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-muted)]"
+            className="text-ui-sm uppercase tracking-[0.16em] text-[var(--v2-text-muted)]"
           >
             {t("projects.snapshot.updated", { date: formatProjectDate(project.updated_at, t) })}
           </time>
@@ -165,9 +165,9 @@ export function ProjectsGrid({
       <Panel className="p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.explorer")}</div>
-            <h2 className="mt-2 font-serif text-3xl font-semibold tracking-[-0.04em] text-iron-100">{t("projects.scoped.title")}</h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
+            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.explorer")}</div>
+            <h2 className="mt-2 font-serif text-display font-semibold tracking-[-0.04em] text-[var(--v2-text-strong)]">{t("projects.scoped.title")}</h2>
+            <p className="mt-2 max-w-2xl text-ui leading-6 text-[var(--v2-text-muted)]">
               {t("projects.scoped.desc")}
             </p>
           </div>
@@ -177,7 +177,7 @@ export function ProjectsGrid({
               value={search}
               onInput={(event) => onSearchChange(event.currentTarget.value)}
               placeholder={t("projects.searchPlaceholder")}
-              className="h-11 min-w-[220px] rounded-md border border-iron-700 bg-iron-950/90 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
+              className="h-11 min-w-[220px] rounded-md border border-[var(--v2-panel-border)] bg-[color-mix(in_srgb,var(--v2-canvas-strong)_88%,transparent)] px-3 text-ui text-[var(--v2-text-strong)] outline-none focus:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))]"
             />
             <Button onClick={onCreateProject}>{isPreparingChat ? t("projects.preparingChat") : t("projects.newProject")}</Button>
           </div>

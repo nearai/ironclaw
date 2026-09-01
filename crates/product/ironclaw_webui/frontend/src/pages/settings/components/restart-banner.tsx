@@ -35,13 +35,13 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
         <p>{t("settings.restartRequired")}</p>
         {!restart.restartEnabled &&
         (
-          <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
+          <p className="mt-1 text-ui-sm text-[var(--v2-text-muted)]">
             {restart.unavailableReason}
           </p>
         )}
         {restart.isRestarting &&
         (
-          <p className="mt-1 text-xs text-[var(--v2-text-muted)]">
+          <p className="mt-1 text-ui-sm text-[var(--v2-text-muted)]">
             {restart.progressLabel}
           </p>
         )}
@@ -69,10 +69,10 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
       size="sm"
     >
       <ModalBody className="space-y-3">
-        <p className="text-sm text-[var(--v2-text)]">
+        <p className="text-ui text-[var(--v2-text)]">
           {t("restart.description")}
         </p>
-        <div className="rounded-xl border border-copper/25 bg-copper/10 px-3 py-2 text-xs text-copper">
+        <div className="rounded-xl border border-copper/25 bg-[var(--v2-warning-soft)] px-3 py-2 text-ui-sm text-[var(--v2-warning-text)]">
           {t("restart.warning")}
         </div>
       </ModalBody>
@@ -107,13 +107,13 @@ export function RestartBanner({ visible, gatewayStatus, gatewayStatusQuery }) {
         aria-live="polite"
       >
         <div className="w-full max-w-sm rounded-[1.5rem] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-6 text-center shadow-[0_24px_60px_rgba(0,0,0,0.35)]">
-          <div className="mx-auto grid h-12 w-12 place-items-center rounded-full border border-copper/30 bg-copper/10 text-copper">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-full border border-[color-mix(in_srgb,var(--v2-warning-text)_35%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]">
             <Icon name="pulse" className="h-5 w-5 animate-pulse" />
           </div>
-          <p className="mt-4 text-base font-semibold text-[var(--v2-text-strong)]">
+          <p className="mt-4 text-ui-lg font-semibold text-[var(--v2-text-strong)]">
             {t("restart.progressTitle")}
           </p>
-          <p className="mt-2 text-sm text-[var(--v2-text-muted)]">
+          <p className="mt-2 text-ui text-[var(--v2-text-muted)]">
             {restart.progressLabel}
           </p>
         </div>

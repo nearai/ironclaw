@@ -8,7 +8,7 @@ function SavedIndicator({ visible }) {
   if (!visible) return null;
   return (
     <span
-      className="font-mono text-[11px] text-mint"
+      className="font-mono text-[11px] text-[var(--v2-accent-text)]"
       role="status"
     >
       {t("tools.saved")}
@@ -46,11 +46,11 @@ export function SettingsField({ field, value, onSave, isSaved }) {
   );
 
   return (
-    <div className="flex items-start justify-between gap-6 border-t border-white/[0.06] py-4 first:border-0 first:pt-0">
+    <div className="flex items-start justify-between gap-6 border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0">
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium text-iron-200">{label}</div>
+        <div className="text-ui font-medium text-[var(--v2-text-strong)]">{label}</div>
         {description &&
-        (<div className="mt-1 text-xs leading-5 text-iron-300">{description}</div>)}
+        (<div className="mt-1 text-ui-sm leading-5 text-[var(--v2-text-muted)]">{description}</div>)}
       </div>
 
       <div className="flex shrink-0 items-center gap-3">
@@ -72,7 +72,7 @@ export function SettingsField({ field, value, onSave, isSaved }) {
                   handleCommit(e.currentTarget.value);
                 }}
                 aria-label={label}
-                className="v2-select h-9 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
+                className="v2-select h-9 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 text-ui text-[var(--v2-text-strong)] outline-none focus:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))]"
               >
                 <option value="">{t("tools.default")}</option>
                 {field.options.map(
@@ -92,7 +92,7 @@ export function SettingsField({ field, value, onSave, isSaved }) {
                 max={field.max !== undefined ? String(field.max) : undefined}
                 placeholder={t("tools.default")}
                 aria-label={label}
-                className="h-9 w-36 rounded-md border border-white/12 bg-white/[0.04] px-3 text-right font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+                className="h-9 w-36 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 text-right font-mono text-ui text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-muted)] focus:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))]"
               />
             )}
         <SavedIndicator visible={isSaved} />

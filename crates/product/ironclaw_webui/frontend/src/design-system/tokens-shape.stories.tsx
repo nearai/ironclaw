@@ -85,7 +85,7 @@ function Row({
     <div className="flex items-center gap-4 rounded-[12px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-3">
       <span className="flex h-12 w-20 shrink-0 items-center justify-center">{sample}</span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate font-mono text-xs text-[var(--v2-text-strong)]">
+        <span className="block truncate font-mono text-ui-sm text-[var(--v2-text-strong)]">
           {token}
         </span>
         <span className="block truncate text-[0.6875rem] text-[var(--v2-text-muted)]">{note}</span>
@@ -184,7 +184,7 @@ export const ShapeAndSpace: Story = {
               note={note}
               theme={theme}
               sample={
-                <span className="font-mono text-xs text-[var(--v2-text-faint)]">z</span>
+                <span className="font-mono text-ui-sm text-[var(--v2-text-faint)]">z</span>
               }
             />
           ))}

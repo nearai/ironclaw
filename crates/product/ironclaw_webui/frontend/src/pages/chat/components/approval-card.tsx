@@ -91,13 +91,13 @@ export function ApprovalCard({
   return (
     <div
       data-testid="approval-card"
-      className="mx-auto max-w-lg rounded-xl border border-copper/30 bg-copper/10 p-4"
+      className="mx-auto max-w-lg rounded-xl border border-[color-mix(in_srgb,var(--v2-warning-text)_35%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] p-4"
     >
       <div className="mb-3 flex items-center gap-2">
-        <span className="grid h-8 w-8 place-items-center rounded-md border border-copper/25 bg-copper/10 text-copper">
+        <span className="grid h-8 w-8 place-items-center rounded-md border border-copper/25 bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]">
           <Icon name="lock" className="h-4 w-4" />
         </span>
-        <span className="font-semibold text-white">{t("approval.title")}</span>
+        <span className="font-semibold text-[var(--v2-text-strong)]">{t("approval.title")}</span>
         <Badge
           tone={risk.tone}
           label={t(risk.key)}
@@ -107,24 +107,24 @@ export function ApprovalCard({
         />
       </div>
       {toolName &&
-      (<div className="mb-1 break-all font-mono text-sm font-medium text-iron-100">{toolName}</div>)}
+      (<div className="mb-1 break-all font-mono text-ui font-medium text-[var(--v2-text-strong)]">{toolName}</div>)}
       {description &&
-      (<div className="mb-3 break-words text-sm text-iron-200">{description}</div>)}
+      (<div className="mb-3 break-words text-ui text-[var(--v2-text-strong)]">{description}</div>)}
       {approvalDetails.length > 0
         ? (
-            <dl className={`mb-2 ${payloadMaxHeight} overflow-y-auto rounded-md border border-iron-800 bg-iron-950/80 text-xs`}>
+            <dl className={`mb-2 ${payloadMaxHeight} overflow-y-auto rounded-md border border-iron-800 bg-[color-mix(in_srgb,var(--v2-canvas-strong)_88%,transparent)] text-ui-sm`}>
               {approvalDetails.map(
                 (detail) => (
                   <div key={detail.label} className="grid gap-1 border-b border-iron-800/70 px-3 py-2 last:border-b-0 sm:grid-cols-[7rem_1fr]">
-                    <dt className="font-medium text-iron-400">{detail.labelKey ? t(detail.labelKey) : detail.label}</dt>
-                    <dd className="min-w-0 whitespace-pre-wrap break-all font-mono text-iron-100">{approvalPayloadPreview(detail.value, expandedPayload)}</dd>
+                    <dt className="font-medium text-[var(--v2-text-muted)]">{detail.labelKey ? t(detail.labelKey) : detail.label}</dt>
+                    <dd className="min-w-0 whitespace-pre-wrap break-all font-mono text-[var(--v2-text-strong)]">{approvalPayloadPreview(detail.value, expandedPayload)}</dd>
                   </div>
                 ),
               )}
             </dl>
           )
         : parameters &&
-          (<pre className={`mb-2 ${payloadMaxHeight} overflow-auto whitespace-pre-wrap break-all rounded-md bg-iron-950 p-2 font-mono text-xs text-iron-100`}>{approvalPayloadPreview(parameters, expandedPayload)}</pre>)}
+          (<pre className={`mb-2 ${payloadMaxHeight} overflow-auto whitespace-pre-wrap break-all rounded-md bg-[color-mix(in_srgb,var(--v2-canvas-strong)_88%,transparent)] p-2 font-mono text-ui-sm text-[var(--v2-text-strong)]`}>{approvalPayloadPreview(parameters, expandedPayload)}</pre>)}
 
       {longPayload &&
       (
@@ -141,7 +141,7 @@ export function ApprovalCard({
 
       {allowAlways &&
       (
-        <label className="mb-3 flex items-center gap-2 text-xs text-iron-200">
+        <label className="mb-3 flex items-center gap-2 text-ui-sm text-[var(--v2-text-strong)]">
           <input
             type="checkbox"
             data-testid="approval-always"
@@ -158,7 +158,7 @@ export function ApprovalCard({
       (
         <Link
           to="/settings/tools"
-          className="mb-3 block text-xs font-medium text-[var(--v2-accent-text)] hover:text-[var(--v2-accent)]"
+          className="mb-3 block text-ui-sm font-medium text-[var(--v2-accent-text)] hover:text-[var(--v2-accent)]"
         >
           {t("approval.globalAutoApproveLink")}
         </Link>

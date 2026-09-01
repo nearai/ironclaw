@@ -59,11 +59,11 @@ export function ProviderDialog({
         (
           <>
           <div className="grid gap-4 sm:grid-cols-2">
-            <label className="space-y-2 text-sm text-[var(--v2-text-strong)]">
+            <label className="space-y-2 text-ui text-[var(--v2-text-strong)]">
               {t("llm.providerName")}
               <Input value={form.name} onChange={(e) => formState.update("name", e.currentTarget.value)} />
             </label>
-            <label className="space-y-2 text-sm text-[var(--v2-text-strong)]">
+            <label className="space-y-2 text-ui text-[var(--v2-text-strong)]">
               {t("llm.providerId")}
               <Input
                 value={form.id}
@@ -75,7 +75,7 @@ export function ProviderDialog({
               />
             </label>
           </div>
-          <div className="space-y-2 text-sm text-[var(--v2-text-strong)]">
+          <div className="space-y-2 text-ui text-[var(--v2-text-strong)]">
             <div>{t("llm.adapter")}</div>
             <SelectMenu
               value={form.adapter}
@@ -91,22 +91,22 @@ export function ProviderDialog({
 
         {isBuiltin &&
         (
-          <div className="rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-[var(--v2-text-muted)]">
+          <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-ui text-[var(--v2-text-muted)]">
             {adapterLabel(provider.adapter)}
           </div>
         )}
 
-        <label className="block space-y-2 text-sm text-[var(--v2-text-strong)]">
+        <label className="block space-y-2 text-ui text-[var(--v2-text-strong)]">
           {t("llm.baseUrl")}
           <Input value={form.baseUrl} placeholder={provider?.base_url || ""} onChange={(e) => formState.update("baseUrl", e.currentTarget.value)} />
         </label>
 
-        <label className="block space-y-2 text-sm text-[var(--v2-text-strong)]">
+        <label className="block space-y-2 text-ui text-[var(--v2-text-strong)]">
           {t("llm.apiKey")}
           <Input type="password" value={apiKey} placeholder={t("llm.apiKeyPlaceholder")} onChange={(e) => formState.setApiKey(e.currentTarget.value)} />
         </label>
 
-        <label className="block space-y-2 text-sm text-[var(--v2-text-strong)]">
+        <label className="block space-y-2 text-ui text-[var(--v2-text-strong)]">
           {t("llm.defaultModel")}
           <div className="flex items-stretch gap-2">
             <Input value={form.model} onChange={(e) => formState.update("model", e.currentTarget.value)} />
@@ -134,7 +134,7 @@ export function ProviderDialog({
 
         {message &&
         (
-          <div className={message.tone === "error" ? "text-sm text-red-200" : "text-sm text-mint"} role="status">
+          <div className={message.tone === "error" ? "text-ui text-[var(--v2-danger-text)]" : "text-ui text-[var(--v2-accent-text)]"} role="status">
             {message.text}
           </div>
         )}

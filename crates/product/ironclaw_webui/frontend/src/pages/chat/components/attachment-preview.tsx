@@ -123,9 +123,9 @@ export function AttachmentPreviewModal({ attachment, onClose, threadId }) {
       </ModalHeader>
       <ModalBody className="flex min-h-[12rem] items-center justify-center">
         {status === "loading" &&
-        (<div className="text-sm text-iron-400">{t("common.loading")}</div>)}
+        (<div className="text-ui text-[var(--v2-text-muted)]">{t("common.loading")}</div>)}
         {status === "error" &&
-        (<div className="text-sm text-iron-400">{t("chat.attachmentLoadFailed")}</div>)}
+        (<div className="text-ui text-[var(--v2-text-muted)]">{t("chat.attachmentLoadFailed")}</div>)}
         {status === "ready" &&
         (<PreviewBody mode={view.mode} view={view} filename={filename} t={t} />)}
       </ModalBody>
@@ -145,7 +145,7 @@ export function AttachmentPreviewModal({ attachment, onClose, threadId }) {
             saveBlob(view.downloadBlob, filename);
           } : undefined}
           data-testid="attachment-download"
-          className="v2-button inline-flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
+          className="v2-button inline-flex items-center gap-1.5 rounded-md border border-[var(--v2-panel-border)] px-3 py-1.5 text-ui-sm text-[var(--v2-text-strong)] hover:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] hover:text-[var(--v2-text-strong)]"
         >
           <Icon name="download" className="h-3.5 w-3.5" />
           <span>{t("common.download")}</span>
@@ -153,7 +153,7 @@ export function AttachmentPreviewModal({ attachment, onClose, threadId }) {
         <button
           type="button"
           onClick={onClose}
-          className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
+          className="v2-button rounded-md border border-[var(--v2-panel-border)] px-3 py-1.5 text-ui-sm text-[var(--v2-text-strong)] hover:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] hover:text-[var(--v2-text-strong)]"
         >
           {t("common.close")}
         </button>
@@ -173,7 +173,7 @@ function OpenInWorkspaceButton({ route, onClose, label }) {
     type="button"
     onClick={openWorkspace}
     data-testid="attachment-open-workspace"
-    className="v2-button inline-flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
+    className="v2-button inline-flex items-center gap-1.5 rounded-md border border-[var(--v2-panel-border)] px-3 py-1.5 text-ui-sm text-[var(--v2-text-strong)] hover:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] hover:text-[var(--v2-text-strong)]"
   >
     <Icon name="folder" className="h-3.5 w-3.5" />
     <span>{label}</span>
@@ -196,24 +196,24 @@ function PreviewBody({ mode, view, filename, t }) {
       return (<iframe
         src={view.frameUrl}
         title={filename}
-        className="h-[70vh] w-full rounded border border-iron-700 bg-white"
+        className="h-[70vh] w-full rounded border border-[var(--v2-panel-border)] bg-white"
       />);
     case "text":
       return (<div className="w-full">
         <pre
-          className="max-h-[70vh] w-full overflow-auto whitespace-pre-wrap break-words rounded bg-iron-900/60 p-3 text-xs text-iron-200"
+          className="max-h-[70vh] w-full overflow-auto whitespace-pre-wrap break-words rounded bg-iron-900/60 p-3 text-ui-sm text-[var(--v2-text-strong)]"
         >{view.text}</pre>
         {view.truncated &&
-        (<div className="mt-2 text-xs text-iron-400">
+        (<div className="mt-2 text-ui-sm text-[var(--v2-text-muted)]">
           {t("chat.attachmentPreviewTruncated")}
         </div>)}
       </div>);
     default:
       // Binary we won't render inline; the Download action in the footer is the
       // way out.
-      return (<div className="flex flex-col items-center gap-2 text-iron-400">
-        <Icon name="file" className="h-10 w-10 text-signal" />
-        <div className="text-sm">{t("chat.attachmentPreviewUnavailable")}</div>
+      return (<div className="flex flex-col items-center gap-2 text-[var(--v2-text-muted)]">
+        <Icon name="file" className="h-10 w-10 text-[var(--v2-accent-text)]" />
+        <div className="text-ui">{t("chat.attachmentPreviewUnavailable")}</div>
       </div>);
   }
 }

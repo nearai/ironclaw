@@ -184,7 +184,7 @@ export function AuthOauthCard({ gate, onCancel }) {
       {error &&
       (
         <div
-          className="mt-3 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+          className="mt-3 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-ui-sm text-[var(--v2-danger-text)]"
           role="alert"
         >
           {error}
@@ -193,7 +193,7 @@ export function AuthOauthCard({ gate, onCancel }) {
       {closedNotice &&
       (
         <div
-          className="mt-3 rounded-md border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+          className="mt-3 rounded-md border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-ui-sm text-amber-200"
           role="status"
         >
           {t("authGate.popupClosed", { provider: providerLabel })}

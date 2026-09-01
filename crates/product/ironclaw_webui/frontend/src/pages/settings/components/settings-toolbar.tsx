@@ -108,7 +108,7 @@ export function SettingsToolbar({
   });
 
   return (
-    <div className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-3">
+    <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-3">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
         <div className="flex min-w-0 flex-1 flex-col gap-3 sm:flex-row sm:items-center">
           {canGoBack &&
@@ -166,7 +166,7 @@ export function SettingsToolbar({
       </div>
 
       <div className="mt-2 min-w-0">
-        <div className="text-xs font-medium text-iron-400">{t("settings.manageJson")}</div>
+        <div className="text-ui-sm font-medium text-[var(--v2-text-muted)]">{t("settings.manageJson")}</div>
         {message &&
         (
           <InlineNotice

@@ -606,7 +606,7 @@ export function ChatInput({
   ].join(" ");
   const textClass = [
     "w-full flex-1 resize-none border-0 !border-transparent !bg-transparent px-2 text-[0.9375rem] leading-6",
-    "text-white outline-none placeholder:text-iron-700 focus:!border-transparent focus:!bg-transparent focus:!outline-none focus:!shadow-none disabled:opacity-50",
+    "text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-muted)] focus:!border-transparent focus:!bg-transparent focus:!outline-none focus:!shadow-none disabled:opacity-50",
     isHero ? "min-h-[72px]" : "min-h-[40px]",
   ].join(" ");
 
@@ -620,7 +620,7 @@ export function ChatInput({
       >
         {dragOver &&
         (
-          <div className="pointer-events-none absolute inset-1 z-10 flex items-center justify-center rounded-[16px] border border-dashed border-[color-mix(in_srgb,var(--v2-accent)_55%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-canvas)_82%,transparent)] text-sm font-medium text-[var(--v2-accent-text)]">
+          <div className="pointer-events-none absolute inset-1 z-10 flex items-center justify-center rounded-[16px] border border-dashed border-[color-mix(in_srgb,var(--v2-accent)_55%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-canvas)_82%,transparent)] text-ui font-medium text-[var(--v2-accent-text)]">
             {t("chat.attachmentDropHint")}
           </div>
         )}
@@ -631,7 +631,7 @@ export function ChatInput({
           // as rows come and go while typing. Header/footer chrome is
           // `shrink-0`; only the option list scrolls, so both stay pinned
           // while the admin's full ~12-entry inventory scrolls between them.
-          <div className="absolute bottom-full left-0 right-0 z-20 mb-2 flex max-h-80 flex-col overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] text-xs shadow-[0_30px_60px_-20px_rgba(0,0,0,0.8)]">
+          <div className="absolute bottom-full left-0 right-0 z-20 mb-2 flex max-h-80 flex-col overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] text-ui-sm shadow-[0_30px_60px_-20px_rgba(0,0,0,0.8)]">
             <div className="flex shrink-0 items-center gap-2 border-b border-[var(--v2-panel-border)] px-3 py-2">
               <Icon name="terminal" className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-faint)]" />
               <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
@@ -697,12 +697,12 @@ export function ChatInput({
                             : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]",
                         ].join(" ")}
                       >
-                        /<span className="text-signal">{matchedPrefix}</span>{restOfName}
+                        /<span className="text-[var(--v2-accent-text)]">{matchedPrefix}</span>{restOfName}
                       </span>
                       <span className="flex min-w-0 flex-1 flex-col">
                         <span
                           className={[
-                            "truncate text-sm font-medium",
+                            "truncate text-ui font-medium",
                             isActive ? "text-[var(--v2-accent-text)]" : "text-[var(--v2-text-strong)]",
                           ].join(" ")}
                         >
@@ -751,7 +751,7 @@ export function ChatInput({
         (
           <div
             role="alert"
-            className="mb-3 flex items-start gap-2 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-danger-text)]"
+            className="mb-3 flex items-start gap-2 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-ui-sm leading-5 text-[var(--v2-danger-text)]"
           >
             <span className="min-w-0 flex-1">{attachmentError}</span>
             <button
@@ -773,7 +773,7 @@ export function ChatInput({
               (att) => (
                 <div
                   key={att.id}
-                  className="group/att relative flex items-center gap-2 rounded-lg border border-iron-700 bg-iron-900/60 py-1.5 pl-1.5 pr-7 text-xs text-iron-100"
+                  className="group/att relative flex items-center gap-2 rounded-lg border border-[var(--v2-panel-border)] bg-iron-900/60 py-1.5 pl-1.5 pr-7 text-ui-sm text-[var(--v2-text-strong)]"
                 >
                   {att.previewUrl
                     ? (<img
@@ -782,7 +782,7 @@ export function ChatInput({
                         className="h-9 w-9 shrink-0 rounded object-cover"
                       />)
                     : (<span
-                        className="grid h-9 w-9 shrink-0 place-items-center rounded bg-iron-800 text-signal"
+                        className="grid h-9 w-9 shrink-0 place-items-center rounded bg-[var(--v2-surface-soft)] text-[var(--v2-accent-text)]"
                       >
                         <Icon name="file" className="h-4 w-4" />
                       </span>)}
@@ -790,14 +790,14 @@ export function ChatInput({
                     <span className="max-w-[12rem] truncate font-medium">
                       {att.filename}
                     </span>
-                    <span className="text-[10px] text-iron-400">{att.sizeLabel}</span>
+                    <span className="text-[10px] text-[var(--v2-text-muted)]">{att.sizeLabel}</span>
                   </span>
                   <button
                     type="button"
                     onClick={() => removeAttachment(att.id)}
                     aria-label={t("chat.attachmentRemove")}
                     title={t("chat.attachmentRemove")}
-                    className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full text-iron-400 hover:bg-iron-700 hover:text-white"
+                    className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]"
                   >
                     <Icon name="close" className="h-3 w-3" />
                   </button>
@@ -843,7 +843,7 @@ export function ChatInput({
         <div className="mt-2 flex items-center gap-2">
           {isSubmitDisabled && statusText &&
           (
-            <span className="inline-flex items-center gap-2 text-xs text-[var(--v2-text-muted)]">
+            <span className="inline-flex items-center gap-2 text-ui-sm text-[var(--v2-text-muted)]">
               <span className="h-2 w-2 rounded-full bg-[var(--v2-accent)]" />
               {statusText}
             </span>

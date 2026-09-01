@@ -47,7 +47,7 @@ function Swatch({ token, theme }: { token: string; theme: string }) {
         style={{ background: `var(${token})` }}
       />
       <span className="min-w-0">
-        <span className="block truncate font-mono text-xs text-[var(--v2-text-strong)]">{token}</span>
+        <span className="block truncate font-mono text-ui-sm text-[var(--v2-text-strong)]">{token}</span>
         <span className="block truncate font-mono text-[0.625rem] text-[var(--v2-text-muted)]">
           {resolved || "—"}
         </span>
