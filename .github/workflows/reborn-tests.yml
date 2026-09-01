@@ -702,7 +702,6 @@ jobs:
         env:
           REBORN_COV_BATCH_ID: ${{ matrix.batch.id }}
           REBORN_COV_LANES_JSON: ${{ toJSON(matrix.batch.lanes) }}
-          REBORN_COV_LANE_PARTITIONS: 4
           REBORN_COV_LANE_TEST_TIMEOUT: 45m
           REBORN_COV_COLLECT: ${{ needs.changes.outputs.run_coverage }}
         run: |

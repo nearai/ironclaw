@@ -1392,6 +1392,19 @@ mod tests {
                 reasoning_details: None,
             })
         }
+
+        async fn list_model_catalog(
+            &self,
+        ) -> Result<Vec<crate::models::DiscoveredModel>, LlmError> {
+            Ok(vec![crate::models::DiscoveredModel {
+                id: "vision-model".to_string(),
+                input_modalities: vec![
+                    crate::models::ModelModality::Text,
+                    crate::models::ModelModality::Image,
+                ],
+                output_modalities: vec![crate::models::ModelModality::Text],
+            }])
+        }
     }
 
     struct RecordingSink(tokio::sync::mpsc::UnboundedSender<String>);
@@ -1572,6 +1585,38 @@ mod tests {
             .expect("tool streaming response");
         assert_eq!(response.content.as_deref(), Some("tool-live"));
         assert_eq!(raw.streaming_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn configured_decorator_chain_preserves_model_capabilities() {
+        let raw: Arc<dyn LlmProvider> = Arc::new(StreamingProbe {
+            streaming_calls: AtomicUsize::new(0),
+            completion_gate: None,
+        });
+        let fallback: Arc<dyn LlmProvider> = Arc::new(StreamingProbe {
+            streaming_calls: AtomicUsize::new(0),
+            completion_gate: None,
+        });
+        let mut config = test_llm_config();
+        config.nearai.fallback_model = Some("fallback-probe".to_string());
+        config.circuit_breaker_threshold = Some(2);
+        config.response_cache_enabled = true;
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let provider = apply_decorator_chain_with_fallback(raw, Some(fallback), &config, session)
+            .await
+            .expect("decorator chain");
+
+        let models = provider.list_model_catalog().await.expect("model catalog");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "vision-model");
+        assert_eq!(
+            models[0].input_modalities,
+            [
+                crate::models::ModelModality::Text,
+                crate::models::ModelModality::Image,
+            ]
+        );
     }
 
     #[tokio::test]

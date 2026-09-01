@@ -736,6 +736,60 @@ async fn cumulative_usage_counts_capability_call_and_reply_turns() {
     }
 }
 
+/// A retry must not contribute usage, while a later usage-less response must
+/// leave the cumulative total from the successful response unchanged.
+#[tokio::test]
+async fn cumulative_usage_survives_model_retry_and_usage_less_response() {
+    use ironclaw_loop_contracts::{LoopModelResponse, LoopModelUsage};
+
+    let result_ref = LoopResultRef::new("result:retry-then-reply").expect("valid");
+    let successful_usage = LoopModelUsage {
+        input_tokens: 73,
+        output_tokens: 19,
+        cache_read_input_tokens: 11,
+        cache_creation_input_tokens: 5,
+    };
+    let calls = LoopModelResponse {
+        usage: Some(successful_usage),
+        ..calls_response()
+    };
+    // This later successful response intentionally has no usage. The final
+    // reported total must remain exactly the usage from the earlier success.
+    let reply = reply_response();
+    let host = MockHost::new(vec![calls, reply])
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "model unavailable during retry",
+        )])
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![resolution::completed(
+                result_ref,
+                "retry result".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.model_usage, Some(successful_usage));
+        }
+        other => panic!("expected completed, got {other:?}"),
+    }
+    assert_eq!(host.model_requests().len(), 3);
+}
+
 #[tokio::test]
 async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_control_message() {
     let result_ref = LoopResultRef::new("result:done").expect("valid");

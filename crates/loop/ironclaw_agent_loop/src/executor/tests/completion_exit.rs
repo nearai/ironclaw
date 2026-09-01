@@ -230,6 +230,73 @@ async fn completion_nudge_disabled_leaves_trailed_off_run_without_tool_use() {
 }
 
 #[tokio::test]
+async fn completion_nudge_is_not_issued_on_capability_resume() {
+    let result_ref = LoopResultRef::new("result:resume-with-stale-reply-signals").expect("valid");
+    let host = MockHost::new(Vec::new())
+        .with_driver_nudges_enabled()
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![resolution::completed(
+                result_ref,
+                "resumed capability completed".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
+            )],
+            stopped_on_suspension: false,
+        }]);
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.last_reply_trailed_off = true;
+    let activity_id = CapabilityActivityId::new();
+    state.pending_approval_resume = Some(PendingApprovalResume {
+        gate_ref: LoopGateRef::new("gate:completion-nudge-resume").expect("valid"),
+        capability_id: capability_id(),
+        approval_request_id: ApprovalRequestId::new(),
+        resume_token: CapabilityResumeToken::new(activity_id.to_string()).expect("valid"),
+        activity_id,
+        correlation_id: CorrelationId::new(),
+        surface_version: surface_version(),
+        input_ref: CapabilityInputRef::new("input:completion-nudge-resume").expect("valid"),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: None,
+        disposition: None,
+    });
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&family_with_stop_after_observed_turns(1), &host, state)
+        .await
+        .expect("resume completes without entering the model path");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(
+        host.model_requests().is_empty(),
+        "a resume terminal must not be converted into a model nudge"
+    );
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
+}
+
+#[tokio::test]
+async fn completion_nudge_is_not_issued_on_skip_model() {
+    let host = MockHost::new(Vec::new()).with_driver_nudges_enabled();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.last_reply_trailed_off = true;
+    state.post_capability_state.skip_model_this_iteration = true;
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&family_with_stop_after_observed_turns(1), &host, state)
+        .await
+        .expect("compaction-only turn completes without entering the model path");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(
+        host.model_requests().is_empty(),
+        "a SkipModel terminal must not be converted into a model nudge"
+    );
+    assert_eq!(final_staged_state(&host).completion_nudges_used, 0);
+}
+
+#[tokio::test]
 async fn completion_nudge_skipped_on_clean_reply() {
     // Gate ON but the first reply is a clean, complete answer (does not trail
     // off): no nudge fires, a single prompt-driven model call, graceful

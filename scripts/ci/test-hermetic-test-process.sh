@@ -347,19 +347,9 @@ do
   fi
 done
 
-if ! grep -Fq \
-  "run-reborn-group-tests.sh" \
-  "${repo_root}/scripts/ci/reborn-coverage-lane-run.sh"
-then
-  echo "integration batch runner lost the canonical sequential group runner" >&2
-  exit 1
-fi
-
-if ! grep -Fq \
-  'cargo test -p ironclaw_integration_tests --test "${test_name}" --ignore-rust-version -- --nocapture' \
-  "${repo_root}/scripts/ci/run-reborn-group-tests.sh"
-then
-  echo "group test runner must ignore the older pinned nightly's rust-version floor" >&2
+if ! grep -Fq -- '--test-threads 4 --ignore-rust-version' \
+  "${repo_root}/scripts/ci/reborn-coverage-lane-run.sh"; then
+  echo "integration batch runner lost bounded nextest or rust-version compatibility" >&2
   exit 1
 fi
 
@@ -399,9 +389,9 @@ for stage_call in \
   "discover-reborn-package-crates.sh" \
   "run_crate_tests" \
   "run_root_partitions" \
-  "run_integration_tier" \
+  "run_integration_lanes" \
   "prepare_frontend_dependencies" \
-  "run-reborn-group-tests.sh" \
+  "reborn-coverage-lane-run.sh" \
   "check-reborn-qa-fixtures.sh" \
   "reborn-e2e-rust.sh" \
   "test_product_surface_coverage.py" \

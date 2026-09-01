@@ -152,6 +152,8 @@ pub struct LoopFamilyRegistry {
 pub enum LoopFamilyRegistryError {
     #[error("duplicate loop family id: {id}")]
     DuplicateFamilyId { id: LoopFamilyId },
+    #[error("invalid loop family capability id: {reason}")]
+    InvalidCapabilityId { reason: String },
 }
 
 impl LoopFamilyRegistry {

@@ -403,8 +403,11 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             .await
         }
         FailureSetup::NoProgressDetected => {
-            // Default repetition detection is advisory-only. This row preserves
-            // coverage for an explicit strategy-authored no-progress failure.
+            // The default strategy CAN now emit `NoProgressDetected` on its
+            // own (windowed output-repetition check, Task 2) — this row
+            // instead pins the terminal-warning LATCH mechanics in
+            // isolation, via an explicit override strategy that force-emits
+            // the kind regardless of real dominance.
             let host = MockHost::new(vec![
                 calls_response(),
                 reply_response_with_text("no progress explanation"),

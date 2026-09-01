@@ -84,7 +84,9 @@ def planner_test_lanes(
 def inventory_document(repo_root: str | pathlib.Path = ROOT) -> dict[str, Any]:
     """Return the versioned normalized inventory consumed by later slices."""
 
-    registrations = _planner_registrations(repo_root)
+    registrations_by_name = {
+        name: path for path, name in _registered_tests(repo_root)
+    }
     lanes = planner_test_lanes(repo_root)
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -96,9 +98,7 @@ def inventory_document(repo_root: str | pathlib.Path = ROOT) -> dict[str, Any]:
                 "kind": "group" if name.startswith(GROUP_NAME_PREFIX) else "flat",
                 "lane": lanes[path],
             }
-            for path, name in sorted(
-                registrations.items(), key=lambda item: (item[1], item[0])
-            )
+            for name, path in sorted(registrations_by_name.items())
         ],
     }
     return validate_inventory_document(document)

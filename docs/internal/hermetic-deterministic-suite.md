@@ -9,8 +9,9 @@ scripts/ci/run-hermetic-deterministic-suite.sh all
 
 It composes the same checked-in discovery and entrypoints used by
 `reborn-tests.yml` and `reborn-e2e.yml`: the production Reborn package closure
-and allowlist with CI feature flags, root test partitions, shared-state group
-suites, the complete registered Reborn integration tier, recorded-QA fixture
+and allowlist with CI feature flags, root test partitions, the complete
+registered integration tier (flat and shared-state group targets in one
+inventory-selected runner invocation), recorded-QA fixture
 checks and replay, the Rust Reborn E2E gate, WebUI unit tests, standalone binary
 build, and the merge-gating Python E2E/provider lanes. It deliberately excludes
 live canaries, nightly Playwright shards, stress, release, and platform

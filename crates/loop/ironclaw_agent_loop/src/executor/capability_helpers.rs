@@ -227,18 +227,6 @@ pub(super) fn apply_capability_filter(
         .retain(|descriptor| filter.permits(&descriptor.capability_id));
 }
 
-pub(super) fn push_call_signature_once(
-    state: &mut LoopExecutionState,
-    signatures: &mut HashSet<CapabilityCallSignature>,
-    call: &CapabilityCallCandidate,
-) -> Result<CapabilityCallSignature, AgentLoopExecutorError> {
-    let signature = capability_call_signature(call)?;
-    if signatures.insert(signature.clone()) {
-        state.recent_call_signatures.push(signature.clone());
-    }
-    Ok(signature)
-}
-
 pub(super) fn capability_call_signature(
     call: &CapabilityCallCandidate,
 ) -> Result<CapabilityCallSignature, AgentLoopExecutorError> {

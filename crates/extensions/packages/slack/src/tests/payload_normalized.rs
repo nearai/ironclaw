@@ -71,6 +71,11 @@ fn dm_and_thread_messages_normalize_to_the_same_contract() {
     }));
     assert_eq!(thread.conversation.topic_id(), Some("1710000000.000010"));
     assert_eq!(thread.trigger, ProductTriggerReason::ReplyToBot);
+    assert_eq!(
+        thread.event_id.as_str(),
+        "slack-install-alpha-msg-T123-C123-1710000000.000011",
+        "ordinary replies, including command and gate text, retain the legacy key"
+    );
 }
 
 #[test]
@@ -93,6 +98,129 @@ fn app_mention_strips_only_the_provider_mention_and_self_roots_a_thread() {
 }
 
 #[test]
+fn slack_user_mention_token_boundaries_are_exact() {
+    let labeled = message(serde_json::json!({
+        "type": "event_callback", "team_id": "T123", "event_id": "EvLabeledMention",
+        "event": {
+            "type": "message", "user": "U1", "channel": "C1",
+            "text": "<@UBOT|ironclaw> ping", "thread_ts": "1.0", "ts": "1.1"
+        }
+    }));
+    assert_eq!(labeled.trigger, ProductTriggerReason::BotMention);
+
+    let w_prefixed = normalize_slack_event(
+        &serde_json::to_vec(&serde_json::json!({
+            "type": "event_callback", "team_id": "T123", "event_id": "EvWPrefixedMention",
+            "event": {
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": "<@W012ABC|ironclaw> ping", "thread_ts": "1.0", "ts": "1.15"
+            }
+        }))
+        .expect("payload"),
+        &installation_id(),
+        Some("W012ABC"),
+    )
+    .expect("normalizes");
+    let SlackInboundEvent::Message(w_prefixed) = w_prefixed else {
+        panic!("expected W-prefixed bot mention")
+    };
+    assert_eq!(w_prefixed.trigger, ProductTriggerReason::BotMention);
+
+    let after_malformed = message(serde_json::json!({
+        "type": "event_callback", "team_id": "T123", "event_id": "EvNestedMention",
+        "event": {
+            "type": "message", "user": "U1", "channel": "C1",
+            "text": "<@not-closed <@UBOT> ping", "thread_ts": "1.0", "ts": "1.2"
+        }
+    }));
+    assert_eq!(
+        after_malformed.trigger,
+        ProductTriggerReason::BotMention,
+        "a malformed candidate must not hide a later complete bot mention"
+    );
+
+    for text in ["<@UOTHER> ping", "<@UBOTX> ping"] {
+        let third_party = normalize(serde_json::json!({
+            "type": "event_callback", "team_id": "T123", "event_id": "EvThirdPartyMention",
+            "event": {
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": text, "thread_ts": "2.0", "ts": "2.1"
+            }
+        }));
+        assert!(matches!(
+            third_party,
+            SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::UnresolvedThreadMention
+            }
+        ));
+    }
+
+    for (label, text) in [
+        ("unterminated token", "<@UBOT ping"),
+        ("wrong case", "<@ubot> ping"),
+    ] {
+        let reply = message(serde_json::json!({
+            "type": "event_callback", "team_id": "T123", "event_id": "EvNearMention",
+            "event": {
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": text, "thread_ts": "2.0", "ts": "2.1"
+            }
+        }));
+        assert_eq!(reply.trigger, ProductTriggerReason::ReplyToBot, "{label}");
+        assert_eq!(
+            reply.event_id.as_str(),
+            "slack-install-alpha-msg-T123-C1-2.1",
+            "{label} must retain the historical ordinary-reply identity"
+        );
+    }
+}
+
+#[test]
+fn legacy_configuration_uses_authoritative_app_mention_only() {
+    let message_twin = serde_json::json!({
+        "type": "event_callback", "team_id": "T123", "event_id": "EvLegacyMessage",
+        "event": {
+            "type": "message", "user": "U1", "channel": "C1",
+            "text": "<@UBOT> ping", "thread_ts": "3.0", "ts": "3.1"
+        }
+    });
+    let outcome = normalize_slack_event(
+        &serde_json::to_vec(&message_twin).expect("serializes"),
+        &installation_id(),
+        None,
+    )
+    .expect("normalizes");
+    assert!(matches!(
+        outcome,
+        SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::UnresolvedThreadMention
+        }
+    ));
+
+    let app_mention = serde_json::json!({
+        "type": "event_callback", "team_id": "T123", "event_id": "EvLegacyAppMention",
+        "event": {
+            "type": "app_mention", "user": "U1", "channel": "C1",
+            "text": "<@UBOT> ping", "thread_ts": "3.0", "ts": "3.1"
+        }
+    });
+    let outcome = normalize_slack_event(
+        &serde_json::to_vec(&app_mention).expect("serializes"),
+        &installation_id(),
+        None,
+    )
+    .expect("normalizes");
+    let SlackInboundEvent::Message(app_mention) = outcome else {
+        panic!("authoritative app_mention must remain admitted without bot configuration");
+    };
+    assert_eq!(app_mention.trigger, ProductTriggerReason::BotMention);
+    assert_eq!(
+        app_mention.event_id.as_str(),
+        "slack-install-alpha-msg-T123-C1-3.1"
+    );
+}
+
+#[test]
 fn bots_subtypes_and_ambient_channels_are_ignored() {
     for (event, expected_reason) in [
         (
@@ -106,6 +234,22 @@ fn bots_subtypes_and_ambient_channels_are_ignored() {
             serde_json::json!({
                 "type": "message", "user": "U1", "channel": "D1", "text": "changed",
                 "ts": "1.0", "subtype": "message_changed"
+            }),
+            SlackIgnoreReason::NonUserMessageSubtype("message_changed".to_string()),
+        ),
+        (
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": "<@UOTHER> loop", "thread_ts": "0.9", "ts": "1.0",
+                "bot_id": "B1"
+            }),
+            SlackIgnoreReason::BotAuthored,
+        ),
+        (
+            serde_json::json!({
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": "<@UOTHER> changed", "thread_ts": "0.9", "ts": "1.0",
+                "subtype": "message_changed"
             }),
             SlackIgnoreReason::NonUserMessageSubtype("message_changed".to_string()),
         ),
@@ -543,6 +687,56 @@ fn app_mention_and_message_twins_of_one_post_collapse_to_the_same_event_id() {
     );
     assert_eq!(app_mention_twin.trigger, ProductTriggerReason::BotMention);
     assert_eq!(message_twin.trigger, ProductTriggerReason::BotMention);
+
+    let mismatched_message_payload = serde_json::json!({
+        "type": "event_callback", "team_id": "T123",
+        "event_id": "EvMismatchedTwinMessage",
+        "event": {
+            "type": "message", "user": "U1", "channel": "C1",
+            "text": "<@UACTUALBOT> ping", "thread_ts": "1710000000.000039",
+            "ts": shared_ts
+        }
+    });
+    let mismatched_app_mention_payload = serde_json::json!({
+        "type": "event_callback", "team_id": "T123",
+        "event_id": "EvMismatchedTwinAppMention",
+        "event": {
+            "type": "app_mention", "user": "U1", "channel": "C1",
+            "text": "<@UACTUALBOT> ping", "thread_ts": "1710000000.000039",
+            "ts": shared_ts
+        }
+    });
+    let mismatched_message = normalize(mismatched_message_payload.clone());
+    let mismatched_app_mention = message(mismatched_app_mention_payload.clone());
+
+    assert!(matches!(
+        mismatched_message,
+        SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::UnresolvedThreadMention
+        }
+    ));
+    assert_eq!(
+        mismatched_app_mention.trigger,
+        ProductTriggerReason::BotMention,
+        "Slack's app_mention callback remains authoritative"
+    );
+    assert_eq!(
+        mismatched_app_mention.event_id.as_str(),
+        "slack-install-alpha-msg-T123-C1-1710000000.000040",
+        "the authoritative callback retains the historical message identity"
+    );
+
+    assert!(matches!(
+        normalize(mismatched_message_payload),
+        SlackInboundEvent::Ignore {
+            reason: SlackIgnoreReason::UnresolvedThreadMention
+        }
+    ));
+    assert_eq!(
+        mismatched_app_mention.event_id,
+        message(mismatched_app_mention_payload).event_id,
+        "an app_mention retry must reproduce its mention identity"
+    );
 }
 
 /// `strip_leading_bot_mention` strips ONLY a leading token that names the

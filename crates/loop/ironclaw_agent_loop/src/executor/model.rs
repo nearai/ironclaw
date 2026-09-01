@@ -162,6 +162,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         }
                     }
                     state.recovery_state = state.recovery_state.cleared_attempts();
+                    state.accumulate_model_usage(response.usage);
                     return Ok(ModelStep::Response(Box::new(state), response));
                 }
                 Err(error) => {

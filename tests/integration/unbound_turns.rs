@@ -450,6 +450,80 @@ async fn default_unbound_run_completes_on_a_plain_text_final() -> HarnessResult<
     Ok(())
 }
 
+/// unbound_default() (families/unbound.rs) composes off
+/// `DefaultPlanner::compose_default()` and overrides only `.with_gate(...)`,
+/// so it inherits `DefaultStopConditionStrategy::default()`'s digest-
+/// dominance terminating check unchanged. This pins that inheritance as a
+/// tested contract for the unbound lane, not silent behavior: the same
+/// two-strike byte-identical-output script
+/// `terminal_warning.rs::repeated_identical_call_terminates_as_no_progress_after_second_strike`
+/// uses for the default family, driven through `accept_prepared_context` →
+/// `TurnCoordinator::submit_turn` instead of the ordinary chat surface.
+/// A group built directly with `GroupCapability::RecordingNoProgress` (the
+/// `RecordingTestCapabilityPort::no_progress()` backend that
+/// `.with_no_progress_echo_for_test()` selects on a bound-thread harness) is
+/// required rather than a degenerate single-thread harness: `.thread(id).build()`
+/// registers its scripted `TraceLlm` on the group's `ScopeRegistryGateway`
+/// keyed to that thread's own BOUND scope, so the run submitted against the
+/// separately-derived unbound (ownerless, prepared-context) `TurnScope` must
+/// have its own script registered via `register_scope_script_for_test` --
+/// exactly like every other unbound test in this file that calls
+/// `run_unbound`/`register_scope_script_for_test`.
+#[tokio::test(flavor = "multi_thread")]
+async fn unbound_default_run_terminates_as_no_progress_after_second_strike() -> HarnessResult<()> {
+    // Byte-identical scripted output each call. Two strikes at threshold 8
+    // need 16 calls minimum (8 + reset + 8); 20 leaves margin -- same shape
+    // as terminal_warning.rs's default-family version of this test.
+    let repeated = || RebornScriptedReply::tool_call("test_echo", json!({"message": "same"}));
+    let group = RebornIntegrationGroup::builder()
+        .build_with_capability(reborn_support::group::GroupCapability::RecordingNoProgress)
+        .await?;
+    let harness = group.thread("conv-unbound-no-progress").build().await?;
+
+    let thread_service = harness.thread_service_for_test()?;
+    let accepted = thread_service
+        .accept_prepared_context(prepared_request(
+            "unbound-no-progress-accept",
+            "keep retrying the same thing",
+            PreparedTurnDeclarations::default(),
+        )?)
+        .await?;
+    let scope = unbound_turn_scope(&accepted.thread_id)?;
+    group
+        .register_scope_script_for_test(
+            scope.clone(),
+            "unbound-no-progress",
+            std::iter::repeat_with(repeated).take(20),
+        )
+        .await?;
+    let coordinator = harness.turn_coordinator_for_test();
+    let SubmitTurnResponse::Accepted { run_id, .. } = coordinator
+        .submit_turn(submit_request(
+            scope.clone(),
+            accepted.accepted_message_ref.clone(),
+            "unbound-no-progress-submit",
+        )?)
+        .await?;
+    let state = wait_for_terminal(&coordinator, &scope, run_id).await?;
+    assert_eq!(
+        state.status,
+        TurnStatus::Failed,
+        "failure={:?}",
+        state.failure
+    );
+    assert_eq!(
+        state.resolved_run_profile_id,
+        RunProfileId::unbound_default(),
+        "the no-declarations contract must resolve to the unbound_default family"
+    );
+    let failure = state
+        .failure
+        .as_ref()
+        .expect("failed run carries a durable failure");
+    assert_eq!(failure.category(), "no_progress_detected");
+    Ok(())
+}
+
 /// Seeded tool history through the accept door: an assistant tool-call turn
 /// plus its tool result persist replay-faithfully — the round lands as a
 /// `ToolResultReference` row whose full outcome bytes are durable in the

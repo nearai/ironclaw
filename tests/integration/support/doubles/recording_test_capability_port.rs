@@ -3,6 +3,7 @@
 /// Test double substituting the whole production capability-port dispatch
 /// pipeline (`HostRuntimeLoopCapabilityPortFactory` +
 /// `RefreshingLoopCapabilityPortFactory`) with a lightweight in-memory Echo backend.
+use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -17,7 +18,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
 use ironclaw_loop_contracts::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityDescriptorView,
-    CapabilityInputRef, CapabilitySurfaceVersion, LoopCapabilityPort, LoopRequest,
+    CapabilityInputRef, CapabilitySurfaceVersion, ContentDigest, LoopCapabilityPort, LoopRequest,
     LoopRequestBatch, ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
     VisibleCapabilitySurface, resolution,
 };
@@ -40,6 +41,16 @@ pub struct RecordingTestCapabilityPort {
     invocations: Arc<Mutex<Vec<LoopRequest>>>,
     next_result: Arc<AtomicUsize>,
     approval_calls: Arc<AtomicUsize>,
+    /// Scripted call arguments keyed by the `input_ref` minted for them in
+    /// `register_provider_tool_call`. Only `CapabilityMode::NoProgress`
+    /// reads this (in `completed_result`): the no-progress loop-stop check
+    /// (`ironclaw_agent_loop::strategies::stop`) keys off (signature,
+    /// output_digest) pairs, so a test double driving that check must report
+    /// a digest that varies with the scripted arguments the same way a real
+    /// capability's output would. The changing-output negative control uses a
+    /// fixed marker argument and instead varies both the returned text and its
+    /// digest from the result sequence.
+    arguments_by_input_ref: Arc<Mutex<HashMap<String, serde_json::Value>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,6 +136,7 @@ impl RecordingTestCapabilityPort {
             invocations: Arc::new(Mutex::new(Vec::new())),
             next_result: Arc::new(AtomicUsize::new(1)),
             approval_calls: Arc::new(AtomicUsize::new(0)),
+            arguments_by_input_ref: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -185,21 +197,56 @@ impl RecordingTestCapabilityPort {
         allowlist
     }
 
-    fn completed_result(&self) -> Resolution {
+    fn completed_result(&self, input_ref: &CapabilityInputRef) -> Resolution {
         let ordinal = self.next_result.fetch_add(1, Ordering::SeqCst);
         let progress = if matches!(self.mode, CapabilityMode::NoProgress) {
             ironclaw_loop_contracts::CapabilityProgress::NoChange
         } else {
             ironclaw_loop_contracts::CapabilityProgress::MadeProgress
         };
+        let arguments = self
+            .arguments_by_input_ref
+            .lock()
+            .unwrap()
+            .get(input_ref.as_str())
+            .cloned();
+        // The changing-output integration negative control keeps the call
+        // arguments fixed, so its output must vary from the result sequence,
+        // not be derived from those arguments. Other no-progress cases retain
+        // the argument-derived digest that makes their scripted output repeat.
+        let changing_output = matches!(
+            arguments.as_ref().and_then(|arguments| arguments.get("message")),
+            Some(serde_json::Value::String(message)) if message == "changing-output"
+        );
+        let output = if matches!(self.mode, CapabilityMode::NoProgress) && changing_output {
+            format!("echo: changing-output-{ordinal}")
+        } else {
+            "echo: hi".to_string()
+        };
+        // Only the no-progress mode needs a corroborating output digest — see
+        // the doc comment on `arguments_by_input_ref`. For the changing-output
+        // probe, hash the returned output itself so the digest varies
+        // independently of the fixed call signature.
+        let output_digest: Option<ContentDigest> =
+            if matches!(self.mode, CapabilityMode::NoProgress) {
+                if changing_output {
+                    ContentDigest::from_json_value(&serde_json::Value::String(output.clone())).ok()
+                } else {
+                    arguments
+                        .as_ref()
+                        .and_then(|arguments| ContentDigest::from_json_value(arguments).ok())
+                }
+            } else {
+                None
+            };
         resolution::completed(
             ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
                 .expect("valid result ref"),
-            "echo: hi".to_string(),
+            output,
             progress,
             false,
             0,
-            None,
+            output_digest,
             None,
         )
     }
@@ -239,14 +286,19 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
         let call = request.tool_call;
         let capability_id = self.capability_id_for_provider_tool(&call.name)?;
+        let input_ref =
+            CapabilityInputRef::new(format!("input:{}", call.id)).expect("valid input ref");
+        self.arguments_by_input_ref
+            .lock()
+            .unwrap()
+            .insert(input_ref.as_str().to_string(), call.arguments.clone());
         Ok(CapabilityCallCandidate {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: capability_id.clone(),
             effective_capability_ids: vec![capability_id],
-            input_ref: CapabilityInputRef::new(format!("input:{}", call.id))
-                .expect("valid input ref"),
+            input_ref,
             provider_replay: Some(ProviderToolCallReplay {
                 provider_id: call.provider_id,
                 provider_model_id: call.provider_model_id,
@@ -297,6 +349,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         &self,
         request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
+        let input_ref = request.input_ref.clone();
         self.invocations.lock().unwrap().push(request);
         if matches!(self.mode, CapabilityMode::InvocationError) {
             // Terminal host fault: `Unavailable` stays in the executor's
@@ -345,7 +398,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         if matches!(self.mode, CapabilityMode::SpawnAuthThenApprovalThenEcho) {
             match self.approval_calls.fetch_add(1, Ordering::SeqCst) {
                 0 => {
-                    return Ok(self.completed_result());
+                    return Ok(self.completed_result(&input_ref));
                 }
                 1 => {
                     return Ok(resolution::approval_required(
@@ -358,7 +411,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 _ => {}
             }
         }
-        Ok(self.completed_result())
+        Ok(self.completed_result(&input_ref))
     }
 
     async fn invoke_capability_batch(

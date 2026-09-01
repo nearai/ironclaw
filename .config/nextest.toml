@@ -34,3 +34,9 @@ slow-timeout = { period = "300s", terminate-after = 2 }
 [[profile.ci.overrides]]
 filter = "test(~e2e_thread_scheduling) | test(~heavy_integration)"
 slow-timeout = { period = "300s", terminate-after = 2 }
+
+# Group binaries may contain several independent top-level tests. Nextest runs
+# each in its own process; scenarios inside one test remain sequential.
+[[profile.ci.overrides]]
+filter = "binary(~reborn_group_)"
+slow-timeout = { period = "28m", terminate-after = 1 }

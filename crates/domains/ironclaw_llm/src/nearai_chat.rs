@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use self::nearai_tool_message_flattening::flatten_tool_messages;
 use crate::config::NearAiConfig;
 use crate::error::LlmError;
+use crate::models::{DiscoveredModel, ModelModality};
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
     LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
@@ -47,18 +48,59 @@ pub struct ModelInfo {
     pub provider: Option<String>,
 }
 
-/// Parse a NEAR AI `/models` response body into [`ModelInfo`] entries.
+/// Parse a NEAR AI `/models` response body into provider-neutral catalog entries.
 ///
 /// Accepts `{models: [...]}`, `{data: [...]}`, or a bare `[...]` array, and
 /// tolerates the various field names different deployments emit. Returns an
 /// empty vec when no recognizable entries are found.
-fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
+fn parse_nearai_models(response_text: &str) -> Vec<DiscoveredModel> {
+    fn deserialize_modalities_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value {
+            serde_json::Value::Array(values) => values
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect(),
+            _ => Vec::new(),
+        })
+    }
+
     #[derive(Deserialize)]
     struct ModelMetadataInner {
         #[serde(default)]
         name: Option<String>,
         #[serde(default, alias = "modelName", alias = "model_name")]
         model_name: Option<String>,
+    }
+
+    #[derive(Default, Deserialize)]
+    struct ModelArchitecture {
+        #[serde(
+            default,
+            alias = "inputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
+        input_modalities: Vec<String>,
+        #[serde(
+            default,
+            alias = "outputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
+        output_modalities: Vec<String>,
+    }
+
+    fn deserialize_architecture_lossy<'de, D>(
+        deserializer: D,
+    ) -> Result<ModelArchitecture, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // silent-ok: malformed optional display metadata must not hide routable model IDs.
+        Ok(serde_json::from_value(value).unwrap_or_default())
     }
 
     #[derive(Deserialize)]
@@ -75,6 +117,20 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
         model_id: Option<String>,
         #[serde(default)]
         metadata: Option<ModelMetadataInner>,
+        #[serde(
+            default,
+            alias = "inputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
+        input_modalities: Vec<String>,
+        #[serde(
+            default,
+            alias = "outputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
+        output_modalities: Vec<String>,
+        #[serde(default, deserialize_with = "deserialize_architecture_lossy")]
+        architecture: ModelArchitecture,
     }
 
     impl ModelEntry {
@@ -104,6 +160,32 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
                 .or_else(|| self.metadata.as_ref().and_then(|m| clean(&m.model_name)))
                 .or_else(|| self.metadata.as_ref().and_then(|m| clean(&m.name)))
         }
+
+        fn modalities(&self) -> (Vec<ModelModality>, Vec<ModelModality>) {
+            fn normalize(values: &[String]) -> Vec<ModelModality> {
+                let mut modalities = Vec::new();
+                for value in values {
+                    if let Some(modality) = ModelModality::from_provider_value(value)
+                        && !modalities.contains(&modality)
+                    {
+                        modalities.push(modality);
+                    }
+                }
+                modalities
+            }
+
+            let input = if self.input_modalities.is_empty() {
+                &self.architecture.input_modalities
+            } else {
+                &self.input_modalities
+            };
+            let output = if self.output_modalities.is_empty() {
+                &self.architecture.output_modalities
+            } else {
+                &self.output_modalities
+            };
+            (normalize(input), normalize(output))
+        }
     }
 
     #[derive(Deserialize)]
@@ -125,9 +207,13 @@ fn parse_nearai_models(response_text: &str) -> Vec<ModelInfo> {
             entries
                 .into_iter()
                 .filter_map(|e| {
-                    e.resolve_id().map(|name| ModelInfo {
-                        name,
-                        provider: None,
+                    e.resolve_id().map(|id| {
+                        let (input_modalities, output_modalities) = e.modalities();
+                        DiscoveredModel {
+                            id,
+                            input_modalities,
+                            output_modalities,
+                        }
                     })
                 })
                 .collect()
@@ -703,20 +789,32 @@ impl NearAiChatProvider {
     /// Handles session renewal on 401 (same pattern as `send_request`).
     /// Supports multiple response formats: `{models: [...]}`, `{data: [...]}`, and plain array.
     pub async fn list_models_full(&self) -> Result<Vec<ModelInfo>, LlmError> {
-        match self.list_models_inner().await {
+        Ok(self
+            .list_model_catalog_full()
+            .await?
+            .into_iter()
+            .map(|model| ModelInfo {
+                name: model.id,
+                provider: None,
+            })
+            .collect())
+    }
+
+    async fn list_model_catalog_full(&self) -> Result<Vec<DiscoveredModel>, LlmError> {
+        match self.list_model_catalog_inner().await {
             Ok(models) => Ok(models),
             Err(LlmError::SessionExpired { .. })
                 if !is_public_nearai_model_catalog(&self.config.base_url)
                     && !self.uses_api_key() =>
             {
                 self.session.handle_auth_failure().await?;
-                self.list_models_inner().await
+                self.list_model_catalog_inner().await
             }
             Err(e) => Err(e),
         }
     }
 
-    async fn list_models_inner(&self) -> Result<Vec<ModelInfo>, LlmError> {
+    async fn list_model_catalog_inner(&self) -> Result<Vec<DiscoveredModel>, LlmError> {
         let url = self.api_url("models");
         let requires_auth = !is_public_nearai_model_catalog(&self.config.base_url);
 
@@ -1127,6 +1225,10 @@ impl LlmProvider for NearAiChatProvider {
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         let models = self.list_models_full().await?;
         Ok(models.into_iter().map(|m| m.name).collect())
+    }
+
+    async fn list_model_catalog(&self) -> Result<Vec<DiscoveredModel>, LlmError> {
+        self.list_model_catalog_full().await
     }
 
     fn active_model_name(&self) -> String {
@@ -1805,9 +1907,73 @@ mod tests {
         ]}"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["deepseek-ai/DeepSeek-V4-Flash", "qwen/Qwen3-30B"]);
+    }
+
+    #[test]
+    fn parse_models_preserves_top_level_modalities() {
+        let body = r#"{"data":[{
+            "id":"openai/gpt-5-image",
+            "input_modalities":["text","image","unknown"],
+            "output_modalities":["text","image"]
+        }]}"#;
+
+        let models = parse_nearai_models(body);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].input_modalities,
+            [
+                crate::models::ModelModality::Text,
+                crate::models::ModelModality::Image,
+            ]
+        );
+        assert_eq!(
+            models[0].output_modalities,
+            [
+                crate::models::ModelModality::Text,
+                crate::models::ModelModality::Image,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_models_preserves_nested_architecture_modalities() {
+        let body = r#"[{
+            "id":"google/gemini",
+            "architecture": {
+                "inputModalities":["text","image","audio","video"],
+                "outputModalities":["text"]
+            }
+        }]"#;
+
+        let models = parse_nearai_models(body);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models[0].input_modalities,
+            [
+                crate::models::ModelModality::Text,
+                crate::models::ModelModality::Image,
+                crate::models::ModelModality::Audio,
+                crate::models::ModelModality::Video,
+            ]
+        );
+        assert_eq!(
+            models[0].output_modalities,
+            [crate::models::ModelModality::Text]
+        );
+    }
+
+    #[test]
+    fn parse_models_defaults_missing_modalities_to_empty() {
+        let models = parse_nearai_models(r#"[{"id":"legacy/model"}]"#);
+
+        assert_eq!(models.len(), 1);
+        assert!(models[0].input_modalities.is_empty());
+        assert!(models[0].output_modalities.is_empty());
     }
 
     #[test]
@@ -1817,7 +1983,7 @@ mod tests {
         let body = r#"[{"name":"gpt-4o"},{"model":"o3-mini"}]"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["gpt-4o", "o3-mini"]);
     }
@@ -1830,7 +1996,7 @@ mod tests {
         ]}"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         // Blank `id` falls through to `name`; second entry uses `model`.
         assert_eq!(models, ["only-display", "meta/Llama-4"]);
@@ -1842,7 +2008,7 @@ mod tests {
         let body = r#"[{"model_id":"vendor/x"},{"modelId":"vendor/y"}]"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["vendor/x", "vendor/y"]);
     }
@@ -1854,7 +2020,7 @@ mod tests {
         let body = r#"[{"model_name":"qwen-turbo"},{"modelName":"glm-5"}]"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["qwen-turbo", "glm-5"]);
     }
@@ -1869,7 +2035,7 @@ mod tests {
         ]"#;
         let models: Vec<_> = parse_nearai_models(body)
             .into_iter()
-            .map(|m| m.name)
+            .map(|m| m.id)
             .collect();
         assert_eq!(models, ["meta-model", "meta-display"]);
     }
@@ -1939,7 +2105,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_model_discovery_uses_session_authentication() {
+    async fn private_model_discovery_authenticates_and_tolerates_malformed_capabilities() {
         use tokio::net::TcpListener;
         use tokio::sync::oneshot;
 
@@ -1957,7 +2123,20 @@ mod tests {
                     }
                     write_http_json_response(
                         &mut socket,
-                        serde_json::json!({ "data": [{ "id": "nearai/test-model" }] }),
+                        serde_json::json!({
+                            "data": [
+                                {
+                                    "id": "nearai/malformed-capabilities",
+                                    "input_modalities": ["text", 7, null],
+                                    "output_modalities": null,
+                                    "architecture": null
+                                },
+                                {
+                                    "id": "nearai/valid",
+                                    "architecture": { "input_modalities": ["image"] }
+                                }
+                            ]
+                        }),
                     )
                     .await;
                     break;
@@ -1979,12 +2158,16 @@ mod tests {
         let provider = NearAiChatProvider::new(config, session).expect("provider");
 
         let models = provider
-            .list_models_full()
+            .list_model_catalog_full()
             .await
             .expect("private model discovery should use the session token");
 
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].name, "nearai/test-model");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "nearai/malformed-capabilities");
+        assert_eq!(models[0].input_modalities, [ModelModality::Text]);
+        assert!(models[0].output_modalities.is_empty());
+        assert_eq!(models[1].id, "nearai/valid");
+        assert_eq!(models[1].input_modalities, [ModelModality::Image]);
         let headers = headers_rx.await.expect("models request headers");
         assert!(
             headers

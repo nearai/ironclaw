@@ -18,7 +18,6 @@
 #![allow(dead_code, unused_imports)]
 
 mod active_task_compaction;
-pub(crate) mod batch;
 mod budget;
 mod capability;
 mod compaction;
@@ -26,13 +25,12 @@ mod context;
 mod drain;
 pub(crate) mod gate;
 mod model;
-pub mod progress;
+mod progress;
 pub(crate) mod recovery;
 mod reply_admission;
 mod stop;
 
 pub(crate) use active_task_compaction::ActiveTaskPreservingCompactionStrategy;
-pub(crate) use batch::BatchPolicy;
 pub(crate) use budget::{BudgetStrategy, DEFAULT_ITERATION_BACKSTOP, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
 pub(crate) use compaction::{
@@ -52,6 +50,7 @@ pub(crate) use gate::{
 pub(crate) use model::{
     DefaultModelStrategy, ModelPreference, ModelStrategy, StructuredResultModelStrategy,
 };
+pub(crate) use progress::RepeatedOutputProgressStrategy;
 pub(crate) use recovery::{
     BackoffDelayMs, CapabilityErrorSummary, DefaultRecoveryStrategy, ModelErrorClass,
     ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, RetryScope,

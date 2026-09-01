@@ -559,6 +559,9 @@ struct HarnessOptions {
     /// `IRONCLAW_REBORN_WEBUI_BASE_URL`. `None` (the default) keeps the
     /// connect notice link-free.
     connect_link_base_url: Option<String>,
+    /// A stale value exercises a legacy installation whose saved bot user ID
+    /// no longer matches the callback's addressed member.
+    slack_bot_user_id: &'static str,
 }
 
 impl HarnessOptions {
@@ -572,6 +575,7 @@ impl HarnessOptions {
             actor_role: AdminUserRole::Member,
             connection_strategy: None,
             connect_link_base_url: None,
+            slack_bot_user_id: "UBOT",
         }
     }
 }
@@ -742,7 +746,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     ]));
     let dm_targets = generic_dm_target_store();
 
-    let channel_config = configured_channel_config().await;
+    let channel_config = configured_channel_config(options.slack_bot_user_id).await;
     let identity = ChannelHostIdentity {
         tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
         agent_id: AgentId::new(AGENT).expect("agent"),     // safety: static test agent id is valid.
@@ -875,7 +879,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 /// `[channel.config]` configured through the production configure service:
 /// the REAL slack manifest is installed into a durable installation store
 /// and the ingress verification secret is saved under its manifest handle.
-async fn configured_channel_config() -> Arc<ChannelConfigService> {
+async fn configured_channel_config(bot_user_id: &str) -> Arc<ChannelConfigService> {
     let installation_store = Arc::new(crate::filesystem_installation_store_for_test().await);
     let record = ExtensionManifestRecord::from_toml(
         slack_manifest_from_bundled_inventory(),
@@ -953,13 +957,10 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
                 ("slack_api_app_id".to_string(), "A-E2E".to_string()),
                 ("slack_installation_id".to_string(), "I-E2E".to_string()),
                 // Must match the `<@…>` id every fixture's `text` mentions
-                // (`UBOT`, not e.g. "U-BOT-E2E"): the adapter's
-                // `strip_leading_bot_mention` now strips a leading mention
-                // only when it names THIS configured bot, so a mismatch here
-                // silently leaves the mention in the normalized text instead
-                // of failing loudly — re-check every `<@UBOT>` fixture below
-                // if this value ever changes.
-                ("slack_bot_user_id".to_string(), "UBOT".to_string()),
+                // (`UBOT`, not e.g. "U-BOT-E2E"). A mismatch leaves the
+                // mention in normalized text; a stale value intentionally
+                // exercises the legacy fallback.
+                ("slack_bot_user_id".to_string(), bot_user_id.to_string()),
                 (
                     "slack_oauth_client_id".to_string(),
                     "e2e-slack-client".to_string(),
@@ -2940,6 +2941,144 @@ async fn slack_in_thread_mentions_each_run_in_their_own_thread_replying_in_the_v
         harness.slack_streamed_text()
     );
     assert!(harness.slack_messages().is_empty());
+}
+
+/// Regression for the explicit-mention deduplication collision: Slack may
+/// describe one post with both a `message` callback and an authoritative
+/// `app_mention` callback. If the configured bot member id is stale, the
+/// `message` shape cannot prove which user was mentioned, so it must be ignored
+/// before durable admission rather than consume the identity the later
+/// `app_mention` needs to start the turn.
+#[tokio::test]
+async fn slack_explicit_mention_survives_reply_shaped_twin_arriving_first() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "mention reply".into(),
+    })
+    .await;
+
+    let response = harness.post_event(STALE_ID_THREAD_MESSAGE_TWIN).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness.post_event(STALE_ID_THREAD_APP_MENTION_TWIN).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(STALE_ID_THREAD_MESSAGE_TWIN, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(STALE_ID_THREAD_APP_MENTION_TWIN, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "the authoritative app_mention must start one turn even when its \
+         ambiguous message twin arrived first"
+    );
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1, "the user must receive exactly one reply");
+    assert_eq!(messages[0]["channel"], "C891");
+    assert_eq!(messages[0]["text"], "mention reply");
+    assert_eq!(messages[0]["thread_ts"], "1710000007.000001");
+}
+
+#[tokio::test]
+async fn slack_explicit_mention_remains_single_when_authoritative_twin_arrives_first() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "mention reply".into(),
+    })
+    .await;
+
+    let response = harness.post_event(STALE_ID_THREAD_APP_MENTION_TWIN).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "an app_mention must start a turn without waiting for a message twin"
+    );
+    assert_eq!(harness.slack_messages().len(), 1);
+
+    let response = harness.post_event(STALE_ID_THREAD_MESSAGE_TWIN).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(STALE_ID_THREAD_APP_MENTION_TWIN, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(STALE_ID_THREAD_MESSAGE_TWIN, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "the ambiguous message twin and callback retries must not add a turn"
+    );
+    assert_eq!(
+        harness.slack_messages().len(),
+        1,
+        "the user must receive exactly one threaded reply"
+    );
+}
+
+#[tokio::test]
+async fn slack_text_only_mentions_run_for_supported_ids_while_ordinary_reply_remains_noop() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "text mention reply".into(),
+    })
+    .await;
+
+    let response = harness.post_event(TEXT_ONLY_THREAD_MENTION).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "a correctly configured message callback must not need an app_mention twin"
+    );
+    assert_eq!(harness.slack_messages().len(), 1);
+
+    let response = harness.post_event(ORDINARY_THREAD_REPLY).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness.post_retry_event(ORDINARY_THREAD_REPLY, 1).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness.post_event(THIRD_PARTY_THREAD_MENTION).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = harness
+        .post_retry_event(THIRD_PARTY_THREAD_MENTION, 1)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    assert_eq!(
+        harness.coordinator.submitted_scopes().len(),
+        1,
+        "ordinary thread chatter, including third-party mentions, must remain silent"
+    );
+    assert_eq!(
+        harness.slack_messages().len(),
+        1,
+        "ordinary thread chatter must not produce another bot reply"
+    );
+
+    let mut w_options = HarnessOptions::new(TurnMode::Complete {
+        assistant_text: "W mention reply".into(),
+    });
+    w_options.slack_bot_user_id = "W012ABC";
+    let w_harness = build_harness_with_options(w_options).await;
+
+    let response = w_harness.post_event(W_PREFIXED_TEXT_ONLY_MENTION).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    w_harness.drain().await;
+    assert_eq!(
+        w_harness.coordinator.submitted_scopes().len(),
+        1,
+        "a W-prefixed configured bot ID must reach signed ingress admission"
+    );
+    assert_eq!(w_harness.slack_messages().len(), 1);
 }
 
 /// Ephemeral-per-ping: pairing mid-thread. Unpaired carol is nudged in place
@@ -5421,6 +5560,52 @@ const IN_THREAD_MENTION_BOB: &str = r#"{
   "event":{"type":"app_mention","user":"U456","channel":"C890","text":"<@UBOT> bob follows up here","ts":"1710000006.000003","thread_ts":"1710000006.000001"}
 }"#;
 
+// Both callbacks describe the same Slack post (`channel` + `ts`) but have
+// distinct envelope event ids. The configured bot id in this harness is
+// `UBOT`, while the text names `UACTUALBOT`, so only the authoritative
+// `app_mention` callback classifies as `BotMention` before the fix.
+const STALE_ID_THREAD_MESSAGE_TWIN: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-stale-twin-message",
+  "event":{"type":"message","user":"U123","channel":"C891",
+           "text":"<@UACTUALBOT> investigate","thread_ts":"1710000007.000001",
+           "ts":"1710000007.000002"}
+}"#;
+
+const STALE_ID_THREAD_APP_MENTION_TWIN: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-stale-twin-app-mention",
+  "event":{"type":"app_mention","user":"U123","channel":"C891",
+           "text":"<@UACTUALBOT> investigate","thread_ts":"1710000007.000001",
+           "ts":"1710000007.000002"}
+}"#;
+
+const TEXT_ONLY_THREAD_MENTION: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-text-only-mention",
+  "event":{"type":"message","user":"U123","channel":"C894",
+           "text":"<@UBOT> investigate","thread_ts":"1710000010.000001",
+           "ts":"1710000010.000002"}
+}"#;
+
+const W_PREFIXED_TEXT_ONLY_MENTION: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-w-text-only-mention",
+  "event":{"type":"message","user":"U123","channel":"C894",
+           "text":"<@W012ABC> investigate","thread_ts":"1710000010.000001",
+           "ts":"1710000010.000005"}
+}"#;
+
+const ORDINARY_THREAD_REPLY: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-ordinary-thread-reply",
+  "event":{"type":"message","user":"U123","channel":"C894",
+           "text":"thanks everyone","thread_ts":"1710000010.000001",
+           "ts":"1710000010.000003"}
+}"#;
+
+const THIRD_PARTY_THREAD_MENTION: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-third-party-thread-mention",
+  "event":{"type":"message","user":"U123","channel":"C894",
+           "text":"<@U456> thanks","thread_ts":"1710000010.000001",
+           "ts":"1710000010.000004"}
+}"#;
+
 // ── Pairing-mid-thread fixtures (#7377) ──────────────────────────────────────
 // Alice roots a thread; U457 (carol) is unpaired at first contact and pairs
 // mid-test through the harness identity-binding seam.
@@ -5749,6 +5934,35 @@ async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent
     assert_eq!(messages[0]["channel"], "C123");
     assert_eq!(messages[0]["thread_ts"], "1710000000.000009");
     assert_eq!(messages[0]["text"], "Authentication canceled.");
+}
+
+#[tokio::test]
+async fn stale_slack_bot_id_thread_auth_deny_survives_unresolved_mention_filter() {
+    let mut options = HarnessOptions::new(TurnMode::BlockAuth);
+    options.slack_bot_user_id = "UOLD";
+    let harness = build_harness_with_options(options).await;
+
+    let first = harness
+        .post_event(app_mention_message("Ev-auth-cancel-start", "needs auth"))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+
+    let second = harness
+        .post_event(thread_message_event(
+            "Ev-auth-cancel",
+            "<@UBOT> auth deny gate:auth-slack",
+            "1710000000.000009",
+        ))
+        .await;
+    assert_eq!(second.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+
+    let auths = harness.auths.requests();
+    assert_eq!(auths.len(), 1); // safety: Slack E2E auth routing assertion.
+    assert_eq!(auths[0].decision, AuthInteractionDecision::Deny); // safety: length asserted above.
+    assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
+    assert_eq!(harness.coordinator.submitted_turn_count(), 1); // safety: no control reply agent turn.
 }
 
 #[tokio::test]

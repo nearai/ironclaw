@@ -60,6 +60,10 @@ family rules in `crates/loop/AGENTS.md`.
 - Do not add stages for pure mapping helpers or one-line wrappers.
 - Keep cancellation, checkpoint, and pending-input-ack ordering explicit at
   the stage boundary that owns the state transition.
+- `canonical.rs` orders stages; successful-call bookkeeping belongs to the
+  stage that owns the successful call, and small lifecycle mechanics join an
+  existing owning stage rather than growing the spine or creating a one-line
+  stage.
 
 ## Adding code
 
@@ -69,6 +73,9 @@ family rules in `crates/loop/AGENTS.md`.
 - Add a new family file only for a built-in loop family composed from sealed
   strategies.
 - Add executor helpers only when they are part of canonical loop mechanics.
+- Batch reporting and execution vocabulary belongs to the contract and the
+  capability executor. Do not add a strategy module for a wire enum or an
+  identity conversion around the contract-owned `BatchPolicyKind`.
 - Introduce a submodule before a file becomes a mixed bag of unrelated
   helpers; no `misc`/`utils`/`common` modules.
 

@@ -39,7 +39,7 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
         gate:DefaultGateHandlingStrategy(block),\
         recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),\
         reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),\
-        stop:DefaultStopConditionStrategy(consecutive_repeat=3,advisory_only,rejected_reply=invalid_model_output),\
+        stop:DefaultStopConditionStrategy(consecutive_repeat=3,no_progress_window=32,no_progress_threshold=8,rejected_reply=invalid_model_output),\
         drain:DefaultInputDrainStrategy(steering=true,followup=true),\
         budget:DefaultBudgetStrategy(iteration_limit={iteration_limit},wall_clock_limit=none)"
     )
@@ -51,8 +51,8 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x0a, 0x79, 0x29, 0xd2, 0x34, 0x55, 0x76, 0xc1, 0x57, 0x86, 0x5c, 0x02, 0xc2, 0xf8, 0x73, 0x4a,
-    0x7f, 0xd6, 0x49, 0xf2, 0x25, 0xa3, 0x77, 0x07, 0xab, 0xb3, 0x12, 0xda, 0xc4, 0x9f, 0xf5, 0x90,
+    0x51, 0x7c, 0x91, 0x80, 0xec, 0xca, 0x58, 0xdf, 0x60, 0xad, 0x9a, 0x47, 0x4e, 0x07, 0x0d, 0x14,
+    0x29, 0xa9, 0x38, 0xa6, 0x3b, 0xd9, 0x3f, 0x21, 0xd5, 0x16, 0x66, 0x94, 0xee, 0xef, 0xff, 0x06,
 ]);
 
 /// The default loop family: the text-tool-use baseline.

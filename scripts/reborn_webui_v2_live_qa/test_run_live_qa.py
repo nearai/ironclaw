@@ -4589,11 +4589,15 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             return {
                 "status_code": 200,
                 "event_id": kwargs["event_id"],
+                "ts": "1788265904.338000",
+                "message_key": run_live_qa._slack_message_key(
+                    kwargs["channel_id"], "1788265904.338000"
+                ),
                 "channel_id_present": True,
             }
 
         async def fake_wait_for_slack_event_run_id(_ctx, **kwargs):
-            return f"run-for-{kwargs['event_id']}"
+            return f"run-for-{kwargs['message_key']}"
 
         with (
             patch.object(
@@ -5127,7 +5131,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         async def fake_post_signed_slack_dm_event(*_args, **kwargs):
             captured_slack_event_texts.append(kwargs["text"])
-            return {"ok": True}
+            return {
+                "ok": True,
+                "message_key": run_live_qa._slack_message_key(
+                    kwargs["channel_id"], "1788265537.085000"
+                ),
+            }
 
         async def fake_slack_history_contains_marker(*_args, **kwargs):
             captured_slack_required_text.extend(kwargs["required_text"])
@@ -5703,7 +5712,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             {
                                 "fingerprint": {
                                     "external_event_id": (
-                                        "slack-local-dev-installation-EvREBORNQA5D123"
+                                        "slack-local-dev-installation-msg"
+                                        "-T0AQMKHM7LK-D0QA5D-1788265537.085000"
                                     )
                                 },
                                 "dispatch_kind": {
@@ -5725,7 +5735,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             {
                                 "fingerprint": {
                                     "external_event_id": (
-                                        "slack-slack-EvREBORNQA7D456"
+                                        "slack-slack-msg"
+                                        "-T0AQMKHM7LK-D0QA7D-1788265904.338000"
                                     )
                                 },
                                 "dispatch_kind": {
@@ -5740,13 +5751,203 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 db.commit()
 
             self.assertEqual(
-                run_live_qa._slack_event_run_id_for_event(home, "EvREBORNQA5D123"),
+                run_live_qa._slack_event_run_id_for_message(
+                    home,
+                    run_live_qa._slack_message_key("D0QA5D", "1788265537.085000"),
+                ),
                 "run-from-dispatch",
             )
             self.assertEqual(
-                run_live_qa._slack_event_run_id_for_event(home, "EvREBORNQA7D456"),
+                run_live_qa._slack_event_run_id_for_message(
+                    home,
+                    run_live_qa._slack_message_key("D0QA7D", "1788265904.338000"),
+                ),
                 "run-from-generic-ingress",
             )
+
+    def test_slack_event_run_id_does_not_match_the_envelope_event_id(self):
+        """Slack's envelope `event_id` must not resolve a run.
+
+        Slack sends twins (`app_mention` + `message`) with DISTINCT envelope
+        ids for one post, so ingress keys the durable admission record on the
+        message identity instead. A harness that still searches for the
+        envelope id silently matches nothing and burns its whole timeout --
+        which is exactly how qa_7d failed 33 runs straight.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(db_path)) as db:
+                db.execute(
+                    """
+                    CREATE TABLE root_filesystem_entries (
+                        path TEXT PRIMARY KEY,
+                        contents BLOB NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'
+                    )
+                    """
+                )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries(path, contents) VALUES (?, ?)",
+                    (
+                        "/tenants/reborn-cli/shared/channel-extensions/slack/"
+                        "product-workflow/idempotency/actions/event.json",
+                        json.dumps(
+                            {
+                                "fingerprint": {
+                                    "external_event_id": (
+                                        "slack-reborn-cli-msg-T0AQMKHM7LK"
+                                        "-D0QA7D-1788265904.338000"
+                                    )
+                                },
+                                "dispatch_kind": {
+                                    "user_message_turn": {"run_id": "run-admitted"}
+                                },
+                            }
+                        ),
+                    ),
+                )
+                db.commit()
+
+            self.assertEqual(
+                run_live_qa._slack_event_run_id_for_message(
+                    home,
+                    run_live_qa._slack_message_key("D0QA7D", "1788265904.338000"),
+                ),
+                "run-admitted",
+            )
+            self.assertIsNone(
+                run_live_qa._slack_event_run_id_for_message(
+                    home,
+                    "EvREBORNQA7D1788265904338",
+                ),
+            )
+
+    def test_slack_event_run_id_distinguishes_two_posts_in_one_channel(self):
+        """The key must carry `ts`, not just the channel.
+
+        qa_5d, qa_7d and qa_7e all inject into the SAME DM channel inside one
+        lane run. A channel-only key resolves whichever record the ordering
+        happens to surface, so a case would silently read the previous case's
+        run id and pass on it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(db_path)) as db:
+                db.execute(
+                    """
+                    CREATE TABLE root_filesystem_entries (
+                        path TEXT PRIMARY KEY,
+                        contents BLOB NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'
+                    )
+                    """
+                )
+                for ts, run_id in (
+                    ("1788265537.085000", "run-earlier-case"),
+                    ("1788266098.194000", "run-later-case"),
+                ):
+                    db.execute(
+                        "INSERT INTO root_filesystem_entries(path, contents)"
+                        " VALUES (?, ?)",
+                        (
+                            "/tenants/reborn-cli/shared/channel-extensions/slack/"
+                            f"product-workflow/idempotency/actions/{ts}.json",
+                            json.dumps(
+                                {
+                                    "fingerprint": {
+                                        "external_event_id": (
+                                            "slack-reborn-cli-msg-T0AQMKHM7LK"
+                                            f"-D0SHARED-{ts}"
+                                        )
+                                    },
+                                    "dispatch_kind": {
+                                        "user_message_turn": {"run_id": run_id}
+                                    },
+                                }
+                            ),
+                        ),
+                    )
+                db.commit()
+
+            self.assertEqual(
+                run_live_qa._slack_event_run_id_for_message(
+                    home,
+                    run_live_qa._slack_message_key("D0SHARED", "1788265537.085000"),
+                ),
+                "run-earlier-case",
+            )
+            self.assertEqual(
+                run_live_qa._slack_event_run_id_for_message(
+                    home,
+                    run_live_qa._slack_message_key("D0SHARED", "1788266098.194000"),
+                ),
+                "run-later-case",
+            )
+
+    def test_signed_slack_dm_event_returns_the_message_key_it_posted(self):
+        """The poster owns the `ts` it minted, so it must surface the key.
+
+        `ts` is generated inside the payload literal; without returning it the
+        caller cannot reconstruct the message identity ingress dedups on, and
+        has nothing to look the admitted run up by.
+        """
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            status_code = 200
+            text = "ok"
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+            async def post(self, _url, **kwargs):
+                captured["body"] = json.loads(kwargs["content"].decode("utf-8"))
+                return FakeResponse()
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ctx = run_live_qa.LiveQaContext(
+                base_url="http://127.0.0.1:3000",
+                output_dir=root,
+                reborn_home=root / "reborn-home",
+                env={"IRONCLAW_REBORN_SLACK_SIGNING_SECRET": "signing-secret"},
+            )
+            with (
+                patch.dict(sys.modules, {"httpx": fake_httpx}),
+                patch.object(
+                    run_live_qa,
+                    "_slack_preflight",
+                    return_value={"auth_test": {"team_id": "T0AQMKHM7LK"}},
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa._post_signed_slack_dm_event(
+                        ctx,
+                        channel_id="D0QA7D",
+                        user_id="U0QA",
+                        text="bug: smoke",
+                        event_id="EvREBORNQA7D1",
+                    )
+                )
+
+        posted_ts = captured["body"]["event"]["ts"]
+        self.assertEqual(result["ts"], posted_ts)
+        self.assertEqual(
+            result["message_key"],
+            run_live_qa._slack_message_key("D0QA7D", posted_ts),
+        )
 
     def test_wait_for_google_sheet_marker_after_slack_event_approves_gate(self):
         ctx = self._dummy_ctx()
@@ -5765,7 +5966,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         with (
             patch.object(
                 run_live_qa,
-                "_slack_event_run_id_for_event",
+                "_slack_event_run_id_for_message",
                 return_value="run-123",
             ),
             patch.object(
@@ -5793,7 +5994,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             result = asyncio.run(
                 run_live_qa._wait_for_google_sheet_marker_after_slack_event(
                     ctx,
-                    event_id="EvREBORNQA7E123",
+                    message_key="-D0QA7E-1788266098.194000",
                     access_token="access-token",
                     spreadsheet_id="spreadsheet-id",
                     marker="row-marker",

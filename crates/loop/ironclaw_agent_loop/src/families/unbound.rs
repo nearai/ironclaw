@@ -4,7 +4,9 @@ use ironclaw_host_api::ids::CapabilityId;
 use ironclaw_host_api::prepared_context::STRUCTURED_RESULT_CAPABILITY_ID;
 
 use crate::default_planner::DefaultPlanner;
-use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId};
+use crate::family::{
+    ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId, LoopFamilyRegistryError,
+};
 use crate::planner::AgentLoopPlanner;
 use crate::strategies::{
     GateNotSupportedStrategy, StructuredOutputReplyAdmissionStrategy,
@@ -26,7 +28,7 @@ const UNBOUND_DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "gate:GateNotSupportedStrategy(abort_gate_not_supported_except_external_tool),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),",
     "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
-    "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
+    "stop:DefaultStopConditionStrategy(consecutive_repeat=3,no_progress_window=32,no_progress_threshold=8,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
     "budget:DefaultBudgetStrategy(iteration_limit=1024,wall_clock_limit=none)"
 )
@@ -47,7 +49,7 @@ const UNBOUND_STRUCTURED_FAMILY_FINGERPRINT: &[u8] = concat!(
     "gate:GateNotSupportedStrategy(abort_gate_not_supported_except_external_tool),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts=12,availability=retry_then_observe,stale_request=iteration_retry_then_observe,output_truncated=observe_then_continue,unauthorized=user_visible_terminal,checkpoint_rejected=abort,transcript_write_failed=user_visible_terminal),",
     "reply_admission:StructuredOutputReplyAdmissionStrategy(reject_all_text_finals),",
-    "stop:StructuredResultStopStrategy(result_capability=builtin.structured_result,all_failed_batches=invalid_model_output,rejected_reply=invalid_model_output),",
+    "stop:StructuredResultStopStrategy(result_capability=builtin.structured_result,all_failed_batches=invalid_model_output,default_stop=DefaultStopConditionStrategy(consecutive_repeat=3,no_progress_window=32,no_progress_threshold=8,rejected_reply=invalid_model_output)),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
     "budget:DefaultBudgetStrategy(iteration_limit=1024,wall_clock_limit=none)"
 )
@@ -55,19 +57,22 @@ const UNBOUND_STRUCTURED_FAMILY_FINGERPRINT: &[u8] = concat!(
 
 /// Stable digest: BLAKE3-256 of the unbound-default family fingerprint.
 pub const UNBOUND_DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x25, 0xf3, 0x64, 0x56, 0x3f, 0x30, 0xb1, 0x7c, 0xce, 0x09, 0x3e, 0x8b, 0x3d, 0x36, 0x77, 0xef,
-    0xab, 0x51, 0xff, 0xa3, 0x29, 0x3d, 0xae, 0x6f, 0x6f, 0x5a, 0x22, 0xae, 0x27, 0xf8, 0xbd, 0xd5,
+    0xfb, 0x7b, 0x56, 0x08, 0x72, 0x91, 0xd7, 0xd4, 0x9e, 0x8a, 0x80, 0x6b, 0x81, 0xdc, 0x35, 0x1f,
+    0x66, 0x09, 0x7b, 0xb9, 0x50, 0x48, 0xf3, 0x01, 0x87, 0x0a, 0xd5, 0x44, 0xd0, 0xfd, 0x37, 0xb2,
 ]);
 
 /// Stable digest: BLAKE3-256 of the unbound-structured family fingerprint.
 pub const UNBOUND_STRUCTURED_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xfe, 0x39, 0x55, 0x21, 0xc6, 0x82, 0x8f, 0x4f, 0xb9, 0xf5, 0x26, 0x6a, 0xa9, 0xa8, 0xb5, 0xa6,
-    0x46, 0x71, 0xed, 0xbe, 0x77, 0x06, 0x80, 0x38, 0x21, 0xb5, 0xd3, 0x2c, 0x1d, 0x10, 0x87, 0x68,
+    0x27, 0x9d, 0x02, 0xc8, 0xe3, 0x05, 0x7f, 0xb7, 0xcd, 0x55, 0xe4, 0x55, 0xd4, 0xd3, 0x64, 0x25,
+    0x84, 0x2a, 0x3f, 0xb8, 0xd9, 0x99, 0xae, 0x1b, 0xf6, 0xb4, 0xfc, 0x95, 0x18, 0xc2, 0xa1, 0x58,
 ]);
 
-fn structured_result_capability() -> CapabilityId {
-    CapabilityId::new(STRUCTURED_RESULT_CAPABILITY_ID)
-        .expect("static unbound result capability id is a valid dotted id") // safety: compile-time constant validated by the pin test below.
+fn structured_result_capability() -> Result<CapabilityId, LoopFamilyRegistryError> {
+    CapabilityId::new(STRUCTURED_RESULT_CAPABILITY_ID).map_err(|error| {
+        LoopFamilyRegistryError::InvalidCapabilityId {
+            reason: error.to_string(),
+        }
+    })
 }
 
 /// The unbound-default family (unbound-turn design §4.2): the default
@@ -92,7 +97,8 @@ pub fn unbound_default() -> LoopFamily {
 /// plus strict structured-output enforcement — every plain-text final is
 /// rejected with a repair hint directing the model to the synthetic result
 /// tool, and the run completes when that tool records a validated result.
-pub fn unbound_structured() -> LoopFamily {
+pub fn unbound_structured() -> Result<LoopFamily, LoopFamilyRegistryError> {
+    let result_capability = structured_result_capability()?;
     let planner = DefaultPlanner::compose_default()
         .with_id(LoopFamilyId::UNBOUND_STRUCTURED)
         .with_version(ComponentIdentity::from_static(
@@ -101,16 +107,16 @@ pub fn unbound_structured() -> LoopFamily {
         ))
         .with_gate(Arc::new(GateNotSupportedStrategy))
         .with_model(Arc::new(StructuredResultModelStrategy::new(
-            structured_result_capability(),
+            result_capability.clone(),
         )))
         .with_reply_admission(Arc::new(StructuredOutputReplyAdmissionStrategy))
         .with_stop(Arc::new(StructuredResultStopStrategy::new(
-            structured_result_capability(),
+            result_capability,
         )));
     let id = planner.id().clone();
     let version = planner.version().clone();
 
-    LoopFamily::new(id, version, Arc::new(planner))
+    Ok(LoopFamily::new(id, version, Arc::new(planner)))
 }
 
 #[cfg(test)]
@@ -122,7 +128,9 @@ mod tests {
     #[test]
     fn structured_result_capability_id_is_valid() {
         assert_eq!(
-            structured_result_capability().as_str(),
+            structured_result_capability()
+                .expect("static unbound result capability id is a valid dotted id")
+                .as_str(),
             STRUCTURED_RESULT_CAPABILITY_ID
         );
     }
@@ -133,7 +141,7 @@ mod tests {
         assert_eq!(default_family.id(), &LoopFamilyId::UNBOUND_DEFAULT);
         assert_eq!(default_family.version().id, "unbound_default");
 
-        let structured = unbound_structured();
+        let structured = unbound_structured().expect("valid unbound-structured family");
         assert_eq!(structured.id(), &LoopFamilyId::UNBOUND_STRUCTURED);
         assert_eq!(structured.version().id, "unbound_structured");
     }

@@ -1004,9 +1004,10 @@ class RebornPrTestPlanTests(unittest.TestCase):
         lane_runner = (
             ROOT / "scripts/ci/reborn-coverage-lane-run.sh"
         ).read_text(encoding="utf-8")
-        self.assertIn("reborn_(integration_|generated_)", lane_runner)
+        self.assertIn("integration_test_inventory.py", lane_runner)
+        self.assertIn(".tests[]", lane_runner)
         self.assertIn(
-            'cargo nextest run --profile ci -p ironclaw_integration_tests "${flat_test_args[@]}"',
+            'cargo nextest run --profile ci -p ironclaw_integration_tests "${test_args[@]}"',
             lane_runner,
         )
 
@@ -1015,8 +1016,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
             ROOT / "scripts/ci/reborn-coverage-lane-run.sh"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            'cargo test -p ironclaw_integration_tests "${flat_test_args[@]}" '
-            "\\\n          --no-fail-fast --ignore-rust-version -- --nocapture",
+            'cargo test -p ironclaw_integration_tests "${test_args[@]}" '
+            "\\\n    --no-fail-fast --ignore-rust-version -- --nocapture",
             lane_runner,
         )
         local_ratchet = (

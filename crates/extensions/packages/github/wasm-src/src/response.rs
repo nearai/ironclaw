@@ -35,6 +35,184 @@ pub(crate) fn compact_issue_search(response: String) -> Result<String, String> {
     serialize(&Value::Object(compact))
 }
 
+pub(crate) fn compact_repo_list(response: String) -> Result<String, String> {
+    let items: Vec<Value> =
+        serde_json::from_str(&response).map_err(|_| invalid_response_error())?;
+    validate_page_size(items.len())?;
+    let compact = items
+        .iter()
+        .map(compact_repository)
+        .collect::<Result<Vec<_>, _>>()?;
+    serialize(&compact)
+}
+
+pub(crate) fn compact_repository_search(response: String) -> Result<String, String> {
+    let response: Value = serde_json::from_str(&response).map_err(|_| invalid_response_error())?;
+    let object = response.as_object().ok_or_else(invalid_response_error)?;
+    let items = object
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid_response_error)?;
+    validate_page_size(items.len())?;
+
+    let mut compact = Map::new();
+    copy_required_fields(
+        object,
+        &mut compact,
+        &["total_count"],
+        is_nonnegative_integer,
+        false,
+    )?;
+    copy_required_fields(
+        object,
+        &mut compact,
+        &["incomplete_results"],
+        Value::is_boolean,
+        false,
+    )?;
+    compact.insert(
+        "items".to_string(),
+        Value::Array(
+            items
+                .iter()
+                .map(compact_repository)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+    );
+    serialize(&Value::Object(compact))
+}
+
+fn compact_repository(item: &Value) -> Result<Value, String> {
+    let item = item.as_object().ok_or_else(invalid_response_error)?;
+    let mut compact = Map::new();
+    copy_required_fields(
+        item,
+        &mut compact,
+        &[
+            "node_id",
+            "name",
+            "full_name",
+            "visibility",
+            "html_url",
+            "default_branch",
+            "updated_at",
+            "pushed_at",
+        ],
+        Value::is_string,
+        false,
+    )?;
+    copy_required_fields(
+        item,
+        &mut compact,
+        &["description", "language"],
+        Value::is_string,
+        true,
+    )?;
+    copy_required_fields(
+        item,
+        &mut compact,
+        &["private", "fork", "archived"],
+        Value::is_boolean,
+        false,
+    )?;
+    copy_required_fields(
+        item,
+        &mut compact,
+        &["id", "stargazers_count", "open_issues_count"],
+        is_nonnegative_integer,
+        false,
+    )?;
+    compact.insert(
+        "owner".to_string(),
+        Value::Object(compact_required_object(
+            item,
+            "owner",
+            &["login"],
+            Value::is_string,
+            false,
+        )?),
+    );
+    compact.insert(
+        "license".to_string(),
+        compact_required_nullable_object(
+            item,
+            "license",
+            &["spdx_id"],
+            Value::is_string,
+            true,
+        )?,
+    );
+    compact.insert(
+        "permissions".to_string(),
+        Value::Object(compact_required_object(
+            item,
+            "permissions",
+            &["admin", "push", "pull"],
+            Value::is_boolean,
+            false,
+        )?),
+    );
+    Ok(Value::Object(compact))
+}
+
+fn copy_required_fields(
+    source: &Map<String, Value>,
+    target: &mut Map<String, Value>,
+    fields: &[&str],
+    is_valid: fn(&Value) -> bool,
+    allow_null: bool,
+) -> Result<(), String> {
+    for field in fields {
+        let value = source.get(*field).ok_or_else(invalid_response_error)?;
+        if !(allow_null && value.is_null()) && !is_valid(value) {
+            return Err(invalid_response_error());
+        }
+        target.insert((*field).to_string(), value.clone());
+    }
+    Ok(())
+}
+
+fn compact_required_object(
+    source: &Map<String, Value>,
+    field: &str,
+    fields: &[&str],
+    is_valid: fn(&Value) -> bool,
+    allow_null_fields: bool,
+) -> Result<Map<String, Value>, String> {
+    let object = source
+        .get(field)
+        .and_then(Value::as_object)
+        .ok_or_else(invalid_response_error)?;
+    let mut compact = Map::new();
+    copy_required_fields(
+        object,
+        &mut compact,
+        fields,
+        is_valid,
+        allow_null_fields,
+    )?;
+    Ok(compact)
+}
+
+fn compact_required_nullable_object(
+    source: &Map<String, Value>,
+    field: &str,
+    fields: &[&str],
+    is_valid: fn(&Value) -> bool,
+    allow_null_fields: bool,
+) -> Result<Value, String> {
+    let value = source.get(field).ok_or_else(invalid_response_error)?;
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+    compact_required_object(source, field, fields, is_valid, allow_null_fields)
+        .map(Value::Object)
+}
+
+fn is_nonnegative_integer(value: &Value) -> bool {
+    value.as_u64().is_some()
+}
+
 fn compact_pull_request(item: &Value) -> Result<Value, String> {
     let item = item.as_object().ok_or_else(invalid_response_error)?;
     let mut compact = copy_fields(
