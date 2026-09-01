@@ -5716,6 +5716,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                                         "-T0AQMKHM7LK-D0QA5D-1788265537.085000"
                                     )
                                 },
+                                # Both fields are present on a real record; the
+                                # lookup must read the accepted outcome, never
+                                # the dispatch routing hint.
                                 "dispatch_kind": {
                                     "user_message_turn": {"run_id": "run-from-dispatch"}
                                 },
@@ -5739,9 +5742,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                                         "-T0AQMKHM7LK-D0QA7D-1788265904.338000"
                                     )
                                 },
-                                "dispatch_kind": {
-                                    "user_message_turn": {
-                                        "run_id": "run-from-generic-ingress"
+                                "outcome": {
+                                    "accepted": {
+                                        "submitted_run_id": "run-from-generic-ingress"
                                     }
                                 },
                             }
@@ -5755,7 +5758,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     home,
                     run_live_qa._slack_message_key("D0QA5D", "1788265537.085000"),
                 ),
-                "run-from-dispatch",
+                "run-from-outcome",
             )
             self.assertEqual(
                 run_live_qa._slack_event_run_id_for_message(
@@ -5801,8 +5804,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                                         "-D0QA7D-1788265904.338000"
                                     )
                                 },
-                                "dispatch_kind": {
-                                    "user_message_turn": {"run_id": "run-admitted"}
+                                "outcome": {
+                                    "accepted": {"submitted_run_id": "run-admitted"}
                                 },
                             }
                         ),
@@ -5822,6 +5825,125 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     home,
                     "EvREBORNQA7D1788265904338",
                 ),
+            )
+
+    def test_slack_event_run_id_ignores_a_busy_rejected_record(self):
+        """A busy rejection must not read as an admitted run.
+
+        `dispatch_kind_from_ack` (crates/product/ironclaw_assistant/src/workflow.rs)
+        maps BOTH `DeferredBusy` and `RejectedBusy` to
+        `UserMessageTurn { run_id: active_run_id }` -- the id of the run that was
+        ALREADY active and blocked this one, not a run the injected event
+        started. Trusting `dispatch_kind` would turn qa_7d green with no
+        admitted run, and let the shared gate helper approve gates on somebody
+        else's run. Only `outcome.accepted` states admission.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(db_path)) as db:
+                db.execute(
+                    """
+                    CREATE TABLE root_filesystem_entries (
+                        path TEXT PRIMARY KEY,
+                        contents BLOB NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'
+                    )
+                    """
+                )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries(path, contents) VALUES (?, ?)",
+                    (
+                        "/tenants/reborn-cli/shared/channel-extensions/slack/"
+                        "product-workflow/idempotency/actions/busy.json",
+                        json.dumps(
+                            {
+                                "fingerprint": {
+                                    "external_event_id": (
+                                        "slack-reborn-cli-msg-T0AQMKHM7LK"
+                                        "-D0QA7D-1788265904.338000"
+                                    )
+                                },
+                                "dispatch_kind": {
+                                    "user_message_turn": {
+                                        "run_id": "run-that-was-already-active"
+                                    }
+                                },
+                                "outcome": {
+                                    "rejected_busy": {
+                                        "accepted_message_ref": "msg:rejected",
+                                        "active_run_id": "run-that-was-already-active",
+                                    }
+                                },
+                            }
+                        ),
+                    ),
+                )
+                db.commit()
+
+            self.assertIsNone(
+                run_live_qa._slack_event_run_id_for_message(
+                    home,
+                    run_live_qa._slack_message_key("D0QA7D", "1788265904.338000"),
+                ),
+            )
+
+    def test_slack_event_run_id_accepts_a_duplicate_replay_of_an_accepted_event(self):
+        """A `Duplicate` settles wrapping the prior ack; an accepted prior counts.
+
+        Slack retries a delivery it thinks timed out, and the replay settles as
+        `Duplicate { prior }`. The event WAS admitted, so the run behind the
+        prior `Accepted` is the right answer.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir) / "reborn-home"
+            db_path = home / "local-dev" / "reborn-local-dev.db"
+            db_path.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(db_path)) as db:
+                db.execute(
+                    """
+                    CREATE TABLE root_filesystem_entries (
+                        path TEXT PRIMARY KEY,
+                        contents BLOB NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'
+                    )
+                    """
+                )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries(path, contents) VALUES (?, ?)",
+                    (
+                        "/tenants/reborn-cli/shared/channel-extensions/slack/"
+                        "product-workflow/idempotency/actions/replay.json",
+                        json.dumps(
+                            {
+                                "fingerprint": {
+                                    "external_event_id": (
+                                        "slack-reborn-cli-msg-T0AQMKHM7LK"
+                                        "-D0QA7D-1788265904.338000"
+                                    )
+                                },
+                                "outcome": {
+                                    "duplicate": {
+                                        "prior": {
+                                            "accepted": {
+                                                "submitted_run_id": "run-admitted",
+                                            }
+                                        }
+                                    }
+                                },
+                            }
+                        ),
+                    ),
+                )
+                db.commit()
+
+            self.assertEqual(
+                run_live_qa._slack_event_run_id_for_message(
+                    home,
+                    run_live_qa._slack_message_key("D0QA7D", "1788265904.338000"),
+                ),
+                "run-admitted",
             )
 
     def test_slack_event_run_id_distinguishes_two_posts_in_one_channel(self):
@@ -5864,8 +5986,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                                             f"-D0SHARED-{ts}"
                                         )
                                     },
-                                    "dispatch_kind": {
-                                        "user_message_turn": {"run_id": run_id}
+                                    "outcome": {
+                                        "accepted": {"submitted_run_id": run_id}
                                     },
                                 }
                             ),
