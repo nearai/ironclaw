@@ -65,8 +65,22 @@ impl AuthEngine {
         admitted_protected_resource_metadata_url: Option<&HttpsEndpoint>,
         register_if_missing: bool,
     ) -> Result<EffectiveOAuthClient, AuthProductError> {
+        let expected_redirect_uri = if register_if_missing {
+            Some(self.callback_base.redirect_uri_for(vendor)?)
+        } else {
+            None
+        };
         if let Some(stored) = self.load_dcr_client(scope, vendor).await? {
-            return stored_to_effective(stored);
+            if expected_redirect_uri
+                .as_ref()
+                .is_none_or(|expected| stored.redirect_uri == expected.as_str())
+            {
+                return stored_to_effective(stored);
+            }
+            tracing::info!(
+                vendor,
+                "replacing dynamic OAuth client registered for an old callback"
+            );
         }
         if !register_if_missing {
             // Exchange/refresh must never register: the client had to exist
@@ -76,7 +90,11 @@ impl AuthEngine {
         // Serialize registrations so concurrent first flows register one
         // client, not several.
         let _registration_guard = self.dcr_registration_lock.lock().await;
-        if let Some(stored) = self.load_dcr_client(scope, vendor).await? {
+        if let Some(stored) = self.load_dcr_client(scope, vendor).await?
+            && expected_redirect_uri
+                .as_ref()
+                .is_none_or(|expected| stored.redirect_uri == expected.as_str())
+        {
             return stored_to_effective(stored);
         }
         let stored = self
@@ -195,13 +213,28 @@ impl AuthEngine {
             Err(error) if error.is_unknown_secret() || error.is_expired() => return Ok(None),
             Err(error) => return Err(http::map_secret_store_error(error)),
         };
-        let material = self
-            .secret_store
-            .consume(scope, lease.id)
-            .await
-            .map_err(http::map_secret_store_error)?;
-        let stored: StoredDcrClient = serde_json::from_str(material.expose_secret())
-            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let material = match self.secret_store.consume(scope, lease.id).await {
+            Ok(material) => material,
+            Err(error) if error.is_unreadable_material() => {
+                tracing::warn!(
+                    vendor,
+                    "replacing unreadable machine-generated OAuth client registration"
+                );
+                return Ok(None);
+            }
+            Err(error) => return Err(http::map_secret_store_error(error)),
+        };
+        let stored: StoredDcrClient = match serde_json::from_str(material.expose_secret()) {
+            Ok(stored) => stored,
+            Err(error) => {
+                tracing::warn!(
+                    vendor,
+                    error = %error,
+                    "replacing malformed machine-generated OAuth client registration"
+                );
+                return Ok(None);
+            }
+        };
         Ok(Some(stored))
     }
 

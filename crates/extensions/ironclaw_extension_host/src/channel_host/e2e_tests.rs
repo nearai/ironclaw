@@ -3210,19 +3210,24 @@ async fn slack_dm_streams_working_state_and_closes_the_stream_after_final_reply(
     let response = harness.post_event(dm_message("Ev-working", "think")).await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    // Working state on a stream channel is the `processing` session
-    // assertion — never an empty Agent container: with nothing renderable
-    // yet, no stream exists at all.
+    // Working state opens the Agent stream immediately with its plan header
+    // and hidden run task. This removes the blank pause before the first
+    // model text or tool call while keeping the session `processing`.
     wait_for_slack_session_status(&harness, "processing").await;
+    wait_for_slack_stream_starts(&harness, 1).await;
     assert_eq!(
         harness.slack_session_statuses().first().map(String::as_str),
         Some("processing"),
         "the agent session is asserted processing while the run works"
     );
+    let opening = harness.slack_stream_starts();
+    assert_eq!(opening.len(), 1, "working state opens one Agent stream");
     assert!(
-        harness.slack_stream_starts().is_empty(),
-        "no stream opens before renderable content exists: {:?}",
-        harness.slack_stream_starts()
+        opening[0]["chunks"]
+            .as_array()
+            .is_some_and(|chunks| !chunks.is_empty()),
+        "the stream opens with the thinking plan rather than a blank container: {}",
+        opening[0]
     );
     assert!(
         harness.slack_messages().is_empty(),
@@ -3433,6 +3438,36 @@ async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
     // Twice per gate — the observer's serviceability decision and the
     // publication's attention enrichment — never once per poll iteration.
     auth_provider.assert_calls(2);
+}
+
+#[tokio::test]
+async fn slack_dm_unserviceable_auth_is_one_streamed_fallback_then_stops() {
+    let harness = build_harness(TurnMode::BlockAuth).await;
+
+    let response = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+    wait_for_slack_stream_stops(&harness, 1).await;
+
+    let streamed = harness.slack_streamed_text();
+    const FALLBACK: &str = "This authentication step can't be completed in chat.";
+    assert_eq!(
+        streamed.matches(FALLBACK).count(),
+        1,
+        "the reply stream owns the one user-visible fallback: {streamed}"
+    );
+    assert_eq!(
+        harness.slack_stream_stops().len(),
+        1,
+        "cancelling an unserviceable auth gate terminalizes the open stream"
+    );
+    assert!(
+        harness.slack_messages().is_empty(),
+        "a progressive channel must not duplicate the fallback with chat.postMessage"
+    );
 }
 
 #[tokio::test]
@@ -5680,14 +5715,17 @@ async fn auth_prompt_appears_exactly_once_when_auth_resolution_ack_races_live_de
 
 #[tokio::test]
 async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent_turn() {
-    let harness = build_harness(TurnMode::BlockAuth).await;
+    let auth_challenges: Arc<dyn AuthChallengeProvider> =
+        Arc::new(FakeAuthChallengeProvider::default());
+    let harness =
+        build_harness_with_auth_challenges(TurnMode::BlockAuth, Some(auth_challenges)).await;
 
     let first = harness
         .post_event(app_mention_message("Ev-auth-cancel-start", "needs auth"))
         .await;
     assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
     harness.drain().await;
-    assert_eq!(harness.slack_messages().len(), 1); // safety: Slack E2E delivery assertion.
+    assert!(harness.slack_messages().is_empty()); // safety: progressive prompt stays in the stream.
 
     let second = harness
         .post_event(thread_message_event(
@@ -5707,22 +5745,25 @@ async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent
     let submitted_turn_count = harness.coordinator.submitted_turn_count();
     assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
     let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
-    assert_eq!(messages[1]["channel"], "C123");
-    assert_eq!(messages[1]["thread_ts"], "1710000000.000009");
-    assert_eq!(messages[1]["text"], "Authentication canceled.");
+    assert_eq!(messages.len(), 1); // safety: Slack E2E delivery assertion.
+    assert_eq!(messages[0]["channel"], "C123");
+    assert_eq!(messages[0]["thread_ts"], "1710000000.000009");
+    assert_eq!(messages[0]["text"], "Authentication canceled.");
 }
 
 #[tokio::test]
 async fn slack_dm_thread_auth_deny_cancels_base_dm_auth_gate_without_agent_turn() {
-    let harness = build_harness(TurnMode::BlockAuth).await;
+    let auth_challenges: Arc<dyn AuthChallengeProvider> =
+        Arc::new(FakeAuthChallengeProvider::default());
+    let harness =
+        build_harness_with_auth_challenges(TurnMode::BlockAuth, Some(auth_challenges)).await;
 
     let first = harness
         .post_event(dm_message("Ev-auth", "needs auth"))
         .await;
     assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
     harness.drain().await;
-    assert_eq!(harness.slack_messages().len(), 1); // safety: Slack E2E delivery assertion.
+    assert!(harness.slack_messages().is_empty()); // safety: progressive prompt stays in the stream.
 
     let second = harness
         .post_event(thread_message_event(
@@ -5742,10 +5783,10 @@ async fn slack_dm_thread_auth_deny_cancels_base_dm_auth_gate_without_agent_turn(
     let submitted_turn_count = harness.coordinator.submitted_turn_count();
     assert_eq!(submitted_turn_count, 1); // safety: Slack E2E turn routing assertion.
     let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2); // safety: Slack E2E delivery assertion.
-    assert_eq!(messages[1]["channel"], CHANNEL);
-    assert_eq!(messages[1]["thread_ts"], "1710000001.123456");
-    assert_eq!(messages[1]["text"], "Authentication canceled.");
+    assert_eq!(messages.len(), 1); // safety: Slack E2E delivery assertion.
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    assert_eq!(messages[0]["thread_ts"], "1710000001.123456");
+    assert_eq!(messages[0]["text"], "Authentication canceled.");
 }
 
 #[tokio::test]

@@ -673,9 +673,6 @@ pub struct RebornRuntime {
     /// publication leases back so another publisher can resume open replies
     /// at once.
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_assistant::DeliveryCoordinator>>,
-    /// The host-served reply channel (authenticated session), registered as a
-    /// reply publication target for every run.
-    pub(crate) session_reply_channel: Option<ironclaw_host_api::ids::ExtensionId>,
     pub(crate) channel_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_auth::ChannelConnectionService>>>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
@@ -1252,7 +1249,10 @@ impl RebornRuntime {
                     run_delivery_settings,
                     admin_users,
                     reply_projection,
-                    session_reply_channel: self.session_reply_channel.clone(),
+                    session_reply_channel: self
+                        .session_channel_extension_id
+                        .as_ref()
+                        .map(|id| ironclaw_host_api::ids::ExtensionId::from_trusted(id.clone())),
                     start_reply_publication: true,
                 },
             )
@@ -3643,6 +3643,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
             Some(tool_diagnostic_sink),
             trigger_poller.enabled,
         )?;
+        if !reply_projection.bind_display_previews(Arc::clone(&capability_host.display_previews)) {
+            tracing::debug!(
+                "reply projection display-preview source was already bound; keeping the first source"
+            );
+        }
         (
             capability_host.capability_factory,
             capability_host.capability_input_resolver,
@@ -4801,7 +4806,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
         #[cfg(any(test, feature = "test-support"))]
         delivered_gate_routes: services.delivered_gate_routes.clone(),
         delivery_coordinator: services.delivery_coordinator.clone(),
-        session_reply_channel: services.session_reply_channel.clone(),
         channel_facade_slot: services.channel_disconnect_slot.clone(),
         channel_config_service: services.channel_config_service.clone(),
         admin_configuration: services.admin_configuration.clone(),

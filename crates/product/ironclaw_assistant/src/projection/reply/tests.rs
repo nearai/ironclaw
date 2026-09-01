@@ -10,7 +10,9 @@ use ironclaw_extension_contracts::reply::{
     REPLY_REASONING_SEGMENT_MAX_BYTES, ReplyActivityState, ReplyAttentionKind, ReplyAudience,
     ReplyOutcome, ReplyPhase, ReplyReconcilePoint,
 };
-use ironclaw_host_api::ids::{AgentId, CapabilityId, ExtensionId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::ids::{
+    AgentId, CapabilityId, ExtensionId, InvocationId, TenantId, ThreadId, UserId,
+};
 use ironclaw_host_api::result_meta::FailureKind;
 use ironclaw_host_api::runtime::RuntimeKind;
 use ironclaw_host_api::turn::{
@@ -18,8 +20,9 @@ use ironclaw_host_api::turn::{
     TurnScope, TurnStatus,
 };
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, LoopCompletionKind, LoopDriverId, LoopDriverNoteKind, LoopFailureKind,
-    LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopSafeSummary,
+    AgentLoopHostError, CapabilityInputRef, LoopCompletionKind, LoopDriverId, LoopDriverNoteKind,
+    LoopFailureKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
+    LoopSafeSummary,
 };
 use ironclaw_threads::{AttachmentKind, AttachmentRef};
 
@@ -27,6 +30,7 @@ use super::{
     ReplyProjection, ReplyProjectionEvent, ReplyProjectionMilestoneSink, ReplyProjectionObserver,
     TerminalReplyFacts, disclose_for_audience,
 };
+use crate::projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 
 struct Fixture {
     projection: Arc<ReplyProjection>,
@@ -456,6 +460,68 @@ fn a_capability_failure_is_a_row_with_a_sanitized_detail_and_kind() {
             .and_then(|p| p.runtime.as_ref())
             .map(|r| r.as_str()),
         Some("mcp")
+    );
+}
+
+#[test]
+fn capability_activity_uses_the_existing_safe_display_preview_store() {
+    let fixture = fixture("capability-preview");
+    let previews = Arc::new(CapabilityDisplayPreviewStore::default());
+    assert!(
+        fixture
+            .projection
+            .bind_display_previews(Arc::clone(&previews))
+    );
+
+    let activity_id = CapabilityActivityId::new();
+    let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let input_ref = CapabilityInputRef::new("input:slack-history").unwrap();
+    previews.record_input(
+        &fixture.run_id.to_string(),
+        &input_ref,
+        capability_id.as_str(),
+        &serde_json::json!({ "channel": "C123", "limit": 20 }),
+    );
+    previews.record_running_invocation(invocation_id, &input_ref);
+
+    fixture.observe(LoopHostMilestoneKind::CapabilityInvoked {
+        activity_id,
+        capability_id: capability_id.clone(),
+    });
+    let document = fixture.document();
+    assert!(
+        document.activities[0]
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.as_str().contains("C123")),
+        "the running row carries the already-sanitized input summary"
+    );
+
+    let output = serde_json::json!({ "messages": [{ "text": "hello from Slack" }] });
+    previews.record_result(CapabilityDisplayPreviewResult {
+        run_id: &fixture.run_id.to_string(),
+        input_ref: &input_ref,
+        invocation_id,
+        capability_id: &capability_id,
+        result_ref: "result:slack-history",
+        output: &output,
+        output_bytes: 48,
+    });
+    fixture.observe(LoopHostMilestoneKind::CapabilityCompleted {
+        activity_id,
+        capability_id,
+        provider: ExtensionId::new("slack").unwrap(),
+        runtime: RuntimeKind::FirstParty,
+        output_bytes: 48,
+    });
+    let document = fixture.document();
+    assert!(
+        document.activities[0]
+            .output_preview
+            .as_ref()
+            .is_some_and(|preview| preview.as_str().contains("hello from Slack")),
+        "the completed row carries the already-sanitized output preview"
     );
 }
 

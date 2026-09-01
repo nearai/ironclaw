@@ -205,9 +205,8 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     let mut harness = Harness::channel();
 
     // Opened: the production first revision (`IterationStarted`) carries no
-    // status, answer, activity, or attention — only `Preparing`. The session
-    // shows `processing`, the checkpoint persists, and NO stream is opened:
-    // Slack would render an empty Agent container.
+    // status, answer, activity, or attention — only `Preparing`. Slack still
+    // gets the lifecycle header immediately, without a synthetic task row.
     assert_eq!(harness.document.phase, ReplyPhase::Preparing);
     assert!(harness.document.status.is_none());
     assert!(harness.document.answer.text.as_str().is_empty());
@@ -215,26 +214,40 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     assert!(harness.document.attention.is_none());
     let report = harness.reconcile(ReplyReconcilePoint::Opened).await;
     assert_applied(&report);
-    assert_eq!(harness.fake.calls(), ["agents.sessions.setStatus"]);
+    assert_eq!(
+        harness.fake.calls(),
+        ["agents.sessions.setStatus", "chat.startStream"]
+    );
     assert_eq!(
         harness
             .fake
             .bodies(SlackWebApiMethod::AgentsSessionsSetStatus),
         [json!({ "status": "processing", "channel_id": CHANNEL, "thread_ts": THREAD })]
     );
-    assert!(
-        harness.fake.streams().is_empty(),
-        "an empty first revision never opens a stream"
+    let ts = harness.stream_ts();
+    assert_eq!(refs(&report), [ts.as_str()]);
+    assert_eq!(
+        harness.fake.bodies(SlackWebApiMethod::ChatStartStream),
+        [json!({
+            "channel": CHANNEL,
+            "thread_ts": THREAD,
+            "recipient_user_id": USER,
+            "recipient_team_id": TEAM,
+            "task_display_mode": "plan",
+            "chunks": [
+                { "type": "plan_update", "title": "Thinking" },
+                { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" }
+            ]
+        })]
     );
     assert_eq!(
         harness.checkpoint_json()["session_status"],
         "processing",
-        "the checkpoint persists even though no stream exists yet"
+        "the checkpoint persists with the visible stream"
     );
 
-    // The first renderable content (an activity plus the answer's first
-    // characters) opens exactly one stream, carrying that content in the
-    // initial `chat.startStream` request.
+    // The first real activity plus the answer's first characters append to
+    // that same stream; they never create a second Agent reply.
     harness.document.activity_started(
         item("act-0"),
         text("Read runbook"),
@@ -245,26 +258,21 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
         .reconcile(ReplyReconcilePoint::ControlCritical)
         .await;
     assert_applied(&report);
-    let ts = harness.stream_ts();
-    assert_eq!(harness.fake.calls()[1..], ["chat.startStream"]);
+    assert_eq!(harness.fake.calls()[2..], ["chat.appendStream"]);
     assert_eq!(
-        harness.fake.bodies(SlackWebApiMethod::ChatStartStream),
-        [json!({
+        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[0],
+        json!({
             "channel": CHANNEL,
-            "thread_ts": THREAD,
-            "recipient_user_id": USER,
-            "recipient_team_id": TEAM,
-            "task_display_mode": "timeline",
+            "ts": ts,
             "chunks": [
                 { "type": "task_update", "id": "act-0", "title": "Read runbook", "status": "in_progress", "details": "docs/runbook.md" },
                 { "type": "markdown_text", "text": "Hi" }
             ]
-        })]
+        })
     );
-    assert_eq!(
-        refs(&report),
-        [ts.as_str()],
-        "the stream ts is the evidence"
+    assert!(
+        refs(&report).is_empty(),
+        "the stream evidence was already recorded"
     );
     assert!(
         !report.evidence.read_back_verified,
@@ -272,6 +280,12 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     );
 
     // ControlCritical: attention before any text → block + suspended.
+    harness.document.activity_finished(
+        item("act-0"),
+        ReplyActivityState::Completed,
+        Some(preview("Runbook opened")),
+        None,
+    );
     harness.document.require_attention(ReplyAttention {
         kind: ReplyAttentionKind::Approval,
         headline: text("Approve writing report.md"),
@@ -287,18 +301,22 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
             .await,
     );
     assert_eq!(
-        harness.fake.calls()[2..],
+        harness.fake.calls()[3..],
         ["chat.appendStream", "agents.sessions.setStatus"]
     );
     assert_eq!(
-        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[0],
+        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[1],
         json!({
             "channel": CHANNEL,
             "ts": ts,
-            "chunks": [{
-                "type": "markdown_text",
-                "text": "\n> **Approval needed:** Approve writing report.md\n> The run wants to write report.md in your workspace.\n"
-            }]
+            "chunks": [
+                { "type": "plan_update", "title": "Thinking paused" },
+                { "type": "task_update", "id": "act-0", "title": "Read runbook", "status": "complete" },
+                {
+                    "type": "markdown_text",
+                    "text": "\n> **Approval needed:** Approve writing report.md\n> The run wants to write report.md in your workspace.\n"
+                }
+            ]
         })
     );
     assert_eq!(
@@ -308,14 +326,25 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
         json!({ "status": "suspended", "channel_id": CHANNEL, "thread_ts": THREAD })
     );
 
-    // Cleared → processing again, nothing appended.
+    // Cleared → the plan and session both return to active processing.
     harness.document.clear_attention();
     assert_applied(
         &harness
             .reconcile(ReplyReconcilePoint::ControlCritical)
             .await,
     );
-    assert_eq!(harness.fake.calls()[4..], ["agents.sessions.setStatus"]);
+    assert_eq!(
+        harness.fake.calls()[5..],
+        ["chat.appendStream", "agents.sessions.setStatus"]
+    );
+    assert_eq!(
+        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[2],
+        json!({
+            "channel": CHANNEL,
+            "ts": ts,
+            "chunks": [{ "type": "plan_update", "title": "Thinking" }]
+        })
+    );
     assert_eq!(
         harness
             .fake
@@ -331,9 +360,9 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     );
     harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
-    assert_eq!(harness.fake.calls()[5..], ["chat.appendStream"]);
+    assert_eq!(harness.fake.calls()[7..], ["chat.appendStream"]);
     assert_eq!(
-        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[1],
+        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[3],
         json!({
             "channel": CHANNEL,
             "ts": ts,
@@ -353,14 +382,14 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     );
     harness.append(" world");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
-    assert_eq!(harness.fake.calls()[6..], ["chat.appendStream"]);
+    assert_eq!(harness.fake.calls()[8..], ["chat.appendStream"]);
     assert_eq!(
-        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[2],
+        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[4],
         json!({
             "channel": CHANNEL,
             "ts": ts,
             "chunks": [
-                { "type": "task_update", "id": "act-1", "title": "Read runbook", "status": "complete", "details": "docs/runbook.md", "output": "12 lines" },
+                { "type": "task_update", "id": "act-1", "title": "Read runbook", "status": "complete" },
                 { "type": "markdown_text", "text": " world" }
             ]
         })
@@ -374,13 +403,17 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     harness.document.complete();
     let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
     assert_applied(&report);
-    assert_eq!(harness.fake.calls()[7..], ["chat.stopStream"]);
+    assert_eq!(harness.fake.calls()[9..], ["chat.stopStream"]);
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStopStream),
         [json!({
             "channel": CHANNEL,
             "ts": ts,
-            "chunks": [{ "type": "markdown_text", "text": "!" }],
+            "chunks": [
+                { "type": "plan_update", "title": "Thinking completed" },
+                { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "complete" },
+                { "type": "markdown_text", "text": "!" }
+            ],
             "session_status": "active"
         })]
     );
@@ -397,7 +430,15 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
         stream.text,
         "Hi\n> **Approval needed:** Approve writing report.md\n> The run wants to write report.md in your workspace.\nHello world!"
     );
-    assert_eq!(stream.task_updates.len(), 3);
+    assert_eq!(
+        stream
+            .task_updates
+            .iter()
+            .filter(|task| task.get("hide_title") != Some(&json!(true)))
+            .count(),
+        4,
+        "two real tools, two states each"
+    );
     assert_eq!(
         harness.fake.streams().len(),
         1,
@@ -417,6 +458,314 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     assert!(checkpoint["tasks"]["act-1"].is_string());
 }
 
+#[tokio::test]
+async fn tool_arguments_are_clean_and_tool_outputs_are_not_published() {
+    let mut harness = Harness::channel();
+    harness.document.activity_started(
+        item("act-json"),
+        text("slack.get_conversation_history"),
+        Some(preview("{\n  \"conversation\": \"C123\"\n}")),
+    );
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    let ts = harness.stream_ts();
+
+    harness.document.activity_finished(
+        item("act-json"),
+        ReplyActivityState::Completed,
+        Some(preview("{\n  \"messages\": [\"hello\"]\n}")),
+        None,
+    );
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+
+    let stream = harness.fake.stream(&ts).expect("stream");
+    assert_eq!(
+        stream.task_updates,
+        [
+            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" }),
+            json!({
+                "type": "task_update",
+                "id": "act-json",
+                "title": "slack.get_conversation_history",
+                "status": "in_progress",
+                "details": "```json\n{\n  \"conversation\": \"C123\"\n}\n```",
+            }),
+            json!({
+                "type": "task_update",
+                "id": "act-json",
+                "title": "slack.get_conversation_history",
+                "status": "complete",
+            }),
+        ],
+        "the completion updates status without repeating arguments or publishing output"
+    );
+    assert!(
+        stream.block_chunks.is_empty(),
+        "tool output must not spill into a separate Slack block"
+    );
+}
+
+#[tokio::test]
+async fn long_json_tool_arguments_remain_complete_and_outputs_are_not_published() {
+    let mut harness = Harness::channel();
+    let arguments = format!("{{\n  \"query\": \"{}\"\n}}", "a".repeat(320));
+    let output = format!("{{\n  \"messages\": [\"{}\"]\n}}", "b".repeat(900));
+
+    harness.document.activity_started(
+        item("act-long-json"),
+        text("slack.get_conversation_history"),
+        Some(preview(&arguments)),
+    );
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    let ts = harness.stream_ts();
+
+    harness.document.activity_finished(
+        item("act-long-json"),
+        ReplyActivityState::Completed,
+        Some(preview(&output)),
+        None,
+    );
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+
+    let stream = harness.fake.stream(&ts).expect("stream");
+    assert_eq!(
+        stream.block_chunks,
+        [json!({
+            "type": "blocks",
+            "blocks": [{
+                "type": "rich_text",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [{
+                            "type": "text",
+                            "text": "Arguments",
+                            "style": { "bold": true },
+                        }],
+                    },
+                    {
+                        "type": "rich_text_preformatted",
+                        "elements": [{ "type": "text", "text": arguments }],
+                        "language": "json",
+                    },
+                ],
+            }],
+        })],
+        "Slack preserves the complete bounded input without publishing output"
+    );
+    assert!(
+        stream
+            .task_updates
+            .iter()
+            .all(|task| task.get("details").is_none() && task.get("output").is_none()),
+        "long inputs belong in rich-text blocks and outputs stay hidden"
+    );
+}
+
+#[tokio::test]
+async fn model_passes_never_become_plan_rows() {
+    let mut harness = Harness::channel();
+
+    harness.document.note_phase(ReplyPhase::Thinking);
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    let ts = harness.stream_ts();
+
+    harness.document.note_phase(ReplyPhase::Working);
+    harness
+        .document
+        .activity_started(item("act-0"), text("Search Slack"), None);
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+
+    harness.document.activity_finished(
+        item("act-0"),
+        ReplyActivityState::Completed,
+        Some(preview("Found the relevant messages")),
+        None,
+    );
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+
+    harness.document.note_phase(ReplyPhase::Thinking);
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+
+    harness
+        .document
+        .finalize_answer(answer("I found the messages you wanted."), Vec::new());
+    harness.document.complete();
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
+
+    let stream = harness.fake.stream(&ts).expect("stream");
+    assert_eq!(stream.task_display_mode.as_deref(), Some("plan"));
+    assert_eq!(
+        stream.task_updates,
+        [
+            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" }),
+            json!({ "type": "task_update", "id": "act-0", "title": "Search Slack", "status": "in_progress" }),
+            json!({ "type": "task_update", "id": "act-0", "title": "Search Slack", "status": "complete" }),
+            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "complete" }),
+        ],
+        "the only non-hidden rows are real tool activities"
+    );
+    assert_eq!(
+        stream.plan_updates,
+        [
+            json!({ "type": "plan_update", "title": "Thinking" }),
+            json!({ "type": "plan_update", "title": "Thinking completed" }),
+        ]
+    );
+    assert!(
+        stream
+            .task_updates
+            .last()
+            .is_some_and(|chunk| chunk["status"] == "complete"),
+        "the terminal message leaves no active spinner"
+    );
+}
+
+#[tokio::test]
+async fn attention_and_resume_update_the_plan_without_reopening_a_task() {
+    let mut harness = Harness::channel();
+    harness.document.note_phase(ReplyPhase::Thinking);
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    let ts = harness.stream_ts();
+
+    harness.document.require_attention(ReplyAttention {
+        kind: ReplyAttentionKind::Approval,
+        headline: text("Approve sending the summary"),
+        body: None,
+        action_url: None,
+        gate_ref: Some(text("gate:approval-1")),
+    });
+    assert_applied(
+        &harness
+            .reconcile(ReplyReconcilePoint::ControlCritical)
+            .await,
+    );
+    harness.document.clear_attention();
+    harness.document.note_phase(ReplyPhase::Thinking);
+    assert_applied(
+        &harness
+            .reconcile(ReplyReconcilePoint::ControlCritical)
+            .await,
+    );
+
+    let stream = harness.fake.stream(&ts).expect("stream");
+    assert_eq!(
+        stream.plan_updates,
+        [
+            json!({ "type": "plan_update", "title": "Thinking" }),
+            json!({ "type": "plan_update", "title": "Thinking paused" }),
+            json!({ "type": "plan_update", "title": "Thinking" }),
+        ]
+    );
+    assert_eq!(
+        stream.task_updates,
+        [
+            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" })
+        ],
+        "attention never exposes or duplicates the hidden lifecycle sentinel"
+    );
+}
+
+#[tokio::test]
+async fn failed_and_cancelled_runs_leave_terminal_plan_titles_and_no_spinner() {
+    for (cancelled, expected_plan_title) in [(false, "Thinking failed"), (true, "Thinking stopped")]
+    {
+        let mut harness = Harness::dm();
+        harness.document.note_phase(ReplyPhase::Thinking);
+        assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+        let ts = harness.stream_ts();
+
+        if cancelled {
+            harness.document.cancel();
+        } else {
+            harness.document.fail(text("The provider timed out."));
+        }
+        assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
+
+        let stream = harness.fake.stream(&ts).expect("stream");
+        assert_eq!(
+            stream.plan_updates.last(),
+            Some(&json!({ "type": "plan_update", "title": expected_plan_title }))
+        );
+        assert_eq!(
+            stream.task_updates,
+            [
+                json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" }),
+                json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "error" }),
+            ],
+            "run outcomes use only the hidden lifecycle sentinel"
+        );
+        assert_eq!(
+            stream.state,
+            StreamState::Stopped {
+                session_status: "active".to_string()
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_terminal_outcome_overrides_stale_attention() {
+    let mut harness = Harness::dm();
+    harness.document.note_phase(ReplyPhase::Thinking);
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    let ts = harness.stream_ts();
+
+    harness.document.require_attention(ReplyAttention {
+        kind: ReplyAttentionKind::Approval,
+        headline: text("Approve sending the summary"),
+        body: None,
+        action_url: None,
+        gate_ref: Some(text("gate:approval-1")),
+    });
+    assert_applied(
+        &harness
+            .reconcile(ReplyReconcilePoint::ControlCritical)
+            .await,
+    );
+
+    harness
+        .document
+        .finalize_answer(answer("Nothing was sent."), Vec::new());
+    harness.document.complete();
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
+
+    let stream = harness.fake.stream(&ts).expect("stream");
+    assert_eq!(
+        stream.plan_updates.last(),
+        Some(&json!({ "type": "plan_update", "title": "Thinking completed" })),
+        "a terminal stream must never remain visually paused"
+    );
+}
+
+#[tokio::test]
+async fn a_terminal_revision_marks_an_unfinished_tool_as_error() {
+    let mut harness = Harness::channel();
+    harness
+        .document
+        .activity_started(item("act-0"), text("Search Slack"), None);
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    let ts = harness.stream_ts();
+
+    harness
+        .document
+        .finalize_answer(answer("I finished the request."), Vec::new());
+    harness.document.complete();
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
+
+    let stream = harness.fake.stream(&ts).expect("stream");
+    assert_eq!(
+        stream.task_updates.last(),
+        Some(&json!({
+            "type": "task_update",
+            "id": "act-0",
+            "title": "Search Slack",
+            "status": "error",
+            "details": "Did not finish before the run ended",
+        })),
+        "a terminal reply must never retain an in-progress provider task"
+    );
+}
+
 /// SYNTHETIC-STATE unit test of chunk planning, not a production path: the
 /// production first revision carries no status (see the happy path above).
 /// This pins the narrow contract that an explicitly supplied driver status
@@ -433,7 +782,11 @@ async fn an_explicit_driver_status_becomes_an_italic_opening_chunk() {
     assert_eq!(bodies.len(), 1);
     assert_eq!(
         bodies[0]["chunks"],
-        json!([{ "type": "markdown_text", "text": "_retrying model request_\n" }])
+        json!([
+            { "type": "plan_update", "title": "Thinking" },
+            { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" },
+            { "type": "markdown_text", "text": "_retrying model request_\n" }
+        ])
     );
 }
 
@@ -464,8 +817,16 @@ async fn repeated_revisions_and_terminals_make_no_calls() {
     let ts = harness.stream_ts();
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStopStream),
-        [json!({ "channel": DM, "ts": ts, "session_status": "active" })],
-        "nothing left to append: the stop carries no chunks"
+        [json!({
+            "channel": DM,
+            "ts": ts,
+            "chunks": [
+                { "type": "plan_update", "title": "Thinking completed" },
+                { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "complete" }
+            ],
+            "session_status": "active"
+        })],
+        "the terminal stop closes the run-level header"
     );
     let calls = harness.fake.calls().len();
 
@@ -494,7 +855,11 @@ async fn text_deltas_are_char_offsets_never_byte_slices() {
     let ts = harness.stream_ts();
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStartStream)[0]["chunks"],
-        json!([{ "type": "markdown_text", "text": "hé" }])
+        json!([
+            { "type": "plan_update", "title": "Thinking" },
+            { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" },
+            { "type": "markdown_text", "text": "hé" }
+        ])
     );
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatAppendStream),
@@ -788,8 +1153,12 @@ async fn a_direct_message_streams_without_a_stored_reply_context() {
         [json!({
             "channel": DM,
             "thread_ts": THREAD,
-            "task_display_mode": "timeline",
-            "chunks": [{ "type": "markdown_text", "text": "Hello" }]
+            "task_display_mode": "plan",
+            "chunks": [
+                { "type": "plan_update", "title": "Thinking" },
+                { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" },
+                { "type": "markdown_text", "text": "Hello" }
+            ]
         })],
         "recipient ids are optional in a DM and omitted when unknown"
     );
@@ -870,14 +1239,26 @@ async fn a_terminal_without_an_open_stream_opens_and_closes_one_native_stream() 
         "_Stopped._"
     );
 
-    // A completed run with nothing to report opens nothing at all: there is
-    // no content to show, so no stream and no message — only the session
-    // settling to `active`.
+    // Even an empty completed run gets the visible lifecycle header and is
+    // immediately closed, rather than disappearing after a blank pause.
     let mut harness = Harness::dm();
     harness.document.complete();
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
-    assert_eq!(harness.fake.calls(), ["agents.sessions.setStatus"]);
-    assert!(harness.fake.streams().is_empty());
+    assert_eq!(
+        harness.fake.calls(),
+        ["chat.startStream", "chat.stopStream"]
+    );
+    let stream = harness.fake.stream(&harness.stream_ts()).expect("stream");
+    assert_eq!(
+        stream.plan_updates.last(),
+        Some(&json!({ "type": "plan_update", "title": "Thinking completed" }))
+    );
+    assert_eq!(
+        stream.task_updates,
+        [
+            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "complete" })
+        ]
+    );
     assert!(harness.fake.posted().is_empty());
 }
 
@@ -923,7 +1304,7 @@ async fn a_terminal_rewrite_re_presents_natively_without_a_conventional_post() {
 async fn an_attention_block_as_first_content_opens_the_stream_carrying_it() {
     let mut harness = Harness::dm();
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
-    assert!(harness.fake.streams().is_empty());
+    let ts = harness.stream_ts();
 
     harness.document.require_attention(ReplyAttention {
         kind: ReplyAttentionKind::Auth,
@@ -937,19 +1318,20 @@ async fn an_attention_block_as_first_content_opens_the_stream_carrying_it() {
             .reconcile(ReplyReconcilePoint::ControlCritical)
             .await,
     );
-    let bodies = harness.fake.bodies(SlackWebApiMethod::ChatStartStream);
+    let bodies = harness.fake.bodies(SlackWebApiMethod::ChatAppendStream);
     assert_eq!(bodies.len(), 1);
     let chunks = bodies[0]["chunks"].as_array().expect("chunks");
     assert!(
         !chunks.is_empty(),
-        "the opening request carries the attention chunk"
+        "the same visible stream receives the attention chunk"
     );
-    assert!(
-        chunks[0]["text"]
-            .as_str()
-            .expect("text chunk")
-            .contains("Sign-in needed"),
-    );
+    assert_eq!(bodies[0]["ts"], ts);
+    assert!(chunks.iter().any(|chunk| {
+        chunk["type"] == "markdown_text"
+            && chunk["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Sign-in needed"))
+    }));
 }
 
 // ── Liveness ─────────────────────────────────────────────────────────────

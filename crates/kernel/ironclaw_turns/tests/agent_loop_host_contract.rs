@@ -2572,6 +2572,13 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
         surface_materialized.model_content
     );
     assert!(
+        surface_materialized.model_content.contains(
+            "Never claim that you checked, read, searched, queried, or refreshed an external service unless you actually invoked the corresponding capability in this run"
+        ),
+        "surface prompt must distinguish startup context from live provider evidence: {:?}",
+        surface_materialized.model_content
+    );
+    assert!(
         surface_materialized
             .model_content
             .contains("\nCapabilities:\n- id: demo.echo"),

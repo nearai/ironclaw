@@ -393,6 +393,60 @@ impl DeliveryCoordinator {
         }
     }
 
+    /// Wait until the target has published the reply document revision that
+    /// is current now. Used before a channel-policy cancellation so the
+    /// actionable auth fallback is visible before the terminal revision
+    /// clears its attention facet. This is an ordering wait only: it never
+    /// retries or changes publication state.
+    pub async fn await_current_reply_published(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        reply_target: &ReplyTargetBindingRef,
+        timeout: Duration,
+    ) -> bool {
+        let Some(publication) = self.started_reply_publication() else {
+            return false;
+        };
+        let Some(snapshot) = publication.projection.snapshot(scope, run_id) else {
+            return false;
+        };
+        let desired_revision = snapshot.revision;
+        publication.wake_run(&RunKey::new(scope, run_id));
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match self.list_reply_publications(scope.clone(), run_id).await {
+                Ok(records) => {
+                    let mut matching = records.iter().filter(|record| {
+                        record
+                            .publication
+                            .descriptor
+                            .as_ref()
+                            .is_some_and(|descriptor| &descriptor.reply_target == reply_target)
+                    });
+                    if matching.next().is_some_and(|record| {
+                        record.publication.published_revision >= desired_revision
+                    }) {
+                        return true;
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        target: "ironclaw::reborn::reply_publication",
+                        %run_id,
+                        %error,
+                        "could not read the target publication while waiting for the current revision"
+                    );
+                    return false;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     /// Resume every open publication in the tenant from the outbound attempt
     /// index — the boot-time half of crash recovery. The journal's terminal
     /// commit is acknowledged only after recovery ran, so a crash *after*

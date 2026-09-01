@@ -7,12 +7,15 @@
 
 use ironclaw_extension_contracts::reply::{
     ReplyActivity, ReplyActivityState, ReplyAttention, ReplyAttentionKind, ReplyDocument,
-    ReplyOutcome, ReplyPhase,
+    ReplyOutcome,
 };
 use serde_json::{Value, json};
 
 use super::checkpoint::{SlackAppliedState, SlackReplyCheckpoint, char_prefix, fingerprint};
 use super::{SLACK_MARKDOWN_CHUNK_MAX_CHARS, SLACK_TASK_FIELD_MAX_CHARS};
+
+const RUN_TASK_ID: &str = "ironclaw-run";
+const RUN_TASK_TITLE: &str = "IronClaw run";
 
 // ── Chunk planning ───────────────────────────────────────────────────────
 
@@ -52,8 +55,8 @@ pub(super) fn plan_chunks(
         ..SlackAppliedState::default()
     };
 
-    append_thinking_tasks(document, checkpoint, &mut chunks, &mut applied);
-
+    let mut task_chunks = Vec::new();
+    append_hidden_run_task(document, checkpoint, &mut task_chunks, &mut applied);
     for activity in &document.activities {
         let id = activity.id.as_str();
         let published = checkpoint.tasks.get(id);
@@ -61,12 +64,19 @@ pub(super) fn plan_chunks(
             // Settled and evicted from the checkpoint: fully published.
             continue;
         }
-        let fingerprint = task_fingerprint(activity);
+        let fingerprint = rendered_task_fingerprint(activity, document.is_terminal());
         if published != Some(&fingerprint) {
-            chunks.push(task_update_chunk(activity));
+            task_chunks.extend(task_update_chunks(
+                activity,
+                document.is_terminal(),
+                published.is_some(),
+            ));
             applied.tasks.insert(id.to_string(), fingerprint);
         }
     }
+
+    append_plan_title(document, checkpoint, &mut chunks, &mut applied);
+    chunks.extend(task_chunks);
 
     if !delta.is_empty() {
         for piece in markdown_pieces(delta) {
@@ -112,129 +122,169 @@ pub(super) fn plan_chunks(
     Ok(ChunkPlan { chunks, applied })
 }
 
-/// Render the semantic thinking phase and product-approved reasoning summaries
-/// as Slack-native timeline tasks. The projection decides what is safe to
-/// disclose; this edge only maps the disclosed document into Slack's shape.
-fn append_thinking_tasks(
+fn append_hidden_run_task(
+    document: &ReplyDocument,
+    checkpoint: &SlackReplyCheckpoint,
+    task_chunks: &mut Vec<Value>,
+    applied: &mut SlackAppliedState,
+) {
+    let status = match &document.outcome {
+        Some(ReplyOutcome::Completed) => "complete",
+        Some(ReplyOutcome::Failed { .. } | ReplyOutcome::Cancelled) => "error",
+        None => "in_progress",
+    };
+    let rendered = fingerprint(&["hidden-run", status]);
+    if checkpoint.tasks.get(RUN_TASK_ID) == Some(&rendered) {
+        return;
+    }
+    task_chunks.push(json!({
+        "type": "task_update",
+        "id": RUN_TASK_ID,
+        "title": RUN_TASK_TITLE,
+        "hide_title": true,
+        "status": status,
+    }));
+    applied.tasks.insert(RUN_TASK_ID.to_string(), rendered);
+}
+
+fn append_plan_title(
     document: &ReplyDocument,
     checkpoint: &SlackReplyCheckpoint,
     chunks: &mut Vec<Value>,
     applied: &mut SlackAppliedState,
 ) {
-    for (index, reasoning) in document.reasoning.iter().enumerate() {
-        let in_progress = document.phase == ReplyPhase::Thinking
-            && document.reasoning_open
-            && index + 1 == document.reasoning.len();
-        append_thinking_task(
-            index,
-            in_progress,
-            Some(reasoning.as_str()),
-            checkpoint,
-            chunks,
-            applied,
-        );
-    }
-
-    let placeholder_index = document.reasoning.len();
-    if document.phase == ReplyPhase::Thinking && !document.reasoning_open {
-        append_thinking_task(placeholder_index, true, None, checkpoint, chunks, applied);
-    } else {
-        let placeholder_id = thinking_task_id(placeholder_index);
-        if checkpoint.tasks.contains_key(&placeholder_id) {
-            append_thinking_task(placeholder_index, false, None, checkpoint, chunks, applied);
-        }
-    }
-}
-
-fn append_thinking_task(
-    index: usize,
-    in_progress: bool,
-    reasoning: Option<&str>,
-    checkpoint: &SlackReplyCheckpoint,
-    chunks: &mut Vec<Value>,
-    applied: &mut SlackAppliedState,
-) {
-    let id = thinking_task_id(index);
-    let status = if in_progress {
-        "in_progress"
-    } else {
-        "complete"
-    };
-    let disclosed = reasoning.map(slack_task_field);
-    let fingerprint = fingerprint(&[status, disclosed.as_deref().unwrap_or("")]);
-    if checkpoint.tasks.get(&id) == Some(&fingerprint) {
+    let title = plan_title(document);
+    let key = fingerprint(&["plan", title]);
+    if checkpoint.plan_title_key.as_deref() == Some(key.as_str()) {
         return;
     }
-
-    let mut chunk = json!({
-        "type": "task_update",
-        "id": id,
-        "title": "Thinking",
-        "status": status,
-    });
-    if let Some(disclosed) = disclosed {
-        if in_progress {
-            chunk["details"] = json!(disclosed);
-        } else {
-            chunk["output"] = json!(disclosed);
-        }
-    }
-    chunks.push(chunk);
-    applied.tasks.insert(id, fingerprint);
+    chunks.push(json!({ "type": "plan_update", "title": title }));
+    applied.plan_title_key = Some(key);
 }
 
-fn thinking_task_id(index: usize) -> String {
-    format!("ironclaw-thinking-{index}")
+fn plan_title(document: &ReplyDocument) -> &'static str {
+    match &document.outcome {
+        Some(ReplyOutcome::Completed) => "Thinking completed",
+        Some(ReplyOutcome::Failed { .. }) => "Thinking failed",
+        Some(ReplyOutcome::Cancelled) => "Thinking stopped",
+        None if document.attention.is_some() => "Thinking paused",
+        None => "Thinking",
+    }
 }
 
 fn slack_task_field(value: &str) -> String {
     value.chars().take(SLACK_TASK_FIELD_MAX_CHARS).collect()
 }
 
-fn task_update_chunk(activity: &ReplyActivity) -> Value {
-    let (status, fallback_details) = match &activity.state {
+fn rendered_task_state(activity: &ReplyActivity, terminal: bool) -> (&'static str, Option<String>) {
+    match &activity.state {
+        ReplyActivityState::Started if terminal => (
+            "error",
+            Some("Did not finish before the run ended".to_string()),
+        ),
         ReplyActivityState::Started => ("in_progress", None),
         ReplyActivityState::Completed => ("complete", None),
         ReplyActivityState::Failed { kind } => ("error", Some(format!("Failed: {kind}"))),
-    };
+    }
+}
+
+fn task_update_chunks(
+    activity: &ReplyActivity,
+    terminal: bool,
+    input_already_published: bool,
+) -> Vec<Value> {
+    let (status, fallback_details) = rendered_task_state(activity, terminal);
     let mut chunk = json!({
         "type": "task_update",
         "id": activity.id.as_str(),
         "title": slack_task_field(activity.title.as_str()),
         "status": status,
     });
-    let details = activity
-        .detail
-        .as_ref()
-        .map(|detail| detail.as_str().to_string())
-        .or(fallback_details);
-    if let Some(details) = details {
-        chunk["details"] = json!(slack_task_field(&details));
+    // Slack appends repeated task details instead of visually replacing them.
+    // Send immutable input arguments on the first update only. A later error
+    // detail is new information and always takes precedence.
+    let details = fallback_details
+        .map(|details| ("Details", details))
+        .or_else(|| {
+            (!input_already_published)
+                .then_some(activity.detail.as_ref())
+                .flatten()
+                .map(|detail| ("Arguments", detail.as_str().to_string()))
+        });
+    let mut overflow = Vec::new();
+    if let Some((label, details)) = details {
+        if let Some(payload) = compact_task_payload(&details) {
+            chunk["details"] = json!(payload);
+        } else {
+            overflow.push(rich_text_payload_chunk(label, &details));
+        }
     }
-    if let Some(output) = &activity.output_preview {
-        chunk["output"] = json!(slack_task_field(output.as_str()));
-    }
-    chunk
+    let mut chunks = Vec::with_capacity(1 + overflow.len());
+    chunks.push(chunk);
+    chunks.extend(overflow);
+    chunks
 }
 
+fn compact_task_payload(value: &str) -> Option<String> {
+    let value = value.trim();
+    if !value.starts_with('{') && !value.starts_with('[') {
+        return (value.chars().count() <= SLACK_TASK_FIELD_MAX_CHARS).then(|| value.to_string());
+    }
+
+    const PREFIX: &str = "```json\n";
+    const SUFFIX: &str = "\n```";
+    let rendered = format!("{PREFIX}{value}{SUFFIX}");
+    (rendered.chars().count() <= SLACK_TASK_FIELD_MAX_CHARS).then_some(rendered)
+}
+
+fn rich_text_payload_chunk(label: &str, value: &str) -> Value {
+    let mut preformatted = json!({
+        "type": "rich_text_preformatted",
+        "elements": [{ "type": "text", "text": value.trim() }],
+    });
+    if value.trim().starts_with('{') || value.trim().starts_with('[') {
+        preformatted["language"] = json!("json");
+    }
+    json!({
+        "type": "blocks",
+        "blocks": [{
+            "type": "rich_text",
+            "elements": [
+                {
+                    "type": "rich_text_section",
+                    "elements": [{
+                        "type": "text",
+                        "text": label,
+                        "style": { "bold": true },
+                    }],
+                },
+                preformatted,
+            ],
+        }],
+    })
+}
+
+#[cfg(test)]
 pub(super) fn task_fingerprint(activity: &ReplyActivity) -> String {
+    rendered_task_fingerprint(activity, false)
+}
+
+fn rendered_task_fingerprint(activity: &ReplyActivity, terminal: bool) -> String {
+    let (rendered_state, fallback_details) = rendered_task_state(activity, terminal);
     let (state, kind) = match &activity.state {
         ReplyActivityState::Started => ("started", ""),
         ReplyActivityState::Completed => ("completed", ""),
         ReplyActivityState::Failed { kind } => ("failed", kind.as_str()),
     };
     fingerprint(&[
+        rendered_state,
         state,
         kind,
         activity.title.as_str(),
-        activity
-            .detail
-            .as_ref()
-            .map_or("", |detail| detail.as_str()),
-        activity
-            .output_preview
-            .as_ref()
-            .map_or("", |output| output.as_str()),
+        activity.detail.as_ref().map_or_else(
+            || fallback_details.as_deref().unwrap_or(""),
+            |detail| detail.as_str(),
+        ),
     ])
 }
 

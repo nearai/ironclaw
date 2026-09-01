@@ -204,6 +204,8 @@ pub(super) async fn enrich_attention(
         }
         ReplyAttentionKind::Auth => {
             let Some(source) = blocked_auth_prompts else {
+                attention.body = display_preview(prompts::unserviceable_auth_prompt_message(None));
+                attention.action_url = None;
                 return;
             };
             let state = match turn_coordinator
@@ -234,6 +236,9 @@ pub(super) async fn enrich_attention(
                 Ok(view) => view,
                 Err(error) => {
                     tracing::debug!(target: LOG_TARGET, run_id = %target.run_id, %error, "auth attention enrichment: prompt unavailable");
+                    attention.body =
+                        display_preview(prompts::unserviceable_auth_prompt_message(None));
+                    attention.action_url = None;
                     return;
                 }
             };

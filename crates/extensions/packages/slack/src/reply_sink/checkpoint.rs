@@ -25,8 +25,8 @@ pub(super) struct SlackReplyCheckpoint {
     pub(super) session_status: SlackSessionStatus,
     #[serde(default)]
     pub(super) stream: Option<SlackStreamState>,
-    /// Presentation task id → fingerprint of the last `task_update` sent for
-    /// it (activities and the semantic thinking timeline).
+    /// Hidden provider sentinel or real activity id → fingerprint of the last
+    /// `task_update` sent for it.
     #[serde(default)]
     pub(super) tasks: BTreeMap<String, String>,
     /// Activities with `started_ordinal` below this and no fingerprint entry
@@ -37,6 +37,9 @@ pub(super) struct SlackReplyCheckpoint {
     /// Fingerprint of the last status line appended (answer still empty).
     #[serde(default)]
     pub(super) status_key: Option<String>,
+    /// Fingerprint of the last `plan_update` title Slack accepted.
+    #[serde(default)]
+    pub(super) plan_title_key: Option<String>,
     /// Fingerprint of the attention block currently shown in the message.
     #[serde(default)]
     pub(super) attention_key: Option<String>,
@@ -128,6 +131,8 @@ pub(super) struct SlackAppliedState {
     pub(super) tasks: BTreeMap<String, String>,
     #[serde(default)]
     pub(super) status_key: Option<String>,
+    #[serde(default)]
+    pub(super) plan_title_key: Option<String>,
     #[serde(default)]
     pub(super) attention_key: Option<String>,
     #[serde(default)]

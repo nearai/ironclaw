@@ -208,6 +208,7 @@ impl Drop for RunDeliveryGuard<'_> {
 /// retracts the working indicator regardless (the publication keeps going;
 /// only the ordering guarantee lapses).
 const REPLY_SETTLE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+const REPLY_ATTENTION_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Generic immediate-ACK run watcher: observes the ack the workflow
 /// produced for an inbound channel message, polls the submitted run, and
@@ -692,11 +693,28 @@ impl RunDeliveryObserver {
                     &scope,
                     run_id,
                     &actionable_state,
+                    progressive,
                 )
                 .await
             {
                 Ok(Some(notification)) => notification,
                 Ok(None) => {
+                    if progressive
+                        && actionable_state.status == TurnStatus::BlockedAuth
+                        && next_blocked_marker
+                            .as_ref()
+                            .and_then(|marker| marker.gate_ref.as_ref())
+                            .is_some()
+                    {
+                        // An unserviceable chat-auth gate was cancelled by
+                        // `notification_for_actionable_state`. Keep the one
+                        // progressive reply alive long enough to observe the
+                        // resulting terminal state, clear its paused facet,
+                        // and close the stream. Suppress the just-observed
+                        // blocked marker so the poll does not process it twice.
+                        observed_blocked_marker = next_blocked_marker;
+                        continue;
+                    }
                     if actionable_state.status == TurnStatus::BlockedResource
                         && let Some(marker) = next_blocked_marker
                     {
@@ -1113,6 +1131,7 @@ impl RunDeliveryObserver {
         scope: &TurnScope,
         run_id: TurnRunId,
         state: &TurnRunState,
+        progressive: bool,
     ) -> Result<Option<ActionableNotification>, RunDeliveryError> {
         let direct_message = envelope_is_direct_chat(envelope);
         let notification = match state.status {
@@ -1231,6 +1250,24 @@ impl RunDeliveryObserver {
                         }
                     }
                     view => {
+                        if progressive
+                            && !self
+                                .services
+                                .coordinator
+                                .await_current_reply_published(
+                                    scope,
+                                    run_id,
+                                    &binding.reply_target_binding_ref,
+                                    REPLY_ATTENTION_WAIT,
+                                )
+                                .await
+                        {
+                            tracing::debug!(
+                                target: "ironclaw::reborn::run_delivery",
+                                %run_id,
+                                "auth fallback did not publish before the bounded cancellation wait elapsed"
+                            );
+                        }
                         cancel_auth_blocked_run(
                             self.services.turn_coordinator.as_ref(),
                             self.services.auth_flow_cancel.as_deref(),
@@ -1240,16 +1277,18 @@ impl RunDeliveryObserver {
                             Some(gate_ref.as_str()),
                         )
                         .await?;
-                        self.services
-                            .post_notice(
-                                DeliveryIntent::FailureNotice,
-                                scope.clone(),
-                                Some(run_id),
-                                envelope.external_conversation_ref(),
-                                prompts::unserviceable_auth_prompt_message(view.as_ref()),
-                                format!("auth-unavailable:{run_id}"),
-                            )
-                            .await;
+                        if !progressive {
+                            self.services
+                                .post_notice(
+                                    DeliveryIntent::FailureNotice,
+                                    scope.clone(),
+                                    Some(run_id),
+                                    envelope.external_conversation_ref(),
+                                    prompts::unserviceable_auth_prompt_message(view.as_ref()),
+                                    format!("auth-unavailable:{run_id}"),
+                                )
+                                .await;
+                        }
                         return Ok(None);
                     }
                 }

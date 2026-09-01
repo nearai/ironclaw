@@ -47,6 +47,10 @@ pub struct FakeStream {
     pub text: String,
     /// Every `task_update` chunk received, in order.
     pub task_updates: Vec<Value>,
+    /// Every `plan_update` chunk received, in order.
+    pub plan_updates: Vec<Value>,
+    /// Every `blocks` chunk received, in order.
+    pub block_chunks: Vec<Value>,
     pub state: StreamState,
     pub append_calls: usize,
 }
@@ -365,6 +369,8 @@ fn handle(
                 task_display_mode: field("task_display_mode"),
                 text: String::new(),
                 task_updates: Vec::new(),
+                plan_updates: Vec::new(),
+                block_chunks: Vec::new(),
                 state: StreamState::Streaming,
                 append_calls: 0,
             };
@@ -580,7 +586,18 @@ fn absorb_chunks(stream: &mut FakeStream, body: &Value) -> Result<(), &'static s
                 }
                 stream.task_updates.push(chunk.clone());
             }
-            Some("plan_update") | Some("blocks") => {}
+            Some("plan_update") => {
+                if chunk.get("title").and_then(Value::as_str).is_none() {
+                    return Err("invalid_chunks");
+                }
+                stream.plan_updates.push(chunk.clone());
+            }
+            Some("blocks") => {
+                if chunk.get("blocks").and_then(Value::as_array).is_none() {
+                    return Err("invalid_chunks");
+                }
+                stream.block_chunks.push(chunk.clone());
+            }
             _ => return Err("invalid_chunks"),
         }
     }

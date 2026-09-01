@@ -36,6 +36,7 @@ use ironclaw_extension_contracts::reply::{
     ReplyAudience, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument, ReplyItemId,
     ReplyReasoningText, ReplyReconcilePoint,
 };
+use ironclaw_host_api::ids::InvocationId;
 use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_loop_contracts::{
     AgentLoopHostError, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
@@ -44,6 +45,8 @@ use ironclaw_loop_contracts::{
 use ironclaw_threads::AttachmentRef;
 
 use crate::run_delivery::prompts::RUN_FAILED_MESSAGE;
+
+use super::display_preview::{CapabilityDisplayPreviewSource, CapabilityDisplayPreviewStore};
 
 #[cfg(test)]
 mod tests;
@@ -238,6 +241,7 @@ impl RunReply {
 pub struct ReplyProjection {
     runs: Mutex<HashMap<RunKey, RunReply>>,
     observers: RwLock<Vec<Arc<dyn ReplyProjectionObserver>>>,
+    display_previews: RwLock<Option<Arc<CapabilityDisplayPreviewStore>>>,
     max_tracked_runs: usize,
 }
 
@@ -265,8 +269,25 @@ impl ReplyProjection {
         Self {
             runs: Mutex::new(HashMap::new()),
             observers: RwLock::new(Vec::new()),
+            display_previews: RwLock::new(None),
             max_tracked_runs: max_tracked_runs.max(1),
         }
+    }
+
+    /// Attach the existing safe capability-preview store once during runtime
+    /// assembly. The capability host is assembled after the milestone sink,
+    /// so this narrow late bind closes that startup cycle without creating a
+    /// second activity or transcript pipeline.
+    pub fn bind_display_previews(&self, previews: Arc<CapabilityDisplayPreviewStore>) -> bool {
+        let mut bound = self
+            .display_previews
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if bound.is_some() {
+            return false;
+        }
+        *bound = Some(previews);
+        true
     }
 
     pub(crate) fn add_observer(&self, observer: Arc<dyn ReplyProjectionObserver>) {
@@ -285,6 +306,11 @@ impl ReplyProjection {
         if !milestone_is_projected(&milestone.kind) {
             return;
         }
+        let display_previews = self
+            .display_previews
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         let events = {
             let mut runs = self.lock_runs();
             let run = match runs.get_mut(&key) {
@@ -306,7 +332,12 @@ impl ReplyProjection {
                 run.actor = milestone.actor.clone();
             }
             let mut folded = Folded::default();
-            let terminal_pending = fold_milestone(run, &milestone.kind, &mut folded);
+            let terminal_pending = fold_milestone(
+                run,
+                &milestone.kind,
+                display_previews.as_deref(),
+                &mut folded,
+            );
             let mut events = Vec::with_capacity(2);
             if let Some(point) = run.seal(&folded) {
                 events.push(ReplyProjectionEvent::Revised(point));
@@ -477,7 +508,12 @@ fn milestone_is_projected(kind: &LoopHostMilestoneKind) -> bool {
 /// Fold one milestone into the run's document via the document's bounded
 /// mutators. Returns whether the loop finished (the terminal facts are now
 /// worth fetching); everything else is recorded on `folded`.
-fn fold_milestone(run: &mut RunReply, kind: &LoopHostMilestoneKind, folded: &mut Folded) -> bool {
+fn fold_milestone(
+    run: &mut RunReply,
+    kind: &LoopHostMilestoneKind,
+    display_previews: Option<&CapabilityDisplayPreviewStore>,
+    folded: &mut Folded,
+) -> bool {
     // More reasoning keeps the open segment growing; anything else closes it.
     if !matches!(kind, LoopHostMilestoneKind::ModelReasoningDelta { .. }) {
         run.close_open_reasoning(folded);
@@ -531,7 +567,11 @@ fn fold_milestone(run: &mut RunReply, kind: &LoopHostMilestoneKind, folded: &mut
             if let Some((id, title)) =
                 item_id(&activity_id.to_string()).zip(display_text(capability_id.as_str()))
             {
-                folded.note(run.document.activity_started(id, title, None));
+                folded.note(run.document.activity_started(
+                    id,
+                    title,
+                    activity_input_preview(display_previews, *activity_id),
+                ));
             }
         }
         LoopHostMilestoneKind::CapabilityCompleted {
@@ -544,11 +584,13 @@ fn fold_milestone(run: &mut RunReply, kind: &LoopHostMilestoneKind, folded: &mut
             let Some(id) = item_id(&activity_id.to_string()) else {
                 return false;
             };
-            ensure_activity_title(run, &id, capability_id.as_str(), folded);
+            let input_preview = activity_input_preview(display_previews, *activity_id);
+            let output_preview = activity_output_preview(display_previews, *activity_id);
+            ensure_activity_title(run, &id, capability_id.as_str(), input_preview, folded);
             folded.note(run.document.activity_finished(
                 id,
                 ReplyActivityState::Completed,
-                None,
+                output_preview,
                 Some(ReplyActivityProvenance {
                     provider: display_text(provider.as_str()),
                     runtime: display_text(runtime.as_str()),
@@ -570,7 +612,13 @@ fn fold_milestone(run: &mut RunReply, kind: &LoopHostMilestoneKind, folded: &mut
             let Some(kind) = display_text(reason_kind.as_str()) else {
                 return false;
             };
-            ensure_activity_title(run, &id, capability_id.as_str(), folded);
+            ensure_activity_title(
+                run,
+                &id,
+                capability_id.as_str(),
+                activity_input_preview(display_previews, *activity_id),
+                folded,
+            );
             folded.note(
                 run.document.activity_finished(
                     id,
@@ -641,6 +689,7 @@ fn ensure_activity_title(
     run: &mut RunReply,
     id: &ReplyItemId,
     capability: &str,
+    detail: Option<ReplyDisplayPreview>,
     folded: &mut Folded,
 ) {
     if run
@@ -652,8 +701,30 @@ fn ensure_activity_title(
         return;
     }
     if let Some(title) = display_text(capability) {
-        folded.note(run.document.activity_started(id.clone(), title, None));
+        folded.note(run.document.activity_started(id.clone(), title, detail));
     }
+}
+
+fn activity_input_preview(
+    previews: Option<&CapabilityDisplayPreviewStore>,
+    activity_id: ironclaw_host_api::turn::CapabilityActivityId,
+) -> Option<ReplyDisplayPreview> {
+    let input = previews?.running_input(InvocationId::from_uuid(activity_id.as_uuid()))?;
+    input
+        .input_summary
+        .or(input.subtitle)
+        .and_then(|summary| display_preview(&summary))
+}
+
+fn activity_output_preview(
+    previews: Option<&CapabilityDisplayPreviewStore>,
+    activity_id: ironclaw_host_api::turn::CapabilityActivityId,
+) -> Option<ReplyDisplayPreview> {
+    let record = previews?.record_for_invocation(InvocationId::from_uuid(activity_id.as_uuid()))?;
+    record
+        .output_preview
+        .or(record.output_summary)
+        .and_then(|summary| display_preview(&summary))
 }
 
 /// The mutations durable terminal facts mean. A not-yet-terminal status

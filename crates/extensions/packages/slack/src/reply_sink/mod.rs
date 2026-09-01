@@ -21,8 +21,8 @@
 //! - claim `Applied` for a request whose transport failed mid-flight — that
 //!   is `Ambiguous`, and the next reconcile reads the streaming message back
 //!   (`conversations.replies`) before appending more;
-//! - claim native plan mode — task cards are driven from real activity facts
-//!   in `timeline` mode, because no plan producer exists in the loop.
+//! - invent a second planning model — Slack's `plan` display uses the run
+//!   lifecycle as its header and groups only real activity facts beneath it.
 //!
 //! Slack facts the mechanics rest on (docs.slack.dev, verified 2026-08-31):
 //! `chat.appendStream` `markdown_text` "is what will be appended to the
@@ -87,8 +87,9 @@ const SESSION_STATUS_REASSERT_AFTER: Duration = Duration::from_secs(30 * 60);
 /// markdown → mrkdwn rendering elsewhere in the message.
 const READ_BACK_TAIL_CHARS: usize = 200;
 
-/// `task_display_mode` — task cards interleaved with the streamed text.
-const TASK_DISPLAY_MODE_TIMELINE: &str = "timeline";
+/// `task_display_mode` — group tool activity into Slack's
+/// collapsible Agent plan instead of interleaving loose task cards with text.
+const TASK_DISPLAY_MODE_PLAN: &str = "plan";
 
 // ── The sink ─────────────────────────────────────────────────────────────
 
@@ -318,6 +319,9 @@ impl Reconciler<'_> {
         if state.status_key.is_some() {
             self.checkpoint.status_key = state.status_key.clone();
         }
+        if state.plan_title_key.is_some() {
+            self.checkpoint.plan_title_key = state.plan_title_key.clone();
+        }
         if state.attention_key.is_some() {
             self.checkpoint.attention_key = state.attention_key.clone();
         }
@@ -417,14 +421,8 @@ impl Reconciler<'_> {
                 });
             }
         };
-        if plan.chunks.is_empty() {
-            // Nothing renderable yet (the run's first revision carries only
-            // `Preparing`): opening now would show the user an empty Agent
-            // container. The session already reads `processing` and the
-            // checkpoint persists; the stream opens — carrying its first
-            // content — at the first revision that has any.
-            return Ok(());
-        }
+        // The plan title is renderable on the first `Preparing` revision, so
+        // progress is visible without inventing a model or tool activity.
         self.start_stream(route, &plan).await.map(|_| ())
     }
 
@@ -439,7 +437,7 @@ impl Reconciler<'_> {
     ) -> Result<SlackStreamState, ReplySinkOutcome> {
         let mut body = json!({
             "channel": route.channel,
-            "task_display_mode": TASK_DISPLAY_MODE_TIMELINE,
+            "task_display_mode": TASK_DISPLAY_MODE_PLAN,
         });
         if let Some(thread_ts) = &route.thread_ts {
             body["thread_ts"] = json!(thread_ts);
@@ -742,6 +740,7 @@ impl Reconciler<'_> {
                 self.checkpoint.tasks.clear();
                 self.checkpoint.tasks_floor_ordinal = 0;
                 self.checkpoint.status_key = None;
+                self.checkpoint.plan_title_key = None;
                 self.checkpoint.attention_key = None;
                 return self.open_and_close_terminal_stream(route, document).await;
             }
@@ -979,7 +978,30 @@ mod tests {
     }
 
     #[test]
-    fn thinking_phase_opens_a_real_task_without_inventing_reasoning() {
+    fn preparing_phase_opens_a_visible_plan_header_with_a_hidden_sentinel() {
+        let document = ReplyDocument::default();
+
+        let plan = plan_chunks(&document, &SlackReplyCheckpoint::default(), 0, "", None)
+            .expect("preparing is append-only");
+
+        assert_eq!(
+            plan.chunks,
+            vec![
+                json!({ "type": "plan_update", "title": "Thinking" }),
+                json!({
+                    "type": "task_update",
+                    "id": "ironclaw-run",
+                    "title": "IronClaw run",
+                    "hide_title": true,
+                    "status": "in_progress",
+                }),
+            ],
+            "the hidden provider sentinel makes the lifecycle header visible"
+        );
+    }
+
+    #[test]
+    fn thinking_phase_does_not_add_a_model_pass_row() {
         let document = ReplyDocument {
             phase: ReplyPhase::Thinking,
             ..ReplyDocument::default()
@@ -990,18 +1012,22 @@ mod tests {
 
         assert_eq!(
             plan.chunks,
-            vec![json!({
-                "type": "task_update",
-                "id": "ironclaw-thinking-0",
-                "title": "Thinking",
-                "status": "in_progress",
-            })],
-            "the semantic phase opens Slack's native timeline immediately without fake prose"
+            vec![
+                json!({ "type": "plan_update", "title": "Thinking" }),
+                json!({
+                    "type": "task_update",
+                    "id": "ironclaw-run",
+                    "title": "IronClaw run",
+                    "hide_title": true,
+                    "status": "in_progress",
+                }),
+            ],
+            "model passes do not become visible activity rows"
         );
     }
 
     #[test]
-    fn approved_reasoning_updates_then_completes_the_same_slack_task() {
+    fn approved_reasoning_never_becomes_an_internal_plan_step() {
         let mut document = ReplyDocument {
             phase: ReplyPhase::Thinking,
             ..ReplyDocument::default()
@@ -1015,30 +1041,25 @@ mod tests {
             plan_chunks(&document, &checkpoint, 0, "", None).expect("reasoning is append-only");
         assert_eq!(
             in_progress.chunks,
-            vec![json!({
-                "type": "task_update",
-                "id": "ironclaw-thinking-0",
-                "title": "Thinking",
-                "status": "in_progress",
-                "details": "Comparing the two trail profiles",
-            })]
+            vec![
+                json!({ "type": "plan_update", "title": "Thinking" }),
+                json!({
+                    "type": "task_update",
+                    "id": "ironclaw-run",
+                    "title": "IronClaw run",
+                    "hide_title": true,
+                    "status": "in_progress",
+                }),
+            ]
         );
         checkpoint.tasks.extend(in_progress.applied.tasks);
+        checkpoint.plan_title_key = in_progress.applied.plan_title_key;
 
         document.phase = ReplyPhase::Working;
         document.reasoning_open = false;
         let complete =
             plan_chunks(&document, &checkpoint, 0, "", None).expect("completion is append-only");
-        assert_eq!(
-            complete.chunks,
-            vec![json!({
-                "type": "task_update",
-                "id": "ironclaw-thinking-0",
-                "title": "Thinking",
-                "status": "complete",
-                "output": "Comparing the two trail profiles",
-            })]
-        );
+        assert!(complete.chunks.is_empty());
     }
 
     #[test]
@@ -1071,10 +1092,13 @@ mod tests {
             checkpoint.tasks_floor_ordinal > 0,
             "settled rows advance the floor"
         );
-        // Every evicted row is settled: the plan emits nothing for it.
+        // Every evicted activity row is settled: only the hidden provider
+        // sentinel may remain.
         let plan = plan_chunks(&document, &checkpoint, 0, "", None).expect("plan");
         assert!(
-            plan.chunks.is_empty(),
+            plan.chunks
+                .iter()
+                .all(|chunk| chunk["type"] != "task_update" || chunk["hide_title"] == true),
             "evicted settled rows are never re-sent"
         );
     }
