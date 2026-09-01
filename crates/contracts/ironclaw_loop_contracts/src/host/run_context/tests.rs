@@ -249,3 +249,59 @@ mod acting_identity_ladder {
         );
     }
 }
+
+fn sample_run_context() -> LoopRunContext {
+    let scope = TurnScope::new(
+        ironclaw_host_api::ids::TenantId::new("tenant-context-budget").expect("tenant"),
+        None,
+        None,
+        ThreadId::new("thread-context-budget").expect("thread"),
+    );
+    let profile = ResolvedRunProfile::legacy_compatibility(
+        ironclaw_host_api::turn::RunProfileId::default_profile(),
+        ironclaw_host_api::turn::RunProfileVersion::new(1),
+        true,
+    );
+    LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), profile)
+}
+
+#[test]
+fn run_context_defaults_to_no_resolved_context_budget() {
+    let context = sample_run_context();
+
+    assert_eq!(context.resolved_context_budget, None);
+}
+
+#[test]
+fn run_context_carries_a_resolved_context_budget() {
+    let budget = PromptContextTokenBudget::from_advertised_window(Some(200_000));
+    let context = sample_run_context().with_resolved_context_budget(budget);
+
+    assert_eq!(context.resolved_context_budget, Some(budget));
+}
+
+#[test]
+fn run_context_without_a_budget_field_still_deserializes() {
+    // Runs recorded before this change must replay, landing on the
+    // compiled-in default rather than failing to deserialize.
+    let context = sample_run_context();
+    let mut wire = serde_json::to_value(&context).expect("serialize");
+    wire.as_object_mut()
+        .expect("object")
+        .remove("resolved_context_budget");
+
+    let restored: LoopRunContext = serde_json::from_value(wire).expect("deserialize");
+
+    assert_eq!(restored.resolved_context_budget, None);
+}
+
+#[test]
+fn resolved_context_budget_round_trips_through_the_wire() {
+    let budget = PromptContextTokenBudget::from_advertised_window(Some(1_000_000));
+    let context = sample_run_context().with_resolved_context_budget(budget);
+
+    let wire = serde_json::to_string(&context).expect("serialize");
+    let restored: LoopRunContext = serde_json::from_str(&wire).expect("deserialize");
+
+    assert_eq!(restored.resolved_context_budget, Some(budget));
+}
