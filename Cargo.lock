@@ -5183,6 +5183,7 @@ dependencies = [
  "ironclaw_attachments",
  "ironclaw_extension_contracts",
  "ironclaw_host_api",
+ "ironclaw_product_contracts",
  "proptest",
  "serde",
  "serde_json",

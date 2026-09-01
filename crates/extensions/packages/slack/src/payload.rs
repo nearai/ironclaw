@@ -13,6 +13,7 @@ use ironclaw_extension_contracts::external::{
     ProductAttachmentKind,
 };
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
+use ironclaw_product_contracts::inbound::classify_channel_inbound_text;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -528,16 +529,32 @@ fn normalize_user_message(
     let raw_text = event.text.as_deref().unwrap_or_default();
     // ponytail: Slack gives a `message` callback no target-user field, so a
     // third-party mention is indistinguishable from the real bot under stale
-    // configuration. Both are non-turn-producing thread chatter here; if
-    // Slack adds a typed target identity, narrow this ignore without changing
-    // event keys. Keep this after the canonical authorship/subtype/shape gates
-    // above so ignored events retain their most precise diagnostic reason.
-    if matches!(kind, SlackMessageKind::ThreadReply) && contains_slack_user_mention(raw_text, None)
+    // configuration. Both are non-turn-producing thread chatter here, except
+    // for text the canonical product classifier recognizes as a control or
+    // command: those preserve the legacy thread-control path without copying
+    // its grammar into this adapter. If Slack adds a typed target identity,
+    // narrow this ignore without changing event keys. Keep this after the
+    // canonical authorship/subtype/shape gates above so ignored events retain
+    // their most precise diagnostic reason.
+    let unresolved_thread_control = if matches!(kind, SlackMessageKind::ThreadReply)
+        && contains_slack_user_mention(raw_text, None)
     {
-        return Ok(SlackInboundEvent::Ignore {
-            reason: SlackIgnoreReason::UnresolvedThreadMention,
-        });
-    }
+        let text_without_leading_mention = strip_leading_bot_mention(raw_text, None);
+        if classify_channel_inbound_text(
+            &text_without_leading_mention,
+            ProductTriggerReason::ReplyToBot,
+        )
+        .is_some()
+        {
+            Some(text_without_leading_mention)
+        } else {
+            return Ok(SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::UnresolvedThreadMention,
+            });
+        }
+    } else {
+        None
+    };
     let (text, thread_ts, trigger) = match kind {
         SlackMessageKind::AppMention | SlackMessageKind::TextMention => (
             strip_leading_bot_mention(raw_text, bot_user_id),
@@ -550,7 +567,8 @@ fn normalize_user_message(
             ProductTriggerReason::DirectChat,
         ),
         SlackMessageKind::ThreadReply => (
-            strip_leading_bot_mention(raw_text, bot_user_id),
+            unresolved_thread_control
+                .unwrap_or_else(|| strip_leading_bot_mention(raw_text, bot_user_id)),
             event.thread_ts.as_deref(),
             ProductTriggerReason::ReplyToBot,
         ),

@@ -447,6 +447,9 @@ struct HarnessOptions {
     /// `IRONCLAW_REBORN_WEBUI_BASE_URL`. `None` (the default) keeps the
     /// connect notice link-free.
     connect_link_base_url: Option<String>,
+    /// A stale value exercises a legacy installation whose saved bot user ID
+    /// no longer matches the callback's addressed member.
+    slack_bot_user_id: &'static str,
 }
 
 impl HarnessOptions {
@@ -460,6 +463,7 @@ impl HarnessOptions {
             actor_role: AdminUserRole::Member,
             connection_strategy: None,
             connect_link_base_url: None,
+            slack_bot_user_id: "UBOT",
         }
     }
 }
@@ -622,7 +626,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     ]));
     let dm_targets = generic_dm_target_store();
 
-    let channel_config = configured_channel_config().await;
+    let channel_config = configured_channel_config(options.slack_bot_user_id).await;
     let identity = ChannelHostIdentity {
         tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
         agent_id: AgentId::new(AGENT).expect("agent"),     // safety: static test agent id is valid.
@@ -743,7 +747,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
 /// `[channel.config]` configured through the production configure service:
 /// the REAL slack manifest is installed into a durable installation store
 /// and the ingress verification secret is saved under its manifest handle.
-async fn configured_channel_config() -> Arc<ChannelConfigService> {
+async fn configured_channel_config(bot_user_id: &str) -> Arc<ChannelConfigService> {
     let installation_store = Arc::new(crate::filesystem_installation_store_for_test().await);
     let record = ExtensionManifestRecord::from_toml(
         slack_manifest_from_bundled_inventory(),
@@ -821,13 +825,10 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
                 ("slack_api_app_id".to_string(), "A-E2E".to_string()),
                 ("slack_installation_id".to_string(), "I-E2E".to_string()),
                 // Must match the `<@…>` id every fixture's `text` mentions
-                // (`UBOT`, not e.g. "U-BOT-E2E"): the adapter's
-                // `strip_leading_bot_mention` now strips a leading mention
-                // only when it names THIS configured bot, so a mismatch here
-                // silently leaves the mention in the normalized text instead
-                // of failing loudly — re-check every `<@UBOT>` fixture below
-                // if this value ever changes.
-                ("slack_bot_user_id".to_string(), "UBOT".to_string()),
+                // (`UBOT`, not e.g. "U-BOT-E2E"). A mismatch leaves the
+                // mention in normalized text; a stale value intentionally
+                // exercises the legacy fallback.
+                ("slack_bot_user_id".to_string(), bot_user_id.to_string()),
                 (
                     "slack_oauth_client_id".to_string(),
                     "e2e-slack-client".to_string(),
@@ -5293,6 +5294,35 @@ async fn slack_thread_auth_deny_with_bot_mention_cancels_auth_gate_without_agent
     assert_eq!(messages[1]["channel"], "C123");
     assert_eq!(messages[1]["thread_ts"], "1710000000.000009");
     assert_eq!(messages[1]["text"], "Authentication canceled.");
+}
+
+#[tokio::test]
+async fn stale_slack_bot_id_thread_auth_deny_survives_unresolved_mention_filter() {
+    let mut options = HarnessOptions::new(TurnMode::BlockAuth);
+    options.slack_bot_user_id = "UOLD";
+    let harness = build_harness_with_options(options).await;
+
+    let first = harness
+        .post_event(app_mention_message("Ev-auth-cancel-start", "needs auth"))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+
+    let second = harness
+        .post_event(thread_message_event(
+            "Ev-auth-cancel",
+            "<@UBOT> auth deny gate:auth-slack",
+            "1710000000.000009",
+        ))
+        .await;
+    assert_eq!(second.status(), StatusCode::OK); // safety: Slack E2E route assertion.
+    harness.drain().await;
+
+    let auths = harness.auths.requests();
+    assert_eq!(auths.len(), 1); // safety: Slack E2E auth routing assertion.
+    assert_eq!(auths[0].decision, AuthInteractionDecision::Deny); // safety: length asserted above.
+    assert_eq!(auths[0].gate_ref.as_str(), AUTH_GATE); // safety: length asserted above.
+    assert_eq!(harness.coordinator.submitted_turn_count(), 1); // safety: no control reply agent turn.
 }
 
 #[tokio::test]

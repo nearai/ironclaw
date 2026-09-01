@@ -108,6 +108,24 @@ fn slack_user_mention_token_boundaries_are_exact() {
     }));
     assert_eq!(labeled.trigger, ProductTriggerReason::BotMention);
 
+    let w_prefixed = normalize_slack_event(
+        &serde_json::to_vec(&serde_json::json!({
+            "type": "event_callback", "team_id": "T123", "event_id": "EvWPrefixedMention",
+            "event": {
+                "type": "message", "user": "U1", "channel": "C1",
+                "text": "<@W012ABC|ironclaw> ping", "thread_ts": "1.0", "ts": "1.15"
+            }
+        }))
+        .expect("payload"),
+        &installation_id(),
+        Some("W012ABC"),
+    )
+    .expect("normalizes");
+    let SlackInboundEvent::Message(w_prefixed) = w_prefixed else {
+        panic!("expected W-prefixed bot mention")
+    };
+    assert_eq!(w_prefixed.trigger, ProductTriggerReason::BotMention);
+
     let after_malformed = message(serde_json::json!({
         "type": "event_callback", "team_id": "T123", "event_id": "EvNestedMention",
         "event": {
