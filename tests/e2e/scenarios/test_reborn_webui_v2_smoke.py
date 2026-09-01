@@ -40,6 +40,7 @@ from playwright.async_api import expect
 from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2, capture_native_dialogs
 from reborn_webui_harness import (
     USER_ID,
+    client_action_id,
     create_thread as _create_thread,
     install_fake_v2_event_stream,
     open_reborn_v2_page,
@@ -1233,6 +1234,119 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
             await expect(
                 reborn_v2_page.get_by_role("button", name=original_label).first
             ).to_be_visible(timeout=15000)
+
+
+async def test_reborn_v2_extension_configure_uses_shared_form_and_feedback(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """Manual extension setup uses shared controls with readable feedback."""
+    package_ref = {"kind": "extension", "id": "github"}
+    headers = reborn_bearer_headers()
+
+    async with httpx.AsyncClient(headers=headers) as client:
+        installed = await client.get(
+            f"{reborn_v2_server}/api/webchat/v2/extensions",
+            timeout=15,
+        )
+        installed.raise_for_status()
+        if any(
+            item.get("package_ref") == package_ref
+            for item in installed.json().get("extensions", [])
+        ):
+            removed = await client.post(
+                f"{reborn_v2_server}/api/webchat/v2/extensions/github/remove",
+                json={"client_action_id": client_action_id()},
+                timeout=15,
+            )
+            removed.raise_for_status()
+
+        install = await client.post(
+            f"{reborn_v2_server}/api/webchat/v2/extensions/install",
+            json={
+                "package_ref": package_ref,
+                "client_action_id": client_action_id(),
+            },
+            timeout=15,
+        )
+        install.raise_for_status()
+
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 800}
+    )
+    await context.add_init_script(
+        "localStorage.setItem('ironclaw:v2-theme', 'light')"
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/extensions/tools"
+            f"?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        github_card = page.locator(
+            '[data-testid="extension-card"][data-extension-id="github"]'
+        )
+        await expect(github_card).to_be_visible(timeout=15000)
+        configure = github_card.get_by_role(
+            "button", name="Configure", exact=True
+        )
+        await expect(configure).to_be_visible(timeout=15000)
+        await configure.click()
+
+        dialog = page.get_by_role("dialog")
+        await expect(
+            dialog.get_by_role("heading", name="Configure GitHub")
+        ).to_be_visible(timeout=5000)
+        credential = dialog.get_by_label("github credential", exact=True)
+        await expect(credential).to_be_visible()
+        assert await credential.get_attribute("type") == "password"
+        input_metrics = await credential.evaluate(
+            """element => {
+              const style = getComputedStyle(element);
+              return {
+                borderRadius: style.borderRadius,
+                height: element.getBoundingClientRect().height,
+              };
+            }"""
+        )
+        assert input_metrics == {"borderRadius": "10px", "height": 36}
+
+        setup_notice = dialog.locator('[data-tone="info"][role="status"]')
+        await expect(setup_notice).to_be_visible()
+        await _assert_readable(
+            setup_notice,
+            "light-theme extension setup notice",
+        )
+
+        await credential.fill("github-e2e-placeholder-token")
+        await dialog.get_by_role("button", name="Save", exact=True).click()
+        await expect(dialog).to_be_hidden(timeout=15000)
+
+        more_actions = github_card.get_by_role(
+            "button", name="More actions", exact=True
+        )
+        await expect(more_actions).to_be_visible(timeout=15000)
+        await more_actions.click()
+        await page.get_by_role("menuitem", name="Reconfigure", exact=True).click()
+
+        await expect(dialog).to_be_visible(timeout=5000)
+        success_notices = dialog.locator(
+            '[data-tone="success"][role="status"]'
+        )
+        assert await success_notices.count() >= 1
+        await _assert_readable(
+            success_notices.first,
+            "light-theme extension configured notice",
+        )
+    finally:
+        await context.close()
+        async with httpx.AsyncClient(headers=headers) as client:
+            removed = await client.post(
+                f"{reborn_v2_server}/api/webchat/v2/extensions/github/remove",
+                json={"client_action_id": client_action_id()},
+                timeout=15,
+            )
+            removed.raise_for_status()
 
 
 async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
