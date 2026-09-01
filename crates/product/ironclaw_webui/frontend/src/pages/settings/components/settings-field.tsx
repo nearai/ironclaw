@@ -1,6 +1,8 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { Card } from "../../../design-system/card";
+import { Input } from "../../../design-system/input";
+import { SelectMenu } from "../../../design-system/select-menu";
 import { Switch } from "../../../design-system/switch";
 
 function SavedIndicator({ visible }) {
@@ -21,6 +23,12 @@ export function SettingsField({ field, value, onSave, isSaved }) {
   const [localValue, setLocalValue] = React.useState("");
   const label = field.labelKey ? t(field.labelKey) : field.label || "";
   const description = field.descKey ? t(field.descKey) : field.description || "";
+  const selectOptions = field.type === "select"
+    ? [
+        { label: t("tools.default"), value: "" },
+        ...field.options.map((option) => ({ label: option, value: option })),
+      ]
+    : [];
 
   React.useEffect(() => {
     if (field.type !== "boolean") {
@@ -65,23 +73,19 @@ export function SettingsField({ field, value, onSave, isSaved }) {
             )
           : field.type === "select"
           ? (
-              <select
+              <SelectMenu
                 value={localValue}
-                onChange={(e) => {
-                  setLocalValue(e.currentTarget.value);
-                  handleCommit(e.currentTarget.value);
+                options={selectOptions}
+                onChange={(nextValue) => {
+                  setLocalValue(nextValue);
+                  handleCommit(nextValue);
                 }}
-                aria-label={label}
-                className="v2-select h-9 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
-              >
-                <option value="">{t("tools.default")}</option>
-                {field.options.map(
-                  (opt) => (<option key={opt} value={opt}>{opt}</option>)
-                )}
-              </select>
+                ariaLabel={label}
+                className="w-36"
+              />
             )
           : (
-              <input
+              <Input
                 type={field.type === "float" || field.type === "number" ? "number" : "text"}
                 value={localValue}
                 onChange={(e) => setLocalValue(e.currentTarget.value)}
@@ -92,7 +96,8 @@ export function SettingsField({ field, value, onSave, isSaved }) {
                 max={field.max !== undefined ? String(field.max) : undefined}
                 placeholder={t("tools.default")}
                 aria-label={label}
-                className="h-9 w-36 rounded-md border border-white/12 bg-white/[0.04] px-3 text-right font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+                size="sm"
+                className="w-36 text-right font-mono"
               />
             )}
         <SavedIndicator visible={isSaved} />
