@@ -1,5 +1,6 @@
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { InlineNotice } from "../../../design-system/inline-notice";
 import { Badge, Panel } from "../../../design-system/primitives";
 import React from "react";
 import { useT } from "../../../lib/i18n";
@@ -335,15 +336,12 @@ export function NotificationChannelsPanel({ channelsState }) {
         <div className="flex flex-col gap-3">
           {hasLoadError &&
           (
-            <div
-              role="alert"
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3.5 text-sm text-red-200"
-            >
+            <InlineNotice tone="danger" role="alert">
               <div>{t("automations.error.loadFailed")}</div>
-              <div className="mt-1 text-xs leading-5 text-red-200/80">
+              <div className="mt-1 text-xs leading-5 opacity-80">
                 {t("automations.notificationChannels.loadFailedEditingDisabled")}
               </div>
-            </div>
+            </InlineNotice>
           )}
           {rows.map((row) => {
             const isSelected = draftIds.has(row.target_id);
@@ -407,24 +405,16 @@ export function NotificationChannelsPanel({ channelsState }) {
           </Button>
           {showSaved &&
           (
-            <span
-              role="status"
-              className="flex items-center gap-1.5 text-xs font-semibold text-[var(--v2-positive-text)]"
-            >
-              <Icon name="check" className="h-3 w-3" />
+            <InlineNotice tone="success" role="status">
               {t("automations.notificationChannels.saved")}
-            </span>
+            </InlineNotice>
           )}
           {channelsState.saveError &&
           !showSaved &&
           (
-            <span
-              role="alert"
-              className="flex items-center gap-1.5 text-xs font-semibold text-red-300"
-            >
-              <Icon name="close" className="h-3 w-3" />
+            <InlineNotice tone="danger" role="alert">
               {t("automations.notificationChannels.saveFailed")}
-            </span>
+            </InlineNotice>
           )}
         </div>
 

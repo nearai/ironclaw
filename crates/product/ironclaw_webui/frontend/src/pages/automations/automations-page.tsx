@@ -1,4 +1,5 @@
 import React from "react";
+import { InlineNotice } from "../../design-system/inline-notice";
 import { SkeletonList } from "../../design-system/skeleton";
 import { PageScroll, PageStack } from "../../layout/page-shell";
 import { useT } from "../../lib/i18n";
@@ -63,20 +64,15 @@ export function AutomationsPage() {
       <PageStack>
           {automationsState.error &&
           (
-            <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-            >
+            <InlineNotice tone="danger" role="alert">
               {t("automations.error.loadFailed")}
-            </div>
+            </InlineNotice>
           )}
           {!automationsState.error && automationsState.summaryError &&
           (
-            <div
-              role="status"
-              className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200"
-            >
+            <InlineNotice tone="warning" role="status">
               {t("automations.error.loadFailed")}
-            </div>
+            </InlineNotice>
           )}
           {showErrorOnly
             ? null
@@ -85,17 +81,14 @@ export function AutomationsPage() {
                 {!automationsState.isLoading &&
                 !automationsState.schedulerEnabled &&
                 (
-                  <div
-                    role="status"
-                    className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3"
-                  >
-                    <div className="text-sm font-semibold text-amber-200">
+                  <InlineNotice tone="warning" role="status">
+                    <div className="font-semibold">
                       {t("automations.schedulerOff.title")}
                     </div>
-                    <div className="mt-0.5 text-xs leading-5 text-amber-200/80">
+                    <div className="mt-0.5 text-xs leading-5 opacity-80">
                       {t("automations.schedulerOff.description")}
                     </div>
-                  </div>
+                  </InlineNotice>
                 )}
                 <AutomationsSummaryStrip
                   summary={automationsState.summary}

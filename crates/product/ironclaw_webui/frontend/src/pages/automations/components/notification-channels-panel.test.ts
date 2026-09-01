@@ -184,6 +184,7 @@ function createHarness({ saveNotificationChannels = async () => {}, isLoading = 
   function Badge() {}
   function Button() {}
   function Icon() {}
+  function InlineNotice() {}
   function Panel() {}
 
   const React = {
@@ -243,6 +244,7 @@ function createHarness({ saveNotificationChannels = async () => {}, isLoading = 
     Badge,
     Button,
     Icon,
+    InlineNotice,
     Panel,
     React,
     TextEncoder,
@@ -268,6 +270,7 @@ function createHarness({ saveNotificationChannels = async () => {}, isLoading = 
   const exports = context.globalThis.__testExports;
   return {
     Button,
+    InlineNotice,
     exports,
     render({ targets = [], channels = [] } = {}) {
       const { rows, selected } = mergeRows(targets, channels);
@@ -290,11 +293,32 @@ function createHarness({ saveNotificationChannels = async () => {}, isLoading = 
 test("NotificationChannelsPanel shows a load error instead of claiming there are no channels", () => {
   const harness = createHarness({ error: new Error("catalog unavailable") });
   const rendered = harness.render();
+  const [notice] = componentProps(rendered, harness.InlineNotice);
   const scalars = collectScalars(rendered);
+  assert.equal(notice.tone, "danger");
+  assert.equal(notice.role, "alert");
   assert.ok(scalars.includes("Unable to load automations"));
   assert.ok(
     !scalars.includes("No connected channels yet."),
     "a backend outage must not look like a truthful empty catalog"
+  );
+});
+
+test("NotificationChannelsPanel renders save failures through a danger alert notice", () => {
+  const harness = createHarness({ saveError: new Error("save failed") });
+  const rendered = harness.render({
+    targets: [target("slack-alpha")],
+    channels: [channel("slack-alpha")],
+  });
+  const [notice] = componentProps(rendered, harness.InlineNotice);
+
+  assert.ok(notice, "expected save failures to render InlineNotice");
+  assert.equal(notice.tone, "danger");
+  assert.equal(notice.role, "alert");
+  assert.ok(
+    collectScalars(rendered).includes(
+      "Couldn't save your notification channels. Please try again.",
+    ),
   );
 });
 
