@@ -190,28 +190,37 @@ paragraph:
 grep -o '\-\-v2-[a-z0-9-]*' src/styles/app.css | sort -u
 ```
 
-Measured on `main` at the time of writing: **31 tokens**, effectively all
-colour. The non-colour axes — radius, spacing, motion, elevation, stacking
-order, and a semantic type ramp — have **no token contract yet**; PR
-[#7831](https://github.com/nearai/ironclaw/pull/7831) adds them at today's
-computed values (a deliberate visual no-op) so that Phase 3 has somewhere to
-change shape, density, elevation, and motion *from*. That matters because the
-M3X target is mostly **not** colour: repainting only the colour tokens would
-change the hue and leave the product looking as it does now.
+When this page was first written the contract was **31 tokens, effectively all
+colour** — the non-colour axes had none at all. Phase 3 closed that: radius,
+spacing, motion, elevation, stacking order and a semantic type ramp all have
+token contracts now, landed at value-neutral defaults first so adopting one was
+provably a no-op. That ordering mattered because the M3X target is mostly
+**not** colour: repainting only the colour tokens would have changed the hue and
+left the product looking as it did before.
 
-## Token mapping — M3 → IronClaw `--v2-*` (Phase 3 targets, not yet applied)
+## Token mapping — M3 → IronClaw `--v2-*` (applied in Phase 3)
 
-| DESIGN.md token | IronClaw token (target) | Status | Notes |
+| DESIGN.md token | IronClaw token | Light | Dark (derived) |
 |---|---|---|---|
-| `primary` / `on-primary` | `--v2-accent` / `--v2-accent-text` | exists — new *values* | high-chroma violet |
-| `primary-container` / `on-primary-container` | `--v2-accent-container` / `-on` | **new token** | |
-| `secondary` / `on-secondary` | `--v2-secondary` / `-on` | **new token** | cyan |
-| `surface` … `surface-container-high` | `--v2-canvas` / `--v2-surface` / `-soft` / `-muted` | exists — new *values* | tonal surfaces |
-| `ai-spark` / `ai-spark-dim` | `--v2-ai-spark` / `-dim` | **new token** | **Hero Moments / streaming only** |
+| `primary` / `on-primary` | `--v2-accent` / `--v2-accent-on` | `#6b4eff` / `#ffffff` | `#aeabff` / `#1c0064` |
+| `primary-container` / `on-primary-container` | `--v2-accent-container` / `-on` | `#e0d4ff` / `#22005d` | `#32009e` / `#d2d4ff` |
+| — (accent as *text*) | `--v2-accent-text` | `#5433ff` | `#aeabff` |
+| `secondary` / `on-secondary` | `--v2-secondary` / `-on` | `#00e5ff` / `#000000` | `#5ad1e3` / `#001f30` |
+| `ai-spark` / `ai-spark-dim` | `--v2-ai-spark` / `-dim` | `#ff4e9e` | `#ff8cbf` |
+| `surface` … `surface-container-high` | `--v2-canvas` / `--v2-surface` / `-soft` / `-muted` | **not adopted** — see below | |
 
-Every token above needs a **dark counterpart** (the spec is light-only; the app
-is dark-default and dual-theme) and **WCAG AA contrast validation** before
-adoption.
+Three things the application settled, all of which are now binding:
+
+- **Surfaces do not come from this palette.** Its four light surfaces sit within
+  **1.05–1.08** contrast of one another and read as a single flat tone. A
+  measured neutral ladder is used instead — white panels on `#fcfcfc` in light,
+  `#0f0f0f` → `#232425` in dark — where the steps are distinguishable.
+- **Dark is derived, not authored.** The palette above is light-only, so dark
+  roles are M3 tonal steps computed in OKLab from `#6b4eff`: primary at tone 80,
+  on-primary 20, container 30, on-container 90.
+- **`--v2-accent-text` is a separate, darker step** rather than the fill value.
+  `#6b4eff` is 4.45:1 as text on this ladder — under AA by 0.05. The fill and the
+  text colour are different jobs and now different tokens.
 
 ## Component mapping & phase
 
@@ -225,33 +234,41 @@ adoption.
 | connected button groups / split buttons | `src/design-system` | 4 |
 | navigation rail | `src/layout` + IA | 5 |
 
-## Open items to resolve before the Phase-3 reskin
+## What Phase 3 resolved
 
-1. **Dark palette** — derive dark values for **every** token. The supplied
-   palette is light-only and the app is dark-default; derive per token by tonal
-   shift, not literal inversion, and validate each pair in the `Tokens/Colors`
-   story before adoption.
-2. **Non-colour token axes** — radius, spacing, motion, elevation, stacking, and
-   the type ramp. In flight as PR #7831; the reskin cannot set values for axes
-   that have no tokens.
-3. **Motion mechanism** — choose an animation approach (JS spring library vs.
-   spring→bezier CSS approximations) and the `prefers-reduced-motion` strategy;
-   none is installed today. Carried to Phase 4.
-4. **Fonts** — vendor **Roboto Flex / Roboto Mono** (OFL) under `public/vendor/fonts`.
-   **Google Sans is not freely redistributable** — pick a substitute (Roboto
-   Flex for the emphasized-headline role) or confirm licensing before shipping.
-5. **Contrast** — validate WCAG AA for all text/token pairings (e.g.
-   `secondary #00E5FF` + `on-secondary #000`, `ai-spark` as text, `primary` on
-   white). `ai-spark-dim` (`#FF4E9E33`) is an alpha glow, never text. The
-   `Tokens/Colors` story should assert it so regressions fail the story suite.
-6. **The `app.css` compat layer** — `!important` overrides remap raw palette
-   classes (`bg-iron-*`, `border-white/10`, …) onto tokens at runtime. It is a
-   shim the reskin has to unwind rather than restyle around; tracked in
-   [#7890](https://github.com/nearai/ironclaw/issues/7890).
-7. **Emitted-bundle verification** — the story and unit suites assert Tailwind
-   class *strings*, not computed style, so a dropped `@theme` block can remove
-   every generated utility with all gates green. A check over the emitted
-   `dist/assets/*.css` belongs in the Phase-3 definition of done.
+Recorded here because this page is the spec those decisions are judged against.
+
+1. **Dark palette** — derived per token by M3 tonal step in OKLab, not by
+   literal inversion. ✅
+2. **Non-colour token axes** — radius, spacing, motion, elevation, stacking and
+   the type ramp all have contracts; shape moved to a pill-based scale
+   (controls `9999px`, fields `0.75rem`, surfaces `1rem`, dialogs `1.75rem`). ✅
+3. **Fonts** — **Roboto Flex + Roboto Mono** vendored under
+   `public/vendor/fonts` (OFL). **Google Sans is dropped**: it is not freely
+   redistributable, and Roboto Flex's variable weight axis carries the
+   emphasized-headline role instead. ✅
+4. **Contrast** — every text token and both on-accent pairings clear **4.5:1
+   worst-case in both themes**, measured against every surface a token can land
+   on rather than only the canvas. This also closed five pre-existing failures,
+   the worst being every filled primary action in light mode at 2.98:1. ✅
+5. **The `app.css` compat layer** — retired ([#7890](https://github.com/nearai/ironclaw/issues/7890)).
+   Call sites were rewritten by a codemod whose mapping table is transcribed
+   from the shim's own declarations, so each rewrite resolves to the variable the
+   shim already forced. ✅
+6. **Emitted-bundle verification** — `scripts/check-token-bundle.ts` reads
+   `dist/assets/*.css` and is chained into `pnpm build`. It has since caught two
+   real bugs that every other gate passed. ✅
+7. **Density** — the base UI step moved `0.8125rem → 0.875rem` (M3
+   body-medium), isolated to one token so it can be reverted alone. ✅
+
+Still open, and deliberately so:
+
+- **Motion mechanism** — an animation approach (JS spring library vs.
+  spring→bezier CSS approximations) and the `prefers-reduced-motion` strategy.
+  None is installed; carried to Phase 4.
+- **`--v2-secondary` and `--v2-ai-spark`** ship as **non-text roles with no
+  consumers** — they are 1.24:1 and 2.48:1 as text on white. Phase 4 inherits
+  settled values rather than deciding mid-feature.
 
 ## Governance rules (enforced for agents)
 
