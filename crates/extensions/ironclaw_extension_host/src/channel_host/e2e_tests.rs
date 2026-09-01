@@ -2806,7 +2806,7 @@ async fn slack_explicit_mention_remains_single_when_authoritative_twin_arrives_f
 }
 
 #[tokio::test]
-async fn slack_text_only_mention_runs_while_ordinary_thread_reply_remains_noop() {
+async fn slack_text_only_mentions_run_for_supported_ids_while_ordinary_reply_remains_noop() {
     let harness = build_harness(TurnMode::Complete {
         assistant_text: "text mention reply".into(),
     })
@@ -2844,6 +2844,22 @@ async fn slack_text_only_mention_runs_while_ordinary_thread_reply_remains_noop()
         1,
         "ordinary thread chatter must not produce another bot reply"
     );
+
+    let mut w_options = HarnessOptions::new(TurnMode::Complete {
+        assistant_text: "W mention reply".into(),
+    });
+    w_options.slack_bot_user_id = "W012ABC";
+    let w_harness = build_harness_with_options(w_options).await;
+
+    let response = w_harness.post_event(W_PREFIXED_TEXT_ONLY_MENTION).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    w_harness.drain().await;
+    assert_eq!(
+        w_harness.coordinator.submitted_scopes().len(),
+        1,
+        "a W-prefixed configured bot ID must reach signed ingress admission"
+    );
+    assert_eq!(w_harness.slack_messages().len(), 1);
 }
 
 /// Ephemeral-per-ping: pairing mid-thread. Unpaired carol is nudged in place
@@ -4942,6 +4958,13 @@ const TEXT_ONLY_THREAD_MENTION: &str = r#"{
   "event":{"type":"message","user":"U123","channel":"C894",
            "text":"<@UBOT> investigate","thread_ts":"1710000010.000001",
            "ts":"1710000010.000002"}
+}"#;
+
+const W_PREFIXED_TEXT_ONLY_MENTION: &str = r#"{
+  "type":"event_callback","team_id":"T-A","event_id":"Ev-w-text-only-mention",
+  "event":{"type":"message","user":"U123","channel":"C894",
+           "text":"<@W012ABC> investigate","thread_ts":"1710000010.000001",
+           "ts":"1710000010.000005"}
 }"#;
 
 const ORDINARY_THREAD_REPLY: &str = r#"{
