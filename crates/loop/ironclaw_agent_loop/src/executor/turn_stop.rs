@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_loop_contracts::LoopExit;
+use ironclaw_loop_contracts::{AgentLoopDriverHost, LoopExit};
 use tracing::debug;
 
 use crate::{
@@ -7,7 +7,10 @@ use crate::{
     strategies::{RepeatedOutputProgressStrategy, StopKind, StopOutcome, TurnSummary},
 };
 
-use super::{AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, StageContext};
+use super::{
+    AgentLoopExecutorError, COMPLETION_NUDGE_LIMIT, CancelCheck, CheckpointStage, ExecutorStage,
+    StageContext, scheduled_trigger_run,
+};
 
 /// Stop-stage helper for callers that can observe and decide back-to-back.
 ///
@@ -81,6 +84,44 @@ impl ExecutorStage<StopInput> for StopStage {
 }
 
 impl StopStage {
+    /// Apply the fresh prepared-turn completion transition after the stop
+    /// strategy has decided. Resume and `SkipModel` callers intentionally do
+    /// not use this entry point.
+    pub(super) fn apply_fresh_completion_nudge(
+        &self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        step: StopStep,
+    ) -> StopStep {
+        let StopStep::Stop {
+            state: mut stop_state,
+            kind,
+        } = step
+        else {
+            return step;
+        };
+        if !completion_nudge_should_fire(host, &stop_state, &kind) {
+            return StopStep::Stop {
+                state: stop_state,
+                kind,
+            };
+        }
+
+        // Re-enter the loop with the full tool surface and a completion
+        // directive, mirroring a drained-follow-up continuation.
+        stop_state.completion_nudges_used += 1;
+        stop_state.completion_nudge_pending = true;
+        stop_state.last_reply_trailed_off = false;
+        stop_state.last_reply_empty = false;
+        stop_state.last_reply_ended_with_question = false;
+        debug!(
+            iteration = stop_state.iteration,
+            ?kind,
+            completion_nudges_used = stop_state.completion_nudges_used,
+            "agent loop issuing tools-capable completion nudge instead of stopping"
+        );
+        StopStep::Continue { state: stop_state }
+    }
+
     pub(super) async fn observe(
         &self,
         ctx: StageContext<'_>,
@@ -140,6 +181,34 @@ impl StopStage {
                 Ok(StopStep::Continue { state })
             }
         }
+    }
+}
+
+/// Decide whether a fresh-turn stop should become one more tools-capable
+/// completion iteration. Driver nudges are opt-in and capped; graceful stops
+/// are nudged only for an unfinished reply (or an unattended scheduled-run
+/// question), while no-progress failures and aborts remain terminal.
+fn completion_nudge_should_fire(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &LoopExecutionState,
+    kind: &StopKind,
+) -> bool {
+    if !host
+        .run_context()
+        .resolved_run_profile
+        .steering_policy
+        .allow_driver_specific_nudges
+        || state.completion_nudges_used >= COMPLETION_NUDGE_LIMIT
+    {
+        return false;
+    }
+    match kind {
+        StopKind::NoProgressDetected => false,
+        StopKind::GracefulStop => {
+            state.last_reply_trailed_off
+                || (scheduled_trigger_run(host) && state.last_reply_ended_with_question)
+        }
+        StopKind::Aborted(_) => false,
     }
 }
 

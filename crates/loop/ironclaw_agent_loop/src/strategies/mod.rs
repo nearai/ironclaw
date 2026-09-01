@@ -18,7 +18,6 @@
 #![allow(dead_code, unused_imports)]
 
 mod active_task_compaction;
-pub(crate) mod batch;
 mod budget;
 mod capability;
 mod compaction;
@@ -32,7 +31,6 @@ mod reply_admission;
 mod stop;
 
 pub(crate) use active_task_compaction::ActiveTaskPreservingCompactionStrategy;
-pub(crate) use batch::BatchPolicy;
 pub(crate) use budget::{BudgetStrategy, DEFAULT_ITERATION_BACKSTOP, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
 pub(crate) use compaction::{

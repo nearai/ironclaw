@@ -18,7 +18,7 @@ use ironclaw_host_api::{
     },
 };
 use ironclaw_loop_contracts::{
-    AuthResumeApprovalIdentity, CapabilityApprovalResume, CapabilityAuthResume,
+    AuthResumeApprovalIdentity, BatchPolicyKind, CapabilityApprovalResume, CapabilityAuthResume,
     CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail, CapabilityInputIssue,
     CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken, ContentDigest,
     LoopDriverNoteKind, LoopExit, LoopFailureKind, LoopProcessRef, LoopProgressEvent,
@@ -34,14 +34,13 @@ use super::{
     CancelCheck, CapabilitySurfaceIndex, CheckpointStage, ExecutorStage, FailedExitDetails,
     GateInput, GateStage, MAX_CAPABILITY_RETRIES, StageContext, TurnCompletedStep,
     append_capability_error_ref, append_capability_result_ref, append_capability_safe_summary_ref,
-    attach_failure_explanation, batch_policy_kind, cancelled_exit_with_reason,
-    cancelled_reason_from_signal, capability_batch_counts, capability_error_failure_category,
-    capability_host_error, capability_invocation_from_auth_resume_candidate,
-    capability_invocation_from_candidate, capability_is_visible, capability_port_error_is_terminal,
-    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume, failed_exit,
-    gate_tool_result_summary, honor_capability_retry_alteration,
-    model_visible_capability_failure_observation, push_completed_result,
-    sanitized_strategy_summary_or_fallback,
+    attach_failure_explanation, cancelled_exit_with_reason, cancelled_reason_from_signal,
+    capability_batch_counts, capability_error_failure_category, capability_host_error,
+    capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
+    capability_is_visible, capability_port_error_is_terminal, clear_matching_pending_auth_resume,
+    clear_matching_pending_external_tool_resume, failed_exit, gate_tool_result_summary,
+    honor_capability_retry_alteration, model_visible_capability_failure_observation,
+    push_completed_result, sanitized_strategy_summary_or_fallback,
 };
 use crate::{
     state::{
@@ -49,7 +48,7 @@ use crate::{
         LoopExecutionState,
     },
     strategies::{
-        BatchPolicy, CapabilityBatchTurnSummary, CapabilityErrorSummary, GateKind, RecoveryOutcome,
+        CapabilityBatchTurnSummary, CapabilityErrorSummary, GateKind, RecoveryOutcome,
         RetryAlteration, SanitizedStrategySummary, TurnSummary, capability_error_to_failure_kind,
     },
 };
@@ -214,18 +213,19 @@ impl CapabilityStage {
     async fn invoke_batch(
         &self,
         ctx: StageContext<'_>,
-        policy: BatchPolicy,
+        policy: BatchPolicyKind,
         invocations: Vec<LoopRequest>,
     ) -> Result<InvokedCapabilityBatch, InvokedCapabilityBatchError> {
         let ordered = invocations.len() >= 2
-            && policy == BatchPolicy::Parallel
+            && policy == BatchPolicyKind::Parallel
             && ctx.host.requires_ordered_batch_invocation(&invocations);
-        if invocations.len() < 2 || policy != BatchPolicy::Parallel || ordered {
+        if invocations.len() < 2 || policy != BatchPolicyKind::Parallel || ordered {
             return ctx
                 .host
                 .invoke_capability_batch(LoopRequestBatch {
                     invocations,
-                    stop_on_first_suspension: matches!(policy, BatchPolicy::Sequential) || ordered,
+                    stop_on_first_suspension: matches!(policy, BatchPolicyKind::Sequential)
+                        || ordered,
                 })
                 .await
                 .map(InvokedCapabilityBatch::from_resolution_batch)
@@ -589,7 +589,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // Multiple calls in one model response are the model's declaration
         // that the calls are semantically independent. The host may still
         // require ordered batch entry for operational or policy reasons.
-        let policy = BatchPolicy::Parallel;
+        let policy = BatchPolicyKind::Parallel;
 
         capability_batch = CapabilityBatchTurnSummary::for_invocation_count(visible_calls.len());
         // Budget accounting: reserve the admitted launch window above, then
@@ -601,7 +601,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 LoopProgressEvent::CapabilityBatchStarted {
                     iteration: state.iteration,
                     call_count: visible_calls.len() as u32,
-                    policy: batch_policy_kind(policy),
+                    policy,
                 },
             )
             .await;

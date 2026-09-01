@@ -53,7 +53,7 @@ use loop_exit::{
     reply_completion_signals, scheduled_trigger_run,
 };
 use mapping::{
-    batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_failure_category,
+    blocked_kind, capability_batch_counts, capability_error_failure_category,
     capability_host_error, capability_port_error_is_terminal, checkpoint_kind_to_host,
     honor_capability_retry_alteration, loop_gate_kind, model_error_class,
     model_error_failure_summary, model_preference_to_host, model_recovery_class,
@@ -75,7 +75,7 @@ use ironclaw_loop_contracts::{
 use crate::{
     family::LoopFamily,
     state::{CheckpointKind, LoopExecutionState},
-    strategies::{StopKind, TurnSummary},
+    strategies::TurnSummary,
 };
 
 const MAX_CAPABILITY_RETRIES: usize = 8;

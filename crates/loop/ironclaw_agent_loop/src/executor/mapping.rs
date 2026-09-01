@@ -4,16 +4,15 @@ use ironclaw_host_api::{
     result_meta::FailureKind,
 };
 use ironclaw_loop_contracts::{
-    AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, LoopBlockedKind,
-    LoopCheckpointKind, LoopGateKind, LoopRecoveryClass, LoopSafeSummary,
-    sanitize_model_visible_text,
+    AgentLoopHostError, AgentLoopHostErrorKind, LoopBlockedKind, LoopCheckpointKind, LoopGateKind,
+    LoopRecoveryClass, LoopSafeSummary, sanitize_model_visible_text,
 };
 
 use crate::{
     state::CheckpointKind,
     strategies::{
-        BatchPolicy, GateKind, ModelErrorClass, ModelErrorSummary, ModelPreference,
-        RetryAlteration, SanitizedStrategySummary,
+        GateKind, ModelErrorClass, ModelErrorSummary, ModelPreference, RetryAlteration,
+        SanitizedStrategySummary,
     },
 };
 
@@ -45,13 +44,6 @@ pub(super) fn loop_gate_kind(kind: GateKind) -> LoopGateKind {
         GateKind::Resource => LoopGateKind::ResourceWait,
         GateKind::AwaitDependentRun => LoopGateKind::AwaitDependentRun,
         GateKind::ExternalTool => LoopGateKind::ExternalTool,
-    }
-}
-
-pub(super) fn batch_policy_kind(policy: BatchPolicy) -> BatchPolicyKind {
-    match policy {
-        BatchPolicy::Sequential => BatchPolicyKind::Sequential,
-        BatchPolicy::Parallel => BatchPolicyKind::Parallel,
     }
 }
 
