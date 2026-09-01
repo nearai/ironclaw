@@ -13,7 +13,11 @@ FONTS_DIR="$VENDOR_DIR/fonts"
 
 # A desktop browser UA so Google Fonts serves modern woff2 @font-face.
 UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-FONTS_QUERY="family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap"
+# M3 type identity (Epic #7781 WS3). Roboto Flex + Roboto Mono are OFL and
+# redistributable; Google Sans, which DESIGN.md names for the emphasized
+# headline role, is NOT freely redistributable, so Roboto Flex's variable
+# weight axis carries that role instead.
+FONTS_QUERY="family=Roboto+Flex:opsz,wght@8..144,300;8..144,400;8..144,500;8..144,600;8..144,700&family=Roboto+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap"
 
 mkdir -p "$VENDOR_DIR" "$FONTS_DIR"
 

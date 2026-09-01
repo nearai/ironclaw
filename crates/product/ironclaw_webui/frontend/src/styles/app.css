@@ -3,10 +3,13 @@
 @source "../../node_modules/streamdown/dist/*.js";
 
 @theme {
-  --font-sans: "Geist", "Inter", "SF Pro Display", "Helvetica Neue",
+  /* M3 type identity. Roboto Flex is variable — its weight axis carries the
+     emphasized-headline role DESIGN.md assigns to Google Sans, which is not
+     freely redistributable and is deliberately not shipped. */
+  --font-sans: "Roboto Flex", "Roboto", "Inter", "SF Pro Display",
     ui-sans-serif, system-ui, sans-serif;
   --font-serif: "Newsreader", "Lyon Text", "Instrument Serif", georgia, serif;
-  --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
+  --font-mono: "Roboto Mono", "SF Mono", "JetBrains Mono", ui-monospace,
     monospace;
   /* Semantic type scale for shared controls. Keep these viewport-independent. */
   --text-ui-sm: 0.75rem;
@@ -784,7 +787,7 @@ input:focus, select:focus, textarea:focus {
 .markdown-body ul,.markdown-body ol { margin-bottom: 0.75em; padding-left: 1.5em; }
 .markdown-body li             { margin-bottom: 0.25em; }
 .markdown-body code {
-  font-family: "Geist Mono","SF Mono","JetBrains Mono",ui-monospace,monospace;
+  font-family: "Roboto Mono","SF Mono","JetBrains Mono",ui-monospace,monospace;
   font-size: 0.9em; background: var(--v2-surface-muted);
   padding: 0.15em 0.4em; border-radius: 4px;
   overflow-wrap: anywhere;

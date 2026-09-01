@@ -14,9 +14,9 @@ import { expect, waitFor } from "storybook/test";
  */
 
 const FONTS = [
-  { token: "--font-sans", label: "Sans — Geist" },
+  { token: "--font-sans", label: "Sans — Roboto Flex" },
   { token: "--font-serif", label: "Serif — Newsreader" },
-  { token: "--font-mono", label: "Mono — Geist Mono" },
+  { token: "--font-mono", label: "Mono — Roboto Mono" },
 ];
 
 // Control text — labels, buttons, form copy.
