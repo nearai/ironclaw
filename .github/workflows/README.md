@@ -78,7 +78,9 @@ packages declaring `harness = false` or an unknown test-target kind retain
 Cargo's runner. The planner derives that split from Cargo metadata and each
 selected manifest after bucket coalescing, failing closed when classification
 is impossible. Exact changed targets keep their existing direct `cargo test`
-path. Nextest groups serialize binaries whose existing locks are process-local.
+path. Nextest groups serialize runtime binaries whose existing locks are
+process-local and CLI trace-policy tests that share an on-disk global policy.
+Zero-test package selections preserve Cargo's successful no-op.
 
 `Tests (Reborn)` owns Rust crate, root, architecture, runtime, and coverage
 contracts. Code Style owns WebUI lint, Vitest, and the production build on all

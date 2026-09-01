@@ -1290,6 +1290,7 @@ def build_plan(
                 event=event,
                 reason=f"unmapped Reborn test path: {path}",
                 canonical_packages=canonical_packages,
+                metadata=metadata,
             )
         if path.startswith("tests/e2e/"):
             # E2E scenarios and support live in the dedicated

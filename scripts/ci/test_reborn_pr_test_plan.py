@@ -330,6 +330,15 @@ class RebornPrTestPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "empty merge-group diff"):
             self.plan("merge_group", [])
 
+    def test_unmapped_reborn_test_path_preserves_fail_closed_behavior(self) -> None:
+        path = "tests/reborn_unmapped_contract.rs"
+        with self.assertRaisesRegex(ValueError, "unmapped Reborn test path"):
+            self.plan("pull_request", [path])
+
+        merge_group = self.plan("merge_group", [path])
+        self.assertEqual(merge_group["mode"], "full")
+        self.assertEqual(merge_group["root_partitions"], [0, 1, 2, 3])
+
     def test_changed_package_includes_transitive_reverse_dependents(self) -> None:
         plan = self.plan("pull_request", ["crates/alpha/src/lib.rs"])
         self.assertEqual(plan["mode"], "selected")
@@ -2523,6 +2532,7 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )
         self.assertIn("cargo nextest run --profile ci", crate_job)
         self.assertIn("--test-threads 4 --all-targets", crate_job)
+        self.assertIn("--no-tests pass", crate_job)
         self.assertIn('if [[ "$(jq \'length\' <<< "${EXACT_TARGETS}")" -gt 0 ]]', crate_job)
         self.assertIn("run-hermetic-deterministic-suite.sh command", crate_job)
         self.assertNotIn('coverage/${package}.lcov', workflow)
@@ -2634,9 +2644,13 @@ class RebornPrTestPlanTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            config["test-groups"]["composition-budget-process-local"][
+            config["test-groups"]["composition-runtime-process-local"][
                 "max-threads"
             ],
+            1,
+        )
+        self.assertEqual(
+            config["test-groups"]["ironclaw-cli-global-policy"]["max-threads"],
             1,
         )
         ci_overrides = config["profile"]["ci"]["overrides"]
@@ -2651,9 +2665,23 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertTrue(
             any(
                 override.get("filter")
-                == 'package(ironclaw_composition) & binary(budget_e2e)'
+                == (
+                    "package(ironclaw_composition) & "
+                    "(binary(budget_e2e) | binary(runtime))"
+                )
                 and override.get("test-group")
-                == "composition-budget-process-local"
+                == "composition-runtime-process-local"
+                for override in ci_overrides
+            )
+        )
+        self.assertTrue(
+            any(
+                override.get("filter")
+                == (
+                    "package(ironclaw) & binary(ironclaw) & "
+                    "test(~commands::traces::tests::)"
+                )
+                and override.get("test-group") == "ironclaw-cli-global-policy"
                 for override in ci_overrides
             )
         )

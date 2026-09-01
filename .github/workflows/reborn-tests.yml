@@ -481,7 +481,8 @@ jobs:
                   timeout --signal=INT --kill-after=30s 28m \
                   "${incremental_env[@]}" cargo nextest run --profile ci \
                     "${nextest_package_args[@]}" "${nextest_feature_args[@]}" \
-                    --test-threads 4 --all-targets --ignore-rust-version
+                    --test-threads 4 --all-targets --ignore-rust-version \
+                    --no-tests pass
               fi
               if [[ "${#cargo_package_args[@]}" -gt 0 ]]; then
                 scripts/ci/run-hermetic-deterministic-suite.sh command \
