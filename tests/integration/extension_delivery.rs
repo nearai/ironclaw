@@ -1582,33 +1582,6 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         })
         .collect();
     assert_slack_thread_delivery_evidence(&stream_opens);
-    assert_eq!(
-        stream_opens.len(),
-        1,
-        "one logical reply opens exactly one Agent stream: {stream_opens:?}"
-    );
-    for open in &stream_opens {
-        let chunks = open["chunks"].as_array();
-        assert!(
-            chunks.is_some_and(|chunks| !chunks.is_empty()),
-            "chat.startStream never opens an empty Agent container; a stream \
-             opens only when renderable content exists and carries it: {open}"
-        );
-    }
-    let streamed: String = requests
-        .iter()
-        .filter(|request| {
-            request.url.ends_with("/api/chat.startStream")
-                || request.url.ends_with("/api/chat.appendStream")
-                || request.url.ends_with("/api/chat.stopStream")
-        })
-        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        streamed.contains(SLACK_REPLY),
-        "the reply text is streamed through the agent surface: {streamed}"
-    );
     let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let stops = inbound
@@ -1625,9 +1598,45 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    // Settled wire (the stream closed): the exactly-once and no-empty-open
+    // pins hold on the COMPLETE request log, not the first-start snapshot.
+    let settled = inbound.captured_network_requests_for_test();
+    let settled_opens: Vec<serde_json::Value> = settled
+        .iter()
+        .filter(|request| request.url.ends_with("/api/chat.startStream"))
+        .map(|request| {
+            serde_json::from_slice(&request.body).expect("chat.startStream body is JSON")
+        })
+        .collect();
+    assert_eq!(
+        settled_opens.len(),
+        1,
+        "one logical reply opens exactly one Agent stream: {settled_opens:?}"
+    );
+    for open in &settled_opens {
+        let chunks = open["chunks"].as_array();
+        assert!(
+            chunks.is_some_and(|chunks| !chunks.is_empty()),
+            "chat.startStream never opens an empty Agent container; a stream \
+             opens only when renderable content exists and carries it: {open}"
+        );
+    }
+    let streamed: String = settled
+        .iter()
+        .filter(|request| {
+            request.url.ends_with("/api/chat.startStream")
+                || request.url.ends_with("/api/chat.appendStream")
+                || request.url.ends_with("/api/chat.stopStream")
+        })
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        !inbound
-            .captured_network_requests_for_test()
+        streamed.contains(SLACK_REPLY),
+        "the reply text is streamed through the agent surface: {streamed}"
+    );
+    assert!(
+        !settled
             .iter()
             .any(|request| request.url.ends_with("/api/chat.postMessage")
                 && String::from_utf8_lossy(&request.body).contains(SLACK_REPLY)),

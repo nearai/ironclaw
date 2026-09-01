@@ -1032,12 +1032,23 @@ impl RunDeliveryObserver {
             .await
         {
             Ok(records) => records.iter().any(|record| {
-                matches!(
-                    record.publication.status,
-                    ironclaw_outbound::ReplyPublicationStatus::Settled(
-                        ironclaw_outbound::ReplyPublicationSettlement::Delivered
+                // Only THIS channel's target counts: the session channel (a
+                // different extension) delivering the same run must not
+                // silence this channel's failure notice. A record without a
+                // descriptor cannot prove this channel delivered.
+                record
+                    .publication
+                    .descriptor
+                    .as_ref()
+                    .is_some_and(|descriptor| {
+                        descriptor.extension_id.as_str() == self.services.extension_id
+                    })
+                    && matches!(
+                        record.publication.status,
+                        ironclaw_outbound::ReplyPublicationStatus::Settled(
+                            ironclaw_outbound::ReplyPublicationSettlement::Delivered
+                        )
                     )
-                )
             }),
             Err(error) => {
                 tracing::debug!(

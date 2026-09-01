@@ -423,6 +423,14 @@ mod tests {
     }
 
     impl RecordingNetworkHttpEgress {
+        fn with_response_headers(headers: Vec<(String, String)>) -> Self {
+            let mut fake = Self::ok();
+            if let Ok(response) = &mut fake.response {
+                response.headers = headers;
+            }
+            fake
+        }
+
         fn ok() -> Self {
             Self {
                 requests: Arc::new(Mutex::new(Vec::new())),
@@ -744,5 +752,40 @@ mod tests {
             "a hostile value is clamped, never honoured"
         );
         assert_eq!(retry_after_hint(&[]), None);
+    }
+
+    /// The caller-level proof for the retry hint: `execute` transfers the
+    /// provider's `Retry-After` response header into
+    /// `RestrictedEgressResponse::retry_after`, capped — not just the parser
+    /// helper in isolation.
+    #[tokio::test]
+    async fn execute_carries_the_capped_retry_after_hint_onto_the_response() {
+        let scope = test_scope();
+        let (port, _requests) =
+            host_egress_port(RecordingNetworkHttpEgress::with_response_headers(vec![(
+                "Retry-After".to_string(),
+                "7".to_string(),
+            )]));
+        let credentials = seeded_credentials(
+            &scope,
+            &SecretHandle::new("vendor_bot_token").unwrap(),
+            "unused",
+        )
+        .await;
+        let transport = HostRuntimeChannelEgressTransport::new(port, credentials, scope);
+
+        let response = transport
+            .execute(approved(
+                "https://vendor.example/api/chat.postMessage",
+                "vendor.example",
+                None,
+            ))
+            .await
+            .expect("transport executes");
+        assert_eq!(
+            response.retry_after,
+            Some(std::time::Duration::from_secs(7)),
+            "the provider's Retry-After rides the restricted-egress response"
+        );
     }
 }

@@ -237,14 +237,41 @@ impl Reconciler<'_> {
                 return Ok(());
             }
         };
-        let Some(message_text) = message else {
-            tracing::debug!("slack streaming message not found on read-back; re-sending");
-            self.clear_pending();
-            return Ok(());
+        let message_text = match message {
+            agent_api::SlackReadBack::Found(text) => text,
+            agent_api::SlackReadBack::NotFound => {
+                tracing::debug!("slack streaming message not found on read-back; re-sending");
+                self.clear_pending();
+                return Ok(());
+            }
+            agent_api::SlackReadBack::FoundWithoutText => {
+                // The message exists but there is nothing to compare (a
+                // blocks-only rendering omits `text`): a text-carrying
+                // pending stays unverifiable — never re-send a fragment the
+                // user may already see.
+                if carried_text {
+                    return Err(ReplySinkOutcome::Ambiguous {
+                        reason: ReplyOutcomeReason::new(
+                            "slack read-back found the message but no comparable text; a pending text append cannot be verified",
+                        ),
+                    });
+                }
+                tracing::debug!(
+                    "slack read-back found no comparable text; re-sending the idempotent non-text chunks"
+                );
+                self.clear_pending();
+                return Ok(());
+            }
         };
+        // Compare the pending append's OWN delta, not the full answer
+        // prefix: earlier attention/status chunks interleave with answer
+        // text in the message, so only the delta is guaranteed contiguous.
         let landed = carried_text
             && char_prefix(text, pending.to_chars).is_some_and(|prefix| {
-                let expected = normalized_tail(prefix);
+                let base_len = char_prefix(prefix, stream.appended_chars)
+                    .map(str::len)
+                    .unwrap_or(0);
+                let expected = normalized_tail(&prefix[base_len..]);
                 !expected.is_empty() && normalize_for_match(&message_text).contains(&expected)
             });
         if landed {

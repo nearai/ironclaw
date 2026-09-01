@@ -502,7 +502,7 @@ fn upload_ticket_request(
     credential: &SecretHandle,
 ) -> Result<RestrictedEgressRequest, String> {
     let mut url = Url::parse(&SlackWebApiMethod::FilesGetUploadUrlExternal.url())
-        .map_err(|_| "slack upload ticket URL is invalid".to_string())?;
+        .map_err(|error| format!("slack upload ticket URL is invalid: {error}"))?;
     url.query_pairs_mut()
         .append_pair("filename", filename)
         .append_pair("length", &length.to_string());

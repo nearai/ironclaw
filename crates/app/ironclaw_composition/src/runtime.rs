@@ -653,6 +653,9 @@ pub struct RebornRuntime {
     pub(crate) session_channel_directory:
         Arc<dyn ironclaw_product_contracts::session_ingress::SessionChannelDirectory>,
     pub(crate) session_channel_extension_id: Option<String>,
+    /// Boot-time reply-publication recovery sweep, owned so shutdown stops
+    /// it before releasing publication leases.
+    pub(crate) reply_publication_recovery: Option<tokio::task::JoinHandle<()>>,
     /// The deployment's single workspace scoping decision, carried so the WebUI
     /// attachment handle addresses the same subtree as agent tool writes.
     pub(crate) workspace_mount_policy: crate::runtime_mounts::WorkspaceMountPolicy,
@@ -2531,6 +2534,11 @@ impl RebornRuntime {
             skill_learning_extraction_tasks.shutdown().await;
         }
         self.turn_scheduler.shutdown().await;
+        // Stop the boot-recovery sweep before its leases are released below.
+        if let Some(recovery) = self.reply_publication_recovery {
+            recovery.abort();
+            let _ = recovery.await; // silent-ok: an aborted join is Cancelled.
+        }
         // Hand open reply publications back: their leases are released so
         // a publisher on the next process (or another node) resumes them
         // immediately instead of waiting for the lease to lapse.
@@ -4400,6 +4408,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // orphaned publication gets a worker again. The coordinator acknowledges
     // the commit only after recovery ran, and the boot sweep below covers a
     // crash that happened after an acknowledgement.
+    let mut reply_publication_recovery: Option<tokio::task::JoinHandle<()>> = None;
     if let Some(coordinator) = services.delivery_coordinator.clone() {
         processes
             .subscribe_process_observer(Arc::clone(&coordinator)
@@ -4418,7 +4427,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             thread_scope.project_id.clone(),
             recovery_thread_id,
         );
-        tokio::spawn(async move {
+        reply_publication_recovery = Some(tokio::spawn(async move {
             match coordinator.resume_reply_publications(&recovery_scope).await {
                 Ok(resumed) if resumed > 0 => {
                     tracing::debug!(resumed, "resumed open reply publications at boot")
@@ -4428,7 +4437,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
                     tracing::debug!(%error, "reply publication boot resume failed; open publications wait for the next terminal signal")
                 }
             }
-        });
+        }));
     }
     let channel_host_assembly = started_channel_host.map(|started| started.assembly);
 
@@ -4777,6 +4786,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
         session_inbound_ledger,
         session_channel_directory,
         session_channel_extension_id,
+        reply_publication_recovery,
         workspace_mount_policy: services.workspace_mounts.clone(),
         system_extensions_lifecycle_mounts: services.system_extensions_lifecycle_mounts.clone(),
         outbound_preferences: services.outbound_preferences.clone(),

@@ -430,18 +430,9 @@ impl RestrictedEgress for NoEgress {
 /// suspends.
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     use std::pin::pin;
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-    fn noop_raw_waker() -> RawWaker {
-        fn clone(_: *const ()) -> RawWaker {
-            noop_raw_waker()
-        }
-        fn noop(_: *const ()) {}
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-        RawWaker::new(std::ptr::null(), &VTABLE)
-    }
-    // SAFETY: the vtable functions are no-ops over a null data pointer.
-    let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
-    let mut context = Context::from_waker(&waker);
+    use std::task::{Context, Poll, Waker};
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
     let mut future = pin!(future);
     loop {
         if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
@@ -639,5 +630,19 @@ fn a_rewritten_answer_replaces_the_progressive_text_but_never_the_finalized_row(
         document.answer.text.as_str(),
         "the transcript row",
         "a rewrite never displaces the finalized transcript text"
+    );
+}
+
+/// A no-op attention clear must not mint a revisionable change: the document
+/// would compare unequal to its previous revision and every stream sink
+/// would be asked to reconcile a zero-semantic delta.
+#[test]
+fn a_no_op_attention_clear_changes_nothing() {
+    let mut document = ReplyDocument::default();
+    let before = document.clone();
+    assert!(!document.clear_attention());
+    assert_eq!(
+        document, before,
+        "clearing absent attention must leave the document identical"
     );
 }

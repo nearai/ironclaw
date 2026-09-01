@@ -633,7 +633,11 @@ impl LiveProjectionPublisher {
                 scope,
                 sequence,
                 ThreadLiveProjectionItem::WorkSummary {
-                    id: work_summary_id(run_id, sequence),
+                    // Keyed on the CHECKPOINT counter, not the process-global
+                    // sequence: a republish from a restored (or lost)
+                    // checkpoint re-mints the same id, so the browser
+                    // upserts the status line instead of appending a twin.
+                    id: work_summary_id(run_id, checkpoint.status_publications),
                     run_id,
                     phase: document
                         .status_kind
@@ -652,6 +656,20 @@ impl LiveProjectionPublisher {
 /// The runtime lane a provenance display text names; the display text is the
 /// lane's own `as_str()`, so this is the inverse of that mapping.
 fn runtime_kind_from_display(text: &str) -> Option<RuntimeKind> {
+    // The exhaustive match keeps the candidate list honest: a new
+    // `RuntimeKind` variant fails to compile here instead of silently
+    // losing the capability card's runtime lane.
+    const fn every_kind_is_listed(kind: RuntimeKind) {
+        match kind {
+            RuntimeKind::Wasm
+            | RuntimeKind::Mcp
+            | RuntimeKind::Script
+            | RuntimeKind::Sandbox
+            | RuntimeKind::FirstParty
+            | RuntimeKind::System => {}
+        }
+    }
+    let _ = every_kind_is_listed;
     [
         RuntimeKind::Wasm,
         RuntimeKind::Mcp,

@@ -110,6 +110,9 @@ struct StagedUpload {
 #[derive(Default)]
 struct State {
     requests: Vec<RestrictedEgressRequest>,
+    /// `conversations.replies` answers the message WITHOUT a `text` field —
+    /// Slack's shape for a message rendered only from blocks.
+    read_back_omits_text: bool,
     streams: BTreeMap<String, FakeStream>,
     sessions: Vec<SessionCall>,
     posted: Vec<PostedMessage>,
@@ -131,6 +134,12 @@ impl FakeSlackAgentApi {
 
     pub fn inject(&self, fault: Fault) {
         self.lock().faults.push_back(fault);
+    }
+
+    /// Read-backs answer a found message with no `text` field, as Slack does
+    /// for a message rendered only from blocks.
+    pub fn omit_read_back_text(&self) {
+        self.lock().read_back_omits_text = true;
     }
 
     /// Slack's stop button: the stream stops answering appends.
@@ -439,6 +448,18 @@ fn handle(
             let Some(ts) = params.get("ts") else {
                 return Ok(slack_error("invalid_arguments"));
             };
+            if state.read_back_omits_text {
+                if state.streams.contains_key(ts)
+                    || state.posted.iter().any(|posted| &posted.ts == ts)
+                {
+                    return Ok(ok(json!({
+                        "ok": true,
+                        "messages": [{ "type": "message", "ts": ts }],
+                        "has_more": false
+                    })));
+                }
+                return Ok(slack_error("thread_not_found"));
+            }
             if let Some(stream) = state.streams.get(ts) {
                 ok(json!({
                     "ok": true,

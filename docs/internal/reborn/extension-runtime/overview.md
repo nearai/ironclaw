@@ -398,8 +398,10 @@ framework:
 - manifest declares `[[tools]]` or `[mcp]` → `tools` must be `Some`;
 - vendor/webhook `[channel.ingress]` ↔ `channel.ingress` must be `Some`;
 - `authenticated_session` ingress ↔ `channel.ingress` must be `None`;
-- message `[channel.reply]` ↔ `channel.reply` must be `Some`, while stream
-  reply requires it absent;
+- every declared `[channel.reply]` (stream or message cadence) ↔
+  `channel.reply` must be `Some` — a vendor package binds its own
+  `ReplySink`; the deployment's session channel receives the host's
+  projection sink through the same slot before activation checks it;
 - `[channel.delivery]` ↔ `channel.delivery` must be `Some`;
 - nothing undeclared may be bound; auth never binds (host-managed);
 - internal publication requires an operational surface: a tool, channel, or hook. The
@@ -523,7 +525,9 @@ pub trait ChannelDelivery: Send + Sync {
 
 A package implements only the halves its protocol needs. Slack and Telegram
 implement all three. Web-app implements delivery only: authenticated-session
-ingress and stream replies are host transports. Lifecycle wiring is manifest
+ingress is host-owned, and its stream reply is the host's projection sink,
+attached by composition to the same `surfaces.reply` slot every package-bound
+sink uses. Lifecycle wiring is manifest
 data too: `[channel.ingress.registration]` and `.deregistration` replace the
 old activation/cleanup hooks and run through restricted egress with host-side
 credential injection.

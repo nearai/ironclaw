@@ -104,12 +104,16 @@ impl SlackAgentApi<'_> {
         classify(method, response)
     }
 
-    /// The streaming message's current text, when Slack still has it.
+    /// The streaming message's current text, when Slack still has it — with
+    /// "found but no comparable text" (a message rendered only from blocks
+    /// omits `text`) kept distinct from "not found": the first proves
+    /// nothing about a pending append, the second proves the message is
+    /// gone.
     pub(super) async fn read_back(
         &self,
         channel: &str,
         ts: &str,
-    ) -> Result<Option<String>, SlackApiFailure> {
+    ) -> Result<SlackReadBack, SlackApiFailure> {
         let response = self
             .get(
                 SlackWebApiMethod::ConversationsReplies,
@@ -121,23 +125,34 @@ impl SlackAgentApi<'_> {
                 ],
             )
             .await?;
-        let text = response
+        let message = response
             .get("messages")
             .and_then(Value::as_array)
             .and_then(|messages| {
                 messages
                     .iter()
                     .find(|message| message.get("ts").and_then(Value::as_str) == Some(ts))
-            })
-            .map(|message| {
-                message
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
             });
-        Ok(text)
+        Ok(match message {
+            None => SlackReadBack::NotFound,
+            Some(message) => match message.get("text").and_then(Value::as_str) {
+                Some(text) => SlackReadBack::Found(text.to_string()),
+                None => SlackReadBack::FoundWithoutText,
+            },
+        })
     }
+}
+
+/// What a `conversations.replies` read-back learned about the streaming
+/// message.
+#[derive(Debug)]
+pub(super) enum SlackReadBack {
+    /// The message exists and carries comparable text.
+    Found(String),
+    /// The message exists but Slack returned no `text` field to compare.
+    FoundWithoutText,
+    /// The message is gone (or never existed).
+    NotFound,
 }
 
 fn classify(

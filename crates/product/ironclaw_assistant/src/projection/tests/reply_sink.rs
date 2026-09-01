@@ -410,3 +410,57 @@ async fn open_reasoning_deltas_republish_one_stable_thinking_item() {
     );
     assert_eq!(second[0].1, "Next: the manifest");
 }
+
+/// The same status republished after the checkpoint was lost (an unreadable
+/// checkpoint, a publication resumed on another node) must keep ONE stable
+/// work-summary id, so the browser upserts the status line instead of
+/// appending a second identical bubble.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_republished_status_keeps_one_stable_work_summary_id() {
+    let fixture = sink_fixture("stable-status");
+    let mut document = ReplyDocument::default();
+    document.set_status(
+        ironclaw_extension_contracts::reply::ReplyDisplayText::new("Searching the runbook")
+            .unwrap(),
+        None,
+    );
+
+    let report = fixture
+        .sink
+        .reconcile(fixture.request(1, document.clone(), None), &NoEgress)
+        .await
+        .unwrap();
+    let (items, cursor) = fixture.drain_items(None).await;
+    let first_id = items
+        .iter()
+        .find_map(|item| match item {
+            ProductProjectionItem::WorkSummary { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .expect("the status publishes a work summary");
+
+    // The checkpoint is LOST: the republish starts from a fresh checkpoint,
+    // exactly like a resumed publisher on another node.
+    let _ = report;
+    fixture
+        .sink
+        .reconcile(fixture.request(2, document, None), &NoEgress)
+        .await
+        .unwrap();
+    let (items, _) = fixture.drain_items(cursor).await;
+    let republished_ids: Vec<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            ProductProjectionItem::WorkSummary { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !republished_ids.is_empty(),
+        "the republished status publishes a work summary"
+    );
+    assert!(
+        republished_ids.iter().all(|id| id == &first_id),
+        "a republished status upserts under one stable id; got {republished_ids:?} vs {first_id:?}"
+    );
+}

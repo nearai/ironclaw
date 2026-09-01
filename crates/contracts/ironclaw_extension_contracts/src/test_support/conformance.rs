@@ -436,13 +436,20 @@ async fn run_reply_sink_conformance(
     };
     let report = sink
         .reconcile(
-            reconcile(terminal.clone(), ReplyReconcilePoint::Terminal, checkpoint),
+            reconcile(
+                terminal.clone(),
+                ReplyReconcilePoint::Terminal,
+                checkpoint.clone(),
+            ),
             server,
         )
         .await
         .expect("conformance: the terminal revision must reconcile"); // safety: test-support conformance failure should fail the caller's test.
     assert_stream_report_applied(&report.outcome, "terminal revision");
-    let checkpoint = report.checkpoint;
+    // `None` keeps the previous checkpoint (the report contract): a sink
+    // with nothing new to persist must still see its carried state on the
+    // repeated terminal reconcile.
+    let checkpoint = report.checkpoint.or(checkpoint);
 
     let repeat = sink
         .reconcile(

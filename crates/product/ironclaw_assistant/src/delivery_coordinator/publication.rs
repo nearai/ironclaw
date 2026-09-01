@@ -600,10 +600,17 @@ impl ReplyPublication {
             return;
         };
         let Some(actor) = snapshot.actor else {
+            // A first revision can arrive before any milestone carried the
+            // actor: give the single-flight guard back so the next revision
+            // retries instead of locking the run out of the session channel.
+            self.session_registrations
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(key);
             tracing::debug!(
                 target: "ironclaw::reborn::reply_publication",
                 run_id = %key.run_id,
-                "run has no actor; the session channel target is not registered"
+                "run has no actor yet; the session channel target registration is retried on the next revision"
             );
             return;
         };

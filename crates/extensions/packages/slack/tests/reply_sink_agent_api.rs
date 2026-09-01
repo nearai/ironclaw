@@ -27,6 +27,9 @@ use ironclaw_slack_extension::{
 use serde_json::{Value, json};
 use support::fake_slack_agent_api::{FakeSlackAgentApi, Fault, StreamState};
 
+#[path = "reply_sink_agent_api/read_back.rs"]
+mod read_back;
+
 const CHANNEL: &str = "C123";
 const DM: &str = "D123";
 const THREAD: &str = "1710000000.000100";
@@ -563,102 +566,6 @@ async fn a_rate_limited_append_is_retryable_with_the_provider_hint_and_never_dup
         ),
         "a 5xx is Retryable without a hint, got {:?}",
         report.outcome
-    );
-}
-
-// ── Ambiguity and read-back ──────────────────────────────────────────────
-
-#[tokio::test]
-async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_the_continuation() {
-    let mut harness = Harness::dm();
-    harness.append("Hello");
-    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
-    let ts = harness.stream_ts();
-
-    // The append reached Slack; only the answer was lost.
-    harness.fake.inject(Fault::TransportAfterAccept {
-        method: SlackWebApiMethod::ChatAppendStream,
-    });
-    harness.append(" world");
-    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
-    assert!(
-        matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
-        "got {:?}",
-        report.outcome
-    );
-    assert!(
-        harness.checkpoint_json()["stream"]["pending"].is_object(),
-        "the checkpoint remembers the unanswered request"
-    );
-
-    harness.append("!");
-    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
-    assert_applied(&report);
-    assert!(
-        report.evidence.read_back_verified,
-        "the read-back proved the ambiguous append landed"
-    );
-    let calls = harness.fake.calls();
-    assert_eq!(
-        calls[calls.len() - 2..],
-        ["conversations.replies", "chat.appendStream"],
-        "read back BEFORE appending more"
-    );
-    let read_back = harness
-        .fake
-        .requests()
-        .into_iter()
-        .find(|request| request.url.contains("conversations.replies"))
-        .expect("read-back request");
-    assert!(
-        read_back.url.contains(&format!("channel={DM}"))
-            && read_back.url.contains(&format!("ts={ts}")),
-        "read-back addresses the streaming message: {}",
-        read_back.url
-    );
-    assert_eq!(
-        harness
-            .fake
-            .bodies(SlackWebApiMethod::ChatAppendStream)
-            .last(),
-        Some(
-            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "!" }] })
-        ),
-        "only the NEW delta is appended; the landed one is not repeated"
-    );
-    assert_eq!(
-        harness.fake.stream(&ts).expect("stream").text,
-        "Hello world!"
-    );
-
-    // The append never reached Slack.
-    harness.fake.inject(Fault::TransportBeforeAccept {
-        method: SlackWebApiMethod::ChatAppendStream,
-    });
-    harness.append(" Bye");
-    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
-    assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
-
-    harness.append(".");
-    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
-    assert_applied(&report);
-    assert!(
-        !report.evidence.read_back_verified,
-        "a read-back that shows the append missing verifies nothing"
-    );
-    assert_eq!(
-        harness
-            .fake
-            .bodies(SlackWebApiMethod::ChatAppendStream)
-            .last(),
-        Some(
-            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": " Bye." }] })
-        ),
-        "the lost delta is re-sent together with the new one"
-    );
-    assert_eq!(
-        harness.fake.stream(&ts).expect("stream").text,
-        "Hello world! Bye."
     );
 }
 

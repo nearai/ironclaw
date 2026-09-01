@@ -227,6 +227,8 @@ async def chat_append_stream(request: web.Request) -> web.Response:
     state: FakeSlackState = request.app["state"]
     body = await _json_body(request)
     _record(state, "chat.appendStream", body)
+    if state.agent_feature_disabled:
+        return _slack_error("feature_disabled")
     stream = state.streams.get(body.get("ts"))
     if stream is None:
         return _slack_error("message_not_found")
@@ -248,6 +250,8 @@ async def chat_stop_stream(request: web.Request) -> web.Response:
     state: FakeSlackState = request.app["state"]
     body = await _json_body(request)
     _record(state, "chat.stopStream", body)
+    if state.agent_feature_disabled:
+        return _slack_error("feature_disabled")
     ts = body.get("ts")
     stream = state.streams.get(ts)
     if stream is None:

@@ -790,3 +790,32 @@ fn a_bare_bot_mention_still_produces_a_message() {
     assert_eq!(mention.text, "");
     assert_eq!(mention.trigger, ProductTriggerReason::BotMention);
 }
+
+/// A channel-shaped agent stop without `thread_ts` cannot name its session:
+/// normalizing it topic-less would fingerprint a DIFFERENT conversation than
+/// the session's own, so the malformed event is ignored, never mis-routed.
+#[test]
+fn a_non_dm_agent_stop_without_thread_ts_is_ignored() {
+    let payload = serde_json::json!({
+        "type": "event_callback",
+        "event_id": "Ev-agent-stop-nothread",
+        "team_id": "T-A",
+        "event": {
+            "type": "agent_session_stopped",
+            "channel": "C777",
+            "user": "U777",
+            "event_ts": "1782234671.392670"
+        }
+    })
+    .to_string();
+    let event = normalize(serde_json::from_str(&payload).unwrap());
+    assert!(
+        matches!(
+            event,
+            SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::MissingField("thread_ts"),
+            }
+        ),
+        "got {event:?}"
+    );
+}

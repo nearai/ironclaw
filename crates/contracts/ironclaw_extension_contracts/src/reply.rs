@@ -17,8 +17,10 @@
 //! never appear here — a sink owns those behind its checkpoint.
 //!
 //! The document evolves only through its bounded semantic mutators
-//! (deterministic, side-effect free, total: overflow truncates or drops with
-//! a flag, ordering surprises land as rows rather than errors, and the first
+//! (deterministic, side-effect free, total: answer/activity overflow
+//! truncates or drops with a flag, reasoning-summary overflow drops
+//! silently — reasoning is best-effort enrichment with no truncation facet —
+//! ordering surprises land as rows rather than errors, and the first
 //! terminal outcome is durable). The host's projection is the only producer;
 //! sinks read the document and never mutate it.
 
@@ -765,10 +767,11 @@ impl ReplyDocument {
         if self.is_terminal() {
             return false;
         }
-        self.next_ordinal();
-        if self.attention.take().is_none() {
+        if self.attention.is_none() {
             return false;
         }
+        self.next_ordinal();
+        self.attention = None;
         self.phase = ReplyPhase::Working;
         true
     }

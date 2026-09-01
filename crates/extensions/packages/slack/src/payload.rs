@@ -352,7 +352,19 @@ fn normalize_agent_session_stopped(
     // topic-less binding — a thread topic here would fingerprint a different
     // conversation and the stop would find nothing to stop. Channel sessions
     // stay thread-topical, matching how mentions self-root.
-    let conversation_thread = if is_dm { None } else { thread_ts };
+    let conversation_thread = if is_dm {
+        None
+    } else {
+        // A channel-shaped agent session IS a thread: a stop without
+        // `thread_ts` cannot name its session, and normalizing it topic-less
+        // would fingerprint a different conversation than the session's own.
+        let Some(thread_ts) = thread_ts else {
+            return Ok(SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::MissingField("thread_ts"),
+            });
+        };
+        Some(thread_ts)
+    };
     let conversation = build_conversation_ref(team_id, channel, conversation_thread, None)?;
     let trigger = if is_dm {
         ProductTriggerReason::DirectChat

@@ -875,3 +875,39 @@ async fn the_answers_first_text_is_not_delayed_by_the_progress_pacing_window() {
         "the answer's first text publishes as a control-critical point, exempt from progress pacing"
     );
 }
+
+// ─── Session-channel registration resilience ───────────────────────────────
+
+/// A first revision whose milestones never carried the actor skips
+/// registration — but must retry on the next revision instead of latching
+/// the run out of the session channel for its whole life.
+#[tokio::test]
+async fn an_actorless_first_revision_does_not_lock_the_session_channel_out() {
+    let harness = harness("session-actorless", ReplyTransport::Stream, Some("web-app"));
+    harness
+        .projection
+        .observe_milestone(&ironclaw_loop_contracts::LoopHostMilestone {
+            scope: harness.scope.clone(),
+            actor: None,
+            turn_id: ironclaw_host_api::turn::TurnId::new(),
+            run_id: harness.run_id,
+            loop_driver_id: ironclaw_loop_contracts::LoopDriverId::new("test_loop").unwrap(),
+            kind: ironclaw_loop_contracts::LoopHostMilestoneKind::IterationStarted { iteration: 1 },
+        });
+    // The next revision carries the actor: registration must succeed now.
+    harness.text("hello after the actor is known");
+    let publications = wait_until(|| async {
+        let publications = harness.publications().await;
+        (!publications.is_empty()).then_some(publications)
+    })
+    .await;
+    assert_eq!(
+        publications[0]
+            .publication
+            .descriptor
+            .as_ref()
+            .map(|descriptor| descriptor.extension_id.as_str()),
+        Some("web-app"),
+        "the session channel registers once the actor is known"
+    );
+}

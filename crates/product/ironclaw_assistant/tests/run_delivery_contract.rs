@@ -2009,6 +2009,163 @@ async fn observer_replaces_working_indicator_with_failure_notice_and_x_reaction(
 /// publication cannot deliver (the sink fails permanently), the conventional
 /// failure notice is the fallback that keeps the user out of silence —
 /// exactly one terminal user-visible message either way.
+/// Another target's delivery must not silence THIS channel's failure notice:
+/// the session channel (a different extension) registered for the same run
+/// and delivered, but the channel's own publication settled Failed — the
+/// conventional fallback still posts here.
+#[tokio::test]
+async fn a_foreign_targets_delivery_does_not_suppress_this_channels_failure_notice() {
+    use ironclaw_outbound::{
+        ClaimReplyPublicationLeaseRequest, OpenReplyPublicationRequest, OutboundDeliveryAttempt,
+        OutboundDeliveryStatus, OutboundPushCandidate, OutboundPushKind, PublisherId,
+        ReplyPublicationTarget, ReplyPublicationTargetDescriptor, ReplyPublicationTargetKey,
+        SettleReplyPublicationRequest,
+    };
+
+    let harness = build_harness(
+        vec![
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Failed, None),
+        ],
+        false,
+        None,
+        Duration::from_secs(5),
+    );
+    harness.reply_sink.script(std::iter::repeat_n(
+        ironclaw_extension_contracts::reply::ReplySinkOutcome::Permanent {
+            reason: ironclaw_extension_contracts::reply::ReplyOutcomeReason::new(
+                "channel refused the reply",
+            ),
+        },
+        8,
+    ));
+    let run_id = TurnRunId::new();
+
+    // A DELIVERED publication for the same run on a DIFFERENT extension (the
+    // session channel's target), settled before the channel's own flow runs.
+    let scope = binding_scope();
+    let now = chrono::Utc::now();
+    let attempt = OutboundDeliveryAttempt {
+        delivery_id: ironclaw_outbound::OutboundDeliveryId::new(),
+        scope: scope.clone(),
+        candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            thread_id: scope.thread_id.clone(),
+            turn_run_id: Some(run_id),
+            target: ironclaw_host_api::turn::ReplyTargetBindingRef::new("reply:session-1").unwrap(),
+            kind: OutboundPushKind::FinalReply,
+            projection_ref: ironclaw_outbound::ProjectionUpdateRef::new(format!(
+                "projection:session:{run_id}"
+            ))
+            .unwrap(),
+            requires_reply_target_revalidation: true,
+        },
+        status: OutboundDeliveryStatus::Prepared,
+        attempted_at: now,
+        failure_kind: None,
+    };
+    harness
+        .store
+        .open_reply_publication(OpenReplyPublicationRequest {
+            attempt: attempt.clone(),
+            target: ReplyPublicationTarget {
+                run_id,
+                key: ReplyPublicationTargetKey::new("session:web").unwrap(),
+            },
+            descriptor: Some(ReplyPublicationTargetDescriptor {
+                extension_id: ironclaw_host_api::ids::ExtensionId::from_trusted(
+                    "web-app".to_string(),
+                ),
+                actor: TurnActor::new(user()),
+                reply_target: ironclaw_host_api::turn::ReplyTargetBindingRef::new(
+                    "reply:session-1",
+                )
+                .unwrap(),
+                conversation: None,
+                thread_anchor: None,
+                audience: ironclaw_extension_contracts::reply::ReplyAudience::Private,
+                transport: ironclaw_extension_contracts::channel::ReplyTransport::Stream,
+                reply_context: None,
+            }),
+            now,
+        })
+        .await
+        .expect("foreign publication opens");
+    let claim = harness
+        .store
+        .claim_reply_publication_lease(ClaimReplyPublicationLeaseRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            owner: PublisherId::new("publisher-foreign").unwrap(),
+            ttl: Duration::from_secs(30),
+            now,
+        })
+        .await
+        .expect("foreign claim");
+    let fence = match claim {
+        ironclaw_outbound::ReplyPublicationClaim::Acquired(record) => record.publication.fence,
+        other => panic!("foreign claim must acquire, got {other:?}"),
+    };
+    harness
+        .store
+        .advance_reply_publication(ironclaw_outbound::AdvanceReplyPublicationRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            fence,
+            desired_revision: 1,
+            published_revision: 1,
+            terminal_revision: Some(1),
+            generation: Some(1),
+            checkpoint: None,
+            evidence: ironclaw_outbound::ReplyPublicationEvidence::default(),
+            now,
+        })
+        .await
+        .expect("foreign publication applies its terminal revision");
+    harness
+        .store
+        .settle_reply_publication(SettleReplyPublicationRequest {
+            delivery_id: attempt.delivery_id,
+            scope: scope.clone(),
+            fence,
+            settlement: ironclaw_outbound::ReplyPublicationSettlement::Delivered,
+            now,
+        })
+        .await
+        .expect("foreign publication settles Delivered");
+
+    harness
+        .observer
+        .observe_ack(
+            envelope_for_conversation_replying_to(
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hi", Vec::new(), ProductTriggerReason::BotMention)
+                        .expect("payload"),
+                ),
+                "evt-foreign-delivered",
+                "conv-1",
+                None,
+                Some("ts-source"),
+            ),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(
+        texts.len(),
+        2,
+        "the foreign target's delivery must not silence this channel's failure notice: {texts:?}"
+    );
+    assert!(
+        texts[1].contains("didn't finish") || texts[1].to_lowercase().contains("wrong"),
+        "the second message is the failure notice: {texts:?}"
+    );
+}
+
 #[tokio::test]
 async fn observer_posts_the_failure_notice_only_when_the_reply_did_not_deliver() {
     let harness = build_harness(
