@@ -99,8 +99,7 @@ fn parse_nearai_models(response_text: &str) -> Vec<DiscoveredModel> {
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        // Capability metadata is optional display data. A malformed provider
-        // value must not hide otherwise-routable model IDs.
+        // silent-ok: malformed optional display metadata must not hide routable model IDs.
         Ok(serde_json::from_value(value).unwrap_or_default())
     }
 
