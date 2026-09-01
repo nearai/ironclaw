@@ -290,28 +290,23 @@ fn capability_call_signature_is_stable_under_nested_key_reordering() {
 }
 
 #[test]
-fn capability_call_signature_rejects_nan_and_infinity() {
+fn serde_json_rejects_non_finite_numbers_before_signature_construction() {
     let capability = CapabilityId::new("demo.echo").unwrap();
     let nan = serde_json::Number::from_f64(f64::NAN);
     let infinity = serde_json::Number::from_f64(f64::INFINITY);
-    // serde_json refuses to construct NaN/Infinity through its public API;
-    // synthesize them via a manually built Value to exercise the guard.
-    // If the upstream representation rejects these inputs entirely, the
-    // guard is unreachable at the public boundary — assert that.
+    // serde_json refuses to construct NaN/Infinity through its public API,
+    // so neither value can reach signature construction through a Number.
     assert!(nan.is_none(), "serde_json refuses NaN at the Number level");
     assert!(
         infinity.is_none(),
         "serde_json refuses Infinity at the Number level"
     );
 
-    // Round-trip a JSON string that contains a NaN-like token. serde_json
-    // rejects this at the parser, so we exercise the guard via the
-    // signature's own check against the canonicalized output.
+    // A NaN-like token is also rejected at the parser boundary.
     let parse: Result<serde_json::Value, _> = serde_json::from_str("NaN");
     assert!(parse.is_err());
 
-    // The function is fallible by signature; with valid JSON input we
-    // should always get Ok.
+    // Valid finite input still reaches signature construction successfully.
     let ok = CapabilityCallSignature::from_call(capability, &json!({"x": 1.0}));
     assert!(ok.is_ok());
 }
