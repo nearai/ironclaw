@@ -1,14 +1,9 @@
 /**
  * Button
  *
- * Single component — all visual styling via Tailwind utilities backed by the
- * `--v2-*` design tokens, plus an inline style for the one thing Tailwind
- * can't express (the radial-gradient on primary), which itself reads a token.
- * No app.css component classes referenced.
- *
- * Shape and accent surface come from tokens, not literals: this component is
- * the reference for what "migrated" means (see `design-system/README.md` →
- * Design tokens). Retheming a button is an `app.css` edit, never an edit here.
+ * Single component — all visual styling via Tailwind + inline style for the
+ * one thing Tailwind can't do (radial-gradient on primary).  No app.css
+ * classes referenced.
  *
  * Props
  *   variant   "primary" | "outline" | "secondary" | "ghost" | "danger"
@@ -26,13 +21,12 @@ import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
 import { cn } from "../utils/cn";
 import { Spinner } from "./spinner";
 
-/* ── Gradient assets (Tailwind can't express these) ──────────────────
-   The gradients themselves live in `app.css` as `--v2-accent-gradient*`;
-   these constants only name the `var()` reference. Keep it that way — a
-   literal here is a value the reskin cannot reach. */
+/* ── Gradient assets (Tailwind can't express these) ────────────────── */
 
-const PRIMARY_BG = "var(--v2-accent-gradient)";
-const PRIMARY_HOVER_BG = "var(--v2-accent-gradient-hover)";
+const PRIMARY_BG =
+  "radial-gradient(ellipse 100% 100% at 50% 130%, #4CA7E6 0%, #2882c8 65%)";
+const PRIMARY_HOVER_BG =
+  "radial-gradient(ellipse 200% 220% at 50% 110%, #5BBAF5 0%, #2882c8 60%)";
 
 /* ── Base ──────────────────────────────────────────────────────────── */
 
@@ -45,16 +39,12 @@ const BASE =
 
 /* ── Size classes ──────────────────────────────────────────────────── */
 
-// Radii come from the control scale (`--v2-radius-control*`), so the shape of
-// every button in the app moves from one place in app.css. The heights stay
-// literal for now: they are a density decision, and density belongs to
-// Phase 3a (#7781 WS3) along with the type ramp it has to move with.
 const SIZES = {
-  sm:      "h-9 rounded-control-sm px-3 text-ui-sm",
-  md:      "min-h-[44px] rounded-control px-3.5 text-ui md:min-h-[50px] md:rounded-control-lg md:px-4",
-  lg:      "min-h-[54px] rounded-control-xl px-6 text-ui-lg",
-  icon:    "h-[44px] w-[44px] rounded-control md:h-[50px] md:w-[50px] md:rounded-control-lg",
-  "icon-sm": "h-9 w-9 rounded-control-sm",
+  sm:      "h-9 rounded-[10px] px-3 text-ui-sm",
+  md:      "min-h-[44px] rounded-[14px] px-3.5 text-ui md:min-h-[50px] md:rounded-[16px] md:px-4",
+  lg:      "min-h-[54px] rounded-[18px] px-6 text-ui-lg",
+  icon:    "h-[44px] w-[44px] rounded-[14px] md:h-[50px] md:w-[50px] md:rounded-[16px]",
+  "icon-sm": "h-9 w-9 rounded-[10px]",
 };
 
 /* ── Variant classes ───────────────────────────────────────────────── */
@@ -152,7 +142,7 @@ export function Button({
       <Element
         style={{
           background: PRIMARY_BG,
-          border: "1px solid var(--v2-accent-edge)",
+          border: "1px solid rgba(76, 167, 230, 0.72)",
         }}
         className={cn(
           BASE,
@@ -160,7 +150,7 @@ export function Button({
           fullClass,
           disabledAnchorClass,
           "relative overflow-hidden text-white group",
-          "hover:shadow-[var(--v2-accent-glow)]",
+          "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
           className
         )}
         disabled={nativeDisabled}

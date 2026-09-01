@@ -11,9 +11,8 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vite build && pnpm check:bundle && pnpm check:tokens",
+    "build": "vite build && pnpm check:bundle",
     "check:bundle": "node --experimental-strip-types scripts/check-bundle-budgets.ts",
-    "check:tokens": "node --experimental-strip-types scripts/check-token-bundle.ts",
     "typecheck": "tsc --noEmit",
     "lint": "pnpm lint:conventions && pnpm typecheck",
     "lint:conventions": "node --experimental-strip-types scripts/check-source-conventions.ts",
