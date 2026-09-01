@@ -69,3 +69,18 @@ test("SearchField omits the optional clear action", () => {
 
   assert.doesNotMatch(html, /<button/);
 });
+
+test("SearchField provides a compact toolbar size", () => {
+  const rendered = SearchField({
+    value: "agent",
+    onChange: () => {},
+    placeholder: "Filter by target…",
+    "aria-label": "Filter by target…",
+    size: "sm",
+  });
+
+  const input = childByType(rendered, "input");
+  assert.match(input.props.className, /\bh-8\b/);
+  assert.match(input.props.className, /\btext-xs\b/);
+  assert.doesNotMatch(input.props.className, /\bh-9\b/);
+});

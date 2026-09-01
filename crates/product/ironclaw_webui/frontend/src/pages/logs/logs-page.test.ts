@@ -47,9 +47,11 @@ function createLogsPageHarness(overrides = {}) {
   const hookValues = [];
   let hookCursor = 0;
   function ConfirmDialog() {}
+  function SearchField() {}
   function SelectMenu() {}
   const context = {
     ConfirmDialog,
+    SearchField,
     SelectMenu,
     globalThis: {},
     React: {
@@ -91,6 +93,7 @@ function createLogsPageHarness(overrides = {}) {
   vm.runInNewContext(logsPageSourceForTest(), context);
   return {
     ConfirmDialog,
+    SearchField,
     SelectMenu,
     render() {
       hookCursor = 0;
@@ -353,6 +356,25 @@ test("LogsPage changes the log level through the compact shared SelectMenu", () 
 
   levelSelect.onChange("warn");
   assert.deepEqual(changes, ["warn"]);
+});
+
+test("LogsPage filters targets through the compact shared SearchField", () => {
+  const changes = [];
+  const harness = createLogsPageHarness({
+    targetFilter: "ironclaw::agent",
+    setTargetFilter: (value) => changes.push(value),
+  });
+
+  const [targetSearch] = componentProps(harness.render(), harness.SearchField);
+  assert.ok(targetSearch, "expected LogsPage to render the shared SearchField");
+  assert.equal(targetSearch.value, "ironclaw::agent");
+  assert.equal(targetSearch.size, "sm");
+  assert.equal(targetSearch["aria-label"], "logs.filterTarget");
+  assert.equal(targetSearch.clearLabel, "settings.clearSearch");
+
+  targetSearch.onChange("ironclaw::runtime");
+  targetSearch.onClear();
+  assert.deepEqual(changes, ["ironclaw::runtime", ""]);
 });
 
 test("LogsPage changes the server level through the compact shared SelectMenu", () => {
