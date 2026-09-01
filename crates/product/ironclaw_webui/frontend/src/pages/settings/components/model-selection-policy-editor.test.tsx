@@ -282,6 +282,95 @@ test("fetch ignores results from a provider that is no longer active", async () 
   }
 });
 
+test("save ignores results from a provider that is no longer active", async () => {
+  let resolveFirstSave;
+  const firstSave = new Promise((resolve) => {
+    resolveFirstSave = resolve;
+  });
+  requests.setPolicy.mockImplementation(() => firstSave);
+  const rendered = await renderEditor(providerState());
+  try {
+    const save = rendered.container.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-model-policy-save"]'
+    );
+    assert.ok(save);
+    await act(async () => save.click());
+
+    await rerenderEditor(rendered, {
+      activeProviderId: "anthropic",
+      selectedModel: "claude",
+      providers: [
+        {
+          id: "anthropic",
+          adapter: "anthropic",
+          default_model: "claude",
+          can_list_models: true,
+        },
+      ],
+      userModelPolicy: null,
+      listModels: vi.fn(),
+    });
+    const anthropicCatalog = {
+      selection_enabled: true,
+      workspace_default: "claude",
+      models: ["claude"],
+      model_entries: [],
+    };
+    const anthropicSnapshot = {
+      user_model_policy: {
+        provider_id: "anthropic",
+        workspace_default: "claude",
+        allowed_models: ["claude"],
+        model_entries: [],
+      },
+    };
+    rendered.queryClient.setQueryData(["user-model-catalog"], anthropicCatalog);
+    rendered.queryClient.setQueryData(["llm-providers"], anthropicSnapshot);
+
+    await act(async () => {
+      resolveFirstSave({
+        selection_enabled: true,
+        workspace_default: "mock-model",
+        models: ["mock-model"],
+        model_entries: [
+          {
+            id: "mock-model",
+            input_modalities: ["text", "image"],
+            output_modalities: ["text"],
+          },
+        ],
+      });
+      await firstSave;
+    });
+
+    assert.deepEqual(
+      rendered.queryClient.getQueryData(["user-model-catalog"]),
+      anthropicCatalog
+    );
+    assert.deepEqual(
+      rendered.queryClient.getQueryData(["llm-providers"]),
+      anthropicSnapshot
+    );
+    assert.ok(
+      rendered.container.querySelector('[data-testid="settings-model-policy-model-claude"]')
+    );
+    assert.equal(
+      rendered.container.querySelector('[data-testid="settings-model-policy-model-mock-model"]'),
+      null
+    );
+    assert.equal(
+      rendered.container.querySelector(
+        '[data-testid="settings-model-policy-status"]'
+      )?.textContent,
+      "Model selection is not enabled yet."
+    );
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+    requests.setPolicy.mockReset();
+  }
+});
+
 test("policy editor fails closed without an active provider", async () => {
   const rendered = await renderEditor(
     providerState({ activeProviderId: null, selectedModel: "", providers: [] })
