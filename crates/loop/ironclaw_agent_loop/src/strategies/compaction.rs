@@ -53,11 +53,15 @@ impl DefaultCompactionStrategy {
     pub const DEFAULT_PRESERVE_TAIL_TOKENS: u64 = 8_000;
     pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
 
-    pub(super) fn can_evaluate(&self, state: &LoopExecutionState) -> bool {
+    pub(super) fn can_evaluate(
+        &self,
+        state: &LoopExecutionState,
+        budget: PromptContextTokenBudget,
+    ) -> bool {
         if state.compaction_prompt.message_index.is_empty() {
             return false;
         }
-        let threshold = self.prompt_context_budget.visible_transcript_tokens();
+        let threshold = budget.visible_transcript_tokens();
         if threshold <= self.preserve_tail_tokens {
             return false;
         }
@@ -77,6 +81,7 @@ impl DefaultCompactionStrategy {
     pub(super) fn trigger_at(
         &self,
         state: &LoopExecutionState,
+        budget: PromptContextTokenBudget,
         drop_through_seq: u64,
     ) -> CompactionDecision {
         let effectiveness_baseline = if state.compaction_state.force_compact_on_next_iteration {
@@ -85,7 +90,7 @@ impl DefaultCompactionStrategy {
             }
         } else {
             CompactionEffectivenessBaseline::TriggerThresholdTokens {
-                tokens: self.prompt_context_budget.visible_transcript_tokens(),
+                tokens: budget.visible_transcript_tokens(),
             }
         };
         CompactionDecision::Trigger {
@@ -113,7 +118,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
         state: &LoopExecutionState,
         _ctx: &LoopRunContext,
     ) -> CompactionDecision {
-        if !self.can_evaluate(state) {
+        if !self.can_evaluate(state, self.prompt_context_budget) {
             return CompactionDecision::Skip;
         }
         let prompt_fingerprint = state.compaction_prompt.fingerprint();
@@ -122,11 +127,11 @@ impl CompactionStrategy for DefaultCompactionStrategy {
                 == Some(CompactionInitiator::WindowEviction)
             {
                 return eligible_window_eviction_boundary(state, prompt_fingerprint, None)
-                    .map(|sequence| self.trigger_at(state, sequence))
+                    .map(|sequence| self.trigger_at(state, self.prompt_context_budget, sequence))
                     .unwrap_or(CompactionDecision::Skip);
             }
             return latest_eligible_user_boundary(state, prompt_fingerprint)
-                .map(|sequence| self.trigger_at(state, sequence))
+                .map(|sequence| self.trigger_at(state, self.prompt_context_budget, sequence))
                 .unwrap_or(CompactionDecision::Skip);
         }
 
@@ -137,7 +142,7 @@ impl CompactionStrategy for DefaultCompactionStrategy {
             0,
             |_| true,
         )
-        .map(|sequence| self.trigger_at(state, sequence))
+        .map(|sequence| self.trigger_at(state, self.prompt_context_budget, sequence))
         .unwrap_or(CompactionDecision::Skip)
     }
 }

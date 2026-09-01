@@ -45,7 +45,10 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
         state: &LoopExecutionState,
         _ctx: &LoopRunContext,
     ) -> CompactionDecision {
-        if !self.base.can_evaluate(state) {
+        if !self
+            .base
+            .can_evaluate(state, self.base.prompt_context_budget)
+        {
             return CompactionDecision::Skip;
         }
 
@@ -59,7 +62,10 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
                 prompt_fingerprint,
                 preserve_from_sequence,
             )
-            .map(|sequence| self.base.trigger_at(state, sequence))
+            .map(|sequence| {
+                self.base
+                    .trigger_at(state, self.base.prompt_context_budget, sequence)
+            })
             .unwrap_or(CompactionDecision::Skip);
         }
         active_task_preserving_user_boundary(
@@ -69,7 +75,10 @@ impl CompactionStrategy for ActiveTaskPreservingCompactionStrategy {
             self.minimum_tail_messages,
             self.minimum_compacted_messages,
         )
-        .map(|sequence| self.base.trigger_at(state, sequence))
+        .map(|sequence| {
+            self.base
+                .trigger_at(state, self.base.prompt_context_budget, sequence)
+        })
         .unwrap_or(CompactionDecision::Skip)
     }
 }
