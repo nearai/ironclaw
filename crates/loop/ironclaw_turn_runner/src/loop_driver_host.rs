@@ -1978,6 +1978,7 @@ where
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                        prompt_context_budget,
                     },
                 ))
             } else {
@@ -2001,6 +2002,7 @@ where
                         context_window_cache: Some(context_window_cache),
                         attachment_read_port: self.attachment_read_port.clone(),
                         prompt_diagnostic_sink: self.prompt_diagnostic_sink.clone(),
+                        prompt_context_budget,
                     },
                 ))
             };
