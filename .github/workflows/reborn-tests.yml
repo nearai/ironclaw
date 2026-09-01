@@ -506,7 +506,14 @@ jobs:
                       --all-targets --ignore-rust-version \
                       --no-pager --color never
                 )"
-                while IFS='|' read -r package group test_name; do
+                group_test_specs=(
+                  'ironclaw|ironclaw-smoke-process-local|onboard_login_link_then_bearer_authorizes_a_protected_request'
+                  'ironclaw|ironclaw-cli-global-policy|commands::traces::tests::opt_in_writes_runtime_owner_policy'
+                  'ironclaw_composition|composition-runtime-process-local|f1_happy_path_records_actual_usd_on_receipt'
+                  'ironclaw_composition|composition-runtime-process-local|runtime_rejects_disabled_profile_before_local_substrate_lookup'
+                )
+                for group_test_spec in "${group_test_specs[@]}"; do
+                  IFS='|' read -r package group test_name <<< "${group_test_spec}"
                   if [[ " ${nextest_packages[*]} " != *" ${package} "* ]]; then
                     continue
                   fi
@@ -520,12 +527,7 @@ jobs:
                     echo "nextest group ${group} did not contain ${test_name}" >&2
                     exit 1
                   fi
-                done <<'GROUP_TESTS'
-                ironclaw|ironclaw-smoke-process-local|onboard_login_link_then_bearer_authorizes_a_protected_request
-                ironclaw|ironclaw-cli-global-policy|commands::traces::tests::opt_in_writes_runtime_owner_policy
-                ironclaw_composition|composition-runtime-process-local|f1_happy_path_records_actual_usd_on_receipt
-                ironclaw_composition|composition-runtime-process-local|runtime_rejects_disabled_profile_before_local_substrate_lookup
-                GROUP_TESTS
+                done
                 fi
                 scripts/ci/run-hermetic-deterministic-suite.sh command \
                   timeout --signal=INT --kill-after=30s 28m \

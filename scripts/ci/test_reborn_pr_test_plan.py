@@ -2689,6 +2689,8 @@ class RebornPrTestPlanTests(unittest.TestCase):
         )[0]
         self.assertIn("cargo nextest show-config", crate_job)
         self.assertIn("test-groups --profile ci", crate_job)
+        self.assertIn("group_test_specs=(", crate_job)
+        self.assertNotIn("done <<'GROUP_TESTS'", crate_job)
         self.assertIn("ironclaw-smoke-process-local", crate_job)
         self.assertIn(
             "onboard_login_link_then_bearer_authorizes_a_protected_request",
@@ -2708,6 +2710,23 @@ class RebornPrTestPlanTests(unittest.TestCase):
             "commands::traces::tests::opt_in_writes_runtime_owner_policy",
             crate_job,
         )
+
+    def test_crate_runner_shell_is_syntactically_valid(self) -> None:
+        workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        block = workflow.split("      - name: Run crate tests\n", 1)[1].split(
+            "      - name: Upload bucket lcov artifact\n", 1
+        )[0]
+        script = block.split("        run: |\n", 1)[1]
+        script = "\n".join(
+            line[10:] if line.startswith("          ") else line
+            for line in script.splitlines()
+        )
+        completed = subprocess.run(
+            ["bash", "-n"], input=script, capture_output=True, text=True
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
             encoding="utf-8"
