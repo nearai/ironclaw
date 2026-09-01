@@ -425,6 +425,32 @@ where
             .and_then(|route| ProviderModelId::new(route.model).ok())
     }
 
+    async fn advertised_context_window_tokens(
+        &self,
+        model_profile_id: &ModelProfileId,
+        resolved_model_route: Option<&HostManagedModelRouteSnapshot>,
+    ) -> Option<u64> {
+        // Advisory only: a provider that cannot report a window for the model
+        // this run will actually be served must leave the run on the
+        // compiled-in budget, never fail the run.
+        let metadata = self.provider.model_metadata().await.ok()?;
+        // `model_metadata()` takes no model argument -- it describes whatever
+        // model the provider was configured with. The served model is resolved
+        // per request (a route override wins, and providers that honor
+        // per-request overrides serve it), so a window borrowed from a
+        // different model would be worse than none: guessing high produces the
+        // provider rejection this mechanism exists to avoid.
+        let route = self.policy.route_for(model_profile_id)?;
+        let served = request_model_override(
+            route,
+            self.provider.as_ref(),
+            resolved_model_route.map(HostManagedModelRouteSnapshot::model_id),
+        )
+        .ok()?;
+        (served == metadata.id).then_some(())?;
+        metadata.context_length.map(u64::from)
+    }
+
     async fn stream_model(
         &self,
         request: HostManagedModelRequest,
@@ -3699,6 +3725,108 @@ mod tests {
             repair_assistant.reasoning_details,
             Some(expected_reasoning),
             "repaired assistant message must preserve typed reasoning_details"
+        );
+    }
+
+    // Bespoke double per test, matching this module's convention
+    // (`StopSequenceRecordingProvider` above): implement only the four
+    // required `LlmProvider` methods, plus the `model_metadata` override the
+    // advertised-window tests actually need.
+    struct WindowReportingProvider {
+        model_id: String,
+        context_length: Option<u32>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for WindowReportingProvider {
+        fn model_name(&self) -> &str {
+            &self.model_id
+        }
+
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            Default::default()
+        }
+
+        async fn model_metadata(&self) -> Result<ironclaw_llm::ModelMetadata, LlmError> {
+            Ok(ironclaw_llm::ModelMetadata {
+                id: self.model_id.clone(),
+                context_length: self.context_length,
+            })
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            unreachable!("the advertised-window tests never dispatch a completion")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("the advertised-window tests have no tool surface")
+        }
+    }
+
+    fn window_test_profile_id() -> ModelProfileId {
+        ModelProfileId::new("interactive_model").expect("valid profile id")
+    }
+
+    #[tokio::test]
+    async fn gateway_reports_the_providers_advertised_context_window() {
+        let provider = Arc::new(WindowReportingProvider {
+            model_id: "base-model".to_string(),
+            context_length: Some(200_000),
+        });
+        let policy =
+            LlmModelProfilePolicy::new().allow_model_profile(window_test_profile_id(), None);
+        let gateway = LlmProviderModelGateway::new(provider, policy);
+
+        let window = gateway
+            .advertised_context_window_tokens(&window_test_profile_id(), None)
+            .await;
+
+        assert_eq!(window, Some(200_000));
+    }
+
+    #[tokio::test]
+    async fn gateway_reports_none_when_the_provider_advertises_nothing() {
+        let provider = Arc::new(WindowReportingProvider {
+            model_id: "base-model".to_string(),
+            context_length: None,
+        });
+        let policy =
+            LlmModelProfilePolicy::new().allow_model_profile(window_test_profile_id(), None);
+        let gateway = LlmProviderModelGateway::new(provider, policy);
+
+        let window = gateway
+            .advertised_context_window_tokens(&window_test_profile_id(), None)
+            .await;
+
+        assert_eq!(window, None);
+    }
+
+    #[tokio::test]
+    async fn gateway_reports_none_when_the_route_overrides_to_another_model() {
+        // The provider describes "base-model" but the policy routes this
+        // profile to a different one. Budgeting from the base model's window
+        // could hand a small model a budget sized for a large one.
+        let provider = Arc::new(WindowReportingProvider {
+            model_id: "base-model".to_string(),
+            context_length: Some(200_000),
+        });
+        let policy = LlmModelProfilePolicy::new()
+            .allow_model_profile(window_test_profile_id(), Some("other-model".to_string()));
+        let gateway = LlmProviderModelGateway::new(provider, policy);
+
+        let window = gateway
+            .advertised_context_window_tokens(&window_test_profile_id(), None)
+            .await;
+
+        assert_eq!(
+            window, None,
+            "a window for a different model must not be trusted"
         );
     }
 }
