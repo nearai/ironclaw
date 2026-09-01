@@ -11,7 +11,7 @@
  * Design tokens). Retheming a button is an `app.css` edit, never an edit here.
  *
  * Props
- *   variant   "primary" | "outline" | "secondary" | "ghost" | "danger"
+ *   variant   "primary" | "tonal" | "outline" | "secondary" | "ghost" | "danger"
  *   size      "sm" | "md" (default) | "lg" | "icon" | "icon-sm"
  *   fullWidth boolean
  *   loading   boolean — shows an inline spinner, disables the button, sets
@@ -61,6 +61,14 @@ const SIZES = {
 // Primary has no Tailwind variant string — it uses inline style for the gradient.
 
 const VARIANTS = {
+  /* Medium emphasis: M3's primary-container. A tonal fill carrying a dark
+     label, for accented actions that should not shout like `primary`. The
+     label reads `--v2-accent-container-on` rather than a literal, because the
+     container is light in one theme and dark in the other. */
+  tonal:
+    "border border-transparent bg-[var(--v2-accent-container)] text-[var(--v2-accent-container-on)] " +
+    "hover:bg-[color-mix(in_srgb,var(--v2-accent-container)_88%,var(--v2-accent))]",
+
   outline:
     "border border-[color-mix(in_srgb,var(--v2-accent)_60%,var(--v2-panel-border))] " +
     "bg-transparent text-[var(--v2-accent-text)] " +
