@@ -54,6 +54,20 @@ pub struct ModelInfo {
 /// tolerates the various field names different deployments emit. Returns an
 /// empty vec when no recognizable entries are found.
 fn parse_nearai_models(response_text: &str) -> Vec<DiscoveredModel> {
+    fn deserialize_modalities_lossy<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value {
+            serde_json::Value::Array(values) => values
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect(),
+            _ => Vec::new(),
+        })
+    }
+
     #[derive(Deserialize)]
     struct ModelMetadataInner {
         #[serde(default)]
@@ -64,10 +78,30 @@ fn parse_nearai_models(response_text: &str) -> Vec<DiscoveredModel> {
 
     #[derive(Default, Deserialize)]
     struct ModelArchitecture {
-        #[serde(default, alias = "inputModalities")]
+        #[serde(
+            default,
+            alias = "inputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
         input_modalities: Vec<String>,
-        #[serde(default, alias = "outputModalities")]
+        #[serde(
+            default,
+            alias = "outputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
         output_modalities: Vec<String>,
+    }
+
+    fn deserialize_architecture_lossy<'de, D>(
+        deserializer: D,
+    ) -> Result<ModelArchitecture, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // Capability metadata is optional display data. A malformed provider
+        // value must not hide otherwise-routable model IDs.
+        Ok(serde_json::from_value(value).unwrap_or_default())
     }
 
     #[derive(Deserialize)]
@@ -84,11 +118,19 @@ fn parse_nearai_models(response_text: &str) -> Vec<DiscoveredModel> {
         model_id: Option<String>,
         #[serde(default)]
         metadata: Option<ModelMetadataInner>,
-        #[serde(default, alias = "inputModalities")]
+        #[serde(
+            default,
+            alias = "inputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
         input_modalities: Vec<String>,
-        #[serde(default, alias = "outputModalities")]
+        #[serde(
+            default,
+            alias = "outputModalities",
+            deserialize_with = "deserialize_modalities_lossy"
+        )]
         output_modalities: Vec<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_architecture_lossy")]
         architecture: ModelArchitecture,
     }
 
@@ -2064,7 +2106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_model_discovery_uses_session_authentication() {
+    async fn private_model_discovery_authenticates_and_tolerates_malformed_capabilities() {
         use tokio::net::TcpListener;
         use tokio::sync::oneshot;
 
@@ -2082,7 +2124,20 @@ mod tests {
                     }
                     write_http_json_response(
                         &mut socket,
-                        serde_json::json!({ "data": [{ "id": "nearai/test-model" }] }),
+                        serde_json::json!({
+                            "data": [
+                                {
+                                    "id": "nearai/malformed-capabilities",
+                                    "input_modalities": ["text", 7, null],
+                                    "output_modalities": null,
+                                    "architecture": null
+                                },
+                                {
+                                    "id": "nearai/valid",
+                                    "architecture": { "input_modalities": ["image"] }
+                                }
+                            ]
+                        }),
                     )
                     .await;
                     break;
@@ -2104,12 +2159,16 @@ mod tests {
         let provider = NearAiChatProvider::new(config, session).expect("provider");
 
         let models = provider
-            .list_models_full()
+            .list_model_catalog_full()
             .await
             .expect("private model discovery should use the session token");
 
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].name, "nearai/test-model");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "nearai/malformed-capabilities");
+        assert_eq!(models[0].input_modalities, [ModelModality::Text]);
+        assert!(models[0].output_modalities.is_empty());
+        assert_eq!(models[1].id, "nearai/valid");
+        assert_eq!(models[1].input_modalities, [ModelModality::Image]);
         let headers = headers_rx.await.expect("models request headers");
         assert!(
             headers
