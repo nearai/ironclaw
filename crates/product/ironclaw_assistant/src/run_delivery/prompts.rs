@@ -294,11 +294,43 @@ pub(crate) fn auth_prompt_is_serviceable(view: &AuthPromptView) -> bool {
 /// The notice for a challenge that cannot be serviced here. Only a typed
 /// credential-entry challenge earns the "this needs an API key" copy --
 /// telling a pairing user to go find an API key is simply wrong.
-pub(crate) fn unserviceable_auth_prompt_message(view: Option<&AuthPromptView>) -> &'static str {
-    match view.and_then(|view| view.challenge_kind) {
+/// The Extensions page URL, when the deployment published a public origin.
+///
+/// **The whole page, not `?configure=<extension>`.** A deep link would need an
+/// extension id, and [`AuthPromptView`] carries only `provider` — a *vendor*
+/// id. A single vendor can back several distinct extensions, so keying the
+/// link off it would send the user to the wrong extension's modal, and the
+/// field's own contract says presentation is "selected by `challenge_kind` and
+/// `connection.strategy`, never by provider name". The user already knows
+/// which extension they asked about; what they lacked was an address.
+///
+/// `None` and blank are the same answer: a notice must never advertise a
+/// relative path into a customer conversation.
+fn extensions_page_link(base_url: Option<&str>) -> Option<String> {
+    let base = ironclaw_extension_contracts::connect_link::validated_connect_link_origin(base_url)?;
+    Some(format!("{base}/extensions"))
+}
+
+/// The message shown when a challenge cannot be completed from a chat surface,
+/// with the web app's address appended when the deployment published one.
+///
+/// Every one of these messages ends by telling the user to open the web app
+/// (`prompts/device_link_auth_unavailable.md` and its siblings). Before #7887
+/// that instruction named the destination in words and gave nothing to click.
+/// A device-link challenge is never serviceable on a chat surface, so this is
+/// the message that reaches the user there — and it dead-ended them.
+pub(crate) fn unserviceable_auth_prompt_message(
+    view: Option<&AuthPromptView>,
+    setup_link_base_url: Option<&str>,
+) -> String {
+    let message = match view.and_then(|view| view.challenge_kind) {
         Some(AuthPromptChallengeKind::ManualToken) => MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE,
         Some(AuthPromptChallengeKind::DeviceLink) => DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE,
         _ => AUTH_UNAVAILABLE_MESSAGE,
+    };
+    match extensions_page_link(setup_link_base_url) {
+        Some(link) => format!("{message} {link}"),
+        None => message.to_string(),
     }
 }
 
@@ -530,7 +562,7 @@ mod tests {
             "a pairing challenge with no usable code cannot be serviced"
         );
         assert_eq!(
-            unserviceable_auth_prompt_message(Some(&pairing_view)),
+            unserviceable_auth_prompt_message(Some(&pairing_view), None),
             AUTH_UNAVAILABLE_MESSAGE,
             "a pairing user must not be told to go find an API key"
         );
@@ -587,7 +619,7 @@ mod tests {
             "pasting a secret into chat stores it in the conversation"
         );
         assert_eq!(
-            unserviceable_auth_prompt_message(Some(&token_view)),
+            unserviceable_auth_prompt_message(Some(&token_view), None),
             MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE
         );
     }
@@ -607,7 +639,7 @@ mod tests {
             "a device link cannot be driven from a chat surface"
         );
         assert_eq!(
-            unserviceable_auth_prompt_message(Some(&link_view)),
+            unserviceable_auth_prompt_message(Some(&link_view), None),
             DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE
         );
         assert_eq!(
@@ -616,7 +648,7 @@ mod tests {
             "the body must never fall through to the raw gate text"
         );
         assert_ne!(
-            unserviceable_auth_prompt_message(Some(&link_view)),
+            unserviceable_auth_prompt_message(Some(&link_view), None),
             MANUAL_TOKEN_AUTH_UNAVAILABLE_MESSAGE,
             "a device-link user has no API key to go and find"
         );
@@ -624,6 +656,27 @@ mod tests {
             DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.contains("web app"),
             "the copy has to name where the link CAN be completed"
         );
+        // #7887: naming the destination is not enough — a chat user was told
+        // to "open the Ironclaw web app" with nothing to click. When the
+        // deployment published an origin, the address travels with the copy.
+        assert_eq!(
+            unserviceable_auth_prompt_message(Some(&link_view), Some("https://app.example.com")),
+            format!("{DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE} https://app.example.com/extensions"),
+            "the copy has to hand over the address, not just name it"
+        );
+        // A trailing slash must not produce `//extensions`, and a blank origin
+        // is the same answer as an unset one: never advertise a relative path.
+        assert_eq!(
+            unserviceable_auth_prompt_message(Some(&link_view), Some("https://app.example.com/")),
+            format!("{DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE} https://app.example.com/extensions")
+        );
+        for blank in ["", "   "] {
+            assert_eq!(
+                unserviceable_auth_prompt_message(Some(&link_view), Some(blank)),
+                DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE,
+                "a blank origin ({blank:?}) must ship dark"
+            );
+        }
         assert!(
             !DEVICE_LINK_AUTH_UNAVAILABLE_MESSAGE.ends_with('\n'),
             "the prompt file's trailing newline must be trimmed before delivery"
@@ -643,7 +696,7 @@ mod tests {
             AuthPromptChallengeKind::Other
         ))));
         assert_eq!(
-            unserviceable_auth_prompt_message(None),
+            unserviceable_auth_prompt_message(None, None),
             AUTH_UNAVAILABLE_MESSAGE,
             "an absent view cannot imply a credential type"
         );

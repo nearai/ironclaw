@@ -866,6 +866,30 @@ test("DeviceLinkPanel offers 'start again' on a restartable failure and refuses 
   assert.ok(!stringify(terminalView).includes("deviceLink.startAgain"));
   assert.ok(stringify(terminalView).includes("deviceLink.cannotRetry"));
 
+  // #7887 follow-up: a deployment that never configured this ceremony is also
+  // terminal, but the account is fine. Reusing `cannotRetry` here asserted
+  // "this account cannot be linked" and sent the user to debug something that
+  // was not broken, while the remedy was an admin page away.
+  const unconfigured = createHarness({
+    startResponses: [
+      response(
+        wireFrame({
+          step: DEVICE_LINK_STEPS.failed,
+          instructions: "This deployment is missing the settings this connection needs.",
+          error_code: "not_configured",
+          restartable: false,
+        }),
+      ),
+    ],
+  });
+  const unconfiguredView = stringify(await unconfigured.mount());
+  assert.ok(!unconfiguredView.includes("deviceLink.startAgain"));
+  assert.ok(unconfiguredView.includes("deviceLink.setupIncomplete"));
+  assert.ok(
+    !unconfiguredView.includes("deviceLink.cannotRetry"),
+    "a configuration gap must not claim the account cannot be linked",
+  );
+
   const conflicted = createHarness({
     startResponses: [
       response(

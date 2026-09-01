@@ -1184,6 +1184,7 @@ impl RebornRuntime {
             turn_coordinator,
             identity,
             run_delivery_settings,
+            blocked_auth_prompts,
         } = wiring;
         let attachment_filesystem = self.read_write_workspace_filesystem()?;
         let inbound_attachments: Arc<dyn ironclaw_attachments::InboundAttachmentLander> =
@@ -1235,7 +1236,7 @@ impl RebornRuntime {
                     auth_interaction: None,
                     identity,
                     approval_context: None,
-                    blocked_auth_prompts: None,
+                    blocked_auth_prompts,
                     auth_flow_cancel: None,
                     run_delivery_settings,
                     admin_users,

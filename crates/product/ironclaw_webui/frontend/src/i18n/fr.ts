@@ -1676,6 +1676,7 @@ registerPack("fr", {
   "deviceLink.revokeHint": "IronClaw apparaît désormais comme un appareil dans {name}. Si vous voyez un appareil inconnu, révoquez-le depuis cette liste.",
   "deviceLink.startAgain": "Recommencer",
   "deviceLink.cannotRetry": "Ce compte {name} ne peut pas être associé.",
+  "deviceLink.setupIncomplete": "La liaison d'un compte {name} n'est pas encore configurée sur ce déploiement. Un administrateur doit terminer la configuration dans Admin → Configuration.",
   "deviceLink.error.expired": "Le code a expiré avant d'être utilisé.",
   "deviceLink.error.unknown_flow": "Cette association n'est plus ouverte.",
   "deviceLink.error.declined": "L'appareil a été refusé.",
@@ -1685,5 +1686,6 @@ registerPack("fr", {
   "deviceLink.error.identity_conflict": "Ce compte est déjà associé. Dissociez-le du compte IronClaw auquel il est connecté, puis réessayez.",
   "deviceLink.error.vendor_unavailable": "Le service est temporairement indisponible.",
   "deviceLink.error.custody_failed": "L'association n'a pas pu être enregistrée en toute sécurité.",
+  "deviceLink.error.not_configured": "Il manque à ce déploiement les paramètres nécessaires à cette connexion.",
   "deviceLink.error.internal": "Un problème est survenu pendant l'association."
 });

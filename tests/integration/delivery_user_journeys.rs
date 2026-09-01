@@ -657,6 +657,7 @@ fn slack_run_delivery_services(
         Some(harness.binding.actor_user_id.clone()),
     );
     RunDeliveryServices {
+        setup_link_base_url: None,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: harness
             .binding_service_for_test()

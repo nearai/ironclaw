@@ -1203,6 +1203,7 @@ fn build_harness_with_gate_ports(
         },
     ));
     let services = RunDeliveryServices {
+        setup_link_base_url: None,
         binding_service: Arc::new(StaticBindingService {
             binding: resolved_binding,
             fail: bind_fails,
@@ -3359,6 +3360,7 @@ fn build_triggered_harness_with_turns_catalog(
         },
     ));
     let services = RunDeliveryServices {
+        setup_link_base_url: None,
         binding_service: Arc::new(StaticBindingService {
             binding: binding(),
             fail: true,
@@ -5367,6 +5369,7 @@ fn notify_user_fixture(
             .insert(ReplyTargetBindingRef::new(entry.binding_ref).expect("binding ref"));
     }
     let services = RunDeliveryServices {
+        setup_link_base_url: None,
         binding_service: Arc::new(StaticBindingService {
             binding: binding(),
             fail: true,

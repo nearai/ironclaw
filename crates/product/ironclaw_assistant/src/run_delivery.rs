@@ -27,6 +27,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ironclaw_extension_contracts::auth_prompt::AuthPromptView;
 use ironclaw_extension_contracts::channel_adapter::{
     OutboundPart, OutboundVisibility, ReactionAction, RunReaction,
 };
@@ -131,6 +132,17 @@ pub fn triggered_run_delivery_settings() -> RunDeliverySettings {
 /// `Arc`s; cloning shares them.
 #[derive(Clone)]
 pub struct RunDeliveryServices {
+    /// The deployment's public web origin, when one is published.
+    ///
+    /// Lets a chat user be handed the Extensions page address when a
+    /// challenge cannot be completed from their surface (#7887). `None` keeps
+    /// the link-free copy rather than advertising a relative path — the same
+    /// fallback the channel connect notice uses, fed by the same
+    /// `connect_link_base_url_from_env` read in composition.
+    ///
+    /// Lives here rather than in `RunDeliverySettings` because that struct is
+    /// `Copy` and this is an owned `String`.
+    pub setup_link_base_url: Option<String>,
     pub binding_service: Arc<dyn ProductBindingResolver>,
     pub thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
     pub turn_coordinator: Arc<dyn TurnCoordinator>,
@@ -431,6 +443,23 @@ pub(crate) fn turn_scope_from_thread_scope(
 }
 
 impl RunDeliveryServices {
+    /// The notice shown when an auth challenge cannot be completed from a
+    /// chat surface, with the web app's address appended when this
+    /// deployment published one.
+    ///
+    /// The live-run path (`observer.rs`) and the triggered/background-run
+    /// path (`triggered.rs`) previously called
+    /// `prompts::unserviceable_auth_prompt_message` independently, each
+    /// re-reading `setup_link_base_url` for itself. That is the exact defect
+    /// class this PR already hit twice (#7887's two arms): a pairing left to
+    /// two call sites drifts the moment one of them changes and the other
+    /// does not. This method is the one place that reads
+    /// `setup_link_base_url` for this message, so the triggered path cannot
+    /// diverge from the live path.
+    pub(crate) fn unserviceable_auth_message(&self, view: Option<&AuthPromptView>) -> String {
+        prompts::unserviceable_auth_prompt_message(view, self.setup_link_base_url.as_deref())
+    }
+
     /// Best-effort publication of bounded, metadata-only run state to the
     /// authenticated WebUI Inbox. Returns `true` only when the durable store
     /// accepted the record. External channel delivery remains separate.

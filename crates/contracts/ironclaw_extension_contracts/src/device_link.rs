@@ -135,6 +135,18 @@ pub enum DeviceLinkErrorCode {
     VendorUnavailable,
     /// Host-side custody failed (see [`LinkedSessionError`]).
     CustodyFailed,
+    /// The deployment has not finished configuring what this ceremony needs
+    /// — an operator must supply a credential or setting before ANY user can
+    /// link.
+    ///
+    /// Distinct from [`Self::Internal`], whose contract reserves it for
+    /// genuinely unclassifiable failures: this one is precisely classifiable
+    /// and precisely remediable, just not by the person looking at the card.
+    /// Distinct from [`Self::AccountUnavailable`] in the direction that
+    /// matters — nothing is wrong with the account, so copy that blames it
+    /// sends the user to debug something that is not broken (#7887 follow-up).
+    /// Terminal for the user; retrying changes nothing until an operator acts.
+    NotConfigured,
     /// Anything else. Reserved for genuinely unclassifiable failures.
     Internal,
 }
@@ -529,6 +541,11 @@ pub enum DeviceLinkError {
     /// Custody failed; the link cannot be made durable.
     #[error("device-link custody failed")]
     Custody(#[from] LinkedSessionError),
+    /// The deployment has not configured what this ceremony needs. `reason`
+    /// names the missing setting so an operator can act on it; the user
+    /// cannot.
+    #[error("device-link is not configured on this deployment: {reason}")]
+    NotConfigured { reason: &'static str },
     /// The adapter failed for a reason the run cannot recover from.
     #[error("device-link adapter failed: {reason}")]
     Internal { reason: &'static str },
@@ -542,6 +559,7 @@ impl DeviceLinkError {
             Self::InvalidInput { .. } | Self::InvalidStep { .. } => {
                 DeviceLinkErrorCode::InvalidInput
             }
+            Self::NotConfigured { .. } => DeviceLinkErrorCode::NotConfigured,
             Self::UnsupportedMode { .. } | Self::Internal { .. } => DeviceLinkErrorCode::Internal,
             Self::Vendor { code, .. } => *code,
             Self::Custody(_) => DeviceLinkErrorCode::CustodyFailed,
@@ -552,9 +570,10 @@ impl DeviceLinkError {
     pub fn restartable(&self) -> bool {
         match self {
             Self::UnknownFlow | Self::InvalidInput { .. } => true,
-            Self::InvalidStep { .. } | Self::UnsupportedMode { .. } | Self::Internal { .. } => {
-                false
-            }
+            Self::InvalidStep { .. }
+            | Self::UnsupportedMode { .. }
+            | Self::NotConfigured { .. }
+            | Self::Internal { .. } => false,
             Self::Vendor { restartable, .. } => *restartable,
             Self::Custody(_) => false,
         }

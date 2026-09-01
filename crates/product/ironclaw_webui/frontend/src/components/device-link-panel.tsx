@@ -488,7 +488,17 @@ export function DeviceLinkPanel({
               )
             : (
                 <p data-testid="device-link-terminal" className="text-xs leading-5 text-iron-400">
-                  {t("deviceLink.cannotRetry", { name })}
+                  {/* A deployment that never configured this ceremony is
+                      terminal for the user but says nothing about their
+                      account; `cannotRetry` asserts the account cannot be
+                      linked, which sends them to debug something that is not
+                      broken (#7887 follow-up). */}
+                  {t(
+                    frame.errorCode === "not_configured"
+                      ? "deviceLink.setupIncomplete"
+                      : "deviceLink.cannotRetry",
+                    { name },
+                  )}
                 </p>
               )}
         </div>

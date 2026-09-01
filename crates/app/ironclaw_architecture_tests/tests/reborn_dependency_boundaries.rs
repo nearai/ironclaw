@@ -822,7 +822,21 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // host-side like `guidance_doc`'s, and nothing here schedules,
         // dispatches, or invokes anything. Count read from this test's own
         // failure message.
-        ("ironclaw_extension_contracts", 11_451),
+        // 11_451 -> 11_633 (2026-08-26, PR #7897 connect-link validation):
+        // the new `connect_link` module — one `validated_connect_link_origin`
+        // helper plus its unit tests — replaces three near-duplicate
+        // trim-and-check-non-empty implementations
+        // (`ironclaw_extension_host::channel_host::configured_origin`,
+        // `ironclaw_assistant::run_delivery::prompts::extensions_page_link`,
+        // `ironclaw_extension_manager::install_guidance::personal_setup_link`)
+        // that never validated `IRONCLAW_REBORN_WEBUI_BASE_URL` was an
+        // absolute origin, so a scheme-less deployment value rendered a
+        // relative link into a customer conversation. Pure validation, no
+        // execution/persistence. Both raises are kept: this row grew twice,
+        // independently, and each delta has its own reason. 11_633 is the
+        // count read from this test's own failure message after merging main,
+        // not the two deltas added — they do not sum.
+        ("ironclaw_extension_contracts", 11_633),
         // Raised 17_501 -> 18_570 by #6831 (standardized messaging framework):
         // the growth is the `messaging` vocabulary — the StandardMessagingOp
         // enum, the 12-code error taxonomy, compiled-in canonical schema/prompt

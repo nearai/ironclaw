@@ -121,6 +121,11 @@ pub struct ChannelWorkflowDeliveryServices {
 /// Everything the factory composes per-extension graphs from. Supplied once by
 /// composition; nothing here varies per extension.
 pub struct RebornChannelWorkflowServices {
+    /// The deployment's public web origin, when one is published. Forwarded
+    /// into [`RunDeliveryServices`] so a chat user blocked on a challenge
+    /// their surface cannot satisfy is handed the Extensions page address
+    /// rather than told to go find it (#7887).
+    pub setup_link_base_url: Option<String>,
     /// Substrate the per-extension durable workflow state is mounted on.
     pub filesystem: Arc<dyn RootFilesystem>,
     pub thread_service: Arc<dyn SessionThreadService>,
@@ -207,6 +212,7 @@ impl RebornChannelWorkflowFactory {
                 }
             };
         let services = RunDeliveryServices {
+            setup_link_base_url: self.services.setup_link_base_url.clone(),
             project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: Arc::new(TriggeredNoopConversationBindingService),
             thread_service: Arc::clone(&self.services.thread_service),
@@ -480,6 +486,7 @@ impl RebornChannelWorkflowFactory {
         let notice_thread_id = ThreadId::new(format!("{extension_id}-channel-notices"))
             .map_err(|error| format!("invalid channel-notice thread id: {error}"))?;
         let services = RunDeliveryServices {
+            setup_link_base_url: self.services.setup_link_base_url.clone(),
             project_filesystem: Arc::clone(&delivery.project_filesystem),
             binding_service: binding,
             thread_service: Arc::clone(&self.services.thread_service),

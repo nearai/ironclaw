@@ -1676,6 +1676,7 @@ registerPack("hi", {
   "deviceLink.revokeHint": "IronClaw अब {name} में एक डिवाइस के रूप में दिखता है। कोई अनजान डिवाइस दिखे तो उसे वहीं से हटाएँ।",
   "deviceLink.startAgain": "फिर से शुरू करें",
   "deviceLink.cannotRetry": "यह {name} खाता लिंक नहीं किया जा सकता।",
+  "deviceLink.setupIncomplete": "इस डिप्लॉयमेंट पर {name} खाता जोड़ना अभी सेट अप नहीं है। किसी प्रशासक को एडमिन → कॉन्फ़िगरेशन में इसे पूरा करना होगा।",
   "deviceLink.error.expired": "कोड इस्तेमाल होने से पहले ही समाप्त हो गया।",
   "deviceLink.error.unknown_flow": "यह लिंक अब खुला नहीं है।",
   "deviceLink.error.declined": "डिवाइस अस्वीकार कर दिया गया।",
@@ -1685,5 +1686,6 @@ registerPack("hi", {
   "deviceLink.error.identity_conflict": "यह खाता पहले से लिंक है। जिस IronClaw खाते से यह जुड़ा है, वहाँ से इसे अनलिंक करें और फिर कोशिश करें।",
   "deviceLink.error.vendor_unavailable": "सेवा फ़िलहाल उपलब्ध नहीं है।",
   "deviceLink.error.custody_failed": "लिंक सुरक्षित रूप से सहेजा नहीं जा सका।",
+  "deviceLink.error.not_configured": "इस डिप्लॉयमेंट में इस कनेक्शन के लिए आवश्यक सेटिंग्स नहीं हैं।",
   "deviceLink.error.internal": "लिंक करते समय कुछ गड़बड़ हो गई।"
 });

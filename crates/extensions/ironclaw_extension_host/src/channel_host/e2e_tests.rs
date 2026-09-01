@@ -640,6 +640,9 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let model_preferences = Arc::new(ChannelModelPreferences::default());
     let workflow_factory = Arc::new(ironclaw_assistant::RebornChannelWorkflowFactory::new(
         ironclaw_assistant::RebornChannelWorkflowServices {
+            // One deployment origin serves both consumers: the connect notice
+            // and the auth-unavailable message.
+            setup_link_base_url: options.connect_link_base_url.clone(),
             filesystem: Arc::new(InMemoryBackend::new()),
             thread_service: Arc::new(threads.clone()),
             turn_coordinator: Arc::new(coordinator.clone()),
@@ -1633,6 +1636,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        setup_link_base_url: None,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -1914,6 +1918,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        setup_link_base_url: None,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -2042,6 +2047,7 @@ async fn triggered_auth_prompt_to_non_dm_channel_redacts_the_link_and_parks_the_
     let fixture = background_run_notifier_fixture(Arc::clone(&outbound_store)).await;
     let driver_egress = fixture.driver_egress.clone();
     let services = RunDeliveryServices {
+        setup_link_base_url: None,
         project_filesystem: Arc::new(ironclaw_assistant::NoProjectFilesystem),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
@@ -3256,6 +3262,78 @@ async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
     assert!(text.contains("Setup link: https://provider.example/oauth"));
     assert!(harness.slack_deletes().is_empty());
     auth_provider.assert_single_call();
+}
+
+/// #7887, CX cell "Link owed": a challenge that cannot be completed from a
+/// chat surface must hand the user an address, not just name the destination.
+///
+/// This is the delivery-path counterpart to the unit coverage on
+/// `unserviceable_auth_prompt_message`. A device-link challenge is never
+/// serviceable (`auth_prompt_is_serviceable`), so the run is auto-denied and
+/// the user receives the unavailable copy instead of a prompt — that copy
+/// already said "open the Ironclaw web app" and gave nothing to click.
+///
+/// Driven end to end through the real observer and delivery coordinator, and
+/// asserted on the message actually posted to the channel, because the string
+/// is only a defect once it reaches a user.
+#[tokio::test]
+async fn slack_dm_device_link_auth_prompt_delivers_the_web_app_address() {
+    let auth_challenges: Arc<dyn AuthChallengeProvider> =
+        Arc::new(FakeAuthChallengeProvider::device_link());
+    let mut options = HarnessOptions::new(TurnMode::BlockAuth);
+    options.auth_challenges = Some(auth_challenges);
+    options.connect_link_base_url = Some("https://app.example.com".to_string());
+    let harness = build_harness_with_options(options).await;
+
+    let response = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    let text = messages[0]["text"].as_str().expect("Slack message text");
+    assert!(
+        text.contains("https://app.example.com/extensions"),
+        "a device-link user must be handed the web app address: {text}"
+    );
+    // The OAuth setup link is a different, single-use artifact and must not
+    // appear for a challenge that has no authorization URL at all.
+    assert!(
+        !text.contains("Setup link:"),
+        "a device-link challenge has no OAuth setup link to offer: {text}"
+    );
+}
+
+/// The ships-dark half of the test above: with no published origin the copy
+/// keeps its wording and never advertises a relative path into a customer
+/// conversation.
+#[tokio::test]
+async fn slack_dm_device_link_auth_prompt_ships_dark_without_a_configured_origin() {
+    let auth_challenges: Arc<dyn AuthChallengeProvider> =
+        Arc::new(FakeAuthChallengeProvider::device_link());
+    let mut options = HarnessOptions::new(TurnMode::BlockAuth);
+    options.auth_challenges = Some(auth_challenges);
+    let harness = build_harness_with_options(options).await;
+
+    let response = harness
+        .post_event(dm_message("Ev-auth", "needs auth"))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    let text = messages[0]["text"].as_str().expect("Slack message text");
+    assert!(
+        text.contains("web app"),
+        "the copy still has to name the destination in words: {text}"
+    );
+    assert!(
+        !text.contains("/extensions"),
+        "no origin means no address, never a relative path: {text}"
+    );
 }
 
 #[tokio::test]

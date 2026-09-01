@@ -472,3 +472,42 @@ fn context_debug_reports_identity_only() {
     assert!(rendered.contains("example"), "{rendered}");
     assert!(!rendered.contains("sensitive-config-value"), "{rendered}");
 }
+
+/// #7887 follow-up: a deployment-configuration gap must not travel as
+/// `Internal`, and must not be renderable as "this account cannot be linked".
+///
+/// The account is fine; an operator has not finished setup. `Internal`'s own
+/// contract reserves it for "genuinely unclassifiable failures", and this one
+/// names the missing settings exactly — so it was both misclassified and,
+/// downstream, rendered as a false claim about the user's account.
+#[test]
+fn a_configuration_gap_is_classified_apart_from_an_unclassifiable_failure() {
+    let not_configured = DeviceLinkError::NotConfigured {
+        reason: "the deployment has not configured its MTProto application identity",
+    };
+
+    assert_eq!(not_configured.code(), DeviceLinkErrorCode::NotConfigured);
+    assert_ne!(
+        not_configured.code(),
+        DeviceLinkErrorCode::Internal,
+        "a precisely remediable gap is not an unclassifiable failure"
+    );
+    assert_ne!(
+        not_configured.code(),
+        DeviceLinkErrorCode::AccountUnavailable,
+        "nothing is wrong with the user's account"
+    );
+    // Terminal for the user: a restart cannot help until an operator acts.
+    assert!(!not_configured.restartable());
+    // The wire form the card branches on to pick its terminal copy.
+    assert_eq!(
+        serde_json::to_string(&DeviceLinkErrorCode::NotConfigured).expect("serialize"),
+        "\"not_configured\""
+    );
+    // The reason names the missing settings so an operator can act on it.
+    assert!(
+        not_configured
+            .to_string()
+            .contains("MTProto application identity")
+    );
+}

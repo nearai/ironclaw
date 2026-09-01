@@ -20,6 +20,16 @@ pub struct ChannelHostAssemblyTestWiring {
     pub turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub identity: ironclaw_extension_host::channel_host::ChannelHostIdentity,
     pub run_delivery_settings: ironclaw_assistant::RunDeliverySettings,
+    /// Auth-prompt enrichment for a run parked `BlockedAuth`, forwarded
+    /// verbatim into `RunDeliveryServices.blocked_auth_prompts`. Production
+    /// always wires `None` through this test-support path (this fixture has
+    /// no `product_auth`/pairing-registry-backed source to hand it); an
+    /// integration test that needs a challenge-kind-specific unserviceable
+    /// message (`unserviceable_auth_prompt_message`'s ManualToken/DeviceLink
+    /// arms, #7897) supplies its own fake here rather than composition
+    /// growing a second real implementation just for the test.
+    pub blocked_auth_prompts:
+        Option<Arc<dyn ironclaw_product_contracts::prompt_source::BlockedAuthPromptSource>>,
 }
 
 #[allow(
@@ -363,7 +373,7 @@ impl RebornRuntimeStores {
                 auth_interaction: None,
                 identity: wiring.identity,
                 approval_context: None,
-                blocked_auth_prompts: None,
+                blocked_auth_prompts: wiring.blocked_auth_prompts,
                 auth_flow_cancel: None,
                 run_delivery_settings: wiring.run_delivery_settings,
                 admin_users,

@@ -42,6 +42,7 @@ pub mod auth_prompt;
 pub mod channel;
 pub mod channel_adapter;
 pub mod channel_identity;
+pub mod connect_link;
 pub mod device_link;
 pub mod egress;
 pub mod extension;

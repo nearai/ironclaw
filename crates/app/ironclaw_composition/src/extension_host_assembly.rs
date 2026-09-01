@@ -583,6 +583,9 @@ pub(crate) fn start_channel_host(
     });
     let workflow_factory = Arc::new(ironclaw_assistant::RebornChannelWorkflowFactory::new(
         ironclaw_assistant::RebornChannelWorkflowServices {
+            // Same env read, and the same no-origin fallback, as the channel
+            // connect notice (#7887).
+            setup_link_base_url: connect_link_base_url_from_env(),
             filesystem: Arc::clone(workflow_filesystem),
             thread_service,
             turn_coordinator,

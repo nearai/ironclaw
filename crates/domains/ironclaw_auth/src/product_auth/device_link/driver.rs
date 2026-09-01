@@ -814,6 +814,9 @@ fn auth_error_for(code: DeviceLinkErrorCode) -> AuthErrorCode {
         | DeviceLinkErrorCode::VendorUnavailable
         | DeviceLinkErrorCode::CustodyFailed
         | DeviceLinkErrorCode::Internal => AuthErrorCode::BackendUnavailable,
+        // An operator-configuration gap, not a flaky backend: `BackendUnavailable`
+        // would tell the caller to retry a service that is perfectly healthy.
+        DeviceLinkErrorCode::NotConfigured => AuthErrorCode::MalformedConfig,
     }
 }
 

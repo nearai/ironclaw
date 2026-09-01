@@ -1676,6 +1676,7 @@ registerPack("uk", {
   "deviceLink.revokeHint": "IronClaw тепер відображається як пристрій у {name}. Якщо побачите незнайомий пристрій, відкличте його там.",
   "deviceLink.startAgain": "Почати спочатку",
   "deviceLink.cannotRetry": "Цей обліковий запис {name} не можна прив'язати.",
+  "deviceLink.setupIncomplete": "Прив'язка облікового запису {name} ще не налаштована в цьому розгортанні. Адміністратор має завершити її в Адмін → Конфігурація.",
   "deviceLink.error.expired": "Код застарів, перш ніж його використали.",
   "deviceLink.error.unknown_flow": "Ця прив'язка більше не відкрита.",
   "deviceLink.error.declined": "Пристрій відхилено.",
@@ -1685,5 +1686,6 @@ registerPack("uk", {
   "deviceLink.error.identity_conflict": "Цей обліковий запис уже прив'язано. Від'єднайте його від облікового запису IronClaw, до якого його підключено, і повторіть спробу.",
   "deviceLink.error.vendor_unavailable": "Сервіс тимчасово недоступний.",
   "deviceLink.error.custody_failed": "Не вдалося безпечно зберегти прив'язку.",
+  "deviceLink.error.not_configured": "У цьому розгортанні бракує налаштувань, потрібних для цього з'єднання.",
   "deviceLink.error.internal": "Під час прив'язки сталася помилка."
 });

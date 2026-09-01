@@ -18,12 +18,36 @@ type AuthChallengeCall = (
     Vec<ironclaw_host_api::decision::RuntimeCredentialAuthRequirement>,
 );
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct FakeAuthChallengeProvider {
     calls: Mutex<Vec<AuthChallengeCall>>,
+    /// Which challenge the engine serves for [`AUTH_GATE`]. Defaults to
+    /// `OAuthUrl` (the serviceable shape the setup-link tests drive);
+    /// [`Self::device_link`] selects the shape that is never serviceable from
+    /// a chat surface, so delivery takes the unavailable-message path.
+    kind: AuthPromptChallengeKind,
+}
+
+impl Default for FakeAuthChallengeProvider {
+    fn default() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            kind: AuthPromptChallengeKind::OAuthUrl,
+        }
+    }
 }
 
 impl FakeAuthChallengeProvider {
+    /// A device-link challenge: no authorization URL, and
+    /// `auth_prompt_is_serviceable` rejects it on every surface, so the run is
+    /// auto-denied and the user gets the unavailable copy instead of a prompt.
+    pub(super) fn device_link() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            kind: AuthPromptChallengeKind::DeviceLink,
+        }
+    }
+
     pub(super) fn assert_single_call(&self) {
         let calls = self
             .calls
@@ -77,15 +101,22 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
         if gate_ref != AUTH_GATE {
             return Ok(None);
         }
-        Ok(Some(AuthChallengeView {
-            kind: AuthPromptChallengeKind::OAuthUrl,
-            provider: AuthProviderId::new("provider".to_string())
-                .expect("static provider id should be valid"), // safety: static test provider id is valid.
-            account_label: None,
-            authorization_url: Some(
+        let authorization_url = match self.kind {
+            // A device link has no URL to follow: the exchange happens on the
+            // vendor's own client, which is exactly why it is unserviceable
+            // here.
+            AuthPromptChallengeKind::DeviceLink => None,
+            _ => Some(
                 OAuthAuthorizationUrl::new("https://provider.example/oauth".to_string())
                     .expect("static OAuth URL should be valid"), // safety: static test URL is valid.
             ),
+        };
+        Ok(Some(AuthChallengeView {
+            kind: self.kind,
+            provider: AuthProviderId::new("provider".to_string())
+                .expect("static provider id should be valid"), // safety: static test provider id is valid.
+            account_label: None,
+            authorization_url,
             expires_at: None,
             pairing: None,
             device_link: None,

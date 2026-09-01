@@ -1193,7 +1193,7 @@ async fn notification_plan_for_state(
                     // or an unknown challenge). Deny: cancel the parked run and
                     // notify every channel. Typing a secret into a chat is
                     // never an option.
-                    let unavailable = prompts::unserviceable_auth_prompt_message(view.as_ref());
+                    let unavailable = services.unserviceable_auth_message(view.as_ref());
                     cancel_auth_blocked_run(
                         services.turn_coordinator.as_ref(),
                         services.auth_flow_cancel.as_deref(),

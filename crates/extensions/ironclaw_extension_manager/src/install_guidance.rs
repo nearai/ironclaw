@@ -146,10 +146,7 @@ const SETUP_QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_AL
 /// its cards on, so the landing resolves against the caller's own inventory
 /// without a second identity to keep in sync.
 pub(crate) fn personal_setup_link(base_url: Option<&str>, package_id: &str) -> Option<String> {
-    let base = base_url?.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return None;
-    }
+    let base = ironclaw_extension_contracts::connect_link::validated_connect_link_origin(base_url)?;
     let package_id = percent_encoding::utf8_percent_encode(package_id, SETUP_QUERY_VALUE);
     Some(format!(
         "{base}/extensions?configure={package_id}&setup=personal_account"

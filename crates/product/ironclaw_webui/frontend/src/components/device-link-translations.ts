@@ -42,6 +42,9 @@ registerPack("en", {
   "deviceLink.revokeHint": "IronClaw now shows up as a device in {name}. If you ever see a device you do not recognize, revoke it there.",
   "deviceLink.startAgain": "Start again",
   "deviceLink.cannotRetry": "This {name} account cannot be linked.",
+  // Terminal for the user, but nothing is wrong with their account — so this
+  // must not reuse `cannotRetry`, which asserts exactly that (#7887 follow-up).
+  "deviceLink.setupIncomplete": "Linking a {name} account is not set up on this deployment yet. An administrator needs to finish it in Admin \u2192 Configuration.",
   "deviceLink.error.expired": "The code expired before it was used.",
   "deviceLink.error.unknown_flow": "This link is no longer open.",
   "deviceLink.error.declined": "The device was refused.",
@@ -51,5 +54,6 @@ registerPack("en", {
   "deviceLink.error.identity_conflict": "This account is already linked. Unlink it from the IronClaw account where it is connected, then try again.",
   "deviceLink.error.vendor_unavailable": "The service is temporarily unavailable.",
   "deviceLink.error.custody_failed": "The link could not be saved securely.",
+  "deviceLink.error.not_configured": "This deployment is missing the settings this connection needs.",
   "deviceLink.error.internal": "Something went wrong while linking.",
 });
