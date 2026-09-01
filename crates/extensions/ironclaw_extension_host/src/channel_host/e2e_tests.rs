@@ -2976,11 +2976,20 @@ async fn slack_explicit_mention_survives_reply_shaped_twin_arriving_first() {
         "the authoritative app_mention must start one turn even when its \
          ambiguous message twin arrived first"
     );
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1, "the user must receive exactly one reply");
-    assert_eq!(messages[0]["channel"], "C891");
-    assert_eq!(messages[0]["text"], "mention reply");
-    assert_eq!(messages[0]["thread_ts"], "1710000007.000001");
+    wait_for_slack_stream_stops(&harness, 1).await;
+    let starts = harness.slack_stream_starts();
+    assert_eq!(starts.len(), 1, "the user must receive exactly one reply");
+    assert_eq!(starts[0]["channel"], "C891");
+    assert_eq!(starts[0]["thread_ts"], "1710000007.000001");
+    assert_eq!(
+        harness
+            .slack_streamed_text()
+            .matches("mention reply")
+            .count(),
+        1,
+        "the one admitted turn publishes one streamed answer"
+    );
+    assert!(harness.slack_messages().is_empty());
 }
 
 #[tokio::test]
@@ -2998,7 +3007,8 @@ async fn slack_explicit_mention_remains_single_when_authoritative_twin_arrives_f
         1,
         "an app_mention must start a turn without waiting for a message twin"
     );
-    assert_eq!(harness.slack_messages().len(), 1);
+    wait_for_slack_stream_stops(&harness, 1).await;
+    assert_eq!(harness.slack_stream_starts().len(), 1);
 
     let response = harness.post_event(STALE_ID_THREAD_MESSAGE_TWIN).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -3017,11 +3027,17 @@ async fn slack_explicit_mention_remains_single_when_authoritative_twin_arrives_f
         1,
         "the ambiguous message twin and callback retries must not add a turn"
     );
+    assert_eq!(harness.slack_stream_starts().len(), 1);
+    assert_eq!(harness.slack_stream_stops().len(), 1);
     assert_eq!(
-        harness.slack_messages().len(),
+        harness
+            .slack_streamed_text()
+            .matches("mention reply")
+            .count(),
         1,
         "the user must receive exactly one threaded reply"
     );
+    assert!(harness.slack_messages().is_empty());
 }
 
 #[tokio::test]
@@ -3039,7 +3055,8 @@ async fn slack_text_only_mentions_run_for_supported_ids_while_ordinary_reply_rem
         1,
         "a correctly configured message callback must not need an app_mention twin"
     );
-    assert_eq!(harness.slack_messages().len(), 1);
+    wait_for_slack_stream_stops(&harness, 1).await;
+    assert_eq!(harness.slack_stream_starts().len(), 1);
 
     let response = harness.post_event(ORDINARY_THREAD_REPLY).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -3058,11 +3075,17 @@ async fn slack_text_only_mentions_run_for_supported_ids_while_ordinary_reply_rem
         1,
         "ordinary thread chatter, including third-party mentions, must remain silent"
     );
+    assert_eq!(harness.slack_stream_starts().len(), 1);
+    assert_eq!(harness.slack_stream_stops().len(), 1);
     assert_eq!(
-        harness.slack_messages().len(),
+        harness
+            .slack_streamed_text()
+            .matches("text mention reply")
+            .count(),
         1,
         "ordinary thread chatter must not produce another bot reply"
     );
+    assert!(harness.slack_messages().is_empty());
 
     let mut w_options = HarnessOptions::new(TurnMode::Complete {
         assistant_text: "W mention reply".into(),
@@ -3078,7 +3101,16 @@ async fn slack_text_only_mentions_run_for_supported_ids_while_ordinary_reply_rem
         1,
         "a W-prefixed configured bot ID must reach signed ingress admission"
     );
-    assert_eq!(w_harness.slack_messages().len(), 1);
+    wait_for_slack_stream_stops(&w_harness, 1).await;
+    assert_eq!(w_harness.slack_stream_starts().len(), 1);
+    assert_eq!(
+        w_harness
+            .slack_streamed_text()
+            .matches("W mention reply")
+            .count(),
+        1
+    );
+    assert!(w_harness.slack_messages().is_empty());
 }
 
 /// Ephemeral-per-ping: pairing mid-thread. Unpaired carol is nudged in place
