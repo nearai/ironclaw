@@ -2581,6 +2581,43 @@ class RebornPrTestPlanTests(unittest.TestCase):
             workflow,
         )
 
+    def test_workflow_rejects_cargo_packages_outside_bucket(self) -> None:
+        workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        crate_job = workflow.split("\n  crate-tests:\n", 1)[1].split(
+            "\n  reborn-root-tests:\n", 1
+        )[0]
+        match = re.search(
+            r'if ! jq -e --argjson packages "\$\{BUCKET_PACKAGES\}" \'\n'
+            r"(?P<expression>.*?)\n          ' <<< \"\$\{CARGO_PACKAGES\}\"",
+            crate_job,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match, "crate runner must validate cargo_packages")
+        expression = match.group("expression").strip()  # type: ignore[union-attr]
+
+        def validate(cargo_packages: list[str]) -> bool:
+            completed = subprocess.run(
+                [
+                    "jq",
+                    "-e",
+                    "--argjson",
+                    "packages",
+                    '["ironclaw", "ironclaw_host_ingress"]',
+                    expression,
+                ],
+                input=json.dumps(cargo_packages),
+                capture_output=True,
+                text=True,
+            )
+            return completed.returncode == 0
+
+        self.assertTrue(validate(["ironclaw_host_ingress"]))
+        self.assertTrue(validate([]))
+        self.assertFalse(validate(["not-in-the-bucket"]))
+        self.assertFalse(validate(["ironclaw", "ironclaw"]))
+
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
             encoding="utf-8"
         )

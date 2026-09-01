@@ -413,7 +413,7 @@ jobs:
           incremental_env=()
           if ! jq -e --argjson packages "${BUCKET_PACKAGES}" '
             type == "array" and length == (unique | length) and
-            all(.[]; $packages | index(.) != null)
+            all(.[]; . as $package | $packages | index($package) != null)
           ' <<< "${CARGO_PACKAGES}" >/dev/null; then
             echo "cargo_packages must be a unique subset of bucket packages" >&2
             exit 1
