@@ -656,11 +656,28 @@ fn fold_terminal_facts(run: &mut RunReply, facts: &TerminalReplyFacts, folded: &
     match facts.status {
         TurnStatus::Completed => {
             folded.note_control_critical(run.document.clear_attention());
-            let text = facts
+            let canonical = facts
                 .answer
                 .as_deref()
                 .map(sanitize_model_visible_text)
                 .unwrap_or_default();
+            // The transcript row finalizes only the run's FINAL assistant
+            // message. When the progressive answer already ends with it (the
+            // earlier model calls' streamed text precedes it), finalize IN
+            // PLACE: replacing the shown text with its own tail would break
+            // every stream presentation's prefix-extension invariant — a
+            // stream sink's terminal reconcile would see a rewrite and
+            // present the answer a second time beside the stream. A
+            // canonical text the shown text does not end with is a genuine
+            // rewrite and replaces it; so does any text once the progressive
+            // bound truncated, because the canonical row is the only
+            // complete copy.
+            let shown = run.document.answer.text.as_str();
+            let text = if !run.document.answer.truncated && shown.ends_with(canonical.as_str()) {
+                shown.to_string()
+            } else {
+                canonical
+            };
             if let Some(text) = answer_text(&text).or_else(|| answer_text("")) {
                 folded.note_control_critical(
                     run.document.finalize_answer(

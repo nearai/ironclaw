@@ -481,6 +481,23 @@ impl Harness {
 
 /// Reply publication reconciles through per-target workers, off the drain
 /// path — stream-wire assertions poll with the file's bounded deadline.
+async fn wait_for_slack_session_status(harness: &Harness, expected: &str) {
+    for _ in 0..200 {
+        if harness
+            .slack_session_statuses()
+            .iter()
+            .any(|status| status == expected)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "expected an agents.sessions.setStatus({expected}) call; got {:?}",
+        harness.slack_session_statuses()
+    );
+}
+
 async fn wait_for_slack_stream_starts(harness: &Harness, expected: usize) {
     for _ in 0..200 {
         if harness.slack_stream_starts().len() >= expected {
@@ -2539,18 +2556,25 @@ async fn bare_approve_with_no_route_still_reports_binding_hint() {
         "missing route must not reach the approval service"
     );
 
-    // The user must receive a "couldn't match" hint.  The completed-turn reply
-    // ("done") occupies messages[0]; the BindingRequired hint is messages[1].
+    // The user must receive a "couldn't match" hint. The completed-turn
+    // reply ("done") rides the Agent stream; the BindingRequired hint is the
+    // one notice message.
+    wait_for_slack_stream_stops(&harness, 1).await;
+    assert!(
+        harness.slack_streamed_text().contains("done"),
+        "the hello turn's reply rides the stream: {}",
+        harness.slack_streamed_text()
+    );
     let messages = harness.slack_messages();
     assert_eq!(
         messages.len(),
-        2,
-        "expected final-reply (hello turn) + binding hint (DM_APPROVE), got {} message(s)",
+        1,
+        "expected only the binding hint (DM_APPROVE) as a message, got {} message(s)",
         messages.len()
     );
     // BindingRequired hint: "I couldn't match this reply … use `approve gate:<ref>`."
     // This uses the literal placeholder `<ref>`.
-    let hint_text = messages[1]["text"].as_str().unwrap_or("");
+    let hint_text = messages[0]["text"].as_str().unwrap_or("");
     assert!(
         hint_text.contains("approve gate:<ref>"),
         "hint must prompt user to use explicit gate ref; got: {hint_text:?}"
@@ -2590,10 +2614,29 @@ async fn slack_dm_delivers_final_reply_after_immediate_ack() {
     assert_body(response, "ok").await;
     harness.drain().await;
 
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], CHANNEL);
-    assert_eq!(messages[0]["text"], "hello from reborn");
+    // The reply rides the native Agent stream: one open (carrying content),
+    // one close — never a conventional `chat.postMessage`.
+    wait_for_slack_stream_stops(&harness, 1).await;
+    let starts = harness.slack_stream_starts();
+    assert_eq!(starts.len(), 1, "one Agent stream for the one reply");
+    assert_eq!(starts[0]["channel"], CHANNEL);
+    assert!(
+        starts[0]["chunks"]
+            .as_array()
+            .is_some_and(|chunks| !chunks.is_empty()),
+        "the stream opens carrying renderable content: {}",
+        starts[0]
+    );
+    assert!(
+        harness.slack_streamed_text().contains("hello from reborn"),
+        "the reply text rides the stream: {}",
+        harness.slack_streamed_text()
+    );
+    assert!(
+        harness.slack_messages().is_empty(),
+        "the reply never rides chat.postMessage: {:?}",
+        harness.slack_messages()
+    );
 }
 
 #[tokio::test]
@@ -2609,10 +2652,18 @@ async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
     assert_body(response, "ok").await;
     harness.drain().await;
 
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], CHANNEL);
-    assert_eq!(messages[0]["text"], "hello personal Slack binding");
+    wait_for_slack_stream_stops(&harness, 1).await;
+    let starts = harness.slack_stream_starts();
+    assert_eq!(starts.len(), 1, "one Agent stream for the one reply");
+    assert_eq!(starts[0]["channel"], CHANNEL);
+    assert!(
+        harness
+            .slack_streamed_text()
+            .contains("hello personal Slack binding"),
+        "the reply rides the stream: {}",
+        harness.slack_streamed_text()
+    );
+    assert!(harness.slack_messages().is_empty());
     // The generic assembly resolves the verified actor through the
     // channel-identity binding store with the installation-scoped key, then
     // performs an uncached freshness read before submitting the turn. The
@@ -2660,10 +2711,16 @@ async fn shared_channel_message_is_served_by_presence() {
         Some(&expected_actor),
         "a shared channel turn runs as the paired actor who invoked it"
     );
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], "C777");
-    assert_eq!(messages[0]["text"], "channel reply");
+    wait_for_slack_stream_stops(&harness, 1).await;
+    let starts = harness.slack_stream_starts();
+    assert_eq!(starts.len(), 1, "one Agent stream for the shared reply");
+    assert_eq!(starts[0]["channel"], "C777");
+    assert!(
+        harness.slack_streamed_text().contains("channel reply"),
+        "the reply rides the stream: {}",
+        harness.slack_streamed_text()
+    );
+    assert!(harness.slack_messages().is_empty());
 }
 
 /// Added with the run-acts-as-invoker ruling (#7377): a paired user's
@@ -2689,15 +2746,21 @@ async fn slack_top_level_mention_roots_a_thread_and_replies_in_it() {
         1,
         "the paired user's top-level mention is served as a turn"
     );
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], "C888");
-    assert_eq!(messages[0]["text"], "threaded reply");
+    wait_for_slack_stream_stops(&harness, 1).await;
+    let starts = harness.slack_stream_starts();
+    assert_eq!(starts.len(), 1, "one Agent stream for the one reply");
+    assert_eq!(starts[0]["channel"], "C888");
+    assert!(
+        harness.slack_streamed_text().contains("threaded reply"),
+        "the reply rides the stream: {}",
+        harness.slack_streamed_text()
+    );
     assert_eq!(
-        messages[0]["thread_ts"], "1710000004.000001",
-        "the reply threads on the pinged message's own ts — a top-level \
+        starts[0]["thread_ts"], "1710000004.000001",
+        "the stream threads on the pinged message's own ts — a top-level \
          mention roots its own conversation thread"
     );
+    assert!(harness.slack_messages().is_empty());
 }
 
 /// Added with the run-acts-as-invoker ruling (#7377), delivery inverted by
@@ -2855,18 +2918,28 @@ async fn slack_in_thread_mentions_each_run_in_their_own_thread_replying_in_the_v
         "each run acts as its own invoker"
     );
 
-    // Reply placement: both replies thread on the EXISTING vendor thread T,
+    // Reply placement: both replies stream in the EXISTING vendor thread T,
     // not on the individual pings.
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2);
-    for message in &messages {
-        assert_eq!(message["channel"], "C890");
-        assert_eq!(message["text"], "shared thread reply");
+    wait_for_slack_stream_stops(&harness, 2).await;
+    let starts = harness.slack_stream_starts();
+    assert_eq!(starts.len(), 2, "one Agent stream per served run");
+    for start in &starts {
+        assert_eq!(start["channel"], "C890");
         assert_eq!(
-            message["thread_ts"], "1710000006.000001",
+            start["thread_ts"], "1710000006.000001",
             "replies land in the mentioned thread T"
         );
     }
+    assert_eq!(
+        harness
+            .slack_streamed_text()
+            .matches("shared thread reply")
+            .count(),
+        2,
+        "each run's reply rides its own stream: {}",
+        harness.slack_streamed_text()
+    );
+    assert!(harness.slack_messages().is_empty());
 }
 
 /// Ephemeral-per-ping: pairing mid-thread. Unpaired carol is nudged in place
@@ -2899,11 +2972,16 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
         1,
         "an unpaired sender must not execute a run"
     );
-    assert_eq!(
-        harness.slack_messages().len(),
-        1,
-        "carol's nudge must not post publicly: {:?}",
+    assert!(
+        harness.slack_messages().is_empty(),
+        "carol's nudge must not post publicly (A's reply rides the stream): {:?}",
         harness.slack_messages()
+    );
+    wait_for_slack_stream_stops(&harness, 1).await;
+    assert_eq!(
+        harness.slack_stream_starts().len(),
+        1,
+        "A's reply is the only stream so far"
     );
     let nudges = harness.slack_ephemeral_messages();
     assert_eq!(nudges.len(), 1, "carol's connect nudge: {nudges:?}");
@@ -2940,12 +3018,22 @@ async fn slack_pairing_mid_thread_runs_in_carols_own_thread() {
     let actors = harness.coordinator.submitted_actors();
     assert_eq!(actors[1].user_id.as_str(), "user:slack-carol");
 
-    // Both replies (A's and carol's) are threaded on A's root ping; carol's
-    // earlier nudge stays off this room-visible log.
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 2, "A reply + carol reply");
-    assert_eq!(messages[1]["text"], "midthread reply");
-    assert_eq!(messages[1]["thread_ts"], "1710000007.000001");
+    // Both replies (A's and carol's) stream on A's root ping; carol's
+    // earlier nudge stays off the room-visible surfaces entirely.
+    wait_for_slack_stream_stops(&harness, 2).await;
+    let starts = harness.slack_stream_starts();
+    assert_eq!(starts.len(), 2, "A reply stream + carol reply stream");
+    assert_eq!(starts[1]["thread_ts"], "1710000007.000001");
+    assert_eq!(
+        harness
+            .slack_streamed_text()
+            .matches("midthread reply")
+            .count(),
+        2,
+        "both served runs' replies ride streams: {}",
+        harness.slack_streamed_text()
+    );
+    assert!(harness.slack_messages().is_empty());
 }
 
 /// Added with the run-acts-as-invoker ruling (#7377): shared-channel pings
@@ -3024,12 +3112,18 @@ async fn slack_top_level_mention_hydrates_channel_context() {
         "context carries the full scripted slice: {context:?}"
     );
 
-    // The turn itself is served and replies in its own thread as usual.
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], "C892");
-    assert_eq!(messages[0]["text"], "hydrated reply");
-    assert_eq!(messages[0]["thread_ts"], "1710000008.000001");
+    // The turn itself is served and streams its reply in its own thread.
+    wait_for_slack_stream_stops(&harness, 1).await;
+    let starts = harness.slack_stream_starts();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0]["channel"], "C892");
+    assert_eq!(starts[0]["thread_ts"], "1710000008.000001");
+    assert!(
+        harness.slack_streamed_text().contains("hydrated reply"),
+        "the reply rides the stream: {}",
+        harness.slack_streamed_text()
+    );
+    assert!(harness.slack_messages().is_empty());
 }
 
 #[tokio::test]
@@ -3047,10 +3141,22 @@ async fn slack_dm_retry_delivery_is_idempotent() {
     assert_eq!(retry.status(), StatusCode::OK);
     harness.drain().await;
 
-    let messages = harness.slack_messages();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["channel"], CHANNEL);
-    assert_eq!(messages[0]["text"], "hello from reborn");
+    wait_for_slack_stream_stops(&harness, 1).await;
+    assert_eq!(
+        harness.slack_stream_starts().len(),
+        1,
+        "the retried event never opens a second stream"
+    );
+    assert_eq!(
+        harness
+            .slack_streamed_text()
+            .matches("hello from reborn")
+            .count(),
+        1,
+        "the reply is streamed exactly once: {}",
+        harness.slack_streamed_text()
+    );
+    assert!(harness.slack_messages().is_empty());
 }
 
 #[tokio::test]
@@ -3104,14 +3210,19 @@ async fn slack_dm_streams_working_state_and_closes_the_stream_after_final_reply(
     let response = harness.post_event(dm_message("Ev-working", "think")).await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    wait_for_slack_stream_starts(&harness, 1).await;
-    let starts = harness.slack_stream_starts();
-    assert_eq!(starts.len(), 1, "a running turn opens exactly one stream");
-    assert_eq!(starts[0]["channel"], CHANNEL);
+    // Working state on a stream channel is the `processing` session
+    // assertion — never an empty Agent container: with nothing renderable
+    // yet, no stream exists at all.
+    wait_for_slack_session_status(&harness, "processing").await;
     assert_eq!(
         harness.slack_session_statuses().first().map(String::as_str),
         Some("processing"),
         "the agent session is asserted processing while the run works"
+    );
+    assert!(
+        harness.slack_stream_starts().is_empty(),
+        "no stream opens before renderable content exists: {:?}",
+        harness.slack_stream_starts()
     );
     assert!(
         harness.slack_messages().is_empty(),
@@ -3126,6 +3237,20 @@ async fn slack_dm_streams_working_state_and_closes_the_stream_after_final_reply(
     harness.drain().await;
 
     wait_for_slack_stream_stops(&harness, 1).await;
+    let starts = harness.slack_stream_starts();
+    assert_eq!(
+        starts.len(),
+        1,
+        "the reply opens exactly one stream, carrying its content"
+    );
+    assert_eq!(starts[0]["channel"], CHANNEL);
+    assert!(
+        starts[0]["chunks"]
+            .as_array()
+            .is_some_and(|chunks| !chunks.is_empty()),
+        "the stream opens with the terminal content, never empty: {}",
+        starts[0]
+    );
     let stops = harness.slack_stream_stops();
     assert_eq!(
         stops.len(),
@@ -6907,7 +7032,9 @@ async fn a_failed_dm_run_shows_exactly_one_terminal_failure_on_the_wire() {
     let harness = build_harness(TurnMode::Running).await;
     let response = harness.post_event(DM_FINAL).await;
     assert_eq!(response.status(), StatusCode::OK);
-    wait_for_slack_stream_starts(&harness, 1).await;
+    // The run is registered and working (processing session, no stream yet
+    // — nothing renderable exists before the failure).
+    wait_for_slack_session_status(&harness, "processing").await;
 
     harness
         .coordinator

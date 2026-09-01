@@ -683,3 +683,90 @@ fn model_text_is_cumulative_per_call_and_calls_concatenate_as_phases() {
         "I’ll research this first.\n\nActually, here it is."
     );
 }
+
+/// A tool run streams text in more than one model call (pre-tool commentary,
+/// then the answer), but the durable transcript finalizes only the run's
+/// final assistant message. The canonical text is the final phase of what
+/// was already streamed, so finalization must converge IN PLACE — replacing
+/// the shown text with its own tail would break every stream presentation's
+/// prefix-extension invariant (the Slack terminal reconcile would see a
+/// rewrite and duplicate the answer beside the stream).
+#[test]
+fn terminal_facts_matching_the_final_phase_finalize_in_place() {
+    let live = fixture("terminal-in-place");
+    live.observe(LoopHostMilestoneKind::ModelStarted {
+        requested_model_profile_id: None,
+    });
+    live.observe(LoopHostMilestoneKind::ModelTextDelta {
+        safe_text: "Let me check the workspace.".to_string(),
+    });
+    live.observe(LoopHostMilestoneKind::ModelCompleted {
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("scripted")
+            .unwrap(),
+    });
+    live.observe(LoopHostMilestoneKind::ModelStarted {
+        requested_model_profile_id: None,
+    });
+    live.observe(LoopHostMilestoneKind::ModelTextDelta {
+        safe_text: "The answer is 42.".to_string(),
+    });
+    live.observe(LoopHostMilestoneKind::ModelCompleted {
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("scripted")
+            .unwrap(),
+    });
+    assert_eq!(
+        live.document().answer.text.as_str(),
+        "Let me check the workspace.\n\nThe answer is 42.",
+        "the progressive answer joins the finished phases"
+    );
+
+    let snapshot = live.projection.apply_terminal_facts(
+        &live.scope,
+        live.run_id,
+        TerminalReplyFacts {
+            actor: Some(live.actor.clone()),
+            status: TurnStatus::Completed,
+            nothing_to_report: false,
+            answer: Some("The answer is 42.".to_string()),
+            attachments: Vec::new(),
+            failure_summary: None,
+        },
+    );
+    let document = &snapshot.document;
+    assert!(document.answer.finalized);
+    assert_eq!(document.outcome, Some(ReplyOutcome::Completed));
+    assert_eq!(
+        document.answer.text.as_str(),
+        "Let me check the workspace.\n\nThe answer is 42.",
+        "a canonical text that is the shown text's final phase finalizes in place"
+    );
+}
+
+/// The empty-transcript completion (`answer: None` — nothing to report, or a
+/// row without content) must not blank streamed text at terminal either:
+/// the empty canonical is trivially contained in whatever is shown.
+#[test]
+fn terminal_facts_without_an_answer_keep_the_streamed_text() {
+    let live = fixture("terminal-keep");
+    live.observe(LoopHostMilestoneKind::ModelTextDelta {
+        safe_text: "Streamed but never persisted.".to_string(),
+    });
+    let snapshot = live.projection.apply_terminal_facts(
+        &live.scope,
+        live.run_id,
+        TerminalReplyFacts {
+            actor: Some(live.actor.clone()),
+            status: TurnStatus::Completed,
+            nothing_to_report: false,
+            answer: None,
+            attachments: Vec::new(),
+            failure_summary: None,
+        },
+    );
+    assert!(snapshot.document.answer.finalized);
+    assert_eq!(
+        snapshot.document.answer.text.as_str(),
+        "Streamed but never persisted.",
+        "an absent canonical answer never erases what the user already saw"
+    );
+}

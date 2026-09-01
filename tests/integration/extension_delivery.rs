@@ -84,9 +84,12 @@ use ironclaw_host_api::{
     scope::{ExecutionContext, Principal},
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
+use ironclaw_loop_contracts::{
+    LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
+};
 use ironclaw_loop_host::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedModelStreamSink,
 };
 use ironclaw_outbound::OutboundDeliveryStatus;
 use ironclaw_product_contracts::binding::ProductBindingResolver;
@@ -223,6 +226,95 @@ impl HostManagedModelGateway for StaticReplyGateway {
         _request: HostManagedModelRequest,
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         Ok(HostManagedModelResponse::assistant_reply(self.0))
+    }
+}
+
+/// A two-phase gateway shaped like a real streaming provider on a tool run:
+/// the first model call streams pre-tool commentary through the progress
+/// sink and returns a real `builtin.extension_search` call; the second call
+/// streams and returns the final answer. The run's progressive reply
+/// therefore holds BOTH phases while the durable transcript finalizes only
+/// the second — the divergence the exactly-once journey pins.
+struct PreambleToolReplyGateway {
+    preamble: &'static str,
+    answer: &'static str,
+    calls: Mutex<usize>,
+}
+
+impl PreambleToolReplyGateway {
+    fn new(preamble: &'static str, answer: &'static str) -> Self {
+        Self {
+            preamble,
+            answer,
+            calls: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl HostManagedModelGateway for PreambleToolReplyGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Err(HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "PreambleToolReplyGateway requires the capability-aware streaming path",
+        ))
+    }
+
+    async fn stream_model_with_capabilities_and_progress(
+        &self,
+        _request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+        sink: Arc<dyn HostManagedModelStreamSink>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let index = {
+            let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+            let index = *calls;
+            *calls += 1;
+            index
+        };
+        if index > 0 {
+            sink.safe_text_update(self.answer.to_string()).await;
+            return Ok(HostManagedModelResponse::assistant_reply(self.answer));
+        }
+        sink.safe_text_update(self.preamble.to_string()).await;
+        let search = CapabilityId::new("builtin.extension_search").expect("capability id");
+        let tool = capabilities
+            .tool_definitions()
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("tool_definitions failed: {error}"),
+                )
+            })?
+            .into_iter()
+            .find(|definition| definition.capability_id == search)
+            .expect("builtin.extension_search is on the vendor run's surface");
+        let candidate = capabilities
+            .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
+                provider_id: "itest-provider".to_string(),
+                provider_model_id: "itest-model".to_string(),
+                turn_id: Some("itest-turn-1".to_string()),
+                id: "itest-call-1".to_string(),
+                name: tool.name,
+                arguments: serde_json::json!({ "query": "web" }),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            }))
+            .await
+            .map_err(|error| {
+                HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidRequest,
+                    format!("register_provider_tool_call failed: {error}"),
+                )
+            })?;
+        Ok(HostManagedModelResponse::capability_calls(
+            vec![candidate],
+            "",
+        ))
     }
 }
 
@@ -1490,6 +1582,19 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         })
         .collect();
     assert_slack_thread_delivery_evidence(&stream_opens);
+    assert_eq!(
+        stream_opens.len(),
+        1,
+        "one logical reply opens exactly one Agent stream: {stream_opens:?}"
+    );
+    for open in &stream_opens {
+        let chunks = open["chunks"].as_array();
+        assert!(
+            chunks.is_some_and(|chunks| !chunks.is_empty()),
+            "chat.startStream never opens an empty Agent container; a stream \
+             opens only when renderable content exists and carries it: {open}"
+        );
+    }
     let streamed: String = requests
         .iter()
         .filter(|request| {
@@ -1534,6 +1639,218 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
         .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
         .expect("host-side credential injection must add the authorization header");
     assert_eq!(authorization.1, format!("Bearer {SLACK_BOT_TOKEN}"));
+}
+
+/// A Slack tool run whose model streams pre-tool commentary, executes a real
+/// capability, and then streams the answer — the multi-phase shape the live
+/// stack produces. The progressive reply concatenates both phases while the
+/// durable transcript finalizes only the final one, so this journey pins the
+/// exactly-once invariant end to end: one Agent stream carrying the
+/// commentary, a task card, and the answer; one close; and the terminal
+/// answer NEVER also posted as a conventional `chat.postMessage`.
+#[tokio::test(flavor = "multi_thread")]
+async fn slack_tool_run_with_streamed_preamble_answers_exactly_once() {
+    const PREAMBLE: &str = "Let me search the catalog first.";
+    const ANSWER: &str = "The catalog holds a web-access extension.";
+    let group = RebornIntegrationGroup::builder()
+        .storage(StorageMode::LibSql)
+        .extension_delivery()
+        .await
+        .expect("delivery group builds");
+    activate_slack(&group).await;
+    let services = reborn_services(&group);
+    assert!(
+        services.register_static_channel_egress_credentials_for_test(vec![(
+            "slack".to_string(),
+            "slack_bot_token".to_string(),
+            ironclaw_secrets::SecretMaterial::from(SLACK_BOT_TOKEN.to_string()),
+        )]),
+        "the composed runtime must expose channel-egress credential bridging"
+    );
+
+    let inbound = group
+        .thread("conv-slack-preamble-inbound")
+        .script([RebornScriptedReply::text("unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+    let delivery_services = delivery_run_services(&inbound, services, "slack");
+    let observer = Arc::new(RecordingForwardObserver::new(Arc::new(
+        RunDeliveryObserver::new(delivery_services),
+    )));
+    let ingress = VendorIngress::register(
+        services
+            .extension_ingress_parts()
+            .expect("composition built the generic ingress"),
+        "slack",
+        SLACK_INSTALLATION,
+        SLACK_SIGNING_SECRET,
+        VerifiedEvidenceMint::RequestSignature {
+            signature_header: "X-Slack-Signature".to_string(),
+            timestamp_header: Some("X-Slack-Request-Timestamp".to_string()),
+        },
+        &inbound,
+        Arc::clone(&observer),
+    );
+
+    let body = json!({
+        "type": "event_callback",
+        "event_id": "Ev-preamble-slack-1",
+        "team_id": "T-A",
+        "event": {
+            "type": "app_mention",
+            "user": "U777",
+            "channel": "C777",
+            "text": "<@UBOT> search the catalog and tell me",
+            "thread_ts": "1710000200.000060",
+            "ts": "1710000300.000200"
+        }
+    })
+    .to_string();
+    let evidence = ProtocolAuthEvidence::test_verified(
+        AuthRequirement::RequestSignature {
+            header_name: "X-Slack-Signature".to_string(),
+            timestamp_header_name: Some("X-Slack-Request-Timestamp".to_string()),
+        },
+        SLACK_INSTALLATION,
+    );
+    let slack_binding_service = inbound
+        .binding_service_for_test()
+        .expect("group binding service");
+    let (vendor_scope, _vendor_actor_user_id) = preresolve_vendor_turn_scope(
+        &slack_binding_service,
+        &ironclaw_slack_extension::SlackChannelAdapter,
+        "slack",
+        SLACK_INSTALLATION,
+        &[],
+        &evidence,
+        &body,
+        true,
+    )
+    .await;
+    inbound.register_scope_gateway_for_test(
+        vendor_scope.clone(),
+        Arc::new(PreambleToolReplyGateway::new(PREAMBLE, ANSWER)),
+    );
+
+    let timestamp = now_unix().to_string();
+    let signature = slack_signature(&timestamp, &body);
+    let status = ingress
+        .post(
+            SLACK_ROUTE,
+            &body,
+            vec![
+                ("X-Slack-Signature", signature),
+                ("X-Slack-Request-Timestamp", timestamp),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "the signed event must be accepted");
+    ingress.drain().await;
+    assert_eq!(
+        observer.accepted_count(),
+        1,
+        "the signed tool-run mention must be admitted (errors: {:?})",
+        observer.errors()
+    );
+    let run_id = observer
+        .accepted_run_id()
+        .expect("the accepted Slack event must identify its submitted run");
+    let coordinator = inbound.turn_coordinator_for_test();
+    wait_for_run_status_in_scope(&coordinator, &vendor_scope, run_id, TurnStatus::Completed).await;
+    let durable_reply = inbound
+        .thread_service_for_test()
+        .expect("group thread service")
+        .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
+            scope: thread_scope_for_turn(&vendor_scope),
+            thread_id: vendor_scope.thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+        })
+        .await
+        .expect("Slack thread history remains readable")
+        .expect("Slack reply is durable");
+    assert!(
+        durable_reply
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains(ANSWER)),
+        "the durable transcript finalizes the answer: {durable_reply:?}"
+    );
+
+    // The wire settles exactly once: one stream carrying commentary, a task
+    // card, and the answer; one close; zero conventional posts of either.
+    let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let requests = loop {
+        let requests = inbound.captured_network_requests_for_test();
+        let stops = requests
+            .iter()
+            .filter(|request| request.url.ends_with("/api/chat.stopStream"))
+            .count();
+        if stops >= 1 {
+            break requests;
+        }
+        assert!(
+            tokio::time::Instant::now() < wire_deadline,
+            "the stream must close at the terminal revision; got {:?}",
+            requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let stream_opens: Vec<serde_json::Value> = requests
+        .iter()
+        .filter(|request| request.url.ends_with("/api/chat.startStream"))
+        .map(|request| {
+            serde_json::from_slice(&request.body).expect("chat.startStream body is JSON")
+        })
+        .collect();
+    assert_eq!(
+        stream_opens.len(),
+        1,
+        "one logical reply opens exactly one Agent stream: {stream_opens:?}"
+    );
+    assert!(
+        stream_opens[0]["chunks"]
+            .as_array()
+            .is_some_and(|chunks| !chunks.is_empty()),
+        "the one stream opens carrying renderable content: {}",
+        stream_opens[0]
+    );
+    let streamed: String = requests
+        .iter()
+        .filter(|request| {
+            request.url.ends_with("/api/chat.startStream")
+                || request.url.ends_with("/api/chat.appendStream")
+                || request.url.ends_with("/api/chat.stopStream")
+        })
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        streamed.contains(PREAMBLE) && streamed.contains(ANSWER),
+        "the stream carries both streamed phases: {streamed}"
+    );
+    assert!(
+        streamed.contains("task_update"),
+        "the real capability call rides the stream as a task card: {streamed}"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.ends_with("/api/chat.stopStream"))
+            .count(),
+        1,
+        "the stream is closed exactly once"
+    );
+    let conventional: Vec<String> = requests
+        .iter()
+        .filter(|request| request.url.ends_with("/api/chat.postMessage"))
+        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
+        .filter(|body| body.contains(ANSWER) || body.contains(PREAMBLE))
+        .collect();
+    assert!(
+        conventional.is_empty(),
+        "the terminal answer is never also posted as a conventional message: {conventional:?}"
+    );
 }
 
 /// DEL-10: the bundled Telegram package — one manifest plus the adapter

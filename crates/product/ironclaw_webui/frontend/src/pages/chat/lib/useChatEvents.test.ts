@@ -430,6 +430,89 @@ test("useChatEvents: completed projection text adopts the durable timeline ident
   assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
 });
 
+test("useChatEvents: finalized text converges the run's live bubble by identity, not content", () => {
+  const harness = createUseChatEventsHarness();
+
+  // A tool run's live answer concatenates every model call's streamed text
+  // (pre-tool commentary + the answer); the durable transcript finalizes a
+  // different string. Convergence must key on the run's live-text identity —
+  // content equality would miss and render the answer twice.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          {
+            text: {
+              id: "text:run-1",
+              run_id: "run-1",
+              body: "Let me check the workspace.\n\nThe answer is 42.",
+            },
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].isFinalReply, false);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "completed" } },
+          {
+            text: {
+              id: "durable-message-1",
+              run_id: "run-1",
+              body: "The answer is 42.",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  const assistant = harness.messages.filter((m) => m.role === "assistant");
+  assert.equal(
+    assistant.length,
+    1,
+    `one logical answer per run after finalization; got ${JSON.stringify(
+      assistant.map((m) => ({ id: m.id, content: m.content })),
+    )}`,
+  );
+  assert.equal(assistant[0].id, "msg-durable-message-1");
+  assert.equal(assistant[0].content, "The answer is 42.");
+  assert.equal(assistant[0].isFinalReply, true);
+
+  // A late live update for the finalized run (the terminal revision's own
+  // publish racing the durable item) must not resurrect the bubble.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            text: {
+              id: "text:run-1",
+              run_id: "run-1",
+              body: "Let me check the workspace.\n\nThe answer is 42.",
+            },
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(
+    harness.messages.filter((m) => m.role === "assistant").length,
+    1,
+    "a late live update never reintroduces a second answer",
+  );
+});
+
 test("useChatEvents: final_reply replaces matching streamed projection bubble", () => {
   const harness = createUseChatEventsHarness();
 

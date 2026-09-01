@@ -49,8 +49,7 @@ use ironclaw_host_api::ids::SecretHandle;
 use serde_json::{Value, json};
 
 use crate::api::SlackWebApiMethod;
-use crate::channel::{SLACK_BOT_TOKEN_HANDLE, SlackChannelAdapter, post_slack_chunk};
-use crate::mrkdwn::{render_slack_mrkdwn, slack_text_chunks};
+use crate::channel::{SLACK_BOT_TOKEN_HANDLE, SlackChannelAdapter};
 use crate::reply_context::SlackReplyContext;
 
 mod agent_api;
@@ -63,7 +62,7 @@ use checkpoint::{
     SlackTerminalState, char_prefix, encode_checkpoint, load_checkpoint, normalize_for_match,
     normalized_tail,
 };
-use plan::{AnswerRewritten, plan_chunks, terminal_note};
+use plan::{AnswerRewritten, ChunkPlan, plan_chunks, terminal_note};
 
 /// The checkpoint payload version this sink writes and understands. A
 /// checkpoint of any other version is treated as absent (fresh presentation)
@@ -152,6 +151,16 @@ impl Reconciler<'_> {
     }
 
     fn record_ref(&mut self, reference: &str) {
+        // One report cites each provider ref once — a terminal that opens
+        // and closes the same stream in a single reconcile is one message.
+        if self
+            .evidence
+            .provider_refs
+            .iter()
+            .any(|existing| existing.as_str() == reference)
+        {
+            return;
+        }
         match ReplyProviderRef::new(reference) {
             Ok(reference) => {
                 if let Err(error) = self.evidence.provider_refs.push(reference) {
@@ -377,6 +386,26 @@ impl Reconciler<'_> {
                 });
             }
         };
+        if plan.chunks.is_empty() {
+            // Nothing renderable yet (the run's first revision carries only
+            // `Preparing`): opening now would show the user an empty Agent
+            // container. The session already reads `processing` and the
+            // checkpoint persists; the stream opens — carrying its first
+            // content — at the first revision that has any.
+            return Ok(());
+        }
+        self.start_stream(route, &plan).await.map(|_| ())
+    }
+
+    /// The one `chat.startStream` call: opens the stream carrying `plan`'s
+    /// chunks, establishes the checkpoint's stream state, and latches the
+    /// unaddressable-ghost ambiguity (Slack documents no idempotency key and
+    /// no way to locate a stream after a lost response).
+    async fn start_stream(
+        &mut self,
+        route: &SlackReplyRoute,
+        plan: &ChunkPlan,
+    ) -> Result<SlackStreamState, ReplySinkOutcome> {
         let mut body = json!({
             "channel": route.channel,
             "task_display_mode": TASK_DISPLAY_MODE_TIMELINE,
@@ -415,24 +444,24 @@ impl Reconciler<'_> {
                         ),
                     });
                 };
-                self.checkpoint.stream = Some(SlackStreamState {
+                let stream = SlackStreamState {
                     channel: route.channel.clone(),
                     ts: ts.clone(),
                     appended_chars: 0,
                     appended_hash: String::new(),
                     opened_at_revision: self.request.revision.revision,
                     pending: None,
-                });
+                };
+                self.checkpoint.stream = Some(stream.clone());
                 self.apply_state(&plan.applied);
                 self.record_ref(&ts);
-                Ok(())
+                Ok(stream)
             }
             // No ts to read back, and Slack documents no way to find a
             // stream a lost response may have created: mark the checkpoint
-            // so no later reconcile opens another stream (or posts the
-            // terminal text conventionally beside a ghost stream). The host
-            // records the ambiguity and settles `Unknown` when it never
-            // resolves.
+            // so no later reconcile opens another stream (or presents the
+            // terminal text beside a ghost stream). The host records the
+            // ambiguity and settles `Unknown` when it never resolves.
             Err(SlackApiFailure::Ambiguous { reason }) => {
                 self.checkpoint.stream_open_ambiguous = true;
                 Err(ReplySinkOutcome::Ambiguous {
@@ -577,26 +606,16 @@ impl Reconciler<'_> {
 
     /// The terminal revision: close the stream with the remaining delta and
     /// the outcome note (`session_status: active`), or — when no stream was
-    /// ever opened — post the terminal text conventionally and activate the
-    /// session; then upload attachments; then mark the terminal applied.
+    /// ever opened — create and close ONE native Agent stream carrying the
+    /// terminal content; then upload attachments; then mark the terminal
+    /// applied. The terminal answer is never posted as a conventional
+    /// message.
     async fn finish(&mut self, route: &SlackReplyRoute) -> ReplySinkOutcome {
         let document = self.request.revision.document.clone();
         if self.checkpoint.terminal.is_none() {
             let outcome = match self.checkpoint.stream.clone() {
                 Some(stream) => self.close_stream(route, &document, &stream).await,
-                None if self.checkpoint.stream_open_ambiguous => {
-                    // A ghost stream may exist and may already show the
-                    // chunks the unanswered `chat.startStream` carried;
-                    // posting the terminal text beside it could duplicate
-                    // content. Stay ambiguous; the host settles `Unknown`.
-                    Err(ReplySinkOutcome::Ambiguous {
-                        reason: ReplyOutcomeReason::new(
-                            "an earlier chat.startStream went unanswered; the terminal text is \
-                             not posted beside a stream slack may have created",
-                        ),
-                    })
-                }
-                None => self.post_terminal_conventionally(route, &document).await,
+                None => self.open_and_close_terminal_stream(route, &document).await,
             };
             if let Err(outcome) = outcome {
                 return outcome;
@@ -674,22 +693,26 @@ impl Reconciler<'_> {
             Ok(plan) => plan,
             Err(AnswerRewritten) => {
                 // The canonical answer is not an extension of what was
-                // streamed: close the stream as it stands and post the
-                // canonical text as its own message so nothing is lost.
-                let closed = self
-                    .stop_stream(
-                        route,
-                        document,
-                        stream,
-                        Vec::new(),
-                        &SlackAppliedState::default(),
-                    )
-                    .await?;
-                if closed {
-                    self.checkpoint.stream = None;
-                    self.post_terminal_conventionally(route, document).await?;
-                }
-                return Ok(());
+                // streamed (a genuine rewrite — the in-place terminal fold
+                // upstream absorbs the ordinary multi-phase case): close the
+                // stale stream as it stands and re-present the canonical
+                // text on ONE fresh native stream, opened and closed in this
+                // reconcile. Never as a conventional message beside the
+                // stream — that is the duplicate-answer shape.
+                self.stop_stream(
+                    route,
+                    document,
+                    stream,
+                    Vec::new(),
+                    &SlackAppliedState::default(),
+                )
+                .await?;
+                self.checkpoint.stream = None;
+                self.checkpoint.tasks.clear();
+                self.checkpoint.tasks_floor_ordinal = 0;
+                self.checkpoint.status_key = None;
+                self.checkpoint.attention_key = None;
+                return self.open_and_close_terminal_stream(route, document).await;
             }
         };
         let mut applied = plan.applied.clone();
@@ -765,49 +788,53 @@ impl Reconciler<'_> {
         }
     }
 
-    /// No stream was ever opened (the run ended before its first revision
-    /// reached Slack): the terminal text goes out as ordinary messages and
-    /// the session is activated.
-    async fn post_terminal_conventionally(
+    /// No live stream exists at the terminal (the run ended before any
+    /// renderable content reached Slack, or a rewrite closed the stale one):
+    /// the terminal content still goes out on the native Agent surface — ONE
+    /// stream created and closed here — never as a conventional message. A
+    /// terminal with nothing to show opens nothing and only settles the
+    /// session.
+    async fn open_and_close_terminal_stream(
         &mut self,
         route: &SlackReplyRoute,
         document: &ReplyDocument,
     ) -> Result<(), ReplySinkOutcome> {
-        let mut text = document.answer.text.as_str().to_string();
-        if let Some(note) = terminal_note(document) {
-            if !text.trim().is_empty() {
-                text.push_str("\n\n");
-            }
-            text.push_str(&note);
+        if self.checkpoint.stream_open_ambiguous {
+            // A ghost stream may exist and may already show the chunks the
+            // unanswered `chat.startStream` carried; presenting the terminal
+            // text beside it could duplicate content. Stay ambiguous; the
+            // host settles `Unknown`.
+            return Err(ReplySinkOutcome::Ambiguous {
+                reason: ReplyOutcomeReason::new(
+                    "an earlier chat.startStream went unanswered; the terminal text is \
+                     not posted beside a stream slack may have created",
+                ),
+            });
         }
-        if !text.trim().is_empty() {
-            let rendered = render_slack_mrkdwn(&text);
-            let chunks = slack_text_chunks(&rendered);
-            let already_posted =
-                usize::try_from(self.checkpoint.terminal_posted_chunks).unwrap_or(usize::MAX);
-            for (index, chunk) in chunks.iter().enumerate().skip(already_posted) {
-                let outcome = post_slack_chunk(
-                    self.api.egress,
-                    self.api.credential,
-                    &route.channel,
-                    route.thread_ts.as_deref(),
-                    chunk,
-                    None,
-                )
+        let note = terminal_note(document);
+        let plan = match plan_chunks(document, &self.checkpoint, 0, "", note.as_deref()) {
+            Ok(plan) => plan,
+            Err(AnswerRewritten) => {
+                return Err(ReplySinkOutcome::Permanent {
+                    reason: ReplyOutcomeReason::new(
+                        "fresh slack stream cannot start from a prefix",
+                    ),
+                });
+            }
+        };
+        if plan.chunks.is_empty() {
+            // Nothing to show (a completed run with nothing to report): no
+            // stream, no message — only the session settling.
+            return self
+                .ensure_session_status(route, SlackSessionStatus::Active, false)
                 .await;
-                match outcome {
-                    PartDeliveryOutcome::Sent { vendor_message_ref } => {
-                        self.checkpoint.terminal_posted_chunks = index as u64 + 1;
-                        if let Some(reference) = vendor_message_ref {
-                            self.record_ref(&reference);
-                        }
-                    }
-                    failed => return Err(outcome_for_part(failed)),
-                }
-            }
         }
-        self.ensure_session_status(route, SlackSessionStatus::Active, false)
+        let stream = self.start_stream(route, &plan).await?;
+        let mut applied = plan.applied.clone();
+        applied.closes_stream = true;
+        self.stop_stream(route, document, &stream, Vec::new(), &applied)
             .await
+            .map(|_| ())
     }
 }
 

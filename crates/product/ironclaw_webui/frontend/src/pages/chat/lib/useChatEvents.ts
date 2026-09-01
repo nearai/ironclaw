@@ -664,13 +664,19 @@ function applyProjectionItems({
         let existing = phaseAware.findIndex(
           (m) => m.id === messageId || (timelineMessageId && m.id === timelineMessageId),
         );
-        if (existing < 0 && finalizedText) {
+        if (existing < 0 && finalizedText && textRunId) {
+          // Converge by identity, never by content: the run's live streaming
+          // bubble (a `text-…` projection item) IS the same logical answer
+          // the durable transcript finalizes, even when their strings differ
+          // (the live text concatenates every model call's streamed phases;
+          // the transcript row holds only the final one).
           existing = phaseAware.findLastIndex(
             (message) =>
               message?.role === "assistant" &&
               message.turnRunId === textRunId &&
               message.isFinalReply === false &&
-              message.content === (item.text.body || ""),
+              typeof message.id === "string" &&
+              message.id.startsWith("text-"),
           );
         }
         const next = {

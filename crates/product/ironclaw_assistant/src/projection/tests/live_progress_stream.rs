@@ -374,8 +374,11 @@ async fn model_text_phases_concatenate_under_one_live_id_and_the_transcript_row_
         "one stable live text id per run carries every model call's text in order"
     );
 
-    // The durable terminal facts replace the ephemeral stream text with the
-    // transcript row; a stray delta after that changes nothing.
+    // The durable terminal facts finalize the answer. The transcript row is
+    // the shown text's final phase, so finalization converges IN PLACE —
+    // replacing the shown text with its own tail is the rewrite shape that
+    // duplicated answers on every stream surface. A stray delta after the
+    // terminal changes nothing.
     fixture.sink.projection.apply_terminal_facts(
         &scope,
         run_id,
@@ -410,10 +413,10 @@ async fn model_text_phases_concatenate_under_one_live_id_and_the_transcript_row_
         live_text(&events),
         vec![(
             format!("text:{run_id}"),
-            "Here is the final answer.".to_string(),
+            "I’ll research this first.\n\nHere is the final answer.".to_string(),
             false,
         )],
-        "the finalized transcript text is authoritative and terminal documents ignore stray text"
+        "finalization keeps the shown text (the canonical row is its final phase) and terminal documents ignore stray text"
     );
 }
 

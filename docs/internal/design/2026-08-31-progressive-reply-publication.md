@@ -357,17 +357,33 @@ regardless of route; the coordinator is transport-blind.
 - Ingress: `agent_session_stopped` → the channel's declared `stop` command;
   the other agent events are authenticated no-ops; every normalized message
   carries a Slack `reply_context`.
-- `SlackReplySink`: `agents.sessions.setStatus{processing}` →
-  `chat.startStream` → `chat.appendStream` (`markdown_text` deltas by offset,
+- `SlackReplySink`: `agents.sessions.setStatus{processing}` on the first
+  reconcile — but `chat.startStream` only once a renderable chunk exists
+  (the run's first revision carries only `Preparing`, and opening then would
+  show an empty Agent container); the one stream opens carrying its first
+  content → `chat.appendStream` (`markdown_text` deltas by offset,
   `task_update` chunks from activity facts) → attention: markdown chunk +
-  `session_status: suspended` → `chat.stopStream` with `session_status`;
-  `429`/`ratelimited` + `retry_after` → `Retryable`; transport ambiguity →
-  `Ambiguous` then `conversations.replies` read-back; `stopped_by_user` →
-  `StoppedByUser`; `message_not_in_streaming_state`/`message_not_owned_by_app`
-  → `Permanent`; auth errors → `Unauthorized`.
+  `session_status: suspended` → `chat.stopStream` with `session_status`.
+  A terminal that arrives with no stream (nothing renderable ever, or a
+  genuine rewrite that closed the stale stream) creates and closes ONE
+  native stream carrying the terminal content; the terminal answer is never
+  posted as a conventional `chat.postMessage`. `429`/`ratelimited` +
+  `retry_after` → `Retryable`; transport ambiguity → `Ambiguous` then
+  `conversations.replies` read-back; `stopped_by_user` → `StoppedByUser`;
+  `message_not_in_streaming_state`/`message_not_owned_by_app` → `Permanent`;
+  auth errors → `Unauthorized`.
 - **No silent conventional fallback.** A workspace whose app lacks the Agent
   feature (`feature_disabled`/`not_agent_app`) is a clear activation/setup
   failure surfaced to the operator, not a mode switch.
+- **Terminal convergence.** The transcript row finalizes only the run's
+  final assistant message, while the progressive answer joins every model
+  call's streamed text; `fold_terminal_facts` therefore finalizes IN PLACE
+  when the shown text already ends with the canonical text, preserving the
+  prefix-extension invariant every stream presentation relies on (Slack
+  closes the stream with at most the remaining delta; the WebUI reducer
+  converges the live bubble into the durable item by run identity, never by
+  content equality). A canonical text the shown text does not end with is a
+  genuine rewrite and replaces it.
 - Native plan mode (`plan_update`, `task_display_mode: plan`) is **not**
   claimed: no plan producer exists in the loop; task UI is driven from real
   activity facts in timeline mode.

@@ -41,10 +41,6 @@ pub(super) struct SlackReplyCheckpoint {
     pub(super) attention_key: Option<String>,
     #[serde(default)]
     pub(super) terminal: Option<SlackTerminalState>,
-    /// Conventional-post fallback progress (no stream was ever opened): how
-    /// many rendered chunks of the terminal text have been posted.
-    #[serde(default)]
-    pub(super) terminal_posted_chunks: u64,
     #[serde(default)]
     pub(super) attachments_delivered: bool,
     /// How many terminal attachments (in request order) Slack has confirmed
