@@ -244,6 +244,7 @@ def capture_native_dialogs(page) -> list[str]:
 # DOM differs entirely from the legacy gateway in SEL, so keep these separate.
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
+    "theme_root":     "html",
     "login_token":    "#v2-token",         # token input on the login/connect view
     "session_check_error": "[data-testid='session-check-error']",
     "session_check_retry": "[data-testid='session-check-retry']",
@@ -383,6 +384,8 @@ SEL_V2 = {
     "extension_card_for": (
         "[data-testid='extension-card'][data-extension-id='{id}']"
     ),
+    "extension_setup_notice": "[data-tone='info'][role='status']",
+    "extension_configured_notice": "[data-tone='success'][role='status']",
     "extension_primary_action": "[data-extension-primary-action]",
     "extension_return_focus": "[data-extension-return-focus]",
     "extension_more_actions_name": "More actions",

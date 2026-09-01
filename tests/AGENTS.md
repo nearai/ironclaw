@@ -438,7 +438,6 @@ entries.
 | Copy a message, use the command palette | `test_reborn_webui_v2_legacy_chat_actions.py` (3) |
 | Delete a thread behind a shared confirmation dialog | `test_reborn_webui_v2_smoke.py::test_reborn_v2_thread_delete_uses_shared_confirmation_dialog` |
 | Collapse the sidebar, collapse and reopen each expandable navigation section, and pick a theme that persists | `test_reborn_webui_v2_smoke.py::test_reborn_v2_desktop_sidebar_can_collapse_and_persist`, `test_reborn_webui_v2_smoke.py::test_reborn_v2_expandable_sidebar_sections_can_collapse`, `test_reborn_webui_v2_smoke.py::test_reborn_v2_appearance_theme_selection_persists` |
-| Configure a credential-backed extension through the shared password input and see readable setup and configured feedback in the light theme | `test_reborn_webui_v2_smoke.py::test_reborn_v2_extension_configure_uses_shared_form_and_feedback` |
 | Opt into the inspector for the browser session, toggle it from the header icon, preserve its selected tab while closing, resizing, reloading, and reconnecting after visibility changes, explicitly disable it, and leave the ordinary chat shell unchanged when debug mode is off | `test_reborn_webui_v2_smoke.py::test_inspector_debug_activation_and_responsive_shell` |
 | Inspect the bounded host-resolved prompt, ordered activity timeline, turn navigation, and model-call statistics for completed runs, including continued diagnostic observation while the panel is closed | `test_reborn_webui_v2_smoke.py::test_inspector_prompt_and_stats_render_host_diagnostics` |
 | Reconnect SSE without gaps or duplicates; multiple tabs both get the reply; excess connections are rate-limited | `test_reborn_webui_v2_legacy_sse_history.py`, `test_reborn_webui_v2_streaming_run_control_api.py` (10) |
@@ -474,6 +473,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Browse the registry, search, install, configure, remove and reinstall an extension | `test_reborn_webui_v2_legacy_extensions.py` (36), `test_extensions.py` (59), `test_wasm_lifecycle.py` (35) |
+| Configure a credential-backed extension and read setup and configured feedback in the light theme | `test_reborn_webui_v2_smoke.py::test_reborn_v2_extension_configure_uses_shared_form_and_feedback` |
 | Recover when the catalog fails, enrichment fails, install fails, or they're offline | `test_reborn_webui_v2_legacy_extensions.py` |
 | Fill in a configure modal (all field variants, https-only setup URLs, focus trapping, enter-to-submit) | `test_reborn_webui_v2_legacy_extensions.py`, `test_extensions.py` |
 | See the right button label for authed vs unauthed extensions (#2235) | `test_settings_extensions_labels.py` (5) |

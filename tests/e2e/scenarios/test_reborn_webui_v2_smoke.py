@@ -1283,20 +1283,24 @@ async def test_reborn_v2_extension_configure_uses_shared_form_and_feedback(
             f"{reborn_v2_server}/extensions/tools"
             f"?token={REBORN_V2_AUTH_TOKEN}"
         )
+        await expect(page.locator(SEL_V2["theme_root"])).to_have_attribute(
+            "data-theme", "light"
+        )
         github_card = page.locator(
-            '[data-testid="extension-card"][data-extension-id="github"]'
+            SEL_V2["extension_card_for"].format(id="github")
         )
         await expect(github_card).to_be_visible(timeout=15000)
-        configure = github_card.get_by_role(
-            "button", name="Configure", exact=True
-        )
+        configure = github_card.locator(SEL_V2["extension_primary_action"])
         await expect(configure).to_be_visible(timeout=15000)
         await configure.click()
 
-        dialog = page.get_by_role("dialog")
-        await expect(
-            dialog.get_by_role("heading", name="Configure GitHub")
-        ).to_be_visible(timeout=5000)
+        dialog = page.get_by_role(
+            "dialog",
+            name=SEL_V2["extension_configure_dialog_name_for"].format(
+                name="GitHub"
+            ),
+        )
+        await expect(dialog).to_be_visible(timeout=5000)
         credential = dialog.get_by_label("github credential", exact=True)
         await expect(credential).to_be_visible()
         assert await credential.get_attribute("type") == "password"
@@ -1311,28 +1315,31 @@ async def test_reborn_v2_extension_configure_uses_shared_form_and_feedback(
         )
         assert input_metrics == {"borderRadius": "10px", "height": 36}
 
-        setup_notice = dialog.locator('[data-tone="info"][role="status"]')
+        setup_notice = dialog.locator(SEL_V2["extension_setup_notice"])
         await expect(setup_notice).to_be_visible()
         await _assert_readable(
             setup_notice,
             "light-theme extension setup notice",
         )
 
-        await credential.fill("github-e2e-placeholder-token")
-        await dialog.get_by_role("button", name="Save", exact=True).click()
+        placeholder_credential = f"e2e-placeholder-{uuid.uuid4().hex}"
+        await credential.fill(placeholder_credential)
+        await dialog.get_by_role(
+            "button", name=SEL_V2["extension_dialog_save_name"], exact=True
+        ).click()
         await expect(dialog).to_be_hidden(timeout=15000)
 
         more_actions = github_card.get_by_role(
-            "button", name="More actions", exact=True
+            "button", name=SEL_V2["extension_more_actions_name"], exact=True
         )
         await expect(more_actions).to_be_visible(timeout=15000)
         await more_actions.click()
-        await page.get_by_role("menuitem", name="Reconfigure", exact=True).click()
+        await page.get_by_role(
+            "menuitem", name=SEL_V2["extension_reconfigure_name"], exact=True
+        ).click()
 
         await expect(dialog).to_be_visible(timeout=5000)
-        success_notices = dialog.locator(
-            '[data-tone="success"][role="status"]'
-        )
+        success_notices = dialog.locator(SEL_V2["extension_configured_notice"])
         assert await success_notices.count() >= 1
         await _assert_readable(
             success_notices.first,
