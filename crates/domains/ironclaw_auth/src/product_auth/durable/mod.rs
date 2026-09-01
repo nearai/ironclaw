@@ -164,6 +164,21 @@ where
         }
     }
 
+    async fn purge_refresh_secret_handle(
+        &self,
+        scope: &ironclaw_host_api::resource::ResourceScope,
+        vendor: &str,
+        handle: &ironclaw_host_api::ids::SecretHandle,
+    ) {
+        self.purge_secret_handle(scope, handle).await;
+        let Ok(client_handle) = crate::oauth::hosted_oauth_refresh_client_handle(vendor, handle)
+        else {
+            tracing::debug!("hosted OAuth client-binding handle derivation failed");
+            return;
+        };
+        self.purge_secret_handle(scope, &client_handle).await;
+    }
+
     async fn read_record<T>(
         &self,
         scope: &ResourceScope,

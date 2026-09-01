@@ -32,6 +32,8 @@ pub struct AuthorizationServerAdmissionMetadata {
     pub token_endpoint: HttpsEndpoint,
     #[serde(default)]
     pub registration_endpoint: Option<HttpsEndpoint>,
+    #[serde(default)]
+    pub client_id_metadata_document_supported: bool,
 }
 
 /// First preflight result: the only protected-resource metadata URL that the
@@ -312,10 +314,15 @@ where
                 Some(profile.credentials)
             }
             None => {
-                let registration =
-                    registration_endpoint.ok_or(AuthProductError::MalformedConfig)?;
-                super::dcr::validate_endpoint_origin(registration, expected_as_metadata)?;
-                super::http::https_endpoint_host(registration)?;
+                if let Some(registration) = registration_endpoint {
+                    super::dcr::validate_endpoint_origin(registration, expected_as_metadata)?;
+                    super::http::https_endpoint_host(registration)?;
+                } else if !request
+                    .authorization_server_metadata
+                    .client_id_metadata_document_supported
+                {
+                    return Err(AuthProductError::MalformedConfig);
+                }
                 None
             }
         };
@@ -489,6 +496,7 @@ mod tests {
                 authorization_endpoint: https("https://auth.example.test/authorize"),
                 token_endpoint: https("https://auth.example.test/token"),
                 registration_endpoint: Some(https("https://auth.example.test/register")),
+                client_id_metadata_document_supported: false,
             },
             scopes: vec!["read".into()],
             client_profile_id: None,
@@ -521,6 +529,26 @@ mod tests {
         assert!(
             recipe.token_response.expires_in.is_some(),
             "admitted recipe must capture expires_in so keepalive/expiry accounting works"
+        );
+    }
+
+    #[tokio::test]
+    async fn cimd_admits_without_a_dynamic_registration_endpoint() {
+        let mut request = request();
+        request.authorization_server_metadata = serde_json::from_value(serde_json::json!({
+            "issuer": "https://auth.example.test",
+            "authorization_endpoint": "https://auth.example.test/authorize",
+            "token_endpoint": "https://auth.example.test/token",
+            "client_id_metadata_document_supported": true
+        }))
+        .expect("CIMD metadata parses");
+
+        let admitted = admit(request)
+            .await
+            .expect("CIMD does not require a DCR endpoint");
+        assert_eq!(
+            admitted.token_exchange_resource.as_deref(),
+            Some("https://mcp.example.test/mcp")
         );
     }
     #[tokio::test]

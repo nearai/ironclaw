@@ -82,7 +82,7 @@ use crate::{
     validate_provider_callback_request,
 };
 
-pub use dcr::DCR_CLIENT_HANDLE_PREFIX;
+pub use dcr::{DCR_CLIENT_HANDLE_PREFIX, OAuthClientMetadataDocument};
 
 /// One vendor's recipe, resolved from active extensions or bundled manifests.
 ///
@@ -230,6 +230,11 @@ impl EngineCallbackBase {
                 "callback base must not carry a query or fragment",
             ));
         }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(AuthProductError::invalid_request(
+                "callback base must not carry user information",
+            ));
+        }
         Ok(Self { base })
     }
 
@@ -298,9 +303,9 @@ pub struct AuthEngine {
     secret_store: Arc<dyn SecretStorePort>,
     callback_base: EngineCallbackBase,
     dcr_client_name: String,
-    /// Serializes dynamic client registration so concurrent flows for one
-    /// vendor register exactly one client.
-    dcr_registration_lock: tokio::sync::Mutex<()>,
+    /// Serializes hosted-client discovery so concurrent flows for one vendor
+    /// select and persist one effective client.
+    hosted_client_lock: tokio::sync::Mutex<()>,
 }
 
 impl fmt::Debug for AuthEngine {
@@ -322,7 +327,7 @@ impl AuthEngine {
             secret_store: deps.secret_store,
             callback_base: deps.callback_base,
             dcr_client_name: deps.dcr_client_name,
-            dcr_registration_lock: tokio::sync::Mutex::new(()),
+            hosted_client_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -392,10 +397,9 @@ impl AuthEngine {
 
     /// Resolve the client material and effective endpoints for a vendor:
     /// deployment `client_credentials` handles when the recipe declares them,
-    /// or the persisted dynamically-registered client (RFC 7591) when it does
-    /// not. `register_if_missing` is true on flow preparation (registration
-    /// side effect allowed) and false on exchange/refresh (the client must
-    /// already exist).
+    /// or the persisted hosted client selected through CIMD/RFC 7591 when it
+    /// does not. Hosted client use binds preparation, callback, and refresh to
+    /// the same selected issuer/client snapshot.
     async fn oauth_client_material(
         &self,
         scope: &ResourceScope,
@@ -405,7 +409,7 @@ impl AuthEngine {
         protected_resource_metadata_url: Option<
             &ironclaw_extension_contracts::recipe::HttpsEndpoint,
         >,
-        register_if_missing: bool,
+        client_use: dcr::DiscoveredClientUse,
     ) -> Result<exchange::EffectiveOAuthClient, AuthProductError> {
         if let Some(credentials) = &recipe.client_credentials {
             let material = self.client_credentials.resolve(vendor, credentials).await?;
@@ -416,14 +420,14 @@ impl AuthEngine {
                 token_endpoint: recipe.token_endpoint.as_str().to_string(),
             });
         }
-        // No deployment client credentials: dynamic client registration is
-        // the generic hosted-MCP behavior, implemented once here.
-        self.dcr_client(
+        // No deployment client credentials: select CIMD or DCR through the
+        // generic hosted-MCP path implemented once here.
+        self.hosted_oauth_client(
             scope,
             vendor,
             resource,
             protected_resource_metadata_url,
-            register_if_missing,
+            client_use,
         )
         .await
     }
@@ -459,7 +463,7 @@ impl AuthEngine {
                 &recipe,
                 resource.as_deref(),
                 protected_resource_metadata_url.as_ref(),
-                true,
+                dcr::DiscoveredClientUse::Prepare(request.flow_id),
             )
             .await?;
         let redirect_uri = self.callback_base.redirect_uri_for(&request.vendor)?;
@@ -483,6 +487,7 @@ impl AuthEngine {
             &state,
             &pkce_secret,
             &requested_scopes,
+            resource.as_deref(),
         )?;
 
         Ok(PreparedOAuthFlow {
@@ -723,6 +728,7 @@ fn build_recipe_authorization_url(
     state: &OAuthState,
     pkce_verifier: &PkceVerifierSecret,
     scopes: &[ProviderScope],
+    resource: Option<&str>,
 ) -> Result<OAuthAuthorizationUrl, AuthProductError> {
     let mut url = Url::parse(&client.authorization_endpoint)
         .map_err(|_| AuthProductError::MalformedConfig)?;
@@ -760,6 +766,9 @@ fn build_recipe_authorization_url(
         if !scopes.is_empty() {
             pairs.append_pair(recipe.scope_param(), &scope_text);
         }
+        if let Some(resource) = resource {
+            pairs.append_pair("resource", resource);
+        }
         pairs.append_pair("state", state.as_str());
         if recipe.pkce == PkceMode::S256 {
             let challenge = pkce_s256_challenge(pkce_verifier);
@@ -789,5 +798,6 @@ mod tests {
         assert!(EngineCallbackBase::new("http://host.example/oauth").is_err());
         assert!(EngineCallbackBase::new("http://127.0.0.1:3000/oauth").is_ok());
         assert!(EngineCallbackBase::new("https://host.example/oauth?x=1").is_err());
+        assert!(EngineCallbackBase::new("https://user:secret@host.example/oauth").is_err());
     }
 }

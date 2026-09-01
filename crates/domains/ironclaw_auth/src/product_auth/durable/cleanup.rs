@@ -171,7 +171,12 @@ where
                 self.purge_secret_handle(&current.scope.resource, h).await;
             }
             if let Some(h) = &purge_refresh {
-                self.purge_secret_handle(&current.scope.resource, h).await;
+                self.purge_refresh_secret_handle(
+                    &current.scope.resource,
+                    current.provider.as_str(),
+                    h,
+                )
+                .await;
             }
         }
         Ok(report)

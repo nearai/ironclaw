@@ -60,14 +60,38 @@ impl AuthEngine {
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         let scope = context.scope.resource.clone();
         let vendor = request.provider.as_str().to_string();
+        let uses_hosted_client = recipe.client_credentials.is_none();
         let client = self
-            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), None, false)
+            .oauth_client_material(
+                &scope,
+                &vendor,
+                &recipe,
+                resource.as_deref(),
+                None,
+                super::dcr::DiscoveredClientUse::Exchange(context.flow_id),
+            )
             .await
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
         let redirect_uri = self
             .callback_base
             .redirect_uri_for(&vendor)
             .map_err(|_| AuthProductError::TokenExchangeFailed)?;
+        let access_secret =
+            exchange_token_handle(&vendor, context.flow_id, scope.invocation_id, "access")?;
+        let prospective_refresh_secret =
+            exchange_token_handle(&vendor, context.flow_id, scope.invocation_id, "refresh")?;
+        if uses_hosted_client {
+            // Stage the deterministic refresh/client binding before redeeming
+            // the one-time authorization code. No fallible binding write may
+            // remain after the vendor has consumed that code.
+            self.bind_flow_client_to_refresh(
+                &context.scope.resource,
+                &vendor,
+                context.flow_id,
+                &prospective_refresh_secret,
+            )
+            .await?;
+        }
 
         let (headers, body) = {
             let mut form = url::form_urlencoded::Serializer::new(String::new());
@@ -83,17 +107,39 @@ impl AuthEngine {
             token_request_headers_and_body(&recipe, &client, form)
         };
 
-        let response = self
+        let response = match self
             .execute_credential_post(&scope, &client.token_endpoint, headers, body)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if uses_hosted_client {
+                    self.discard_refresh_client_binding(
+                        &context.scope.resource,
+                        &vendor,
+                        &prospective_refresh_secret,
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
         if !(200..300).contains(&response.status) {
+            if uses_hosted_client {
+                self.discard_refresh_client_binding(
+                    &context.scope.resource,
+                    &vendor,
+                    &prospective_refresh_secret,
+                )
+                .await;
+            }
             if (500..600).contains(&response.status) {
                 return Err(AuthProductError::BackendUnavailable);
             }
             log_vendor_error(&vendor, response.status, &response.body, "token exchange");
             return Err(AuthProductError::TokenExchangeFailed);
         }
-        let extracted = extract_token_response(
+        let extracted = match extract_token_response(
             &recipe,
             &response.body,
             &request.scopes,
@@ -101,26 +147,66 @@ impl AuthEngine {
         )
         .inspect_err(|_| {
             tracing::debug!(vendor, "token response extraction failed");
-        })?;
+        }) {
+            Ok(extracted) => extracted,
+            Err(error) => {
+                if uses_hosted_client {
+                    self.discard_refresh_client_binding(
+                        &context.scope.resource,
+                        &vendor,
+                        &prospective_refresh_secret,
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
 
-        let provider_identity = self
-            .extract_identity(&scope, &recipe, &extracted)
-            .await
-            .map_err(|_| AuthProductError::TokenExchangeFailed)?;
+        let provider_identity = match self.extract_identity(&scope, &recipe, &extracted).await {
+            Ok(identity) => identity,
+            Err(_) => {
+                if uses_hosted_client {
+                    self.discard_refresh_client_binding(
+                        &context.scope.resource,
+                        &vendor,
+                        &prospective_refresh_secret,
+                    )
+                    .await;
+                }
+                return Err(AuthProductError::TokenExchangeFailed);
+            }
+        };
 
-        let access_secret =
-            exchange_token_handle(&vendor, context.flow_id, scope.invocation_id, "access")?;
         let refresh_secret = extracted
             .refresh_token
             .as_ref()
-            .map(|_| {
-                exchange_token_handle(&vendor, context.flow_id, scope.invocation_id, "refresh")
-            })
-            .transpose()?;
+            .map(|_| prospective_refresh_secret.clone());
+        if uses_hosted_client && refresh_secret.is_none() {
+            self.discard_refresh_client_binding(
+                &context.scope.resource,
+                &vendor,
+                &prospective_refresh_secret,
+            )
+            .await;
+        }
         let scopes = extracted.scopes.clone();
-        let stored = self
+        let stored = match self
             .store_token_pair(scope, access_secret, refresh_secret, &extracted)
-            .await?;
+            .await
+        {
+            Ok(stored) => stored,
+            Err(failure) => {
+                if uses_hosted_client && !failure.refresh_adopted {
+                    self.discard_refresh_client_binding(
+                        &context.scope.resource,
+                        &vendor,
+                        &prospective_refresh_secret,
+                    )
+                    .await;
+                }
+                return Err(failure.error);
+            }
+        };
 
         Ok(OAuthProviderExchange {
             provider: request.provider,
@@ -143,13 +229,36 @@ impl AuthEngine {
     ) -> Result<OAuthProviderRefresh, AuthProductError> {
         let scope = request.scope.resource.clone();
         let vendor = request.provider.as_str().to_string();
+        let uses_hosted_client = recipe.client_credentials.is_none();
         let refresh_token = self
             .read_refresh_token(&scope, &request.refresh_secret)
             .await?;
         let client = self
-            .oauth_client_material(&scope, &vendor, &recipe, resource.as_deref(), None, false)
+            .oauth_client_material(
+                &scope,
+                &vendor,
+                &recipe,
+                resource.as_deref(),
+                None,
+                super::dcr::DiscoveredClientUse::Refresh(request.refresh_secret.clone()),
+            )
             .await
             .map_err(|_| AuthProductError::RefreshFailed)?;
+        let rotated_refresh_handle = refresh_token_handle(&vendor, request.account_id, "refresh")?;
+        let staged_rotated_binding =
+            uses_hosted_client && rotated_refresh_handle != request.refresh_secret;
+        if staged_rotated_binding {
+            // Stage the immutable client binding before the vendor can consume
+            // the old refresh token. Once the remote rotation succeeds, no
+            // fallible binding write remains between us and durable storage.
+            self.rebind_refresh_client(
+                &request.scope.resource,
+                &vendor,
+                &request.refresh_secret,
+                &rotated_refresh_handle,
+            )
+            .await?;
+        }
 
         let (headers, body) = {
             let mut form = url::form_urlencoded::Serializer::new(String::new());
@@ -161,10 +270,32 @@ impl AuthEngine {
             token_request_headers_and_body(&recipe, &client, form)
         };
 
-        let response = self
+        let response = match self
             .execute_credential_post(&scope, &client.token_endpoint, headers, body)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if staged_rotated_binding {
+                    self.discard_refresh_client_binding(
+                        &request.scope.resource,
+                        &vendor,
+                        &rotated_refresh_handle,
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
         if !(200..300).contains(&response.status) {
+            if staged_rotated_binding {
+                self.discard_refresh_client_binding(
+                    &request.scope.resource,
+                    &vendor,
+                    &rotated_refresh_handle,
+                )
+                .await;
+            }
             if (500..600).contains(&response.status) {
                 return Err(AuthProductError::BackendUnavailable);
             }
@@ -182,7 +313,7 @@ impl AuthEngine {
             }
             return Err(AuthProductError::RefreshFailed);
         }
-        let extracted = extract_token_response(
+        let extracted = match extract_token_response(
             &recipe,
             &response.body,
             &request.scopes,
@@ -191,7 +322,20 @@ impl AuthEngine {
         .map_err(|error| match error {
             AuthProductError::BackendUnavailable => AuthProductError::BackendUnavailable,
             _ => AuthProductError::RefreshFailed,
-        })?;
+        }) {
+            Ok(extracted) => extracted,
+            Err(error) => {
+                if staged_rotated_binding {
+                    self.discard_refresh_client_binding(
+                        &request.scope.resource,
+                        &vendor,
+                        &rotated_refresh_handle,
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
 
         let rotates = recipe
             .refresh
@@ -206,8 +350,15 @@ impl AuthEngine {
         let new_refresh_handle = extracted
             .refresh_token
             .as_ref()
-            .map(|_| refresh_token_handle(&vendor, request.account_id, "refresh"))
-            .transpose()?;
+            .map(|_| rotated_refresh_handle.clone());
+        if staged_rotated_binding && new_refresh_handle.is_none() {
+            self.discard_refresh_client_binding(
+                &request.scope.resource,
+                &vendor,
+                &rotated_refresh_handle,
+            )
+            .await;
+        }
         if rotates && new_refresh_handle.is_none() {
             tracing::warn!(
                 vendor,
@@ -221,9 +372,23 @@ impl AuthEngine {
         } else {
             extracted.scopes.clone()
         };
-        let stored = self
+        let stored = match self
             .store_token_pair(scope, access_secret, new_refresh_handle, &extracted)
-            .await?;
+            .await
+        {
+            Ok(stored) => stored,
+            Err(failure) => {
+                if staged_rotated_binding && !failure.refresh_adopted {
+                    self.discard_refresh_client_binding(
+                        &request.scope.resource,
+                        &vendor,
+                        &rotated_refresh_handle,
+                    )
+                    .await;
+                }
+                return Err(failure.error);
+            }
+        };
 
         Ok(OAuthProviderRefresh {
             provider: request.provider,
@@ -315,7 +480,7 @@ impl AuthEngine {
         access_secret: SecretHandle,
         refresh_secret: Option<SecretHandle>,
         tokens: &ExtractedTokenResponse,
-    ) -> Result<StoredTokenPair, AuthProductError> {
+    ) -> Result<StoredTokenPair, StoreTokenPairFailure> {
         let access_expires_at: Option<Timestamp> = tokens
             .expires_in_seconds
             // `expires_in: 0` means a non-expiring token; storing it literally
@@ -336,12 +501,20 @@ impl AuthEngine {
                         None,
                     )
                     .await
-                    .map_err(http::map_secret_store_error)?;
+                    .map_err(|error| StoreTokenPairFailure {
+                        error: http::map_secret_store_error(error),
+                        refresh_adopted: false,
+                    })?;
                 Some(handle)
             }
             (None, None) => None,
             // A handle without a token (or vice versa) is an engine bug.
-            _ => return Err(AuthProductError::BackendUnavailable),
+            _ => {
+                return Err(StoreTokenPairFailure {
+                    error: AuthProductError::BackendUnavailable,
+                    refresh_adopted: false,
+                });
+            }
         };
 
         // Access secret last; on failure the just-written refresh secret is
@@ -355,13 +528,23 @@ impl AuthEngine {
                 access_expires_at,
             )
             .await
-            .map_err(http::map_secret_store_error)?;
+            .map_err(|error| StoreTokenPairFailure {
+                error: http::map_secret_store_error(error),
+                refresh_adopted: refresh_secret.is_some(),
+            })?;
 
         Ok(StoredTokenPair {
             access_secret,
             refresh_secret,
         })
     }
+}
+
+struct StoreTokenPairFailure {
+    error: AuthProductError,
+    /// True once the replacement refresh token is durable. Its staged client
+    /// binding must be retained even when the later access-token write fails.
+    refresh_adopted: bool,
 }
 
 pub(super) struct StoredTokenPair {

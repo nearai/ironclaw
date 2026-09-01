@@ -7,6 +7,7 @@
 // arch-exempt: large_file, product-auth serve router and DTO/route composition surface; decomposition into per-route submodules tracked by the Slack-OAuth audit, plan #5604
 
 mod accounts;
+mod client_metadata;
 mod device_link;
 mod lifecycle;
 mod manual_token;
@@ -681,7 +682,8 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
         .route(
             VENDOR_OAUTH_CALLBACK_PATH,
             get(oauth::vendor_oauth_callback_handler),
-        );
+        )
+        .route(client_metadata::PATH, get(client_metadata::handler));
 
     ProductAuthRouteMount::new(
         Router::new()
@@ -822,6 +824,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         NetworkMethod::Get,
         VENDOR_OAUTH_CALLBACK_PATH,
         callback_policy(),
+    ));
+    descriptors.push(descriptor(
+        client_metadata::ROUTE_ID,
+        NetworkMethod::Get,
+        client_metadata::PATH,
+        client_metadata::policy(),
     ));
     descriptors
 }
@@ -2354,7 +2362,7 @@ mod tests {
         assert!(dispatcher.events().is_empty());
     }
 
-    struct NoopDispatcher;
+    pub(super) struct NoopDispatcher;
 
     #[async_trait]
     impl RebornAuthContinuationDispatcher for NoopDispatcher {
@@ -2479,7 +2487,7 @@ mod tests {
 
     /// Shared engine-backed test rig: a synthetic vendor recipe (statically
     /// credentialed or DCR) + scripted vendor egress behind the real engine.
-    fn test_vendor_recipe(
+    pub(super) fn test_vendor_recipe(
         with_client_credentials: bool,
         resource: Option<&str>,
     ) -> ironclaw_auth::ResolvedVendorAuthRecipe {
@@ -2540,16 +2548,28 @@ mod tests {
         egress: Arc<dyn RuntimeHttpEgress>,
         secret_store: Arc<dyn SecretStorePort>,
     ) -> Arc<ironclaw_auth::AuthEngine> {
+        test_engine_with_resolver_and_callback_base(
+            recipes,
+            egress,
+            secret_store,
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
+        )
+    }
+
+    pub(super) fn test_engine_with_resolver_and_callback_base(
+        recipes: Arc<dyn ironclaw_auth::AuthRecipeResolver>,
+        egress: Arc<dyn RuntimeHttpEgress>,
+        secret_store: Arc<dyn SecretStorePort>,
+        callback_base: &str,
+    ) -> Arc<ironclaw_auth::AuthEngine> {
         Arc::new(ironclaw_auth::AuthEngine::new(
             ironclaw_auth::AuthEngineDeps {
                 recipes,
                 client_credentials: Arc::new(StaticTestCredentials),
                 egress,
                 secret_store,
-                callback_base: ironclaw_auth::EngineCallbackBase::new(
-                    "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
-                )
-                .expect("callback base"),
+                callback_base: ironclaw_auth::EngineCallbackBase::new(callback_base)
+                    .expect("callback base"),
                 dcr_client_name: "Ironclaw".to_string(),
             },
         ))
@@ -3413,7 +3433,7 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct PanickingDcrEgress;
+    pub(super) struct PanickingDcrEgress;
 
     #[async_trait]
     impl RuntimeHttpEgress for PanickingDcrEgress {

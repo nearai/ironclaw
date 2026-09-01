@@ -1501,6 +1501,17 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
         )
         .await
         .unwrap();
+    let refresh_client =
+        crate::oauth::hosted_oauth_refresh_client_handle("google", &refresh).unwrap();
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            refresh_client.clone(),
+            SecretString::from("hosted-client-material"),
+            None,
+        )
+        .await
+        .unwrap();
 
     // Create an extension-owned account.
     let account = service
@@ -1567,6 +1578,14 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             .unwrap()
             .is_none(),
         "Uninstall must delete refresh secret from SecretStore"
+    );
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &refresh_client)
+            .await
+            .unwrap()
+            .is_none(),
+        "Uninstall must delete the hosted OAuth client bound to the refresh secret"
     );
 }
 
@@ -3132,9 +3151,27 @@ async fn filesystem_project_credential_recovery_returns_setup_required_when_empt
 async fn filesystem_credential_setup_service_update_path() {
     use crate::{CredentialAccountMutation, CredentialAccountUpdate, CredentialSetupService};
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStorePort> = Arc::new(SecretStore::ephemeral());
+    let concrete_secret_store = Arc::new(SecretStore::ephemeral());
+    let secret_store: Arc<dyn SecretStorePort> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
+    let old_refresh = SecretHandle::new("flow-refresh").unwrap();
+    let old_refresh_client =
+        crate::oauth::hosted_oauth_refresh_client_handle("google", &old_refresh).unwrap();
+    for (handle, material) in [
+        (&old_refresh, "refresh-token"),
+        (&old_refresh_client, "issuer-bound-client"),
+    ] {
+        concrete_secret_store
+            .put(
+                scope.resource.clone(),
+                handle.clone(),
+                SecretString::from(material),
+                None,
+            )
+            .await
+            .unwrap();
+    }
 
     let account = service
         .create_account(NewCredentialAccount {
@@ -3146,13 +3183,14 @@ async fn filesystem_credential_setup_service_update_path() {
             owner_extension: None,
             granted_extensions: vec![],
             access_secret: Some(SecretHandle::new("old-access").unwrap()),
-            refresh_secret: None,
+            refresh_secret: Some(old_refresh.clone()),
             scopes: vec![],
         })
         .await
         .unwrap();
 
     let new_handle = SecretHandle::new("new-access").unwrap();
+    let new_refresh = SecretHandle::new("account-refresh").unwrap();
     let updated = service
         .create_or_update_account(CredentialAccountMutation::Update(CredentialAccountUpdate {
             account_id: account.id,
@@ -3165,13 +3203,30 @@ async fn filesystem_credential_setup_service_update_path() {
                 owner_extension: None,
                 granted_extensions: vec![],
                 access_secret: Some(new_handle.clone()),
-                refresh_secret: None,
+                refresh_secret: Some(new_refresh.clone()),
                 scopes: vec![],
             },
         }))
         .await
         .unwrap();
     assert_eq!(updated.access_secret, Some(new_handle));
+    assert_eq!(updated.refresh_secret, Some(new_refresh));
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &old_refresh)
+            .await
+            .unwrap()
+            .is_none(),
+        "the flow-specific refresh token is purged after account-handle rotation"
+    );
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &old_refresh_client)
+            .await
+            .unwrap()
+            .is_none(),
+        "the flow-specific hosted client snapshot is purged with its refresh token"
+    );
 }
 
 // ─── tests: get_account cross-scope rejection ─────────────────────────────────

@@ -814,8 +814,12 @@ where
                 .await;
         }
         if let Some(handle) = &purge_refresh {
-            self.purge_secret_handle(&account.scope.resource, handle)
-                .await;
+            self.purge_refresh_secret_handle(
+                &account.scope.resource,
+                account.provider.as_str(),
+                handle,
+            )
+            .await;
         }
     }
 
@@ -895,7 +899,12 @@ where
                         if let Some(h) = &previous_refresh_secret
                             && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
                         {
-                            self.purge_secret_handle(&request.scope.resource, h).await;
+                            self.purge_refresh_secret_handle(
+                                &request.scope.resource,
+                                account.provider.as_str(),
+                                h,
+                            )
+                            .await;
                         }
                         Ok(account.id)
                     }
@@ -951,7 +960,8 @@ where
         if let Some(h) = &previous_refresh_secret
             && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
         {
-            self.purge_secret_handle(&scope.resource, h).await;
+            self.purge_refresh_secret_handle(&scope.resource, account.provider.as_str(), h)
+                .await;
         }
         Ok(account_id)
     }

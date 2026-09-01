@@ -189,6 +189,10 @@ struct Harness {
 
 impl Harness {
     fn new(recipes: Vec<ResolvedVendorAuthRecipe>) -> Self {
+        Self::with_callback_base(recipes, CALLBACK_BASE)
+    }
+
+    fn with_callback_base(recipes: Vec<ResolvedVendorAuthRecipe>, callback_base: &str) -> Self {
         let mut by_vendor = HashMap::new();
         for recipe in &recipes {
             by_vendor.insert(
@@ -206,7 +210,7 @@ impl Harness {
             client_credentials: Arc::new(StaticClientCredentials { by_vendor }),
             egress: Arc::clone(&server) as Arc<dyn RuntimeHttpEgress>,
             secret_store: Arc::clone(&secrets),
-            callback_base: EngineCallbackBase::new(CALLBACK_BASE).expect("callback base"),
+            callback_base: EngineCallbackBase::new(callback_base).expect("callback base"),
             dcr_client_name: "IronClaw test".to_string(),
         });
         Self {
@@ -1396,13 +1400,14 @@ async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() 
     );
 
     let scope = test_scope();
+    let flow_id = AuthFlowId::new();
     harness
         .engine
         .prepare_oauth_flow(PrepareOAuthFlowRequest {
             vendor: "notion".to_string(),
             requester_extension: None,
             scope: scope.clone(),
-            flow_id: AuthFlowId::new(),
+            flow_id,
             account_label: CredentialAccountLabel::new("account").expect("account label"),
             requested_scopes: Vec::new(),
         })
@@ -1437,7 +1442,10 @@ async fn dcr_uses_the_admitted_non_well_known_protected_resource_metadata_url() 
     let exchange = harness
         .engine
         .exchange_callback(
-            exchange_context(&scope),
+            OAuthProviderExchangeContext {
+                scope: scope.clone(),
+                flow_id,
+            },
             callback_request("notion", Vec::new()),
         )
         .await
@@ -1523,7 +1531,8 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
             requested_scopes: Vec::new(),
         })
     };
-    let prepared = prepare(AuthFlowId::new()).await.expect("first notion flow");
+    let first_flow_id = AuthFlowId::new();
+    let prepared = prepare(first_flow_id).await.expect("first notion flow");
     let url = url::Url::parse(prepared.authorization_url.as_str()).unwrap();
     assert!(
         url.as_str()
@@ -1536,6 +1545,11 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
         Some("notion-dcr-client-1"),
         "the registered client id is used"
     );
+    assert_eq!(
+        pairs.get("resource").map(String::as_str),
+        Some("https://mcp.notion.com/mcp"),
+        "authorization uses the same admitted MCP resource as token requests"
+    );
     let registration = &harness
         .server
         .requests_for("https://mcp.notion.com/register")[0];
@@ -1545,17 +1559,41 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
         format!("{CALLBACK_BASE}/notion/callback"),
         "registration pins the static vendor callback (AUTH-13)"
     );
+    assert_eq!(
+        registered["application_type"], "web",
+        "an HTTPS callback registers as a web client"
+    );
 
-    // Second flow: the persisted registered client is reused — no second
-    // registration, no second discovery round-trip.
-    let discovery_calls_before = harness.server.request_count();
+    // Second flow: discovery revalidates the selected issuer, while the
+    // issuer-bound registered client is reused without another registration.
+    harness.server.script(
+        "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+        200,
+        serde_json::json!({
+            "resource": "https://mcp.notion.com/mcp",
+            "authorization_servers": ["https://mcp.notion.com"]
+        }),
+    );
+    harness.server.script(
+        "https://mcp.notion.com/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://mcp.notion.com",
+            "authorization_endpoint": "https://mcp.notion.com/discovered/authorize",
+            "token_endpoint": "https://mcp.notion.com/discovered/token",
+            "registration_endpoint": "https://mcp.notion.com/register"
+        }),
+    );
     prepare(AuthFlowId::new())
         .await
         .expect("second notion flow");
     assert_eq!(
-        harness.server.request_count(),
-        discovery_calls_before,
-        "second flow reuses the persisted registered client"
+        harness
+            .server
+            .requests_for("https://mcp.notion.com/register")
+            .len(),
+        1,
+        "second flow revalidates the issuer but reuses its registered client"
     );
 
     // The token exchange then runs the standard oauth2_code flow against the
@@ -1575,7 +1613,10 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     let exchange = harness
         .engine
         .exchange_callback(
-            exchange_context(&scope),
+            OAuthProviderExchangeContext {
+                scope: scope.clone(),
+                flow_id: first_flow_id,
+            },
             callback_request("notion", Vec::new()),
         )
         .await
@@ -1602,6 +1643,408 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     assert_eq!(
         form.get("client_id").map(String::as_str),
         Some("notion-dcr-client-1")
+    );
+}
+
+#[tokio::test]
+async fn cimd_is_preferred_over_dcr_and_uses_the_public_metadata_url_as_client_id() {
+    let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
+    for _ in 0..3 {
+        harness.server.script(
+            "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+            200,
+            serde_json::json!({
+                "resource": "https://mcp.notion.com/mcp",
+                "authorization_servers": ["https://mcp.notion.com"]
+            }),
+        );
+        harness.server.script(
+            "https://mcp.notion.com/.well-known/oauth-authorization-server",
+            200,
+            serde_json::json!({
+                "issuer": "https://mcp.notion.com",
+                "authorization_endpoint": "https://mcp.notion.com/discovered/authorize",
+                "token_endpoint": "https://mcp.notion.com/discovered/token",
+                "registration_endpoint": "https://mcp.notion.com/register",
+                "client_id_metadata_document_supported": true
+            }),
+        );
+    }
+
+    let scope = test_scope();
+    let flow_id = AuthFlowId::new();
+    let prepared = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: scope.clone(),
+            flow_id,
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("CIMD avoids dynamic registration");
+
+    let url = url::Url::parse(prepared.authorization_url.as_str()).unwrap();
+    let pairs: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    assert_eq!(
+        pairs.get("client_id").map(String::as_str),
+        Some("https://host.example/api/reborn/product-auth/oauth/notion/client-metadata.json")
+    );
+    assert!(
+        harness
+            .server
+            .requests_for("https://mcp.notion.com/register")
+            .is_empty(),
+        "CIMD support suppresses DCR"
+    );
+
+    harness.server.script(
+        "https://mcp.notion.com/discovered/token",
+        200,
+        serde_json::json!({
+            "access_token": "cimd-access",
+            "refresh_token": "cimd-refresh",
+            "expires_in": 3600
+        }),
+    );
+    let exchange = harness
+        .engine
+        .exchange_callback(
+            OAuthProviderExchangeContext {
+                scope: scope.clone(),
+                flow_id,
+            },
+            callback_request("notion", Vec::new()),
+        )
+        .await
+        .expect("CIMD code exchange succeeds");
+    harness.server.script(
+        "https://mcp.notion.com/discovered/token",
+        200,
+        serde_json::json!({
+            "access_token": "cimd-refreshed-access",
+            "refresh_token": "cimd-refreshed-refresh",
+            "expires_in": 3600
+        }),
+    );
+    harness
+        .engine
+        .refresh_token(OAuthProviderRefreshRequest {
+            provider: AuthProviderId::new("notion").unwrap(),
+            scope,
+            account_id: CredentialAccountId::new(),
+            refresh_secret: exchange.refresh_secret.expect("refresh secret"),
+            scopes: exchange.scopes,
+        })
+        .await
+        .expect("CIMD refresh succeeds");
+
+    let token_requests = harness
+        .server
+        .requests_for("https://mcp.notion.com/discovered/token");
+    assert_eq!(token_requests.len(), 2);
+    for request in token_requests {
+        let form = request.form();
+        assert_eq!(
+            form.get("client_id").map(String::as_str),
+            Some("https://host.example/api/reborn/product-auth/oauth/notion/client-metadata.json")
+        );
+        assert_eq!(
+            form.get("resource").map(String::as_str),
+            Some("https://mcp.notion.com/mcp")
+        );
+    }
+    assert!(
+        harness
+            .server
+            .requests_for("https://mcp.notion.com/register")
+            .is_empty(),
+        "CIMD suppresses DCR for prepare, exchange, and refresh"
+    );
+}
+
+#[tokio::test]
+async fn cimd_fails_closed_without_a_public_https_metadata_url() {
+    let harness = Harness::with_callback_base(
+        vec![manifest_recipe("notion-mcp", "notion")],
+        "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
+    );
+    harness.server.script(
+        "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+        200,
+        serde_json::json!({
+            "resource": "https://mcp.notion.com/mcp",
+            "authorization_servers": ["https://mcp.notion.com"]
+        }),
+    );
+    harness.server.script(
+        "https://mcp.notion.com/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://mcp.notion.com",
+            "authorization_endpoint": "https://mcp.notion.com/authorize",
+            "token_endpoint": "https://mcp.notion.com/token",
+            "registration_endpoint": "https://mcp.notion.com/register",
+            "client_id_metadata_document_supported": true
+        }),
+    );
+
+    let error = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect_err("CIMD requires public HTTPS metadata hosting");
+
+    assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::InvalidRequest);
+    assert!(
+        error.to_string().contains("public HTTPS client metadata"),
+        "the operator-facing error is actionable: {error}"
+    );
+    assert!(
+        harness
+            .server
+            .requests_for("https://mcp.notion.com/register")
+            .is_empty(),
+        "CIMD advertisement must never silently fall back to DCR"
+    );
+}
+
+#[tokio::test]
+async fn dcr_registers_loopback_callbacks_as_native_clients() {
+    let harness = Harness::with_callback_base(
+        vec![manifest_recipe("notion-mcp", "notion")],
+        "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
+    );
+    harness.server.script(
+        "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+        200,
+        serde_json::json!({
+            "resource": "https://mcp.notion.com/mcp",
+            "authorization_servers": ["https://mcp.notion.com"]
+        }),
+    );
+    harness.server.script(
+        "https://mcp.notion.com/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://mcp.notion.com",
+            "authorization_endpoint": "https://mcp.notion.com/authorize",
+            "token_endpoint": "https://mcp.notion.com/token",
+            "registration_endpoint": "https://mcp.notion.com/register"
+        }),
+    );
+    harness.server.script(
+        "https://mcp.notion.com/register",
+        201,
+        serde_json::json!({ "client_id": "native-client" }),
+    );
+
+    harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("loopback DCR succeeds");
+
+    let registration = &harness
+        .server
+        .requests_for("https://mcp.notion.com/register")[0];
+    let registered: serde_json::Value = serde_json::from_slice(&registration.body).unwrap();
+    assert_eq!(registered["application_type"], "native");
+}
+
+#[tokio::test]
+async fn dcr_re_registers_when_the_selected_issuer_changes() {
+    let mut recipe = manifest_recipe("notion-mcp", "notion");
+    recipe.token_exchange_resource = Some("https://mcp.example.test/mcp".to_string());
+    let harness = Harness::new(vec![recipe]);
+    let scope = test_scope();
+    let first_flow_id = AuthFlowId::new();
+    let second_flow_id = AuthFlowId::new();
+    for issuer in ["https://issuer-one.example", "https://issuer-two.example"] {
+        harness.server.script(
+            "https://mcp.example.test/.well-known/oauth-protected-resource/mcp",
+            200,
+            serde_json::json!({
+                "resource": "https://mcp.example.test/mcp",
+                "authorization_servers": [issuer]
+            }),
+        );
+        harness.server.script(
+            &format!("{issuer}/.well-known/oauth-authorization-server"),
+            200,
+            serde_json::json!({
+                "issuer": issuer,
+                "authorization_endpoint": format!("{issuer}/authorize"),
+                "token_endpoint": format!("{issuer}/token"),
+                "registration_endpoint": format!("{issuer}/register")
+            }),
+        );
+        harness.server.script(
+            &format!("{issuer}/register"),
+            201,
+            serde_json::json!({ "client_id": format!("client-at-{issuer}") }),
+        );
+    }
+
+    for flow_id in [first_flow_id, second_flow_id] {
+        harness
+            .engine
+            .prepare_oauth_flow(PrepareOAuthFlowRequest {
+                vendor: "notion".to_string(),
+                requester_extension: None,
+                scope: scope.clone(),
+                flow_id,
+                account_label: CredentialAccountLabel::new("account").unwrap(),
+                requested_scopes: Vec::new(),
+            })
+            .await
+            .expect("each selected issuer has matching client registration");
+    }
+
+    assert_eq!(
+        harness
+            .server
+            .requests_for("https://issuer-one.example/register")
+            .len(),
+        1
+    );
+    assert_eq!(
+        harness
+            .server
+            .requests_for("https://issuer-two.example/register")
+            .len(),
+        1,
+        "a client registered for another issuer is never reused"
+    );
+
+    harness.server.script(
+        "https://issuer-one.example/token",
+        200,
+        serde_json::json!({
+            "access_token": "issuer-one-access",
+            "refresh_token": "issuer-one-refresh",
+            "expires_in": 3600
+        }),
+    );
+    harness
+        .engine
+        .exchange_callback(
+            OAuthProviderExchangeContext {
+                scope,
+                flow_id: first_flow_id,
+            },
+            callback_request("notion", Vec::new()),
+        )
+        .await
+        .expect("the first flow remains bound to its issuer after issuer rotation");
+    let first_issuer_requests = harness
+        .server
+        .requests_for("https://issuer-one.example/token");
+    assert_eq!(first_issuer_requests.len(), 1);
+    assert_eq!(
+        first_issuer_requests[0]
+            .form()
+            .get("client_id")
+            .map(String::as_str),
+        Some("client-at-https://issuer-one.example"),
+        "an in-flight authorization uses the client registered for its original issuer"
+    );
+    assert!(
+        harness
+            .server
+            .requests_for("https://issuer-two.example/token")
+            .is_empty(),
+        "later discovery must not redirect an earlier callback to the new issuer"
+    );
+}
+
+#[tokio::test]
+async fn legacy_issuerless_dcr_material_is_replaced_instead_of_reused() {
+    let harness = Harness::new(vec![manifest_recipe("notion-mcp", "notion")]);
+    let scope = test_scope();
+    harness
+        .secrets
+        .put(
+            scope.resource.clone(),
+            SecretHandle::new("oauth-dcr-client-notion").unwrap(),
+            SecretString::from(
+                serde_json::json!({
+                    "client_id": "legacy-client",
+                    "authorization_endpoint": "https://legacy.example/authorize",
+                    "token_endpoint": "https://legacy.example/token",
+                    "redirect_uri": format!("{CALLBACK_BASE}/notion/callback")
+                })
+                .to_string(),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    harness.server.script(
+        "https://mcp.notion.com/.well-known/oauth-protected-resource/mcp",
+        200,
+        serde_json::json!({
+            "resource": "https://mcp.notion.com/mcp",
+            "authorization_servers": ["https://mcp.notion.com"]
+        }),
+    );
+    harness.server.script(
+        "https://mcp.notion.com/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "issuer": "https://mcp.notion.com",
+            "authorization_endpoint": "https://mcp.notion.com/authorize",
+            "token_endpoint": "https://mcp.notion.com/token",
+            "registration_endpoint": "https://mcp.notion.com/register"
+        }),
+    );
+    harness.server.script(
+        "https://mcp.notion.com/register",
+        201,
+        serde_json::json!({ "client_id": "replacement-client" }),
+    );
+
+    let prepared = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            requester_extension: None,
+            scope,
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("legacy material is replaced");
+
+    let url = url::Url::parse(prepared.authorization_url.as_str()).unwrap();
+    let pairs: HashMap<String, String> = url.query_pairs().into_owned().collect();
+    assert_eq!(
+        pairs.get("client_id").map(String::as_str),
+        Some("replacement-client")
+    );
+    assert_eq!(
+        harness
+            .server
+            .requests_for("https://mcp.notion.com/register")
+            .len(),
+        1
     );
 }
 

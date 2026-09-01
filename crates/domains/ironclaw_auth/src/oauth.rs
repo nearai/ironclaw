@@ -8,7 +8,7 @@
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ironclaw_host_api::resource::ResourceScope;
+use ironclaw_host_api::{ids::SecretHandle, resource::ResourceScope};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -21,6 +21,20 @@ use crate::{
 
 /// Reborn auth provider id for Google OAuth accounts.
 pub const GOOGLE_PROVIDER_ID: &str = "google";
+
+/// Companion secret handle for the issuer/client snapshot required to use a
+/// hosted-MCP refresh token. Shared here so durable token cleanup removes both
+/// halves without depending on the recipe engine's implementation module.
+pub(crate) fn hosted_oauth_refresh_client_handle(
+    vendor: &str,
+    refresh_secret: &SecretHandle,
+) -> Result<SecretHandle, AuthProductError> {
+    let digest = ironclaw_common::hashing::sha256_hex(
+        format!("{vendor}\0{}", refresh_secret.as_str()).as_bytes(),
+    );
+    SecretHandle::new(format!("oauth-hosted-refresh-{digest}"))
+        .map_err(|_| AuthProductError::BackendUnavailable)
+}
 
 /// Read-only access to Google Calendar calendars and events.
 pub const GOOGLE_CALENDAR_READONLY_SCOPE: &str =

@@ -1280,6 +1280,72 @@ async fn legacy_auto_manifest_without_oauth_client_path_requires_explicit_select
 }
 
 #[tokio::test]
+async fn legacy_auto_manifest_with_cimd_without_dcr_checkpoints_oauth_requirements() {
+    let oauth = HostedMcpRegistrationServer::start(
+        HostedMcpAuthPolicy::OAuthWithoutChallenge {
+            access_token: "oauth-token".to_string(),
+        },
+        Vec::new(),
+    )
+    .await;
+    oauth.script_authorization_server_response(ScriptedMetadataResponse::new(
+        axum::http::StatusCode::OK,
+        serde_json::to_vec(&json!({
+            "issuer": "https://auth.example.test",
+            "authorization_endpoint": "https://auth.example.test/authorize",
+            "token_endpoint": "https://auth.example.test/token",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256"],
+            "client_id_metadata_document_supported": true
+        }))
+        .expect("authorization metadata with CIMD serializes"),
+    ));
+    let (restored, scope) = restored_legacy_hosted_mcp(
+        "hosted-mcp-legacy-auto-cimd",
+        HostedMcpAuthSelection::Auto,
+        Arc::new(HostedMcpRegistrationNetworkEgress::for_server(&oauth)),
+    )
+    .await;
+
+    let activated = restored
+        .lifecycle_service
+        .execute(
+            lifecycle_product_context(scope),
+            LifecycleProductAction::ExtensionActivate {
+                package_ref: fixture_package_ref(),
+            },
+        )
+        .await
+        .expect("CIMD is a usable automatic OAuth client path");
+    assert!(activated.blockers.iter().any(|blocker| matches!(
+        blocker,
+        ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Credential { .. }
+    )));
+    assert!(
+        !activated.blockers.iter().any(|blocker| matches!(
+            blocker,
+            ironclaw_product_contracts::package_lifecycle::LifecycleReadinessBlocker::Setup {
+                ref_id: Some(ref_id),
+            } if ref_id.as_str()
+                == ironclaw_product_contracts::package_lifecycle::HOSTED_MCP_AUTH_SELECTION_BLOCKER_REF
+        )),
+        "CIMD must not send automatic OAuth back to auth-method selection"
+    );
+    let manifest = restored
+        .extension_management
+        .installation_store_for_test()
+        .get_manifest(&ExtensionId::new("mcp-fixture").expect("fixture extension id"))
+        .await
+        .expect("checkpointed manifest readback")
+        .expect("fixture manifest persists");
+    assert!(manifest.resolved().auth.iter().any(|auth| matches!(
+        &auth.setup,
+        ironclaw_host_api::capability::RuntimeCredentialAccountSetup::OAuth { .. }
+    )));
+}
+
+#[tokio::test]
 async fn legacy_explicit_oauth_with_unusable_metadata_resets_to_auth_selection() {
     let oauth = HostedMcpRegistrationServer::start(
         HostedMcpAuthPolicy::OAuthWithoutChallenge {

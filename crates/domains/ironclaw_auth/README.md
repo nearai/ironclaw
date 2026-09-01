@@ -26,7 +26,8 @@ authorization decision.
   `CredentialSetupService`), `SecretCleanupService`, `AuthProviderClient`
   (exchange/refresh), `ChannelConnectionService`.
 - The engine: `AuthEngine`, `AuthRecipeResolver` (implemented by the extension
-  host), OAuth admission metadata, DCR, keepalive sweep
+  host), OAuth admission metadata, hosted-client selection (CIMD preferred,
+  issuer-bound RFC 7591 DCR fallback), keepalive sweep
   (`spawn_keepalive_sweep` + leader lock).
 - Durable services: `FilesystemAuthProductServices`; the OAuth turn-gate
   (`OAuthGateFlowDriver`); runtime credential selection/refresh services.
@@ -64,6 +65,11 @@ authorization decision.
 - Engine transport is the injected egress port with per-recipe host pinning
   and capped response bodies; vendor response bodies never reach logs, stores,
   or errors.
+- Hosted MCP OAuth sends the recipe's canonical resource indicator on
+  authorization, code exchange, and refresh. Servers advertising Client ID
+  Metadata Documents use the public HTTPS metadata URL derived from the
+  configured product-auth callback base as `client_id`; otherwise DCR records
+  are reused only for the issuer and redirect URI that created them.
 
 ## Tests
 

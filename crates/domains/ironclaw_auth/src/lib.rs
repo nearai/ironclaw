@@ -77,8 +77,8 @@ pub use engine::keepalive::{
 };
 pub use engine::{
     AuthEngine, AuthEngineDeps, AuthRecipeResolver, DCR_CLIENT_HANDLE_PREFIX, EngineCallbackBase,
-    EngineClientCredentialsSource, EngineOAuthClientMaterial, PrepareOAuthFlowRequest,
-    PreparedOAuthFlow, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
+    EngineClientCredentialsSource, EngineOAuthClientMaterial, OAuthClientMetadataDocument,
+    PrepareOAuthFlowRequest, PreparedOAuthFlow, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 #[cfg(any(test, feature = "test-support"))]

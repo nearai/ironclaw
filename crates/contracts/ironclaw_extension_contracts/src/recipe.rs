@@ -30,6 +30,7 @@ pub const RESERVED_AUTHORIZE_PARAMS: &[&str] = &[
     "response_type",
     "code",
     "scope",
+    "resource",
 ];
 
 /// Maximum reference-token depth of a [`BoundedJsonPointer`].
@@ -872,7 +873,13 @@ team_id = "/team/id"
 
     #[test]
     fn oauth2_recipe_rejects_reserved_authorize_params() {
-        for reserved in ["state", "redirect_uri", "code_challenge", "user_scope"] {
+        for reserved in [
+            "state",
+            "redirect_uri",
+            "code_challenge",
+            "resource",
+            "user_scope",
+        ] {
             let mut recipe: VendorAuthRecipe = toml::from_str(slack_shaped_recipe_toml()).unwrap();
             if let VendorAuthRecipe::Oauth2Code(inner) = &mut recipe {
                 inner

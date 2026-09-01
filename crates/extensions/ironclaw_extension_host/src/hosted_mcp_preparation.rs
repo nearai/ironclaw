@@ -806,6 +806,7 @@ impl HostedMcpPreparationService {
                 && authorization_server_metadata
                     .registration_endpoint
                     .is_none()
+                && !authorization_server_metadata.client_id_metadata_document_supported
             {
                 tracing::debug!(
                     authorization_server = authorization_server_fetch.issuer(),

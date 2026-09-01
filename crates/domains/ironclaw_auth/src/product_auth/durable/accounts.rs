@@ -476,9 +476,27 @@ where
                     .read_account(&update.account.scope, update.account_id)
                     .await?
                     .ok_or(AuthProductError::CredentialMissing)?;
+                let previous_access_secret = account.access_secret.clone();
+                let previous_refresh_secret = account.refresh_secret.clone();
                 update_account_from_request(&mut account, update.account, Utc::now())?;
                 self.write_account(&account, CasExpectation::Version(version))
                     .await?;
+                if let Some(handle) = previous_access_secret.as_ref()
+                    && previous_access_secret.as_ref() != account.access_secret.as_ref()
+                {
+                    self.purge_secret_handle(&account.scope.resource, handle)
+                        .await;
+                }
+                if let Some(handle) = previous_refresh_secret.as_ref()
+                    && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
+                {
+                    self.purge_refresh_secret_handle(
+                        &account.scope.resource,
+                        account.provider.as_str(),
+                        handle,
+                    )
+                    .await;
+                }
                 Ok(account)
             }
         }
