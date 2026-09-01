@@ -1251,8 +1251,8 @@ impl RebornRuntime {
                     reply_projection,
                     session_reply_channel: self
                         .session_channel_extension_id
-                        .as_ref()
-                        .map(|id| ironclaw_host_api::ids::ExtensionId::from_trusted(id.clone())),
+                        .clone()
+                        .map(ironclaw_host_api::ids::ExtensionId::from_trusted),
                     start_reply_publication: true,
                 },
             )
@@ -3643,11 +3643,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
             Some(tool_diagnostic_sink),
             trigger_poller.enabled,
         )?;
-        if !reply_projection.bind_display_previews(Arc::clone(&capability_host.display_previews)) {
-            tracing::debug!(
-                "reply projection display-preview source was already bound; keeping the first source"
-            );
-        }
+        _ = reply_projection.bind_display_previews(Arc::clone(&capability_host.display_previews));
         (
             capability_host.capability_factory,
             capability_host.capability_input_resolver,
