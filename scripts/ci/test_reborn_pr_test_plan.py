@@ -2618,6 +2618,97 @@ class RebornPrTestPlanTests(unittest.TestCase):
         self.assertFalse(validate(["not-in-the-bucket"]))
         self.assertFalse(validate(["ironclaw", "ironclaw"]))
 
+    def test_workflow_installs_nextest_only_for_buckets_that_use_it(self) -> None:
+        workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        crate_job = workflow.split("\n  crate-tests:\n", 1)[1].split(
+            "\n  reborn-root-tests:\n", 1
+        )[0]
+        settings = crate_job.split("      - name: Resolve bucket settings", 1)[
+            1
+        ].split("      - name: Pre-pull Postgres test image", 1)[0]
+        install = crate_job.split("      - name: Install cargo-nextest", 1)[1].split(
+            "      - name: Run crate tests", 1
+        )[0]
+
+        self.assertIn("CARGO_PACKAGES:", settings)
+        self.assertIn("EXACT_TARGETS:", settings)
+        self.assertIn("needs_nextest=false", settings)
+        self.assertIn('echo "needs_nextest=${needs_nextest}"', settings)
+        self.assertIn(
+            "steps.bucket-settings.outputs.needs_nextest == 'true'", install
+        )
+        match = re.search(
+            r'--argjson exact_targets "\$\{EXACT_TARGETS\}" \'\n'
+            r"(?P<expression>.*?)\n            ' >/dev/null",
+            settings,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match, "bucket settings must derive nextest usage")
+        expression = match.group("expression").strip()  # type: ignore[union-attr]
+
+        def needs_nextest(
+            packages: list[str], cargo_packages: list[str], exact_targets: list[object]
+        ) -> bool:
+            completed = subprocess.run(
+                [
+                    "jq",
+                    "-e",
+                    "-n",
+                    "--argjson",
+                    "packages",
+                    json.dumps(packages),
+                    "--argjson",
+                    "cargo_packages",
+                    json.dumps(cargo_packages),
+                    "--argjson",
+                    "exact_targets",
+                    json.dumps(exact_targets),
+                    expression,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            return completed.returncode == 0
+
+        self.assertTrue(needs_nextest(["alpha", "beta"], ["beta"], []))
+        self.assertFalse(needs_nextest(["alpha"], ["alpha"], []))
+        self.assertFalse(
+            needs_nextest(
+                ["alpha"], [], [{"package": "alpha", "kind": "test", "name": "x"}]
+            )
+        )
+
+    def test_workflow_validates_process_local_groups_against_inventory(self) -> None:
+        workflow = (ROOT / ".github/workflows/reborn-tests.yml").read_text(
+            encoding="utf-8"
+        )
+        crate_job = workflow.split("\n  crate-tests:\n", 1)[1].split(
+            "\n  reborn-root-tests:\n", 1
+        )[0]
+        self.assertIn("cargo nextest show-config", crate_job)
+        self.assertIn("test-groups --profile ci", crate_job)
+        self.assertIn("ironclaw-smoke-process-local", crate_job)
+        self.assertIn(
+            "onboard_login_link_then_bearer_authorizes_a_protected_request",
+            crate_job,
+        )
+        self.assertIn("composition-runtime-process-local", crate_job)
+        self.assertIn(
+            "f1_happy_path_records_actual_usd_on_receipt",
+            crate_job,
+        )
+        self.assertIn(
+            "runtime_rejects_disabled_profile_before_local_substrate_lookup",
+            crate_job,
+        )
+        self.assertIn("ironclaw-cli-global-policy", crate_job)
+        self.assertIn(
+            "commands::traces::tests::opt_in_writes_runtime_owner_policy",
+            crate_job,
+        )
+
         code_style = (ROOT / ".github/workflows/code_style.yml").read_text(
             encoding="utf-8"
         )

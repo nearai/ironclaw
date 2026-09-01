@@ -279,10 +279,23 @@ jobs:
         id: bucket-settings
         env:
           BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
+          CARGO_PACKAGES: ${{ toJSON(matrix.bucket.cargo_packages || fromJSON('[]')) }}
+          EXACT_TARGETS: ${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}
         run: |
           needs_webui_node=false
           needs_postgres_image=false
+          needs_nextest=false
           sccache_dist_enabled=true
+
+          if jq -e -n \
+            --argjson packages "${BUCKET_PACKAGES}" \
+            --argjson cargo_packages "${CARGO_PACKAGES}" \
+            --argjson exact_targets "${EXACT_TARGETS}" '
+              ($exact_targets | length) == 0 and
+              (($packages - $cargo_packages) | length) > 0
+            ' >/dev/null; then
+            needs_nextest=true
+          fi
 
           while IFS= read -r package; do
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
@@ -309,6 +322,7 @@ jobs:
 
           echo "needs_webui_node=${needs_webui_node}" >> "${GITHUB_OUTPUT}"
           echo "needs_postgres_image=${needs_postgres_image}" >> "${GITHUB_OUTPUT}"
+          echo "needs_nextest=${needs_nextest}" >> "${GITHUB_OUTPUT}"
           echo "sccache_dist_enabled=${sccache_dist_enabled}" >> "${GITHUB_OUTPUT}"
 
       - name: Pre-pull Postgres test image
@@ -386,7 +400,9 @@ jobs:
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
       - name: Install cargo-nextest
-        if: needs.changes.outputs.run_coverage != 'true'
+        if: >-
+          needs.changes.outputs.run_coverage != 'true' &&
+          steps.bucket-settings.outputs.needs_nextest == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
         with:
           tool: cargo-nextest@0.9.143
@@ -406,6 +422,7 @@ jobs:
           export IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
           package_args=()
           feature_args=()
+          nextest_packages=()
           nextest_package_args=()
           nextest_feature_args=()
           cargo_package_args=()
@@ -425,6 +442,7 @@ jobs:
               cargo_package_args+=(-p "$package")
               subset_feature_args_name=cargo_feature_args
             else
+              nextest_packages+=("$package")
               nextest_package_args+=(-p "$package")
               subset_feature_args_name=nextest_feature_args
             fi
@@ -477,6 +495,38 @@ jobs:
               )
             else
               if [[ "${#nextest_package_args[@]}" -gt 0 ]]; then
+                if [[ " ${nextest_packages[*]} " == *" ironclaw "* ||
+                      " ${nextest_packages[*]} " == *" ironclaw_composition "* ]]; then
+                nextest_group_report="$(
+                  scripts/ci/run-hermetic-deterministic-suite.sh command \
+                    timeout --signal=INT --kill-after=30s 28m \
+                    "${incremental_env[@]}" cargo nextest show-config \
+                      test-groups --profile ci \
+                      "${nextest_package_args[@]}" "${nextest_feature_args[@]}" \
+                      --all-targets --ignore-rust-version \
+                      --no-pager --color never
+                )"
+                while IFS='|' read -r package group test_name; do
+                  if [[ " ${nextest_packages[*]} " != *" ${package} "* ]]; then
+                    continue
+                  fi
+                  if ! awk -v header="group: ${group} (max threads = 1)" \
+                    -v test_name="${test_name}" '
+                      $0 == header { in_group = 1; found_group = 1; next }
+                      /^group: / { in_group = 0 }
+                      in_group && index($0, test_name) { found_test = 1 }
+                      END { exit !(found_group && found_test) }
+                    ' <<< "${nextest_group_report}"; then
+                    echo "nextest group ${group} did not contain ${test_name}" >&2
+                    exit 1
+                  fi
+                done <<'GROUP_TESTS'
+                ironclaw|ironclaw-smoke-process-local|onboard_login_link_then_bearer_authorizes_a_protected_request
+                ironclaw|ironclaw-cli-global-policy|commands::traces::tests::opt_in_writes_runtime_owner_policy
+                ironclaw_composition|composition-runtime-process-local|f1_happy_path_records_actual_usd_on_receipt
+                ironclaw_composition|composition-runtime-process-local|runtime_rejects_disabled_profile_before_local_substrate_lookup
+                GROUP_TESTS
+                fi
                 scripts/ci/run-hermetic-deterministic-suite.sh command \
                   timeout --signal=INT --kill-after=30s 28m \
                   "${incremental_env[@]}" cargo nextest run --profile ci \
