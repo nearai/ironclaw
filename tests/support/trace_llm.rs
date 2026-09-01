@@ -16,8 +16,8 @@ use ironclaw_llm::LlmError;
 use ironclaw_llm::trace_binding::{ObservedToolResult, resolve_trace_result_bindings};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionResponseFormat,
-    CompletionStreamSink, FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    CompletionStreamSink, FinishReason, LlmProvider, ModelMetadata, Role, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 // Re-export shared types from `recording` so downstream test files can
@@ -290,6 +290,10 @@ pub struct TraceLlm {
     /// one record. Keeping these fields under one lock preserves their shared
     /// index when concurrent model calls interleave.
     captured_calls: Mutex<Vec<CapturedCall>>,
+    /// Provider-advertised total context window, in tokens. `None` — the
+    /// default — reports no window, exactly like a provider that does not
+    /// implement `model_metadata`.
+    advertised_context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -520,7 +524,15 @@ impl TraceLlm {
             streaming_calls: AtomicUsize::new(0),
             hint_mismatches: AtomicUsize::new(0),
             captured_calls: Mutex::new(Vec::new()),
+            advertised_context_window: None,
         }
+    }
+
+    /// Make this fake advertise a total context window, as a real provider
+    /// that populates `ModelMetadata::context_length` would.
+    pub fn with_advertised_context_window(mut self, tokens: u32) -> Self {
+        self.advertised_context_window = Some(tokens);
+        self
     }
 
     /// Load from a JSON file and create the provider.
@@ -893,6 +905,13 @@ impl TraceLlm {
 impl LlmProvider for TraceLlm {
     fn model_name(&self) -> &str {
         &self.model_name
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        Ok(ModelMetadata {
+            id: self.model_name.clone(),
+            context_length: self.advertised_context_window,
+        })
     }
 
     fn cost_per_token(&self) -> (Decimal, Decimal) {
