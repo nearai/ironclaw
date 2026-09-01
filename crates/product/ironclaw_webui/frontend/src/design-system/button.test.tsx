@@ -125,8 +125,12 @@ test("disabled native Buttons keep the disabled attribute", () => {
   assert.equal(rendered.type, "button");
   assert.equal(rendered.props.disabled, true);
   assert.equal(rendered.props["aria-disabled"], undefined);
-  const children = rendered.props.children as ReactElement[];
-  const content = children[1] as ReactElement<{ children: [unknown, unknown] }>;
+  // Primary renders a single content span. It used to render [hoverOverlay,
+  // content] and this indexed children[1]; the overlay went away with the
+  // gradient in #7781 WS3, since a flat fill hovers by changing its own colour.
+  const content = rendered.props.children as ReactElement<{
+    children: [unknown, unknown];
+  }>;
   assert.equal(content.props.children[0], false, "disabled without loading renders no spinner");
   assert.equal(content.props.children[1], "Save");
 });

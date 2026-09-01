@@ -2,9 +2,9 @@
  * Button
  *
  * Single component — all visual styling via Tailwind utilities backed by the
- * `--v2-*` design tokens, plus an inline style for the one thing Tailwind
- * can't express (the radial-gradient on primary), which itself reads a token.
- * No app.css component classes referenced.
+ * `--v2-*` design tokens. No inline styles and no app.css component classes:
+ * the accent surface is a flat colour since #7781 WS3, so primary needs
+ * neither a gradient nor the clipping overlay it used to be painted with.
  *
  * Shape and accent surface come from tokens, not literals: this component is
  * the reference for what "migrated" means (see `design-system/README.md` →
@@ -25,14 +25,6 @@
 import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
 import { cn } from "../utils/cn";
 import { Spinner } from "./spinner";
-
-/* ── Gradient assets (Tailwind can't express these) ──────────────────
-   The gradients themselves live in `app.css` as `--v2-accent-gradient*`;
-   these constants only name the `var()` reference. Keep it that way — a
-   literal here is a value the reskin cannot reach. */
-
-const PRIMARY_BG = "var(--v2-accent-gradient)";
-const PRIMARY_HOVER_BG = "var(--v2-accent-gradient-hover)";
 
 /* ── Base ──────────────────────────────────────────────────────────── */
 
@@ -154,20 +146,19 @@ export function Button({
         }
       : rest;
 
-  /* ── Primary: gradient + hover overlay ──────────────────────────── */
+  /* ── Primary: a flat tonal fill ─────────────────────────────────── */
   if (variant === "primary") {
     return (
       <Element
-        style={{
-          background: PRIMARY_BG,
-          border: "1px solid var(--v2-accent-edge)",
-        }}
         className={cn(
           BASE,
           sizeClass,
           fullClass,
           disabledAnchorClass,
-          "relative overflow-hidden text-[var(--v2-accent-on)] group",
+          "border border-[var(--v2-accent-edge)] text-[var(--v2-accent-on)]",
+          /* Literal strings, not template interpolation: Tailwind scans source
+             text, so an interpolated class name is never generated. */
+          "bg-[var(--v2-accent-gradient)] hover:bg-[var(--v2-accent-gradient-hover)]",
           "hover:shadow-[var(--v2-accent-glow)]",
           className
         )}
@@ -177,12 +168,7 @@ export function Button({
         tabIndex={isLinkLike && isDisabled ? -1 : undefined}
         {...elementProps}
       >
-        <span
-          aria-hidden="true"
-          style={{ background: PRIMARY_HOVER_BG }}
-          className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100"
-        />
-        <span className="relative z-10 flex items-center gap-2">
+        <span className="flex items-center gap-2">
           {loading && <Spinner />}
           {children}
         </span>
