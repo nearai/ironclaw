@@ -262,12 +262,22 @@ async fn forward_stream_event(
 ) -> bool {
     let rendered = codec::browser_frame(envelope).and_then(|browser| {
         let cursor = browser.cursor_token.clone();
-        browser.event_body().ok().map(|body| (cursor, body))
+        match browser.event_body() {
+            Ok(body) => Some((cursor, body)),
+            Err(error) => {
+                tracing::debug!(
+                    target: "ironclaw_webui_v2::session_socket",
+                    %error,
+                    "session event body failed to serialize",
+                );
+                None
+            }
+        }
     });
     let Some((cursor, body)) = rendered else {
         tracing::debug!(
             target: "ironclaw_webui_v2::session_socket",
-            "session event body failed to serialize; failing the subscription",
+            "failing the subscription after an unserializable event",
         );
         let _ = sender
             .send(SubscriptionEmit::Failed {

@@ -137,6 +137,18 @@ pub struct NewRunCompletionNotice {
     pub arbitration_closes_at: DateTime<Utc>,
 }
 
+/// The §5.3 grant a coordinator issues on one pending notice: one opaque
+/// grant identity, the single browser profile allowed to apply it, the
+/// surface, the state revision it was ranked against, and its expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewGrant {
+    pub grant_id: String,
+    pub browser_instance_id: String,
+    pub surface: CompletionSurface,
+    pub state_revision: u64,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 struct SequenceDocument {
     version: u32,
@@ -714,20 +726,19 @@ where
 
     /// Pending → Granted (§5.3). Fails `Conflict` from any other state so
     /// racing coordinators observe exactly one issued grant.
-    // allow-exemption: grant issuance names every §5.3 grant field once at
-    // the single transition seam; bundling them into a struct would add a
-    // mirror of `CompletionDeliveryState::Granted` with no second caller.
-    #[allow(clippy::too_many_arguments)]
     pub async fn issue_grant(
         &self,
         owner: &RunCompletionOwner,
         notice_id: &str,
-        grant_id: &str,
-        browser_instance_id: &str,
-        surface: CompletionSurface,
-        state_revision: u64,
-        expires_at: DateTime<Utc>,
+        grant: NewGrant,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
+        let NewGrant {
+            grant_id,
+            browser_instance_id,
+            surface,
+            state_revision,
+            expires_at,
+        } = grant;
         let (notice, ()) = self
             .transition(owner, notice_id, move |mut notice| {
                 let grants_issued = match &notice.delivery {
@@ -752,8 +763,8 @@ where
                     });
                 }
                 notice.delivery = CompletionDeliveryState::Granted {
-                    grant_id: grant_id.to_string(),
-                    browser_instance_id: browser_instance_id.to_string(),
+                    grant_id: grant_id.clone(),
+                    browser_instance_id: browser_instance_id.clone(),
                     surface,
                     state_revision,
                     expires_at,
@@ -1036,18 +1047,11 @@ pub trait RunCompletionNotices: Send + Sync {
         read_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError>;
 
-    // allow-exemption: trait mirror of the grant-issuance seam above; the
-    // same single-call-site rationale applies.
-    #[allow(clippy::too_many_arguments)]
     async fn issue_grant(
         &self,
         owner: &RunCompletionOwner,
         notice_id: &str,
-        grant_id: &str,
-        browser_instance_id: &str,
-        surface: CompletionSurface,
-        state_revision: u64,
-        expires_at: DateTime<Utc>,
+        grant: NewGrant,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError>;
 
     async fn acknowledge_presented(
@@ -1178,23 +1182,9 @@ where
         &self,
         owner: &RunCompletionOwner,
         notice_id: &str,
-        grant_id: &str,
-        browser_instance_id: &str,
-        surface: CompletionSurface,
-        state_revision: u64,
-        expires_at: DateTime<Utc>,
+        grant: NewGrant,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        RunCompletionNoticeStore::issue_grant(
-            self,
-            owner,
-            notice_id,
-            grant_id,
-            browser_instance_id,
-            surface,
-            state_revision,
-            expires_at,
-        )
-        .await
+        RunCompletionNoticeStore::issue_grant(self, owner, notice_id, grant).await
     }
 
     async fn acknowledge_presented(
@@ -1457,11 +1447,13 @@ mod tests {
             .issue_grant(
                 &owner,
                 &notice.notice_id,
-                "grant-1",
-                "browser-1",
-                CompletionSurface::InApp,
-                41,
-                expires,
+                NewGrant {
+                    grant_id: "grant-1".to_string(),
+                    browser_instance_id: "browser-1".to_string(),
+                    surface: CompletionSurface::InApp,
+                    state_revision: 41,
+                    expires_at: expires,
+                },
             )
             .await
             .expect("grant issues from pending");
@@ -1469,11 +1461,13 @@ mod tests {
             .issue_grant(
                 &owner,
                 &notice.notice_id,
-                "grant-2",
-                "browser-2",
-                CompletionSurface::InApp,
-                42,
-                expires,
+                NewGrant {
+                    grant_id: "grant-2".to_string(),
+                    browser_instance_id: "browser-2".to_string(),
+                    surface: CompletionSurface::InApp,
+                    state_revision: 42,
+                    expires_at: expires,
+                },
             )
             .await;
         assert!(

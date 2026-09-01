@@ -326,11 +326,13 @@ impl RunCompletionCoordinator {
             .issue_grant(
                 owner,
                 &notice.notice_id,
-                &grant_id,
-                &winner.browser_instance_id,
-                surface,
-                winner.state_revision,
-                expires_at,
+                super::store::NewGrant {
+                    grant_id,
+                    browser_instance_id: winner.browser_instance_id.clone(),
+                    surface,
+                    state_revision: winner.state_revision,
+                    expires_at,
+                },
             )
             .await
         {

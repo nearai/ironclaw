@@ -229,7 +229,10 @@ impl RebornChannelWorkflowFactory {
         let notice_thread_id = match ThreadId::new(format!("{notifier_id}-channel-notices")) {
             Ok(thread_id) => thread_id,
             Err(error) => {
-                tracing::warn!(
+                // debug!, not warn!: internal construction diagnostic (the
+                // REPL renders warn), and unreachable for the two compiled-in
+                // notifier ids.
+                tracing::debug!(
                     target: "ironclaw::reborn::channel_workflow",
                     %error,
                     "invalid notifier notice thread id; delivery unavailable"
