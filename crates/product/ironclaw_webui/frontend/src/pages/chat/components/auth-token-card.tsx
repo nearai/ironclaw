@@ -69,7 +69,7 @@ export function AuthTokenCard({ gate, onSubmit, onCancel }) {
           />
           {error &&
           (
-            <p className="mt-2 text-xs text-[var(--v2-danger-text)]" role="alert">
+            <p className="mt-2 text-ui-sm text-[var(--v2-danger-text)]" role="alert">
               {error}
             </p>
           )}

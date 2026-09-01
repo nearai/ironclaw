@@ -45,7 +45,7 @@ export function UserModelPreferenceSelector() {
           <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
             {t("llm.modelPreference")}
           </h3>
-          <p className="mt-2 max-w-2xl text-sm text-[var(--v2-text-muted)]">
+          <p className="mt-2 max-w-2xl text-ui text-[var(--v2-text-muted)]">
             {t("llm.modelPreferenceDesc")}
           </p>
         </div>
@@ -70,7 +70,7 @@ export function UserModelPreferenceSelector() {
           />
           <div
             data-testid="settings-model-selector-status"
-            className="mt-2 min-h-5 text-xs text-[var(--v2-text-muted)]"
+            className="mt-2 min-h-5 text-ui-sm text-[var(--v2-text-muted)]"
           >
             {catalogReadFailed
               ? t("llm.catalogLoadFailed")

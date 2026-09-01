@@ -50,7 +50,7 @@ export function ConfirmDialog({
     >
       {description ? (
         <ModalBody>
-          <p className="text-sm leading-6 text-[var(--v2-text-muted)]">{description}</p>
+          <p className="text-ui leading-6 text-[var(--v2-text-muted)]">{description}</p>
         </ModalBody>
       ) : null}
       <ModalFooter>

@@ -37,7 +37,7 @@ function ImportButton({ onImport, isImporting, isBusy }) {
         type="button"
         onClick={openFilePicker}
         disabled={disabled}
-        className="flex items-center gap-1.5 rounded-md border border-white/12 bg-white/[0.04] px-2.5 py-1 text-xs text-iron-100 transition hover:bg-white/[0.08] disabled:opacity-50"
+        className="flex items-center gap-1.5 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5 py-1 text-ui-sm text-[var(--v2-text-strong)] transition hover:bg-white/[0.08] disabled:opacity-50"
       >
         <Icon name="upload" className="h-3 w-3" />
         {isImporting ? t("ext.registry.importing") : t("ext.registry.import")}
@@ -107,12 +107,12 @@ export function RegistryTab({
     return (
       <Panel className="p-6 sm:p-8">
         <div className="flex items-start justify-between gap-4">
-          <h3 className="text-lg font-semibold text-white">
+          <h3 className="text-title-sm font-semibold text-[var(--v2-text-strong)]">
             {t("ext.registry.emptyTitle")}
           </h3>
           {importControl}
         </div>
-        <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
+        <p className="mt-2 max-w-md text-ui leading-6 text-[var(--v2-text-muted)]">
           {t("ext.registry.emptyDesc")}
         </p>
       </Panel>
@@ -131,7 +131,7 @@ export function RegistryTab({
           clearLabel={t("settings.clearSearch")}
           className="flex-1"
         />
-        <span className="font-mono text-[11px] text-iron-700">
+        <span className="font-mono text-[11px] text-[var(--v2-text-muted)]">
           {filtered.length} / {catalogEntries.length}
         </span>
       </div>
@@ -141,7 +141,7 @@ export function RegistryTab({
         (
           <>
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
           >
             {t("extensions.installed")}
           </h3>
@@ -180,7 +180,7 @@ export function RegistryTab({
               installedCount > 0 ? "mt-6" : "",
             ].join(" ")}
           >
-            <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+            <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
               {t("ext.registry.availableTitle")}
             </h3>
             {importControl}
@@ -204,7 +204,7 @@ export function RegistryTab({
         )}
 
         {filtered.length === 0 &&
-        (<p className="py-4 text-sm text-iron-300">
+        (<p className="py-4 text-ui text-[var(--v2-text-muted)]">
           {t("ext.registry.noMatch")}
         </p>)}
       </Panel>

@@ -98,7 +98,7 @@ export function StatCard({
             {value}
           </div>
           {detail &&
-          (<div className="mt-2 text-xs leading-5 text-[var(--v2-text-muted)]">
+          (<div className="mt-2 text-ui-sm leading-5 text-[var(--v2-text-muted)]">
             {detail}
           </div>)}
         </div>
@@ -133,14 +133,14 @@ export function FlowList({ items }: FlowListProps) {
             className="grid grid-cols-[2.75rem_minmax(0,1fr)] gap-4 border-t border-[var(--v2-panel-border)] py-4"
             style={{ "--index": index } as IndexedStyle}
           >
-            <div className="font-mono text-xs text-[var(--v2-accent-text)]">
+            <div className="font-mono text-ui-sm text-[var(--v2-accent-text)]">
               {String(index + 1).padStart(2, "0")}
             </div>
             <div className="min-w-0">
-              <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+              <div className="text-ui font-semibold text-[var(--v2-text-strong)]">
                 {item.title}
               </div>
-              <div className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
+              <div className="mt-1 text-ui leading-6 text-[var(--v2-text-muted)]">
                 {item.description}
               </div>
             </div>

@@ -58,7 +58,7 @@ function DevicePushBlock({ device, t }) {
   const canUnenroll = state === "enrolled" && !device.isBusy;
   return (
     <div
-      className="rounded-[10px] border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-muted)]"
+      className="rounded-[10px] border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-ui-sm leading-relaxed text-[var(--v2-text-muted)]"
     >
       <div className="font-semibold text-[var(--v2-text-strong)]">
         {t("automations.notificationChannels.devicePush.deviceHeading")}
@@ -66,7 +66,7 @@ function DevicePushBlock({ device, t }) {
       <div className="mt-1">{stateCopy}</div>
       {hasStatusError
         ? (
-          <div role="alert" className="mt-1 text-red-300">
+          <div role="alert" className="mt-1 text-[var(--v2-danger-text)]">
             {t("automations.notificationChannels.devicePush.statusFailed")}
           </div>
         )
@@ -108,7 +108,7 @@ function DevicePushBlock({ device, t }) {
       )}
       {device.actionError &&
       (
-        <div role="alert" className="mt-2 text-red-300">
+        <div role="alert" className="mt-2 text-[var(--v2-danger-text)]">
           {t("automations.notificationChannels.devicePush.actionFailed")}
         </div>
       )}
@@ -156,11 +156,11 @@ function renderChannelRowLabel({
         className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--v2-accent)]"
       />
       <div className="flex-1 min-w-0">
-        <div className="text-sm font-semibold text-[var(--v2-text-strong)] leading-snug">
+        <div className="text-ui font-semibold text-[var(--v2-text-strong)] leading-snug">
           {displayName}
         </div>
         {description &&
-        (<div className="mt-0.5 text-xs leading-5 text-[var(--v2-text-muted)]">
+        (<div className="mt-0.5 text-ui-sm leading-5 text-[var(--v2-text-muted)]">
           {description}
         </div>)}
       </div>
@@ -321,10 +321,10 @@ export function NotificationChannelsPanel({ channelsState }) {
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">
             {t("automations.notificationChannels.eyebrow")}
           </div>
-          <h2 className="mt-1 text-xl font-semibold tracking-[-0.02em] text-[var(--v2-text-strong)]">
+          <h2 className="mt-1 text-title font-semibold tracking-[-0.02em] text-[var(--v2-text-strong)]">
             {t("automations.notificationChannels.title")}
           </h2>
-          <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">
+          <p className="mt-1 text-ui leading-6 text-[var(--v2-text-muted)]">
             {t("automations.notificationChannels.explainer")}
           </p>
         </div>
@@ -337,10 +337,10 @@ export function NotificationChannelsPanel({ channelsState }) {
           (
             <div
               role="alert"
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3.5 text-sm text-red-200"
+              className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3.5 text-ui text-[var(--v2-danger-text)]"
             >
               <div>{t("automations.error.loadFailed")}</div>
-              <div className="mt-1 text-xs leading-5 text-red-200/80">
+              <div className="mt-1 text-ui-sm leading-5 text-[var(--v2-danger-text)]">
                 {t("automations.notificationChannels.loadFailedEditingDisabled")}
               </div>
             </div>
@@ -387,7 +387,7 @@ export function NotificationChannelsPanel({ channelsState }) {
           {!hasLoadError && rows.length === 0 &&
           (
             <div
-              className="rounded-xl border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3.5 text-sm text-[var(--v2-text-muted)]"
+              className="rounded-xl border border-dashed border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3.5 text-ui text-[var(--v2-text-muted)]"
             >
               {t("automations.notificationChannels.empty")}
             </div>
@@ -409,7 +409,7 @@ export function NotificationChannelsPanel({ channelsState }) {
           (
             <span
               role="status"
-              className="flex items-center gap-1.5 text-xs font-semibold text-[var(--v2-positive-text)]"
+              className="flex items-center gap-1.5 text-ui-sm font-semibold text-[var(--v2-positive-text)]"
             >
               <Icon name="check" className="h-3 w-3" />
               {t("automations.notificationChannels.saved")}
@@ -420,7 +420,7 @@ export function NotificationChannelsPanel({ channelsState }) {
           (
             <span
               role="alert"
-              className="flex items-center gap-1.5 text-xs font-semibold text-red-300"
+              className="flex items-center gap-1.5 text-ui-sm font-semibold text-[var(--v2-danger-text)]"
             >
               <Icon name="close" className="h-3 w-3" />
               {t("automations.notificationChannels.saveFailed")}
@@ -436,7 +436,7 @@ export function NotificationChannelsPanel({ channelsState }) {
         {!hasLoadError && draftIds.size === 0 &&
         (
           <div
-            className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-xs leading-relaxed text-[var(--v2-text-faint)]"
+            className="rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3 text-ui-sm leading-relaxed text-[var(--v2-text-faint)]"
           >
             {t("automations.notificationChannels.noSelectionHelper")}
           </div>

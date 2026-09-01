@@ -72,14 +72,14 @@ function CreateUserForm({ onCreate, isCreating, error }) {
             id="user-role"
             value={role}
             onChange={(e) => setRole(e.currentTarget.value)}
-            className="v2-select h-9 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))]"
+            className="v2-select h-9 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 text-ui text-[var(--v2-text-strong)] outline-none focus:border-[color-mix(in_srgb,var(--v2-accent)_45%,var(--v2-panel-border))]"
           >
             <option value="member">{t("users.member")}</option>
             <option value="admin">{t("users.admin")}</option>
           </select>
         </FormField>
         {error &&
-        ( <p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p> )}
+        ( <p className="text-ui text-[var(--v2-danger-text)]">{error.message}</p> )}
         <div className="flex gap-2">
           <Button type="submit" disabled={isCreating}>
             {isCreating ? t("users.creating") : t("users.createUser")}
@@ -106,7 +106,7 @@ function UserRow({ user }) {
     >
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-[var(--v2-text)]"
+          <span className="text-ui font-medium text-[var(--v2-text)]"
             >{user.display_name || user.id}</span
           >
           <Badge
@@ -120,7 +120,7 @@ function UserRow({ user }) {
         </div>
         {user.email &&
         (
-          <div className="mt-0.5 font-mono text-xs text-[var(--v2-text-muted)]">
+          <div className="mt-0.5 font-mono text-ui-sm text-[var(--v2-text-muted)]">
             {user.email}
           </div>
         )}
@@ -164,11 +164,11 @@ export function UsersTab({ searchQuery = "" }) {
       <Card padding="lg">
         <div className="flex items-center gap-3">
           <Icon name="lock" className="h-5 w-5 text-[var(--v2-text-faint)]" />
-          <h3 className="text-lg font-semibold text-[var(--v2-text-strong)]">
+          <h3 className="text-title-sm font-semibold text-[var(--v2-text-strong)]">
             {t("users.adminRequired")}
           </h3>
         </div>
-        <p className="mt-2 max-w-md text-sm leading-6 text-[var(--v2-text-muted)]">
+        <p className="mt-2 max-w-md text-ui leading-6 text-[var(--v2-text-muted)]">
           {t("users.adminRequiredDesc")}
         </p>
       </Card>
@@ -178,7 +178,7 @@ export function UsersTab({ searchQuery = "" }) {
   if (query.error) {
     return (
       <Card padding="md">
-        <p className="text-sm text-[var(--v2-danger-text)]">
+        <p className="text-ui text-[var(--v2-danger-text)]">
           {t("users.failedLoad", { message: query.error.message })}
         </p>
       </Card>
@@ -211,11 +211,11 @@ export function UsersTab({ searchQuery = "" }) {
           {t("users.title", { count: filteredUsers.length })}
         </h3>
         {users.length === 0
-          ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">
+          ? (<p className="py-4 text-ui text-[var(--v2-text-muted)]">
               {t("users.noUsers")}
             </p>)
           : filteredUsers.length === 0
-          ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">
+          ? (<p className="py-4 text-ui text-[var(--v2-text-muted)]">
               {t("settings.noMatchingSettings", { query: searchQuery })}
             </p>)
           : filteredUsers.map(

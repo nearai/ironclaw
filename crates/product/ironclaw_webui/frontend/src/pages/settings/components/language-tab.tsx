@@ -25,15 +25,15 @@ export function LanguageTab({ searchQuery = "" }) {
       <h3 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
         {t("lang.title")}
       </h3>
-      <p className="text-sm leading-6 text-[var(--v2-text-muted)]">
+      <p className="text-ui leading-6 text-[var(--v2-text-muted)]">
         {t("lang.description")}
       </p>
 
       <div className="mt-5 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
-        <div className="text-xs text-[var(--v2-text-muted)]">{t("lang.current")}</div>
+        <div className="text-ui-sm text-[var(--v2-text-muted)]">{t("lang.current")}</div>
         <div className="mt-1 flex items-baseline gap-2">
-          <span className="text-lg font-semibold text-[var(--v2-text-strong)]">{current.native}</span>
-          <span className="font-mono text-xs text-[var(--v2-text-faint)]">{current.name}</span>
+          <span className="text-title-sm font-semibold text-[var(--v2-text-strong)]">{current.native}</span>
+          <span className="font-mono text-ui-sm text-[var(--v2-text-faint)]">{current.name}</span>
         </div>
       </div>
 
@@ -52,7 +52,7 @@ export function LanguageTab({ searchQuery = "" }) {
               ].join(" ")}
             >
               <div className="min-w-0">
-                <div className="truncate text-sm font-medium">{l.native}</div>
+                <div className="truncate text-ui font-medium">{l.native}</div>
                 <div className="truncate font-mono text-[11px] text-[var(--v2-text-faint)]">{l.name}</div>
               </div>
               <div className="shrink-0 font-mono text-[11px] text-[var(--v2-text-faint)]">{l.code}</div>

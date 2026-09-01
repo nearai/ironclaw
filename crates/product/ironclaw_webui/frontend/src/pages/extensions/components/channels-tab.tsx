@@ -37,7 +37,7 @@ export function ChannelsTab({
       (
         <Panel className="p-5 sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
           >
             {t("channels.messaging")}
           </h3>
@@ -60,7 +60,7 @@ export function ChannelsTab({
       (
         <Panel className="p-5 sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
           >
             {t("channels.availableChannels")}
           </h3>

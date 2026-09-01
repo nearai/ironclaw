@@ -18,11 +18,11 @@ export function OnboardingDeviceLinkPanel({ onboarding, displayName, errorMessag
   const deviceLinkSecret = deviceLinkSetupSecret(setup.secrets);
 
   if (setup.isLoading) {
-    return <p className="mt-3 text-sm text-iron-400">{t("common.loading")}</p>;
+    return <p className="mt-3 text-ui text-[var(--v2-text-muted)]">{t("common.loading")}</p>;
   }
   if (setup.error || !deviceLinkSecret) {
     return (
-      <p role="alert" className="mt-3 text-xs leading-5 text-red-300">
+      <p role="alert" className="mt-3 text-ui-sm leading-5 text-[var(--v2-danger-text)]">
         {errorMessage}
       </p>
     );

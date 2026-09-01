@@ -17,8 +17,8 @@ export const Default: Story = {};
 export const Composed: Story = {
   render: () => (
     <Panel className="p-6">
-      <h3 className="text-base font-semibold text-[var(--v2-text-strong)]">Section title</h3>
-      <p className="mt-2 text-sm text-[var(--v2-text-muted)]">
+      <h3 className="text-ui-lg font-semibold text-[var(--v2-text-strong)]">Section title</h3>
+      <p className="mt-2 text-ui text-[var(--v2-text-muted)]">
         Panel is a thin wrapper over Card used across settings and dashboards.
       </p>
     </Panel>

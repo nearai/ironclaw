@@ -19,7 +19,7 @@ export const Default: Story = {
   render: (args) => (
     <Card {...args} className="max-w-md">
       <CardLabel>Workspace</CardLabel>
-      <p className="mt-2 text-sm text-[var(--v2-text)]">
+      <p className="mt-2 text-ui text-[var(--v2-text)]">
         A solid panel surface backed by theme tokens, so it adapts to light and dark automatically.
       </p>
     </Card>
@@ -32,7 +32,7 @@ export const Variants: Story = {
       {(["default", "bordered", "subtle", "inset"] as const).map((variant) => (
         <Card key={variant} variant={variant} padding="md">
           <CardLabel>{variant}</CardLabel>
-          <p className="mt-2 text-sm text-[var(--v2-text)]">Card variant: {variant}</p>
+          <p className="mt-2 text-ui text-[var(--v2-text)]">Card variant: {variant}</p>
         </Card>
       ))}
     </div>
@@ -44,10 +44,10 @@ export const Composed: Story = {
     <Card className="max-w-md" padding="none">
       <CardHeader divider>
         <CardLabel>Billing</CardLabel>
-        <h3 className="mt-1 text-base font-semibold text-[var(--v2-text-strong)]">Current plan</h3>
+        <h3 className="mt-1 text-ui-lg font-semibold text-[var(--v2-text-strong)]">Current plan</h3>
       </CardHeader>
       <CardBody>
-        <p className="text-sm text-[var(--v2-text)]">
+        <p className="text-ui text-[var(--v2-text)]">
           You are on the Team plan. Manage seats and usage from the settings page.
         </p>
       </CardBody>

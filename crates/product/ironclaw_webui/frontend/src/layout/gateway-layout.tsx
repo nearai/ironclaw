@@ -162,7 +162,7 @@ export function GatewayLayout({
           (
             <div
               className={cn(
-                "m-4 rounded-[14px] border px-4 py-3 text-sm",
+                "m-4 rounded-[14px] border px-4 py-3 text-ui",
                 "border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))]",
                 "bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]"
               )}

@@ -56,13 +56,13 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
     return (
       <div
         data-testid="onboarding-pairing-card"
-        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] bg-signal/5 p-4"
       >
-        <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
+        <h3 className="text-ui font-semibold text-[var(--v2-text-strong)]">{copy.title}</h3>
         {copy.instructions &&
-        (<p className="mt-1 text-sm leading-6 text-iron-300">{copy.instructions}</p>)}
+        (<p className="mt-1 text-ui leading-6 text-[var(--v2-text-muted)]">{copy.instructions}</p>)}
         <React.Suspense
-          fallback={(<p className="mt-3 text-sm text-iron-400">{t("common.loading")}</p>)}
+          fallback={(<p className="mt-3 text-ui text-[var(--v2-text-muted)]">{t("common.loading")}</p>)}
         >
           <DeviceLinkOnboarding
             onboarding={onboarding}
@@ -75,7 +75,7 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
           <div className="mt-3">
             <Button
               variant="ghost"
-              className="h-9 px-3 text-xs"
+              className="h-9 px-3 text-ui-sm"
               onClick={onCancel}
             >
               {t("common.dismiss")}
@@ -96,11 +96,11 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
     return (
       <div
         data-testid="onboarding-pairing-card"
-        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] bg-signal/5 p-4"
       >
-        <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
+        <h3 className="text-ui font-semibold text-[var(--v2-text-strong)]">{copy.title}</h3>
         {instructions &&
-        (<p className="mt-1 text-sm leading-6 text-iron-300">{instructions}</p>)}
+        (<p className="mt-1 text-ui leading-6 text-[var(--v2-text-muted)]">{instructions}</p>)}
         <PairingWebCodePanel
           compact
           extensionId={onboarding.extensionName}
@@ -111,7 +111,7 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
           <div className="mt-3">
             <Button
               variant="ghost"
-              className="h-9 px-3 text-xs"
+              className="h-9 px-3 text-ui-sm"
               onClick={onCancel}
             >
               {t("common.dismiss")}
@@ -128,16 +128,16 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
   return (
     <div
       data-testid="onboarding-pairing-card"
-      className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+      className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))] bg-signal/5 p-4"
     >
-      <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
-      <p className="mt-1 text-sm leading-6 text-iron-300">{copy.instructions}</p>
+      <h3 className="text-ui font-semibold text-[var(--v2-text-strong)]">{copy.title}</h3>
+      <p className="mt-1 text-ui leading-6 text-[var(--v2-text-muted)]">{copy.instructions}</p>
       <div className="mt-3 flex flex-wrap gap-2">
         {onConfigure &&
         (
           <Button
             variant="secondary"
-            className="h-9 gap-2 px-3 text-xs"
+            className="h-9 gap-2 px-3 text-ui-sm"
             onClick={configure}
             loading={isConfiguring}
           >
@@ -148,7 +148,7 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
         (
           <Button
             variant="ghost"
-            className="h-9 px-3 text-xs"
+            className="h-9 px-3 text-ui-sm"
             onClick={onCancel}
           >
             {t("common.dismiss")}
@@ -157,12 +157,12 @@ export function OnboardingPairingCard({ onboarding, onConfigure, onCancel }) {
       </div>
       {!onConfigure &&
       (
-        <p className="mt-2 text-xs leading-5 text-iron-400">
+        <p className="mt-2 text-ui-sm leading-5 text-[var(--v2-text-muted)]">
           {t("pairing.connectFromExtensions", { name: copy.displayName })}
         </p>
       )}
       {error &&
-      (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)}
+      (<p role="alert" className="mt-3 text-ui-sm leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
     </div>
   );
 }

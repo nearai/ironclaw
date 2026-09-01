@@ -60,7 +60,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
       detail: t("automations.summary.nextRunDetail"),
       // NEXT RUN is a date string, not a count — use a smaller size so it isn't
       // truncated to "Jun…" inside a narrow card.
-      valueClassName: "text-lg md:text-xl",
+      valueClassName: "text-title-sm md:text-title",
     },
   ];
 
@@ -83,7 +83,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
             />
           );
           const baseClass =
-            "rounded-[14px] border border-white/8 bg-white/[0.03] p-4 text-left";
+            "rounded-[14px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4 text-left";
           if (!interactive) {
             return (<div key={card.key} className={baseClass}>{inner}</div>);
           }
@@ -96,7 +96,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
               onClick={() => onSelectFilter(card.filter)}
               className={cn(
                 baseClass,
-                "transition-colors hover:border-white/20 hover:bg-white/[0.05]",
+                "transition-colors hover:border-[var(--v2-panel-border)] hover:bg-[var(--v2-surface-soft)]",
                 "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]",
                 isActive && "border-[var(--v2-accent)]/60 bg-[var(--v2-accent-soft)]/30"
               )}

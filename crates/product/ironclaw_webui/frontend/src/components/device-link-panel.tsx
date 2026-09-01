@@ -48,8 +48,8 @@ const INPUT_ATTRIBUTES = Object.freeze({
 });
 
 const INPUT_CLASS =
-  "w-full rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-sm " +
-  "text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45";
+  "w-full rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-ui " +
+  "text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-muted)] focus:border-[color-mix(in_srgb,var(--v2-accent)_44%,var(--v2-panel-border))]";
 
 /**
  * DeviceLinkPanel — the whole multi-step device link, from first payload to a
@@ -317,7 +317,7 @@ export function DeviceLinkPanel({
           onClick={switchMode}
           data-testid="device-link-mode-switch"
           data-device-link-target-mode={targetMode}
-          className="text-xs text-iron-400 underline underline-offset-2 hover:text-iron-200"
+          className="text-ui-sm text-[var(--v2-text-muted)] underline underline-offset-2 hover:text-[var(--v2-text-strong)]"
         >
           {targetModeLabel ||
             (targetMode === DEVICE_LINK_MODES.alternate
@@ -334,7 +334,7 @@ export function DeviceLinkPanel({
   const showOpenLink = frame?.displayKind !== DEVICE_LINK_DISPLAY_KINDS.qrCode;
 
   const errorNotice = error
-    ? (<p role="alert" data-testid="device-link-error" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)
+    ? (<p role="alert" data-testid="device-link-error" className="mt-3 text-ui-sm leading-5 text-[var(--v2-danger-text)]">{error}</p>)
     : null;
 
   if (!frame) {
@@ -342,14 +342,14 @@ export function DeviceLinkPanel({
       <div data-testid="device-link-panel">
         <p
           data-testid="device-link-personal-disclosure"
-          className="mb-3 text-xs leading-5 text-iron-300"
+          className="mb-3 text-ui-sm leading-5 text-[var(--v2-text-muted)]"
         >
           {t("deviceLink.personalDisclosure", { name })}
         </p>
         {error
           ? (
               <div className="space-y-2">
-                <p role="alert" data-testid="device-link-error" className="text-xs leading-5 text-red-300">{error}</p>
+                <p role="alert" data-testid="device-link-error" className="text-ui-sm leading-5 text-[var(--v2-danger-text)]">{error}</p>
                 <Button
                   variant="secondary"
                   size="sm"
@@ -370,11 +370,11 @@ export function DeviceLinkPanel({
     <div data-testid="device-link-panel" data-device-link-step={frame.step} data-device-link-mode={mode}>
       <p
         data-testid="device-link-personal-disclosure"
-        className="mb-3 text-xs leading-5 text-iron-300"
+        className="mb-3 text-ui-sm leading-5 text-[var(--v2-text-muted)]"
       >
         {t("deviceLink.personalDisclosure", { name })}
       </p>
-      <p data-testid="device-link-instructions" className="mb-3 text-xs leading-5 text-iron-300">
+      <p data-testid="device-link-instructions" className="mb-3 text-ui-sm leading-5 text-[var(--v2-text-muted)]">
         {frame.instructions}
       </p>
       {frame.step === DEVICE_LINK_STEPS.display &&
@@ -398,7 +398,7 @@ export function DeviceLinkPanel({
         <p
           role="status"
           data-testid="device-link-awaiting"
-          className="text-xs leading-5 text-iron-300"
+          className="text-ui-sm leading-5 text-[var(--v2-text-muted)]"
         >
           {t("deviceLink.awaiting", { name })}
         </p>
@@ -406,7 +406,7 @@ export function DeviceLinkPanel({
       {frame.step === DEVICE_LINK_STEPS.inputRequired &&
       (
         <form onSubmit={submitInput} className="space-y-2">
-          <label className="block text-xs text-iron-300" htmlFor="device-link-input">
+          <label className="block text-ui-sm text-[var(--v2-text-muted)]" htmlFor="device-link-input">
             {frame.secretLabel || t(inputAttributes(frame.inputKind).labelKey)}
           </label>
           <input
@@ -437,7 +437,7 @@ export function DeviceLinkPanel({
       {frame.step === DEVICE_LINK_STEPS.completed &&
       (
         <div className="space-y-2">
-          <p data-testid="device-link-completed" className="text-sm text-[var(--v2-positive-text)]">
+          <p data-testid="device-link-completed" className="text-ui text-[var(--v2-positive-text)]">
             ✅ {t("deviceLink.linked", { name })}
           </p>
           {/*
@@ -454,16 +454,16 @@ export function DeviceLinkPanel({
             ? (
                 <p
                   data-testid="device-link-account"
-                  className="text-xs leading-5 text-iron-300"
+                  className="text-ui-sm leading-5 text-[var(--v2-text-muted)]"
                 >
                   {t("deviceLink.confirmDeviceAccount", { account: frame.vendorUserRef })}
                 </p>
               )
             : null}
-          <p data-testid="device-link-confirm-device" className="text-xs leading-5 text-iron-400">
+          <p data-testid="device-link-confirm-device" className="text-ui-sm leading-5 text-[var(--v2-text-muted)]">
             {t("deviceLink.confirmDevice", { name })}
           </p>
-          <p className="text-xs leading-5 text-iron-400">
+          <p className="text-ui-sm leading-5 text-[var(--v2-text-muted)]">
             {t("deviceLink.revokeHint", { name })}
           </p>
         </div>
@@ -471,7 +471,7 @@ export function DeviceLinkPanel({
       {frame.step === DEVICE_LINK_STEPS.failed &&
       (
         <div className="space-y-2">
-          <p role="alert" data-testid="device-link-failed" className="text-xs leading-5 text-red-300">
+          <p role="alert" data-testid="device-link-failed" className="text-ui-sm leading-5 text-[var(--v2-danger-text)]">
             {failureCopy(t, frame)}
           </p>
           {frame.restartable
@@ -487,7 +487,7 @@ export function DeviceLinkPanel({
                 </Button>
               )
             : (
-                <p data-testid="device-link-terminal" className="text-xs leading-5 text-iron-400">
+                <p data-testid="device-link-terminal" className="text-ui-sm leading-5 text-[var(--v2-text-muted)]">
                   {t("deviceLink.cannotRetry", { name })}
                 </p>
               )}

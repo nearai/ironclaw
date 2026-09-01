@@ -38,7 +38,7 @@ function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
       action={(
         <button
           type="button"
-          className="rounded-md border border-current px-3 py-1.5 text-sm font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-md border border-current px-3 py-1.5 text-ui font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-50"
           onClick={onRetry}
           disabled={isRefetching}
         >
@@ -46,8 +46,8 @@ function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
         </button>
       )}
     >
-      <p className="text-sm font-semibold">{t(titleKey)}</p>
-      <p className="mt-1 text-sm">{t(descriptionKey)}</p>
+      <p className="text-ui font-semibold">{t(titleKey)}</p>
+      <p className="mt-1 text-ui">{t(descriptionKey)}</p>
     </InlineNotice>
   );
 }
@@ -219,7 +219,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
             (i) => (
               <div
                 key={i}
-                className="flex items-center justify-between border-t border-white/[0.06] py-4 first:border-0"
+                className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-4 first:border-0"
               >
                 <div>
                   <Skeleton className="h-4 w-40 rounded" />
@@ -321,7 +321,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
         <div className="flex justify-end">
           <button
             type="button"
-            className="rounded-md bg-signal px-3 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+            className="rounded-md bg-[var(--v2-accent)] text-[var(--v2-accent-on)] px-3 py-2 text-ui font-medium text-[var(--v2-text-strong)] transition-opacity hover:opacity-90"
             onClick={() => setRegisteringCustomMcp(true)}
           >
             {t("extensions.addCustomMcp")}

@@ -14,14 +14,14 @@ function BuiltinChannelCard({ name, description, enabled, detail = "" }) {
     >
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-[var(--v2-text)]">{name}</span>
+          <span className="text-ui font-medium text-[var(--v2-text)]">{name}</span>
           <Badge
             tone={enabled ? "positive" : "muted"}
             label={enabled ? t("channels.statusOn") : t("channels.statusOff")}
             size="sm"
           />
         </div>
-        <div className="mt-1 text-xs text-[var(--v2-text-muted)]">{description}</div>
+        <div className="mt-1 text-ui-sm text-[var(--v2-text-muted)]">{description}</div>
         {detail &&
         (<div className="mt-1 font-mono text-[11px] text-[var(--v2-text-faint)]">
           {detail}
@@ -62,7 +62,7 @@ function ExtensionChannelCard({ channel = null, registryEntry }) {
     >
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-[var(--v2-text)]">{name}</span>
+          <span className="text-ui font-medium text-[var(--v2-text)]">{name}</span>
           {isInstalled
             ? (<Badge
                 tone={toneMap[state] || "muted"}
@@ -75,7 +75,7 @@ function ExtensionChannelCard({ channel = null, registryEntry }) {
                 size="sm"
               />)}
         </div>
-        <div className="mt-1 text-xs text-[var(--v2-text-muted)]">{desc}</div>
+        <div className="mt-1 text-ui-sm text-[var(--v2-text-muted)]">{desc}</div>
       </div>
     </div>
   );

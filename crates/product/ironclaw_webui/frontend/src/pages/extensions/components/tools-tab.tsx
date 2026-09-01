@@ -34,8 +34,8 @@ export function ToolsTab({
   if (tools.length === 0 && toolRegistry.length === 0) {
     return (
       <Panel className="p-6 sm:p-8">
-        <h3 className="text-lg font-semibold text-white">{t("extensions.emptyToolsTitle")}</h3>
-        <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
+        <h3 className="text-title-sm font-semibold text-[var(--v2-text-strong)]">{t("extensions.emptyToolsTitle")}</h3>
+        <p className="mt-2 max-w-md text-ui leading-6 text-[var(--v2-text-muted)]">
           {t("extensions.emptyToolsDesc")}
         </p>
       </Panel>
@@ -48,7 +48,7 @@ export function ToolsTab({
       (
         <Panel className="p-5 sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
           >
             {t("tools.installed")}
           </h3>
@@ -71,7 +71,7 @@ export function ToolsTab({
       (
         <Panel className="p-5 sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
           >
             {t("tools.available")}
           </h3>

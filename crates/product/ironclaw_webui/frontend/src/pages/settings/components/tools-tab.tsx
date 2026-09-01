@@ -40,10 +40,10 @@ function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
   return (
     <Card padding="md" className="flex items-center justify-between gap-6">
       <div className="min-w-0">
-        <h3 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+        <h3 className="text-ui font-semibold text-[var(--v2-text-strong)]">
           {label}
         </h3>
-        <p className="mt-1 text-sm text-[var(--v2-text-muted)]">
+        <p className="mt-1 text-ui text-[var(--v2-text-muted)]">
           {t("settings.field.autoApproveEligibleToolsDesc")}
         </p>
       </div>
@@ -99,7 +99,7 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
         </span>)}
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="truncate font-mono text-sm text-[var(--v2-text)]"
+            <span className="truncate font-mono text-ui text-[var(--v2-text)]"
               >{tool.name}</span
             >
             {isDefault &&
@@ -118,7 +118,7 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
           </div>
           {description &&
           (
-            <div className="mt-0.5 truncate text-xs text-[var(--v2-text-muted)]">
+            <div className="mt-0.5 truncate text-ui-sm text-[var(--v2-text-muted)]">
               {description}
             </div>
           )}
@@ -259,7 +259,7 @@ export function ToolsTab({
           {t("tools.permissions")}
         </h3>
         {filtered.length === 0
-          ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">
+          ? (<p className="py-4 text-ui text-[var(--v2-text-muted)]">
               {t("tools.noMatch")}
             </p>)
           : filtered.map(

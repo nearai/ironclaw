@@ -183,13 +183,13 @@ export function PairingWebCodePanel({
 
   const containerClass = compact
     ? "mt-3"
-    : "mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4";
+    : "mt-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4";
   const name = displayName || extensionId;
 
   if (connected) {
     return (
       <div data-testid="pairing-web-code-panel" className={containerClass}>
-        <p data-testid="pairing-connected" className="text-sm text-[var(--v2-positive-text)]">
+        <p data-testid="pairing-connected" className="text-ui text-[var(--v2-positive-text)]">
           ✅ {t("pairing.web.paired", { name })}
         </p>
         <button
@@ -197,12 +197,12 @@ export function PairingWebCodePanel({
           onClick={disconnect}
           disabled={isDisconnecting}
           data-testid="pairing-disconnect"
-          className="mt-2 text-xs text-iron-400 underline underline-offset-2 hover:text-iron-200 disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-2 text-ui-sm text-[var(--v2-text-muted)] underline underline-offset-2 hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {t("pairing.web.disconnect")}
         </button>
         {error &&
-        (<p role="alert" className="mt-2 text-xs leading-5 text-red-300">{error}</p>)}
+        (<p role="alert" className="mt-2 text-ui-sm leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
       </div>
     );
   }
@@ -213,7 +213,7 @@ export function PairingWebCodePanel({
         {error
           ? (
               <div className="space-y-2">
-                <p role="alert" className="text-xs leading-5 text-red-300">{error}</p>
+                <p role="alert" className="text-ui-sm leading-5 text-[var(--v2-danger-text)]">{error}</p>
                 <Button
                   variant="secondary"
                   size="sm"
@@ -234,10 +234,10 @@ export function PairingWebCodePanel({
   return (
     <div data-testid="pairing-web-code-panel" className={containerClass}>
       {!compact &&
-      (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+      (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">
         {t("pairing.web.title", { name })}
       </h4>)}
-      <p className="mb-3 text-xs leading-5 text-iron-300">{instructions ||
+      <p className="mb-3 text-ui-sm leading-5 text-[var(--v2-text-muted)]">{instructions ||
         (deepLink
           ? t("pairing.web.instructions", { name })
           : t("pairing.web.instructionsNoLink", { name }))}</p>
@@ -252,7 +252,7 @@ export function PairingWebCodePanel({
         isRenewing={isRenewing}
       />
       {error &&
-      (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)}
+      (<p role="alert" className="mt-3 text-ui-sm leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
     </div>
   );
 }

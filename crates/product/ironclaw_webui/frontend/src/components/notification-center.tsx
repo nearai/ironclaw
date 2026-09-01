@@ -42,7 +42,7 @@ function NotificationPanelLoading({ close }) {
           <div aria-hidden="true" className="v2-skeleton h-4 w-24 rounded" />
         </div>
         <div className="space-y-3 px-4 py-4">
-          <p className="text-xs text-[var(--v2-text-muted)]">
+          <p className="text-ui-sm text-[var(--v2-text-muted)]">
             {t("notifications.loadingTitle")}
           </p>
           {Array.from({ length: 3 }, (_, index) => (

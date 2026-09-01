@@ -1,12 +1,17 @@
 /**
  * Button
  *
- * Single component — all visual styling via Tailwind + inline style for the
- * one thing Tailwind can't do (radial-gradient on primary).  No app.css
- * classes referenced.
+ * Single component — all visual styling via Tailwind utilities backed by the
+ * `--v2-*` design tokens. No inline styles and no app.css component classes:
+ * the accent surface is a flat colour since #7781 WS3, so primary needs
+ * neither a gradient nor the clipping overlay it used to be painted with.
+ *
+ * Shape and accent surface come from tokens, not literals: this component is
+ * the reference for what "migrated" means (see `design-system/README.md` →
+ * Design tokens). Retheming a button is an `app.css` edit, never an edit here.
  *
  * Props
- *   variant   "primary" | "outline" | "secondary" | "ghost" | "danger"
+ *   variant   "primary" | "tonal" | "outline" | "secondary" | "ghost" | "danger"
  *   size      "sm" | "md" (default) | "lg" | "icon" | "icon-sm"
  *   fullWidth boolean
  *   loading   boolean — shows an inline spinner, disables the button, sets
@@ -21,13 +26,6 @@ import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
 import { cn } from "../utils/cn";
 import { Spinner } from "./spinner";
 
-/* ── Gradient assets (Tailwind can't express these) ────────────────── */
-
-const PRIMARY_BG =
-  "radial-gradient(ellipse 100% 100% at 50% 130%, #4CA7E6 0%, #2882c8 65%)";
-const PRIMARY_HOVER_BG =
-  "radial-gradient(ellipse 200% 220% at 50% 110%, #5BBAF5 0%, #2882c8 60%)";
-
 /* ── Base ──────────────────────────────────────────────────────────── */
 
 const BASE =
@@ -39,18 +37,30 @@ const BASE =
 
 /* ── Size classes ──────────────────────────────────────────────────── */
 
+// Radii come from the control scale (`--v2-radius-control*`), so the shape of
+// every button in the app moves from one place in app.css. The heights stay
+// literal for now: they are a density decision, and density belongs to
+// Phase 3a (#7781 WS3) along with the type ramp it has to move with.
 const SIZES = {
-  sm:      "h-9 rounded-[10px] px-3 text-ui-sm",
-  md:      "min-h-[44px] rounded-[14px] px-3.5 text-ui md:min-h-[50px] md:rounded-[16px] md:px-4",
-  lg:      "min-h-[54px] rounded-[18px] px-6 text-ui-lg",
-  icon:    "h-[44px] w-[44px] rounded-[14px] md:h-[50px] md:w-[50px] md:rounded-[16px]",
-  "icon-sm": "h-9 w-9 rounded-[10px]",
+  sm:      "h-9 rounded-control-sm px-3 text-ui-sm",
+  md:      "min-h-[44px] rounded-control px-3.5 text-ui md:min-h-[50px] md:rounded-control-lg md:px-4",
+  lg:      "min-h-[54px] rounded-control-xl px-6 text-ui-lg",
+  icon:    "h-[44px] w-[44px] rounded-control md:h-[50px] md:w-[50px] md:rounded-control-lg",
+  "icon-sm": "h-9 w-9 rounded-control-sm",
 };
 
 /* ── Variant classes ───────────────────────────────────────────────── */
 // Primary has no Tailwind variant string — it uses inline style for the gradient.
 
 const VARIANTS = {
+  /* Medium emphasis: M3's primary-container. A tonal fill carrying a dark
+     label, for accented actions that should not shout like `primary`. The
+     label reads `--v2-accent-container-on` rather than a literal, because the
+     container is light in one theme and dark in the other. */
+  tonal:
+    "border border-transparent bg-[var(--v2-accent-container)] text-[var(--v2-accent-container-on)] " +
+    "hover:bg-[color-mix(in_srgb,var(--v2-accent-container)_88%,var(--v2-accent))]",
+
   outline:
     "border border-[color-mix(in_srgb,var(--v2-accent)_60%,var(--v2-panel-border))] " +
     "bg-transparent text-[var(--v2-accent-text)] " +
@@ -136,21 +146,20 @@ export function Button({
         }
       : rest;
 
-  /* ── Primary: gradient + hover overlay ──────────────────────────── */
+  /* ── Primary: a flat tonal fill ─────────────────────────────────── */
   if (variant === "primary") {
     return (
       <Element
-        style={{
-          background: PRIMARY_BG,
-          border: "1px solid rgba(76, 167, 230, 0.72)",
-        }}
         className={cn(
           BASE,
           sizeClass,
           fullClass,
           disabledAnchorClass,
-          "relative overflow-hidden text-white group",
-          "hover:shadow-[0_24px_24px_-20px_rgba(76,167,230,0.55)]",
+          "border border-[var(--v2-accent-edge)] text-[var(--v2-accent-on)]",
+          /* Literal strings, not template interpolation: Tailwind scans source
+             text, so an interpolated class name is never generated. */
+          "bg-[var(--v2-accent-gradient)] hover:bg-[var(--v2-accent-gradient-hover)]",
+          "hover:shadow-[var(--v2-accent-glow)]",
           className
         )}
         disabled={nativeDisabled}
@@ -159,12 +168,7 @@ export function Button({
         tabIndex={isLinkLike && isDisabled ? -1 : undefined}
         {...elementProps}
       >
-        <span
-          aria-hidden="true"
-          style={{ background: PRIMARY_HOVER_BG }}
-          className="pointer-events-none absolute inset-0 opacity-0 group-hover:opacity-100"
-        />
-        <span className="relative z-10 flex items-center gap-2">
+        <span className="flex items-center gap-2">
           {loading && <Spinner />}
           {children}
         </span>

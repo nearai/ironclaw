@@ -127,7 +127,7 @@ export function LinkPayloadPanel({
   if (expired) {
     return (
       <div data-testid={`${idPrefix}-payload-panel`}>
-        <p data-testid={`${idPrefix}-expired`} className="text-xs leading-5 text-iron-300">
+        <p data-testid={`${idPrefix}-expired`} className="text-ui-sm leading-5 text-[var(--v2-text-muted)]">
           {labels.expired}
         </p>
         {onRenew &&
@@ -157,7 +157,7 @@ export function LinkPayloadPanel({
         <img
           src={qrDataUrl}
           alt={labels.qrAlt}
-          className="h-36 w-36 shrink-0 rounded-md border border-white/[0.06] bg-white p-1"
+          className="h-36 w-36 shrink-0 rounded-md border border-[var(--v2-panel-border)] bg-white p-1"
         />
       )}
       <div className="min-w-0 flex-1 space-y-2">
@@ -166,7 +166,7 @@ export function LinkPayloadPanel({
           <div className="flex flex-wrap items-center gap-2">
             <span
               data-testid={`${idPrefix}-code`}
-              className="font-mono text-xl tracking-[0.18em] text-iron-100"
+              className="font-mono text-title tracking-[0.18em] text-[var(--v2-text-strong)]"
             >
               {code}
             </span>
@@ -198,7 +198,7 @@ export function LinkPayloadPanel({
         )}
         {expiresAtMs > 0 &&
         (
-          <p data-testid={`${idPrefix}-countdown`} className="text-[11px] text-iron-400">
+          <p data-testid={`${idPrefix}-countdown`} className="text-[11px] text-[var(--v2-text-muted)]">
             {labels.expiresIn?.(formatLinkCountdown(expiresAtMs - now))}
           </p>
         )}

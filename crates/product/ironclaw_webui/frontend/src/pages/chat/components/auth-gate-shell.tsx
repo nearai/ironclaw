@@ -57,13 +57,13 @@ export function AuthGateShell({
           <Icon name={icon} className="h-4 w-4" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-semibold text-white">
+          <span className="block truncate font-semibold text-[var(--v2-text-strong)]">
             {headline || t("authGate.title")}
           </span>
           {subtitle &&
-          (<span className="block truncate text-xs text-iron-300">{subtitle}</span>)}
+          (<span className="block truncate text-ui-sm text-[var(--v2-text-muted)]">{subtitle}</span>)}
         </span>
-        <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs font-medium text-[#8fc8f2]">
+        <span className="ml-auto flex shrink-0 items-center gap-1.5 text-ui-sm font-medium text-[#8fc8f2]">
           {pillHint && (<span className="hidden sm:inline">{pillHint}</span>)}
           <Icon
             name="chevron"
@@ -79,11 +79,11 @@ export function AuthGateShell({
           className="border-t border-[rgba(76,167,230,0.2)] px-4 pb-4 pt-3"
         >
           {body &&
-          (<div className="mb-3 text-sm text-iron-200">{body}</div>)}
+          (<div className="mb-3 text-ui text-[var(--v2-text-strong)]">{body}</div>)}
           {children}
           {expiresAt &&
           (
-            <p className="mt-2 text-xs text-iron-300">
+            <p className="mt-2 text-ui-sm text-[var(--v2-text-muted)]">
               {t("authGate.expiresAt")}: {new Date(expiresAt).toLocaleString()}
             </p>
           )}

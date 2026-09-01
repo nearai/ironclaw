@@ -32,7 +32,7 @@ export function KeyboardShortcuts({ open, onClose }) {
           <span className="grid h-8 w-8 place-items-center rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]">
             <Icon name="bolt" className="h-4 w-4" />
           </span>
-          <h2 className="text-base font-semibold text-[var(--v2-text-strong)]">
+          <h2 className="text-ui-lg font-semibold text-[var(--v2-text-strong)]">
             {t("shortcuts.title")}
           </h2>
           <button
@@ -49,7 +49,7 @@ export function KeyboardShortcuts({ open, onClose }) {
             (shortcut, index) => (
               <li
                 key={index}
-                className="flex items-center justify-between gap-3 text-sm text-[var(--v2-text)]"
+                className="flex items-center justify-between gap-3 text-ui text-[var(--v2-text)]"
               >
                 <span>{t(shortcut.descKey)}</span>
                 <span className="flex items-center gap-1">

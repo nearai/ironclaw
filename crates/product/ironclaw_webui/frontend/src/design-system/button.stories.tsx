@@ -14,6 +14,10 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Primary: Story = { args: { variant: "primary", children: "Save changes" } };
+export const Tonal: Story = {
+  args: { variant: "tonal", children: "Add to notebook" },
+};
+
 export const Secondary: Story = { args: { variant: "secondary", children: "Cancel" } };
 export const Outline: Story = { args: { variant: "outline", children: "Configure" } };
 export const Ghost: Story = { args: { variant: "ghost", children: "Dismiss" } };

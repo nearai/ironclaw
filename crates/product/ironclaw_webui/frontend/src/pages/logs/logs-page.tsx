@@ -197,16 +197,16 @@ export function LogsPage() {
           value={targetFilter}
           onInput={(e) => setTargetFilter(e.currentTarget.value)}
           placeholder={t("logs.filterTarget")}
-          className="h-8 min-w-[10rem] flex-1 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-3 text-xs text-[var(--v2-text-base)] placeholder:text-[var(--v2-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--v2-accent)]"
+          className="h-8 min-w-[10rem] flex-1 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-3 text-ui-sm text-[var(--v2-text-base)] placeholder:text-[var(--v2-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--v2-accent)]"
         />
 
         <div className="flex items-center gap-2 ml-auto">
-          <span className="hidden tabular-nums text-xs text-[var(--v2-text-muted)] sm:inline">
+          <span className="hidden tabular-nums text-ui-sm text-[var(--v2-text-muted)] sm:inline">
             {t("logs.entryCount", { count: totalCount })}
           </span>
 
           {/* Auto-scroll toggle */}
-          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-[var(--v2-text-muted)]">
+          <label className="flex cursor-pointer items-center gap-1.5 text-ui-sm text-[var(--v2-text-muted)]">
             <input
               type="checkbox"
               checked={autoScroll}
@@ -220,7 +220,7 @@ export function LogsPage() {
           <button
             onClick={togglePause}
             className={[
-              "h-8 rounded-[8px] px-3 text-xs font-medium",
+              "h-8 rounded-[8px] px-3 text-ui-sm font-medium",
               paused
                 ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] hover:bg-[color-mix(in_srgb,var(--v2-accent)_18%,transparent)]"
                 : "border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
@@ -233,7 +233,7 @@ export function LogsPage() {
           <button
             type="button"
             onClick={() => setClearDialogOpen(true)}
-            className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+            className="h-8 rounded-[8px] border border-[var(--v2-panel-border)] px-3 text-ui-sm text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           >
             {t("logs.clear")}
           </button>
@@ -243,7 +243,7 @@ export function LogsPage() {
         (
           <div
             data-testid="logs-scope-toolbar"
-            className="flex w-full flex-wrap items-center gap-2 border-t border-[var(--v2-panel-border)] pt-2 text-xs text-[var(--v2-text-muted)]"
+            className="flex w-full flex-wrap items-center gap-2 border-t border-[var(--v2-panel-border)] pt-2 text-ui-sm text-[var(--v2-text-muted)]"
           >
             <span className="font-medium text-[var(--v2-text-strong)]">{t("logs.scoped")}</span>
             {activeScope.map(
@@ -251,7 +251,7 @@ export function LogsPage() {
             )}
             <a
               href="/logs"
-              className="ml-auto rounded-[6px] px-2 py-1 text-xs text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
+              className="ml-auto rounded-[6px] px-2 py-1 text-ui-sm text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
             >
               {t("logs.clearScope")}
             </a>
@@ -261,7 +261,7 @@ export function LogsPage() {
         {/* Server log level */}
         {serverLevel != null &&
         (
-          <div className="flex w-full items-center gap-2 border-t border-[var(--v2-panel-border)] pt-2 text-xs text-[var(--v2-text-muted)]">
+          <div className="flex w-full items-center gap-2 border-t border-[var(--v2-panel-border)] pt-2 text-ui-sm text-[var(--v2-text-muted)]">
             <span>{t("logs.serverLevel")}</span>
             <SelectMenu
               value={serverLevel}
@@ -289,7 +289,7 @@ export function LogsPage() {
         {error && hasEntries
           ? (
               <div
-                className="sticky top-0 z-10 border-b border-red-500/25 bg-red-950/70 px-4 py-2 text-xs text-red-100 backdrop-blur"
+                className="sticky top-0 z-10 border-b border-red-500/25 bg-red-950/70 px-4 py-2 text-ui-sm text-red-100 backdrop-blur"
               >
                 {t("error.loadFailed", {
                   what: t("nav.logs"),
@@ -302,7 +302,7 @@ export function LogsPage() {
           ? (
               <div
                 data-testid="logs-select-thread-state"
-                className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+                className="flex h-full items-center justify-center text-ui text-[var(--v2-text-muted)]"
               >
                 {t("chat.selectConversation")}
               </div>
@@ -310,7 +310,7 @@ export function LogsPage() {
           : error && !hasEntries
           ? (
               <div
-                className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"
+                className="flex h-full items-center justify-center px-6 text-center text-ui text-[var(--v2-danger-text)]"
               >
                 {t("error.loadFailed", {
                   what: t("nav.logs"),
@@ -321,7 +321,7 @@ export function LogsPage() {
           : isLoading && !hasEntries
             ? (
                 <div
-                  className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+                  className="flex h-full items-center justify-center text-ui text-[var(--v2-text-muted)]"
                 >
                   {t("common.loading")}
                 </div>
@@ -329,7 +329,7 @@ export function LogsPage() {
             : !hasEntries
           ? (
               <div
-                className="flex h-full items-center justify-center text-sm text-[var(--v2-text-muted)]"
+                className="flex h-full items-center justify-center text-ui text-[var(--v2-text-muted)]"
               >
                 {t("logs.empty")}
               </div>
@@ -347,7 +347,7 @@ export function LogsPage() {
                   ? (
                       <span
                         data-testid="logs-retention-limit"
-                        className="text-center text-xs text-[var(--v2-text-muted)]"
+                        className="text-center text-ui-sm text-[var(--v2-text-muted)]"
                       >
                         {t("logs.retentionLimitReached", {
                           count: maxRetainedEntries,
@@ -358,7 +358,7 @@ export function LogsPage() {
                   ? (
                       <span
                         data-testid="logs-load-older-error"
-                        className="text-center text-xs text-red-300"
+                        className="text-center text-ui-sm text-[var(--v2-danger-text)]"
                       >
                         {t("error.loadFailed", {
                           what: t("nav.logs"),
@@ -377,7 +377,7 @@ export function LogsPage() {
                         data-testid="logs-load-older"
                         disabled={isLoadingMore}
                         onClick={loadOlder}
-                        className="rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-60"
+                        className="rounded-[8px] border border-[var(--v2-panel-border)] px-3 py-1.5 text-ui-sm font-medium text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)] disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         {isLoadingMore
                           ? t("common.loading")

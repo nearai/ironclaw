@@ -472,9 +472,9 @@ export function runStatusBreakdown(runs) {
   const counts = summarizeRuns(runs);
   return [
     { key: "ok", tone: "text-[var(--v2-positive-text)]", count: counts.ok },
-    { key: "error", tone: "text-red-300", count: counts.error },
+    { key: "error", tone: "text-[var(--v2-danger-text)]", count: counts.error },
     { key: "running", tone: "text-sky-300", count: counts.running },
-    { key: "unknown", tone: "text-iron-400", count: counts.unknown },
+    { key: "unknown", tone: "text-[var(--v2-text-muted)]", count: counts.unknown },
   ].filter((part) => part.count > 0);
 }
 
