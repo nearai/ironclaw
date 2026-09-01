@@ -570,7 +570,10 @@ static BRIDGE_TOOL_DEFINITIONS: LazyLock<Vec<(ProviderToolDefinition, u32)>> = L
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum number of matching tool names to return; the bridged reply returns at most 3, ranked.",
+                            "description": format!(
+                                "Maximum number of matching tool names to return; the bridged reply returns at most {}, ranked.",
+                                crate::tool_disclosure_port::TOOL_SEARCH_INLINE_RESULT_LIMIT
+                            ),
                             "default": crate::tool_disclosure_port::TOOL_SEARCH_INLINE_RESULT_LIMIT,
                             "minimum": 1
                         }

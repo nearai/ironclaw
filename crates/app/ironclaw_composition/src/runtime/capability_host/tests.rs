@@ -2098,12 +2098,21 @@ mod tests {
     /// independently-maintained copy that a shape-only rename (no size change) could silently break.
     #[test]
     fn tool_search_worst_case_reply_wrapped_observation_fits_the_first_look_ceiling() {
-        use ironclaw_host_api::model_result_preview::{
-            MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES, MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES,
-        };
-        // Both inputs are the same public constants tool_disclosure_port.rs's
-        // TOOL_SEARCH_REPLY_BUDGET_BYTES derives from (T1) -- no independent literal restated here.
-        let budget = MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES - MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES;
+        use ironclaw_host_api::model_result_preview::MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES;
+
+        /// Locally-derived expectation for the wrapped observation's fixed JSON scaffolding
+        /// (schema_version/status/summary/detail tag/artifacts/trust, plus `result_ref` carried
+        /// twice). Previously imported as
+        /// `ironclaw_host_api::model_result_preview::MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES`;
+        /// PR #7984 (review thread 11) moved that constant into
+        /// `ironclaw_loop_host::tool_disclosure_port` as `OBSERVATION_ENVELOPE_SCAFFOLDING_BYTES`
+        /// -- its one production consumer, and no longer a model-result contract `host_api` owns.
+        /// This test does not need tool_search's own budget arithmetic; it only needs a target
+        /// raw-reply size close to the first-look ceiling to measure the wrapper's overhead
+        /// against, so it keeps its own local copy of the same value instead of reaching into
+        /// loop_host's private tool_search internals.
+        const OBSERVATION_WRAPPER_ALLOWANCE_FOR_TEST: usize = 512;
+        let budget = MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES - OBSERVATION_WRAPPER_ALLOWANCE_FOR_TEST;
 
         // Grow only the `note` field until the whole payload hits the target byte size -- the other
         // fields are fixed and are what supplies the quote density (108 `"` characters at this size,
@@ -2143,14 +2152,14 @@ mod tests {
         // without becoming flaky, while still failing if the allowance is raised without a matching
         // re-measurement.
         let overhead = observation_bytes.saturating_sub(serialized.len());
-        let slack = MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES.saturating_sub(overhead);
+        let slack = OBSERVATION_WRAPPER_ALLOWANCE_FOR_TEST.saturating_sub(overhead);
         assert!(
-            overhead <= MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES,
-            "wrapper overhead was {overhead} bytes -- MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES no longer covers the real envelope, raise it in ironclaw_host_api and re-check TOOL_SEARCH_REPLY_BUDGET_BYTES still leaves room for a genuine large schema"
+            overhead <= OBSERVATION_WRAPPER_ALLOWANCE_FOR_TEST,
+            "wrapper overhead was {overhead} bytes -- OBSERVATION_WRAPPER_ALLOWANCE_FOR_TEST no longer covers the real envelope, raise it here and in ironclaw_loop_host::tool_disclosure_port::OBSERVATION_ENVELOPE_SCAFFOLDING_BYTES"
         );
         assert!(
             slack <= 100,
-            "wrapper allowance ({MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES} B) is {slack} B more than the measured overhead ({overhead} B) -- the allowance is now wastefully generous, eating into rank 1's headroom for no reason; lower it (or justify the growth) rather than leaving slack unexplained"
+            "wrapper allowance ({OBSERVATION_WRAPPER_ALLOWANCE_FOR_TEST} B) is {slack} B more than the measured overhead ({overhead} B) -- the allowance is now wastefully generous, eating into rank 1's headroom for no reason; lower it (or justify the growth) rather than leaving slack unexplained"
         );
         assert!(
             observation_bytes <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES,

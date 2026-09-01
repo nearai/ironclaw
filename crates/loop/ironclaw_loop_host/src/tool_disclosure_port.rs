@@ -10,9 +10,7 @@ use ironclaw_common::truncate_preview;
 use ironclaw_host_api::{
     capability_surface::CapabilitySurfacePolicy,
     ids::{AgentId, CapabilityId, InvocationId, ProjectId, ProviderToolName, TenantId, ThreadId},
-    model_result_preview::{
-        MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES, MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES,
-    },
+    model_result_preview::MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES,
     resolution::{Resolution, ResolutionBatch},
     result_meta::FailureKind,
 };
@@ -39,13 +37,20 @@ use crate::tool_search::{
 
 const DISCLOSURE_INPUT_PREFIX: &str = "input:tool-disclosure:";
 
-/// The byte ceiling tool_search's own raw JSON (before the ModelVisibleToolObservation
-/// wrapper adds its envelope) must fit under. Derived from two named, imported constants —
-/// see T1 and "Wrapper-allowance measurement" below for where the allowance comes from and
-/// how it is checked two-sidedly, not merely assumed. Do not restate this subtraction as a
-/// bare literal anywhere else.
-const TOOL_SEARCH_REPLY_BUDGET_BYTES: usize =
-    MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES - MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES;
+/// Fixed JSON scaffolding a `ModelVisibleToolObservation` embedding a tool_search reply adds
+/// beyond the reply's own JSON-string-escaped size: schema_version/status/summary/detail tag/
+/// artifacts/trust fields, plus the `result_ref` string carried twice
+/// (`crates/app/ironclaw_composition/src/runtime/capability_host/result_preview.rs::result_reference_observation`).
+///
+/// **Moved here from `ironclaw_host_api::model_result_preview::MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES`
+/// (PR #7984 review thread 11).** Before this fix the allowance had to double as an estimate of
+/// escaping overhead too — content-dependent, and therefore never exact — because nothing measured
+/// the real embedding cost. Now that `wrapped_reply_fits` computes the exact escaped size itself
+/// (see below), this constant only needs to cover the truly fixed envelope, so it is no longer a
+/// content-dependent fudge factor and no longer belongs to `host_api`'s shared model-result
+/// contract: it has exactly one production consumer (this module), so it lives beside that
+/// consumer.
+const OBSERVATION_ENVELOPE_SCAFFOLDING_BYTES: usize = 512;
 
 /// How many ranks reach the model in one tool_search reply. The single definition used at
 /// BOTH the `.take(...)` below AND `invoke_tool_search`'s runtime fallback AND the advertised
@@ -72,9 +77,22 @@ pub(crate) const TOOL_SEARCH_INLINE_RESULT_LIMIT: usize = 3;
 ///
 /// **This cap is also rank 1's real competitor for budget, not a cosmetic detail** (see the Goal
 /// section's arithmetic): every byte this constant lets ranks 2-3's descriptions grow by is a byte
-/// rank 1's own schema no longer has room for under `TOOL_SEARCH_REPLY_BUDGET_BYTES`. Raising this
-/// constant without re-checking the boundary test above would silently shrink rank 1's headroom.
+/// rank 1's own schema no longer has room for under `wrapped_reply_fits`'s escaped-size check.
+/// Raising this constant without re-checking the boundary test above would silently shrink rank 1's
+/// headroom.
 const COMPACT_DESCRIPTION_MAX_BYTES: usize = 160;
+
+/// Cap on how many `required` parameter names ride in a degraded compact entry
+/// (`RequiredParamsShape::Capped`). Untrusted, hosted-MCP tool schemas can declare an
+/// arbitrarily large `required` array — #7984 measured 20 names x 40 chars producing a
+/// 6,332 B RAW compact reply on its own, over the first-look ceiling outright regardless of
+/// escaping. 8 names at the largest realistic name length (`ProviderToolName::MAX_BYTES`,
+/// 64 B) is ~576 B for the array across all three ranks combined even before this cap's own
+/// escaping accounting, comfortably inside the budget `bounded_search_output`'s later,
+/// smaller-count rungs still have to share with everything else in the reply. When even the
+/// capped array does not fit, the next rung drops the field entirely
+/// (`RequiredParamsShape::Omitted`).
+const REQUIRED_PARAMS_COMPACT_CAP: usize = 8;
 
 /// A SUCCESS results[] entry name, not a failure diagnostic (#5712 covers describe/call FAILURE branches only).
 const TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE: &str = "rank 1 has a complete parameters schema; invoke it directly with the schema above, or via tool_call";
@@ -85,6 +103,14 @@ const TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE: &str = "rank 1 has a complete parame
 /// Tracked as follow-up, not yet fixed.
 const TOOL_SEARCH_DESCRIBE_FOR_SCHEMA_GUIDANCE: &str = "rank 1 matched but its schema is too large to show inline; call tool_describe on it to get the full parameters schema, then invoke it";
 const TOOL_SEARCH_NO_MATCH_GUIDANCE: &str = "no deferred tool matches this query; do not search again for it; tell the user the capability is unavailable";
+/// #7984: one or more results' `required` parameter list was too large (or too many results
+/// together were too large) to show in full — an untrusted, hosted-MCP tool schema can declare
+/// an arbitrarily large `required` array. Used by the `RequiredParamsShape::Capped`/`Omitted`
+/// rungs and by the fewer-results rung, all of which still return real matches.
+const TOOL_SEARCH_TRIMMED_RESULTS_GUIDANCE: &str = "matched results' parameter lists were too large to show in full; call tool_describe on a result to see its complete required parameters, then invoke it";
+/// The floor rung: even a single trimmed result did not fit. Returned with an empty `results`
+/// array, so unlike every guidance string above, this one must not imply any result is present.
+const TOOL_SEARCH_QUERY_TOO_BROAD_GUIDANCE: &str = "no result fit within the reply size limit; narrow the query (e.g. a more specific tool name) and search again";
 
 /// Internal bridge name for an auto-loaded schema (describe-first) response.
 ///
@@ -223,42 +249,6 @@ enum BridgeKind {
     Call,
 }
 
-struct BoundedCountingWriter {
-    bytes_written: usize,
-    limit: usize,
-}
-
-impl std::io::Write for BoundedCountingWriter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        let Some(next) = self.bytes_written.checked_add(buffer.len()) else {
-            return Err(std::io::Error::other(
-                "serialized schema exceeds byte limit",
-            ));
-        };
-        if next > self.limit {
-            return Err(std::io::Error::other(
-                "serialized schema exceeds byte limit",
-            ));
-        }
-        self.bytes_written = next;
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn serialized_len_within(value: &Value, limit: usize) -> Option<usize> {
-    let mut writer = BoundedCountingWriter {
-        bytes_written: 0,
-        limit,
-    };
-    serde_json::to_writer(&mut writer, value)
-        .ok()
-        .map(|()| writer.bytes_written)
-}
-
 /// Shared 4-field core: D11's `compact_search_results` and tool_search's own `compact_result_entry` both build from here, then diverge.
 fn compact_result_fields(result: &CatalogSearchResult) -> Value {
     json!({"name": result.name, "capability_id": result.capability_id.as_str(), "description": result.description, "required": result.required_params})
@@ -282,54 +272,213 @@ fn compact_search_results(results: Vec<CatalogSearchResult>) -> Vec<Value> {
 /// module-private, not part of `dispatch`'s public surface) — do NOT add a fourth; this is exactly the
 /// class of duplication `truncate_preview` reuse here avoids repeating.
 fn compact_result_entry(result: &CatalogSearchResult) -> Value {
+    compact_result_entry_shaped(result, RequiredParamsShape::Full)
+}
+
+/// The per-entry `required`-field degradation rungs `bounded_search_output` tries in order.
+/// Untrusted, hosted-MCP tool schemas can declare an arbitrarily large `required` array (#7984
+/// measured 20 names x 40 chars alone producing a 6,332 B RAW compact reply, over the ceiling
+/// outright) — this is the escape hatch that keeps one pathological schema from taking the whole
+/// tool_search reply over budget, on every return path, not only the schema-complete one.
+#[derive(Debug, Clone, Copy)]
+enum RequiredParamsShape {
+    /// Every declared required-param name, unmodified.
+    Full,
+    /// At most `REQUIRED_PARAMS_COMPACT_CAP` names; the rest are dropped silently (the entry
+    /// still declares `schema_complete: false`, so the model already knows to call
+    /// `tool_describe` for the authoritative full schema).
+    Capped,
+    /// The `required` field is absent from the entry entirely.
+    Omitted,
+}
+
+/// One rank's compact entry: D11's core fields plus a truncated description,
+/// `schema_complete:false`, and `required` shaped per `shape`. `name`/`description` are capped by
+/// construction (name <= `ProviderToolName::MAX_BYTES` 64 B, description <=
+/// `COMPACT_DESCRIPTION_MAX_BYTES` + 3 = 163 B worst case, per the note above — `truncate_preview`
+/// appends "..." after the cap, not within it); `capability_id`/`required` are NOT bounded by
+/// construction (an untrusted hosted-MCP schema controls both), which is exactly why the caller
+/// (`bounded_search_output`) always re-measures the candidate it builds from this rather than
+/// trusting a per-entry cap alone.
+///
+/// Truncation uses the EXISTING `ironclaw_common::truncate_preview` (`crates/contracts/ironclaw_common/src/util.rs:34`)
+/// rather than a new helper — `ironclaw_common` is already a dependency of `ironclaw_loop_host`
+/// (`crates/loop/ironclaw_loop_host/Cargo.toml:31`) and the function is already live production code,
+/// used at `crates/domains/ironclaw_llm/src/nearai_chat.rs:768`. Note: `truncate_preview` appends
+/// `"..."` on truncation and re-closes a `<tool_output>` tag if truncation cut through one — the
+/// tag-closing branch is a no-op for a plain description string, and the `"..."` suffix is a
+/// (desirable) behavior change from the earlier no-suffix sketch: it signals to the model that the
+/// description was cut. A THIRD copy of this byte-boundary-walk already exists as a private helper —
+/// `ironclaw_host_api::dispatch::truncate_at_char_boundary` (`crates/contracts/ironclaw_host_api/src/dispatch.rs:91`,
+/// module-private, not part of `dispatch`'s public surface) — do NOT add a fourth; this is exactly the
+/// class of duplication `truncate_preview` reuse here avoids repeating.
+fn compact_result_entry_shaped(result: &CatalogSearchResult, shape: RequiredParamsShape) -> Value {
     let mut entry = compact_result_fields(result);
     entry["description"] = Value::String(truncate_preview(
         &result.description,
         COMPACT_DESCRIPTION_MAX_BYTES,
     ));
     entry["schema_complete"] = Value::Bool(false);
+    match shape {
+        RequiredParamsShape::Full => {}
+        RequiredParamsShape::Capped => {
+            if result.required_params.len() > REQUIRED_PARAMS_COMPACT_CAP {
+                entry["required"] = Value::Array(
+                    result
+                        .required_params
+                        .iter()
+                        .take(REQUIRED_PARAMS_COMPACT_CAP)
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                );
+            }
+        }
+        RequiredParamsShape::Omitted => {
+            if let Value::Object(fields) = &mut entry {
+                fields.remove("required");
+            }
+        }
+    }
     entry
 }
 
 /// Build the JSON reply carrying `guidance`. Every caller passes the exact guidance string the
 /// returned value will carry: the value measured here is the value returned — do not reintroduce
 /// a probe that measures a different object than it returns.
-///
-/// Only the schema-complete branch (below) re-measures its candidate at runtime via
-/// `serialized_len_within`. The no-match and compact-fallback branches carry no runtime byte
-/// check — their bound rests on the compact-entry field caps (`name`/`description` enforced by
-/// construction, `capability_id`/`required` bounded only by today's observed corpus — see the
-/// Goal section's "Compact-path worst case" table) plus `MAX_SEARCH_QUERY_BYTES`, and are pinned
-/// only by `bounded_search_output_compact_worst_case_fits_the_first_look_ceiling` and the
-/// `over_output`/no-match test assertions below — a test-time pin, not a runtime guard.
 fn search_reply(query: &str, results: Vec<Value>, guidance: &'static str) -> Value {
     json!({"query": query, "results": results, "guidance": guidance})
 }
 
-/// Ranks 1..=TOOL_SEARCH_INLINE_RESULT_LIMIT always ride compact (bounded by construction); rank 1
-/// gets exactly ONE additional check: does the reply carrying its own full schema, WITH its real
-/// guidance string already in place, fit the budget? The value tested for fit and the value
-/// returned are the same value — no probe, no clone-and-swap, no separate "what guidance would we
-/// use if this fit" step for the fit check to silently disagree with. This is the ONLY branch with
-/// a runtime fit check; see `search_reply`'s doc comment immediately above for what that does and
-/// does not mean for the other two branches.
+/// Exact number of bytes `raw` occupies once JSON-string-escaped, quotes excluded. Computed by
+/// asking serde_json to perform the escaping (NOT approximated by a per-`"`-or-`\` multiplier):
+/// serializing a `Value::String(raw)` performs the exact same escaping
+/// `result_reference_observation`'s embedding of the reply into `detail.preview` performs
+/// (`crates/app/ironclaw_composition/src/runtime/capability_host/result_preview.rs`), so this
+/// measurement cannot drift from the embedding cost it predicts.
+fn json_string_escaped_len(raw: &str) -> usize {
+    match serde_json::to_string(&Value::String(raw.to_string())) {
+        Ok(quoted) => quoted.len().saturating_sub(2), // strip the wrapping `"` .. `"`
+        // Serializing a `Value::String` cannot fail in practice (no custom Serialize impl, no
+        // writer I/O) — this arm exists only so the function has no panic path. Treat the
+        // impossible error as an infinite cost so a candidate is never mistakenly accepted.
+        Err(_) => usize::MAX,
+    }
+}
+
+/// Whether returning `candidate` as the tool_search reply keeps the resulting
+/// `ModelVisibleToolObservation.detail.preview` within `MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES`.
+///
+/// Bounds the ESCAPED size, not the raw size: the reply does not reach the model as raw bytes —
+/// `result_reference_observation` re-embeds it as a JSON-escaped string inside `detail.preview`,
+/// and escaping cost is content-dependent (~1 extra byte per `"` or `\` in the raw reply, and
+/// ordinary JSON is dense with `"`), so a fixed raw-byte budget cannot model it. That gap is the
+/// #7984 defect: a reply that fit under the old raw-byte check could still blow the embedded
+/// observation's budget once escaped.
+///
+/// **Why checking only this one rule is sufficient AND conservative:** `raw_len <= escaped_len`
+/// always (escaping only ever adds bytes, never removes them), so any candidate passing this
+/// check also satisfies `first_look_result_preview`'s raw-bytes-<=-3,072-B verbatim-pass-through
+/// condition; and `MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES` (3,072 B) is itself well under
+/// `RESULT_OBSERVATION_MAX_BYTES` (4,096 B,
+/// `crates/app/ironclaw_composition/src/runtime/capability_host/result_preview.rs:9`) — a
+/// candidate that fits inside 3,072 B leaves >1 KiB of margin for the observation's own fixed
+/// JSON scaffolding (schema_version/status/summary/detail tag/artifacts/trust, plus `result_ref`
+/// carried twice), so it also fits inside the observation. One rule, both constraints, no new
+/// cross-crate constant.
+fn wrapped_reply_fits(candidate: &Value) -> bool {
+    let Ok(serialized) = serde_json::to_vec(candidate) else {
+        return false;
+    };
+    let Ok(raw) = std::str::from_utf8(&serialized) else {
+        return false;
+    };
+    json_string_escaped_len(raw).saturating_add(OBSERVATION_ENVELOPE_SCAFFOLDING_BYTES)
+        <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES
+}
+
+/// Builds the tool_search reply through an ordered degradation ladder — the first candidate whose
+/// ESCAPED size (see `wrapped_reply_fits`) fits the shared first-look ceiling wins, so the reply
+/// fits by construction for ANY input, including an adversarial/untrusted hosted-MCP schema:
+///
+/// a. rank 1 complete: its own full parameter schema, ranks 2-3 compact with `required` full.
+/// b. all-compact: no rank carries a schema, `required` still full.
+/// c. all-compact with `required` capped (`RequiredParamsShape::Capped`), then omitted entirely
+///    (`RequiredParamsShape::Omitted`) if capping alone still does not fit.
+/// d. progressively fewer results (3 -> 2 -> 1), `required` omitted.
+/// e. the floor: query + guidance + an empty `results` array. Always fits (bounded query, no
+///    result content, a static guidance string), so the ladder always terminates.
+///
+/// Every non-floor rung keeps a real, non-empty `results` array and a guidance string that stays
+/// true for what it actually returns — the floor rung is the only one that returns zero results,
+/// and the only one using `TOOL_SEARCH_QUERY_TOO_BROAD_GUIDANCE`.
 fn bounded_search_output(query: &str, results: Vec<CatalogSearchResult>) -> Value {
-    let compact: Vec<Value> = results
+    let Some(rank_one) = results.first() else {
+        return search_reply(query, Vec::new(), TOOL_SEARCH_NO_MATCH_GUIDANCE);
+    };
+
+    // Rung a: rank 1 complete, ranks 2-3 compact with `required` full — the measured object IS
+    // the returned object, no probe/clone-and-swap step for the fit check to disagree with.
+    let compact_full: Vec<Value> = results
         .iter()
         .take(TOOL_SEARCH_INLINE_RESULT_LIMIT)
         .map(compact_result_entry)
         .collect();
-    let Some(rank_one) = results.first() else {
-        return search_reply(query, compact, TOOL_SEARCH_NO_MATCH_GUIDANCE);
-    };
-    let mut complete = compact.clone();
+    let mut complete = compact_full.clone();
     complete[0]["schema_complete"] = Value::Bool(true);
     complete[0]["parameters"] = rank_one.parameters.clone();
     let candidate = search_reply(query, complete, TOOL_SEARCH_INVOKE_DIRECTLY_GUIDANCE);
-    if serialized_len_within(&candidate, TOOL_SEARCH_REPLY_BUDGET_BYTES).is_some() {
-        return candidate; // the measured object IS the returned object
+    if wrapped_reply_fits(&candidate) {
+        return candidate;
     }
-    search_reply(query, compact, TOOL_SEARCH_DESCRIBE_FOR_SCHEMA_GUIDANCE)
+
+    // Rung b: all-compact, `required` still full.
+    let candidate = search_reply(
+        query,
+        compact_full,
+        TOOL_SEARCH_DESCRIBE_FOR_SCHEMA_GUIDANCE,
+    );
+    if wrapped_reply_fits(&candidate) {
+        return candidate;
+    }
+
+    // Rung c (capped): all-compact, `required` capped to REQUIRED_PARAMS_COMPACT_CAP names.
+    let compact_capped: Vec<Value> = results
+        .iter()
+        .take(TOOL_SEARCH_INLINE_RESULT_LIMIT)
+        .map(|result| compact_result_entry_shaped(result, RequiredParamsShape::Capped))
+        .collect();
+    let candidate = search_reply(query, compact_capped, TOOL_SEARCH_TRIMMED_RESULTS_GUIDANCE);
+    if wrapped_reply_fits(&candidate) {
+        return candidate;
+    }
+
+    // Rung c (omitted): all-compact, `required` dropped entirely — the smallest per-entry shape.
+    let compact_omitted: Vec<Value> = results
+        .iter()
+        .take(TOOL_SEARCH_INLINE_RESULT_LIMIT)
+        .map(|result| compact_result_entry_shaped(result, RequiredParamsShape::Omitted))
+        .collect();
+    let candidate = search_reply(
+        query,
+        compact_omitted.clone(),
+        TOOL_SEARCH_TRIMMED_RESULTS_GUIDANCE,
+    );
+    if wrapped_reply_fits(&candidate) {
+        return candidate;
+    }
+
+    // Rung d: progressively fewer of the smallest-shape entries (2, then 1).
+    for keep in (1..TOOL_SEARCH_INLINE_RESULT_LIMIT).rev() {
+        let subset: Vec<Value> = compact_omitted.iter().take(keep).cloned().collect();
+        let candidate = search_reply(query, subset, TOOL_SEARCH_TRIMMED_RESULTS_GUIDANCE);
+        if wrapped_reply_fits(&candidate) {
+            return candidate;
+        }
+    }
+
+    // Rung e: the floor. Always fits — bounded query, no result content, static guidance.
+    search_reply(query, Vec::new(), TOOL_SEARCH_QUERY_TOO_BROAD_GUIDANCE)
 }
 
 impl BridgeKind {
@@ -1300,12 +1449,26 @@ impl ToolDisclosureCapabilityPort {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_recoverable(
-                    FailureKind::InputEncode,
+                    FailureKind::Unavailable,
                     "tool catalog is unavailable",
                 ));
             };
+            // In complete-signature mode the reply carries at most
+            // TOOL_SEARCH_INLINE_RESULT_LIMIT results regardless of the caller's `limit` (see
+            // `bounded_search_output`'s own `.take(...)`), and `AuthorizedToolSearchIndex::search`
+            // scores the WHOLE corpus before truncating to `limit` — so narrowing `limit` here
+            // cannot change which ranks come first, only how many the index bothers to
+            // canonicalize (`state.catalog.search_result`) below. Capping avoids materializing and
+            // immediately discarding ranks 4-50 on every complete-signature search. The Compact
+            // control arm (unbounded by design, see below) must keep using the caller's full
+            // `limit`.
+            let limit_for_search = if self.mode.includes_complete_signatures() {
+                limit.min(TOOL_SEARCH_INLINE_RESULT_LIMIT)
+            } else {
+                limit
+            };
             let search_started_at = std::time::Instant::now();
-            let outcome = state.search_index.search(query, limit);
+            let outcome = state.search_index.search(query, limit_for_search);
             debug!(
                 target: "ironclaw::reborn::tool_search",
                 query_class = outcome.query_class.as_str(),
@@ -1375,7 +1538,7 @@ impl ToolDisclosureCapabilityPort {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_recoverable(
-                    FailureKind::InputEncode,
+                    FailureKind::Unavailable,
                     "tool catalog is unavailable",
                 ));
             };
@@ -1435,13 +1598,13 @@ impl ToolDisclosureCapabilityPort {
             let mut guard = self.turn_state()?;
             let Some(state) = guard.as_mut() else {
                 return Ok(failed_recoverable(
-                    FailureKind::InputEncode,
+                    FailureKind::Unavailable,
                     "tool catalog is unavailable",
                 ));
             };
             let Some(result) = state.catalog.search_result(name) else {
                 return Ok(failed_recoverable(
-                    FailureKind::InputEncode,
+                    FailureKind::UnknownCapability,
                     "auto-schema target is unknown",
                 ));
             };
@@ -4256,6 +4419,46 @@ mod tests {
         );
     }
 
+    /// Test-only now: production's fit check moved from a fixed raw-byte comparison
+    /// (`serialized_len_within` against a byte ceiling) to the exact escaped-size check
+    /// `wrapped_reply_fits` performs (see #7984). Kept here as a focused unit test of the
+    /// bounded-writer byte-counting mechanics themselves.
+    struct BoundedCountingWriter {
+        bytes_written: usize,
+        limit: usize,
+    }
+
+    impl std::io::Write for BoundedCountingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            let Some(next) = self.bytes_written.checked_add(buffer.len()) else {
+                return Err(std::io::Error::other(
+                    "serialized schema exceeds byte limit",
+                ));
+            };
+            if next > self.limit {
+                return Err(std::io::Error::other(
+                    "serialized schema exceeds byte limit",
+                ));
+            }
+            self.bytes_written = next;
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn serialized_len_within(value: &Value, limit: usize) -> Option<usize> {
+        let mut writer = BoundedCountingWriter {
+            bytes_written: 0,
+            limit,
+        };
+        serde_json::to_writer(&mut writer, value)
+            .ok()
+            .map(|()| writer.bytes_written)
+    }
+
     #[test]
     fn bounded_schema_measurement_stops_at_the_limit() {
         let schema = json!({"value": "x".repeat(1_000_000)});
@@ -4364,25 +4567,43 @@ mod tests {
         let rank_two = search_result_with_schema("rank_two", json!({"type": "object"}));
         let rank_three = search_result_with_schema("rank_three", json!({"type": "object"}));
 
-        // Measure the reply at pad_len=0 to derive the exact byte where it crosses the
-        // budget -- padding is an unescaped ASCII string, so it grows the reply
-        // byte-for-byte; this DERIVES the boundary instead of guessing at it.
-        let baseline = search_result_with_schema("rank_one", schema_of_pad_len(0));
-        let baseline_output = bounded_search_output(
-            "query",
-            vec![baseline.clone(), rank_two.clone(), rank_three.clone()],
-        );
-        assert_eq!(
-            baseline_output["results"][0]["schema_complete"],
-            Value::Bool(true),
+        // Whether rank 1's own complete-schema candidate (rung a) fits at a given pad_len.
+        // Padding is unescaped ASCII, so it grows both the raw AND the JSON-string-escaped size
+        // byte-for-byte -- `fits_at` is therefore monotonic decreasing in pad_len, so binary
+        // search finds the EXACT byte the escaped-size check flips at, deriving the boundary
+        // from the real (fixed) check rather than assuming raw bytes == embedded bytes (the
+        // assumption #7984's escaping defect broke).
+        let fits_at = |pad_len: usize| -> bool {
+            let rank_one = search_result_with_schema("rank_one", schema_of_pad_len(pad_len));
+            let output = bounded_search_output(
+                "query",
+                vec![rank_one, rank_two.clone(), rank_three.clone()],
+            );
+            output["results"][0]["schema_complete"] == Value::Bool(true)
+        };
+
+        assert!(
+            fits_at(0),
             "pad_len=0 baseline must itself fit, or the derived boundary below is meaningless"
         );
-        let baseline_bytes = serde_json::to_vec(&baseline_output)
-            .expect("reply serializes")
-            .len();
-        let headroom = TOOL_SEARCH_REPLY_BUDGET_BYTES - baseline_bytes;
+        let mut lower = 0usize; // known to fit
+        let mut upper = 8192usize; // must not fit -- checked next
+        assert!(
+            !fits_at(upper),
+            "search upper bound must itself not fit; widen it if this assertion fires"
+        );
+        while upper - lower > 1 {
+            let mid = lower + (upper - lower) / 2;
+            if fits_at(mid) {
+                lower = mid;
+            } else {
+                upper = mid;
+            }
+        }
+        // `lower` = the largest pad_len that still fits ("just under"); `upper` = `lower + 1`,
+        // the smallest pad_len that does not ("just over").
 
-        let just_under = search_result_with_schema("rank_one", schema_of_pad_len(headroom));
+        let just_under = search_result_with_schema("rank_one", schema_of_pad_len(lower));
         let under_output = bounded_search_output(
             "query",
             vec![just_under.clone(), rank_two.clone(), rank_three.clone()],
@@ -4404,7 +4625,7 @@ mod tests {
                 <= MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES
         );
 
-        let just_over = search_result_with_schema("rank_one", schema_of_pad_len(headroom + 1));
+        let just_over = search_result_with_schema("rank_one", schema_of_pad_len(upper));
         let over_output = bounded_search_output("query", vec![just_over, rank_two, rank_three]);
         assert_eq!(
             over_output["results"][0]["schema_complete"],
@@ -4507,6 +4728,104 @@ mod tests {
             required_params: vec!["value".to_string()],
             parameters,
         }
+    }
+
+    /// #7984 defect 2: escaping cost is content-dependent, so a fixed raw-byte budget cannot
+    /// model it. Build a result whose `required` names and `description` are saturated with `"`
+    /// and `\` -- each occurrence costs an EXTRA byte once JSON-string-escaped into
+    /// `detail.preview`, on top of the escaping the raw candidate's own JSON serialization
+    /// already performs on them (a `"`/`\` inside a JSON string value is escaped once building
+    /// the raw reply, then escaped AGAIN embedding that raw reply as a string) -- so a handful of
+    /// these characters costs far more than their raw byte count suggests.
+    fn escape_heavy_required_name(seed: usize) -> String {
+        format!(
+            "\"param_{seed}\"_with\\backslash_and_\"quotes\"_{}",
+            "\\\"".repeat(6)
+        )
+    }
+
+    #[test]
+    fn bounded_search_output_degrades_for_escape_heavy_content() {
+        let mut rank_one = search_result_with_schema("rank_one", json!({"type": "object"}));
+        rank_one.description = format!(
+            "\"escape\\heavy\" description with lots of \\\"quoted\\\" segments: {}",
+            "\\\"".repeat(40)
+        );
+        rank_one.required_params = (0..10).map(escape_heavy_required_name).collect();
+        let mut rank_two = search_result_with_schema("rank_two", json!({"type": "object"}));
+        rank_two.description = rank_one.description.clone();
+        rank_two.required_params = rank_one.required_params.clone();
+        let mut rank_three = search_result_with_schema("rank_three", json!({"type": "object"}));
+        rank_three.description = rank_one.description.clone();
+        rank_three.required_params = rank_one.required_params.clone();
+
+        let output = bounded_search_output("query", vec![rank_one, rank_two, rank_three]);
+
+        // A real, non-empty reply -- not a panic, and not the empty floor rung.
+        let results = output["results"]
+            .as_array()
+            .expect("results is an array")
+            .clone();
+        assert!(
+            !results.is_empty(),
+            "escape-heavy content must still return real matches, not the empty floor"
+        );
+        // The SAME escaped-size check production enforces -- proves the reply fits by
+        // construction, not merely that this test forgot to check.
+        assert!(
+            wrapped_reply_fits(&output),
+            "escape-heavy reply must fit the escaped-size budget: {}",
+            serde_json::to_string(&output).expect("serializes")
+        );
+    }
+
+    #[test]
+    fn bounded_search_output_degrades_for_wide_required_array() {
+        // #7984 defect 1: an untrusted/dynamic (e.g. hosted-MCP) tool schema can declare an
+        // arbitrarily large `required` array. 20 names x 40 chars alone produces a 6,332 B RAW
+        // compact reply -- over the 3,072 B first-look ceiling outright, regardless of escaping,
+        // so the compact fallback (which previously had NO runtime check at all) must itself
+        // degrade.
+        let wide_required: Vec<String> = (0..20)
+            .map(|index: usize| format!("required_param_name_{index:02}_{}", "p".repeat(17)))
+            .collect();
+        assert_eq!(
+            wide_required[0].len(),
+            40,
+            "fixture must actually be 40 B per name, matching the Goal section's worst case"
+        );
+        let mut rank_one = search_result_with_schema("rank_one", json!({"type": "object"}));
+        rank_one.required_params = wide_required.clone();
+        let mut rank_two = search_result_with_schema("rank_two", json!({"type": "object"}));
+        rank_two.required_params = wide_required.clone();
+        let mut rank_three = search_result_with_schema("rank_three", json!({"type": "object"}));
+        rank_three.required_params = wide_required;
+
+        let output = bounded_search_output("query", vec![rank_one, rank_two, rank_three]);
+
+        let results = output["results"]
+            .as_array()
+            .expect("results is an array")
+            .clone();
+        assert!(
+            !results.is_empty(),
+            "a wide required array must still return real matches, not the empty floor"
+        );
+        assert!(
+            wrapped_reply_fits(&output),
+            "wide-required-array reply must fit the escaped-size budget: {}",
+            serde_json::to_string(&output).expect("serializes")
+        );
+        // The degradation actually fired: the 20-name array did not ride through unbounded.
+        let required_len = results[0]["required"]
+            .as_array()
+            .map(|array| array.len())
+            .unwrap_or(0);
+        assert!(
+            required_len < 20,
+            "required array must have been capped or omitted, not passed through unbounded \
+             (got {required_len} entries)"
+        );
     }
 
     fn disclosure_port(

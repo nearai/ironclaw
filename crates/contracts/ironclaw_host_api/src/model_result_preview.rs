@@ -38,16 +38,6 @@ pub const MODEL_RESULT_JSON_PAGE_VIEW: &str = "ironclaw.json_page.v1";
 /// MODEL_RESULT_PREVIEW_MAX_BYTES (24 KiB result_read page bound).
 pub const MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES: usize = 3 * 1024;
 
-/// Estimated byte overhead the `ModelVisibleToolObservation` envelope adds on top of a
-/// raw capability reply body when `first_look_result_preview` passes it through verbatim
-/// (fixed JSON scaffolding — schema_version/status/summary/detail tag/artifacts/trust — plus
-/// the `result_ref` string carried twice, plus JSON-string-escaping the embedded reply text
-/// itself, which is proportional to how many `"` characters the raw reply contains).
-/// A producer that must size its OWN raw reply so the wrapped envelope still fits
-/// `MODEL_FIRST_LOOK_PREVIEW_MAX_BYTES` subtracts this. Keep this as the one named
-/// definition — do not restate the value as a bare literal at either call site.
-pub const MODEL_OBSERVATION_WRAPPER_ALLOWANCE_BYTES: usize = 512;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ModelResultJsonPageView {
     #[serde(rename = "ironclaw.json_page.v1")]
