@@ -1,5 +1,88 @@
 use super::*;
 
+/// Resource gates do not carry a resume token or a pending-resume state slot.
+/// The blocked exit and its `BeforeBlock` checkpoint are therefore the
+/// continuity contract: both must identify the same gate and parked activity,
+/// and the checkpoint ref must remain bound to this run.
+#[tokio::test]
+async fn resource_gate_blocks_with_matching_before_block_resume_state() {
+    let gate_ref = LoopGateRef::new("gate:resource-test").expect("valid gate ref");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![
+                resolution::resource_blocked(
+                    gate_ref.clone(),
+                    "resource budget unavailable".to_string(),
+                )
+                .resolution,
+            ],
+            stopped_on_suspension: true,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    let LoopExit::Blocked(blocked) = exit else {
+        panic!("expected resource gate to block, got {exit:?}");
+    };
+    assert_eq!(
+        blocked.kind,
+        ironclaw_loop_contracts::LoopBlockedKind::Resource
+    );
+    assert_eq!(blocked.gate_ref, gate_ref);
+    assert!(
+        blocked.state_ref.is_for_run(host.run_context()),
+        "blocked state ref must remain scoped to the executing run"
+    );
+
+    let batch = host
+        .batch_invocations()
+        .into_iter()
+        .next()
+        .expect("resource gate invocation batch");
+    let activity_id = batch
+        .invocations
+        .into_iter()
+        .next()
+        .expect("resource gate invocation")
+        .activity_id;
+    assert_eq!(
+        blocked.blocked_activity_id,
+        Some(activity_id),
+        "blocked exit must identify the activity parked by the resource gate"
+    );
+
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeSideEffect,
+            LoopCheckpointKind::BeforeBlock,
+        ]
+    );
+    let before_block_state = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock);
+    assert_eq!(
+        before_block_state.last_gate,
+        Some(gate_ref.clone()),
+        "BeforeBlock state must preserve the gate identity used by the blocked exit"
+    );
+    assert_eq!(
+        before_block_state
+            .last_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.kind),
+        Some(CheckpointKind::BeforeBlock)
+    );
+    assert!(before_block_state.pending_approval_resume.is_none());
+    assert!(before_block_state.pending_auth_resume.is_none());
+    assert!(before_block_state.pending_external_tool_resume.is_none());
+}
+
 #[tokio::test]
 async fn model_budget_approval_required_with_gate_ref_blocks_resource_gate() {
     let gate_ref = LoopGateRef::new("gate:budget-test-approval").expect("gate ref");

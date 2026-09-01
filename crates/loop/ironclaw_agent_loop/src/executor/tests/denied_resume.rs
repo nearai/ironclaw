@@ -1423,3 +1423,179 @@ async fn capability_stage_denied_approval_resume_no_matching_call_dispatches_unr
          from the model's batch"
     );
 }
+
+/// Characterizes the denied external-tool resume partition.
+///
+/// A client-cancelled external-tool resume must consume only its matching
+/// parked activity. The parked call is terminalized as a model-visible
+/// `GateDeclined` failure without host dispatch, while an unrelated call in
+/// the same batch still reaches the capability host and its result is retained.
+#[tokio::test]
+async fn capability_stage_denied_external_tool_resume_clears_matching_slot_without_dispatch_and_continues_unrelated()
+ {
+    let y_result_ref = LoopResultRef::new("result:external-tool-y-outcome").expect("valid");
+    let host = MockHost::new(Vec::new())
+        .with_extra_capability_descriptors(vec![
+            ironclaw_loop_contracts::CapabilityDescriptorView {
+                capability_id: other_capability_id(),
+                provider: None,
+                runtime: ironclaw_host_api::runtime::RuntimeKind::FirstParty,
+                safe_name: "demo_list".to_string(),
+                safe_description: "demo list capability".to_string(),
+                description_trust: Default::default(),
+                parameters_schema: serde_json::json!({"type":"object","properties":{}}),
+            },
+        ])
+        .with_batch_outcomes(vec![ironclaw_host_api::resolution::ResolutionBatch {
+            resolutions: vec![resolution::completed(
+                y_result_ref.clone(),
+                "list done".to_string(),
+                ironclaw_loop_contracts::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
+            )],
+            stopped_on_suspension: false,
+        }]);
+
+    let denied_activity_id = CapabilityActivityId::new();
+    let unrelated_activity_id = CapabilityActivityId::new();
+    let mut denied_call = match provider_calls_response().output {
+        ParentLoopOutput::CapabilityCalls(calls) => calls
+            .into_iter()
+            .next()
+            .expect("provider call fixture must contain one call"),
+        ParentLoopOutput::AssistantReply(_) => panic!("expected provider calls fixture"),
+    };
+    denied_call.activity_id = denied_activity_id;
+
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.pending_external_tool_resume = Some(PendingExternalToolResume {
+        gate_ref: LoopGateRef::new("gate:external-tool-deny-test").expect("valid"),
+        capability_id: capability_id(),
+        activity_id: denied_activity_id,
+        surface_version: surface_version(),
+        input_ref: denied_call.input_ref.clone(),
+        effective_capability_ids: vec![capability_id()],
+        provider_replay: denied_call.provider_replay.clone(),
+        disposition: Some(GateResumeDisposition::Denied),
+    });
+
+    let calls = vec![
+        denied_call,
+        ironclaw_loop_contracts::CapabilityCallCandidate {
+            activity_id: unrelated_activity_id,
+            surface_version: surface_version(),
+            capability_id: other_capability_id(),
+            input_ref: CapabilityInputRef::new("input:external-tool-y-unrelated").expect("valid"),
+            effective_capability_ids: vec![other_capability_id()],
+            provider_replay: None,
+        },
+    ];
+
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let step = CapabilityStage
+        .process(
+            ctx,
+            CapabilityInput {
+                state,
+                surface: ironclaw_loop_contracts::LoopCapabilityPort::visible_capabilities(
+                    &host,
+                    VisibleCapabilityRequest,
+                )
+                .await
+                .expect("visible surface"),
+                calls,
+            },
+        )
+        .await
+        .expect("capability stage");
+
+    let final_state = match step {
+        TurnCompletedStep::Continue { state, .. } => state,
+        TurnCompletedStep::Exit(exit) => {
+            panic!("expected Continue after denied external-tool resume, got Exit: {exit:?}")
+        }
+    };
+
+    assert!(
+        final_state.pending_external_tool_resume.is_none(),
+        "matching denied external-tool resume must be cleared"
+    );
+
+    let batches = host.batch_invocations();
+    assert_eq!(
+        batches.len(),
+        1,
+        "only the unrelated call should be dispatched"
+    );
+    assert_eq!(batches[0].invocations.len(), 1);
+    assert_eq!(batches[0].invocations[0].activity_id, unrelated_activity_id);
+    assert_eq!(
+        batches[0].invocations[0].capability_id,
+        other_capability_id()
+    );
+    assert!(
+        host.registered_provider_calls().is_empty(),
+        "denied external-tool resume must not re-register or dispatch its parked provider call"
+    );
+
+    assert!(
+        host.progress_events().iter().any(|event| matches!(
+            event,
+            LoopProgressEvent::CapabilityActivityFailed {
+                activity_id,
+                capability_id: emitted_capability_id,
+                reason_kind: FailureKind::GateDeclined,
+                ..
+            } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
+        )),
+        "denied external-tool resume must persist a GateDeclined activity failure"
+    );
+
+    let appended = host.appended_result_refs();
+    assert_eq!(
+        appended.len(),
+        2,
+        "one model-visible denial and one unrelated completed result must be appended"
+    );
+    let failure_entry = appended
+        .iter()
+        .find(|entry| entry.model_observation.is_some())
+        .expect("denied external-tool resume must append model-visible failure evidence");
+    assert_eq!(
+        failure_entry.safe_summary,
+        "external tool gate cancelled by client"
+    );
+    let observation = failure_entry
+        .model_observation
+        .as_ref()
+        .expect("model observation must be present");
+    assert_eq!(observation.status, ToolObservationStatus::Error);
+    assert_eq!(observation.summary, "Capability declined by user.");
+    let recovery = observation
+        .recovery
+        .as_ref()
+        .expect("gate-declined recovery must be present");
+    assert_eq!(recovery.same_call_retry, SameCallRetryConstraint::Forbidden);
+
+    assert!(
+        appended
+            .iter()
+            .any(|entry| entry.result_ref == y_result_ref),
+        "the unrelated call's completed result must be persisted"
+    );
+    assert!(
+        final_state.result_refs.contains(&failure_entry.result_ref),
+        "final state must retain the persisted GateDeclined result ref"
+    );
+    assert!(
+        final_state.result_refs.contains(&y_result_ref),
+        "final state must retain the unrelated completed result ref"
+    );
+}

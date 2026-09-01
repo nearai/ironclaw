@@ -473,7 +473,7 @@ async fn completed_output_digest_is_recorded_for_the_no_progress_window() {
 /// branch inside that one: a completed result with `output_digest: None` must
 /// leave `seen_capability_output_digests` fully EMPTY, not merely excluded
 /// from a mixed set. `append_completed_capability_result`
-/// (capabilities.rs) only pushes into the ring `if let Some(output_digest) =
+/// (capability_outcomes.rs) only pushes into the ring `if let Some(output_digest) =
 /// result.output_digest`.
 #[tokio::test]
 async fn completed_result_without_output_digest_leaves_no_progress_window_empty() {

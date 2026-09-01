@@ -110,7 +110,7 @@ pub enum ToolErrorClass {
 impl ToolErrorClass {
     /// The `safe_summary` prefix the executor writes for this class — see
     /// `capability_{failed,denied}_summary` in
-    /// `crates/loop/ironclaw_agent_loop/src/executor/capabilities.rs`.
+    /// `crates/loop/ironclaw_agent_loop/src/executor/capability_failure.rs`.
     fn summary_prefix(self) -> &'static str {
         match self {
             Self::Failed => "capability failed with ",
@@ -1704,10 +1704,10 @@ impl RebornIntegrationHarness {
     /// Assert some persisted `ToolResultReference`'s raw `safe_summary` text
     /// contains `text` — NO class-prefix requirement. Complements
     /// [`assert_tool_error`] for executor-synthesized `CapabilityErrorSummary`s
-    /// (filtered-surface denial, stale-surface retry, gate-declined
-    /// short-circuit — `executor/capabilities.rs`) that are fixed host-authored
-    /// literals with no host-returned text, so `assert_tool_error`'s prefix
-    /// match can never succeed for them.
+    /// (filtered- or stale-surface outcomes in `executor/capabilities.rs`;
+    /// denied-resume and retry outcomes in `executor/capability_dispatch.rs`)
+    /// that are fixed host-authored literals with no host-returned text, so
+    /// `assert_tool_error`'s prefix match can never succeed for them.
     pub async fn assert_tool_error_summary_contains(&self, text: &str) -> HarnessResult<()> {
         let summaries = self.persisted_tool_error_summaries().await?;
         if summaries.iter().any(|summary| summary.contains(text)) {
