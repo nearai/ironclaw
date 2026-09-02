@@ -248,7 +248,11 @@ impl crate::reply::ReplySink for RecordingReplySink {
             crate::reply::ReplySinkOutcome::Applied => format!("applied:{revision}"),
             crate::reply::ReplySinkOutcome::Retryable { .. } => format!("retryable:{revision}"),
             crate::reply::ReplySinkOutcome::Ambiguous { .. } => format!("ambiguous:{revision}"),
-            _ => String::new(),
+            crate::reply::ReplySinkOutcome::Permanent { .. } => format!("permanent:{revision}"),
+            crate::reply::ReplySinkOutcome::Unauthorized { .. } => {
+                format!("unauthorized:{revision}")
+            }
+            crate::reply::ReplySinkOutcome::StoppedByUser => String::new(),
         };
         let checkpoint = crate::reply::ReplySinkCheckpoint::new(1, checkpoint_payload.clone())
             .expect("checkpoint within bound"); // safety: test-support fake with a fixed small payload.

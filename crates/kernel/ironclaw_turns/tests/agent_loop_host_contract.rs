@@ -2573,7 +2573,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
     );
     assert!(
         surface_materialized.model_content.contains(
-            "Never claim that you checked, read, searched, queried, or refreshed an external service unless you actually invoked the corresponding capability in this run"
+            "Startup context and earlier conversation text are not evidence of a live provider query"
         ),
         "surface prompt must distinguish startup context from live provider evidence: {:?}",
         surface_materialized.model_content

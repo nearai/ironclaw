@@ -387,6 +387,9 @@ enum Step {
         reason: ReplyOutcomeReason,
         kind: DeliveryFailureKind,
         generation: u64,
+        /// What the sink handed back with the terminal failure, kept on the
+        /// settled row like any other checkpoint.
+        checkpoint: Option<ReplySinkCheckpoint>,
     },
     Stopped {
         generation: u64,
@@ -588,8 +591,9 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
             reason,
             kind,
             generation,
+            checkpoint,
         } => {
-            record_outcome(coordinator, &scope, Some(reason), generation, None).await;
+            record_outcome(coordinator, &scope, Some(reason), generation, checkpoint).await;
             settle(
                 coordinator,
                 target,
@@ -663,6 +667,8 @@ async fn prepare(
             reason: ReplyOutcomeReason::new("channel no longer binds a reply sink"),
             kind: DeliveryFailureKind::Rejected,
             generation: channel.generation,
+
+            checkpoint: None,
         });
     }
     // The reply context is the per-run SNAPSHOT taken at registration (and
@@ -727,6 +733,8 @@ async fn reconcile(
             reason: ReplyOutcomeReason::new("channel no longer binds a reply sink"),
             kind: DeliveryFailureKind::Rejected,
             generation,
+
+            checkpoint: None,
         };
     };
     // The pre-claim point classification stands: the caller re-plans (and
@@ -782,6 +790,8 @@ async fn reconcile(
                 reason: reason.clone(),
                 kind: DeliveryFailureKind::Rejected,
                 generation,
+
+                checkpoint: report.checkpoint.clone(),
             },
             // Fail-closed per `.claude/rules/lifecycle.md`: an authentication
             // rejection is terminal and never retried until the credential
@@ -793,6 +803,8 @@ async fn reconcile(
                 reason: reason.clone(),
                 kind: DeliveryFailureKind::AuthorizationRevoked,
                 generation,
+
+                checkpoint: report.checkpoint.clone(),
             },
             ReplySinkOutcome::StoppedByUser => Step::Stopped { generation },
         },
@@ -827,6 +839,8 @@ fn channel_error_step(error: ChannelError, generation: u64) -> Step {
             reason,
             kind: DeliveryFailureKind::Rejected,
             generation,
+
+            checkpoint: None,
         },
     }
 }
@@ -842,6 +856,8 @@ async fn materialize(
             reason: ReplyOutcomeReason::new("reply attachments need an agent-scoped run"),
             kind: DeliveryFailureKind::Rejected,
             generation: channel.generation,
+
+            checkpoint: None,
         });
     };
     let thread_scope = ThreadScope {
@@ -874,6 +890,8 @@ async fn materialize(
                     reason,
                     kind,
                     generation: channel.generation,
+
+                    checkpoint: None,
                 },
             })
         }

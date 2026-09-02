@@ -879,6 +879,15 @@ async fn permanent_and_unauthorized_outcomes_settle_failed_without_another_attem
         ))
     );
     assert_eq!(harness.sink.requests().len(), 1);
+    assert!(
+        settled
+            .publication
+            .checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.payload().starts_with("permanent:")),
+        "the checkpoint handed back with a permanent report stays on the settled row: {:?}",
+        settled.publication.checkpoint
+    );
 
     let unauthorized = harness_with_prefix("unauthorized", ReplyTransport::Message);
     unauthorized.sink.script([ReplySinkOutcome::Unauthorized {
@@ -898,6 +907,15 @@ async fn permanent_and_unauthorized_outcomes_settle_failed_without_another_attem
         ))
     );
     assert_eq!(unauthorized.sink.requests().len(), 1);
+    assert!(
+        settled
+            .publication
+            .checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.payload().starts_with("unauthorized:")),
+        "the checkpoint handed back with an unauthorized report stays on the settled row: {:?}",
+        settled.publication.checkpoint
+    );
 }
 
 #[tokio::test]
