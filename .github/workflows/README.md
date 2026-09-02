@@ -10,6 +10,23 @@ a check belongs to exactly one tier on purpose.
 | Post-merge confirm | `push` to `main` | Runs exhaustive coverage, warms shared caches, and feeds Codecov/canaries. A main-only deterministic failure means the affected-area classifier missed an impact and must be widened. |
 | Deep / scheduled | `schedule` (nightly) | Exhaustive suites too slow for the queue: legacy v1 matrix, full browser E2E, stress scans. |
 
+## Build caches
+
+Rust build caches (Swatinem/rust-cache) are saved only by pushes to `main`
+(the stress lane's by its nightly scan) and restored by every other event.
+GitHub lets a run restore caches from its own ref, its base branch, and the
+default branch, so a save from a `merge_group` run lands on the queue entry's
+`gh-readonly-queue/...` ref where no pull request and no later entry can read
+it; those saves were write-only and evicted `main`'s entries from the 10 GB
+repository limit. Two plain lineages exist. `reborn-hermetic` is every lane
+that builds inside `scripts/ci/run-hermetic-test-process.sh` (crate buckets,
+root partitions, the integration batch, QA replay, the Rust Reborn E2E
+groups): pinned stable toolchain, mold, and a stable hermetic Cargo home, so
+one entry is fresh for all of them. `reborn-direct` is the lanes that run
+cargo against the host Cargo home (the sandbox Docker tests, which save it,
+and the merge-queue mutation gate, which restores it). The instrumented
+coverage lanes on `main` keep their separate `-cov-llvm21` lineages.
+
 ## The invariant
 
 **No attributable deterministic failure may be main-only.** The merge queue

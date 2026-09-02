@@ -37,6 +37,7 @@ run_probe() {
     REBORN_COV_COLLECT="false" \
     IRONCLAW_E2E_EMULATE_SLACK_CHANNEL_BEARER="emulate-slack-channel-token" \
     IRONCLAW_HERMETIC_SABOTAGE="${sabotage}" \
+    RUNNER_TEMP="${probe_dir}" \
     "${runner}" -- bash -c '
       set -euo pipefail
       for key in \
@@ -59,13 +60,24 @@ run_probe() {
         fi
       done
 
+      # The Cargo home must be sanitized (no host config or credentials) but
+      # must NOT live under the per-invocation root: cargo hashes the
+      # absolute source path of every registry crate into its fingerprint, so
+      # a per-invocation Cargo home marks the whole dependency closure
+      # PathToSourceChanged on the next invocation and a cached target
+      # directory can never be fresh. Stability is asserted outside.
       case "${CARGO_HOME}" in
-        "${IRONCLAW_HERMETIC_ROOT}"/*) ;;
-        *)
-          echo "CARGO_HOME is outside the hermetic root: ${CARGO_HOME}" >&2
+        "${IRONCLAW_HERMETIC_ROOT}"/*)
+          echo "CARGO_HOME lives under the per-invocation hermetic root: ${CARGO_HOME}" >&2
           exit 38
           ;;
       esac
+      for host_cargo_file in config config.toml credentials credentials.toml; do
+        if [[ -e "${CARGO_HOME}/${host_cargo_file}" ]]; then
+          echo "hermetic CARGO_HOME exposes host Cargo state: ${CARGO_HOME}/${host_cargo_file}" >&2
+          exit 43
+        fi
+      done
       if [[ -n "${RUSTUP_HOME+x}" ]]; then
         echo "ambient RUSTUP_HOME leaked into the hermetic process" >&2
         exit 39
@@ -129,16 +141,47 @@ run_probe() {
         exit 34
       fi
 
-      printf "%s\n" "${IRONCLAW_HERMETIC_ROOT}"
+      printf "%s\t%s\n" "${IRONCLAW_HERMETIC_ROOT}" "${CARGO_HOME}"
     '
 }
 
-first_root="$(run_probe)"
-second_root="$(run_probe)"
+first_probe="$(run_probe)"
+second_probe="$(run_probe)"
+first_root="${first_probe%%$'\t'*}"
+second_root="${second_probe%%$'\t'*}"
+first_cargo_home="${first_probe#*$'\t'}"
+second_cargo_home="${second_probe#*$'\t'}"
 if [[ "${first_root}" == "${second_root}" ]]; then
   echo "hermetic invocations reused mutable state root: ${first_root}" >&2
   exit 1
 fi
+# Regression guard for the double-compile: the sanitized Cargo home is one
+# stable path per host, so cargo fingerprints (which hash each registry
+# crate's absolute source path) survive from one invocation to the next and
+# from a restored CI cache into the job that restored it.
+if [[ "${first_cargo_home}" != "${second_cargo_home}" ]]; then
+  echo "hermetic CARGO_HOME changed between invocations (every registry crate would be PathToSourceChanged): ${first_cargo_home} vs ${second_cargo_home}" >&2
+  exit 1
+fi
+expected_cargo_home="${probe_dir}/ironclaw-hermetic-cargo-home"
+if [[ "${first_cargo_home}" != "${expected_cargo_home}" ]]; then
+  echo "hermetic CARGO_HOME is not the suite-owned path under RUNNER_TEMP: ${first_cargo_home} (expected ${expected_cargo_home})" >&2
+  exit 1
+fi
+host_cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
+if [[ "${first_cargo_home}" == "${host_cargo_home}" ]]; then
+  echo "hermetic CARGO_HOME is the host Cargo home: ${first_cargo_home}" >&2
+  exit 1
+fi
+for cargo_cache in registry git; do
+  if [[ -d "${host_cargo_home}/${cargo_cache}" ]]; then
+    if [[ ! -L "${first_cargo_home}/${cargo_cache}" ]] \
+      || [[ "$(readlink "${first_cargo_home}/${cargo_cache}")" != "${host_cargo_home}/${cargo_cache}" ]]; then
+      echo "hermetic CARGO_HOME does not link the offline host ${cargo_cache} cache" >&2
+      exit 1
+    fi
+  fi
+done
 
 parallel_dir="${probe_dir}/parallel-roots"
 mkdir -p "${parallel_dir}"
@@ -150,11 +193,32 @@ done
 for pid in "${parallel_pids[@]}"; do
   wait "${pid}"
 done
-parallel_root_count="$(LC_ALL=C sort -u "${parallel_dir}"/* | wc -l | tr -d '[:space:]')"
+parallel_root_count="$(cut -f1 "${parallel_dir}"/* | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')"
 if [[ "${parallel_root_count}" != "4" ]]; then
   echo "parallel hermetic invocations did not receive four isolated roots" >&2
   LC_ALL=C sort "${parallel_dir}"/* >&2
   exit 1
+fi
+parallel_cargo_home_count="$(cut -f2 "${parallel_dir}"/* | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')"
+if [[ "${parallel_cargo_home_count}" != "1" ]]; then
+  echo "parallel hermetic invocations did not share one stable Cargo home" >&2
+  LC_ALL=C sort "${parallel_dir}"/* >&2
+  exit 1
+fi
+
+# The behavioral form of the same guard: a second invocation must compile
+# nothing. Builds the smallest workspace crate, so a cold run costs seconds.
+# The pre-build outside the boundary fetches its handful of dependencies;
+# the guarded runs are offline by design.
+if [[ -z "${IRONCLAW_HERMETIC_SELF_TEST_SKIP_CARGO:-}" ]] && command -v cargo >/dev/null 2>&1; then
+  (cd "${repo_root}" && cargo build -p ironclaw_prompt_envelope --quiet)
+  RUNNER_TEMP="${probe_dir}" "${runner}" -- cargo build -p ironclaw_prompt_envelope --quiet
+  second_build="$(RUNNER_TEMP="${probe_dir}" "${runner}" -- cargo build -p ironclaw_prompt_envelope 2>&1)"
+  if [[ "${second_build}" == *"Compiling"* ]]; then
+    echo "second hermetic invocation recompiled dependencies; the Cargo home is not stable across invocations:" >&2
+    printf '%s\n' "${second_build}" >&2
+    exit 1
+  fi
 fi
 
 no_prepare_bin="${probe_dir}/no-prepare-bin"

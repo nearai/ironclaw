@@ -84,11 +84,17 @@ def is_inside(path: str, root: str) -> bool:
     )
 
 
-def run(command: list[str], cwd: pathlib.Path) -> subprocess.CompletedProcess[str]:
+def run(
+    command: list[str], cwd: pathlib.Path, *, in_place: bool = False
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
-    # cargo-mutants creates isolated copies of the source tree. A shared target
-    # directory can leak incompatible build artifacts into those copies.
-    environment.pop("CARGO_TARGET_DIR", None)
+    if not in_place:
+        # cargo-mutants creates isolated copies of the source tree. A shared
+        # target directory can leak incompatible build artifacts into those
+        # copies. In-place runs build in the checkout's own target directory
+        # on purpose (a restored CI cache lives there), so they keep the
+        # caller's environment.
+        environment.pop("CARGO_TARGET_DIR", None)
     return subprocess.run(
         command,
         cwd=cwd,
@@ -223,13 +229,33 @@ def main() -> int:
     parser.add_argument("--changed-files", type=pathlib.Path)
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--selection-only", action="store_true")
-    parser.add_argument("--jobs", type=int, default=3)
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        help="parallel cargo-mutants jobs (default 3, or 1 with --in-place)",
+    )
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument(
+        "--in-place",
+        action="store_true",
+        help=(
+            "mutate the checkout in place (cargo-mutants --in-place) so the "
+            "baseline and every mutant build reuse its warm target directory; "
+            "CI-only, for a disposable checkout, and implies --jobs 1 because "
+            "cargo-mutants cannot run parallel jobs in one tree"
+        ),
+    )
     args = parser.parse_args()
     try:
         if args.all and (args.base or args.head or args.changed_files):
             raise GateError("--all cannot be combined with diff-selection arguments")
-        if args.jobs < 1 or args.timeout < 1:
+        if args.in_place and args.jobs not in (None, 1):
+            raise GateError(
+                "--in-place runs one cargo-mutants job at a time (parallel jobs "
+                "need separate tree copies); drop --jobs or pass --jobs 1"
+            )
+        jobs = args.jobs if args.jobs is not None else (1 if args.in_place else 3)
+        if jobs < 1 or args.timeout < 1:
             raise GateError("--jobs and --timeout must be positive integers")
         repo_root = args.repo_root.resolve()
         entries = load_manifest(args.manifest, repo_root)
@@ -349,7 +375,8 @@ def main() -> int:
                         "--timeout",
                         str(args.timeout),
                         "--jobs",
-                        str(args.jobs),
+                        str(jobs),
+                        *(("--in-place",) if args.in_place else ()),
                         "--output",
                         temp,
                         "--annotations",
@@ -361,6 +388,7 @@ def main() -> int:
                         ),
                     ],
                     repo_root,
+                    in_place=args.in_place,
                 )
                 # 0 = all caught, 2 = survivors, and 3 = timeouts. The latter
                 # two are verdicts that must be read from mutants.out.

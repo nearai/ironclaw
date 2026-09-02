@@ -33,12 +33,19 @@ as a network exception.
 
 Every stage runs through `scripts/ci/run-hermetic-test-process.sh`. The boundary
 uses a default-deny environment allowlist: only required compiler/tool paths and
-named deterministic test controls survive. Cargo receives a temporary home that
-links only the existing offline `registry` and `git` caches, never host Cargo
-credentials or configuration; the resolved Rust sysroot is placed directly on
+named deterministic test controls survive. Cargo receives a suite-owned home
+(`ironclaw-hermetic-cargo-home` under `RUNNER_TEMP`, else the temp directory;
+`IRONCLAW_HERMETIC_CARGO_HOME` relocates it) that links only the existing
+offline `registry` and `git` caches, never host Cargo credentials or
+configuration. That home is one stable path per host rather than a fresh
+directory per invocation: cargo hashes each registry crate's absolute source
+path into its fingerprint, so a per-invocation home invalidated the whole
+dependency closure between one guarded command and the next and left every
+restored CI build cache stale. The resolved Rust sysroot is placed directly on
 `PATH` without exporting the host Rustup home. Compiler output remains in the
 repository's explicit `target/` build directory so prebuilt E2E binaries and
-incremental CI artifacts keep their documented paths.
+incremental CI artifacts keep their documented paths, and so a `target/`
+restored from the `reborn-hermetic` Actions cache is fresh inside the boundary.
 
 That boundary:
 

@@ -131,10 +131,6 @@ jobs:
     if: needs.changes.outputs.has_e2e_scope == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    env:
-      # Full-runtime debug futures exceed libtest's default thread stack in
-      # merged-state runs. Match the root Reborn lane's measured headroom.
-      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       matrix:
@@ -158,12 +154,19 @@ jobs:
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: reborn-e2e-${{ matrix.group }}
+          # The same hermetic stable+mold build as every guarded Tests (Reborn)
+          # lane, so the four groups share that workflow's `reborn-hermetic`
+          # lineage instead of minting four 1.3-1.5 GB per-group entries.
+          shared-key: reborn-hermetic
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Run deterministic Reborn Rust gate
         env:
           CARGO_TEST_ARGS: "-- --nocapture"
+          # Full-runtime debug futures exceed libtest's default thread stack in
+          # merged-state runs. Match the root Reborn lane's measured headroom.
+          # Step-scoped so it stays out of the rust-cache key.
+          RUST_MIN_STACK: "67108864"
         run: >-
           scripts/ci/run-hermetic-deterministic-suite.sh
           rust-e2e

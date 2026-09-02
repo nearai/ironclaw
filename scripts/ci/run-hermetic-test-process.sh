@@ -74,12 +74,36 @@ fi
 
 original_home="${HOME:-}"
 original_cargo_home="${CARGO_HOME:-${original_home:+${original_home}/.cargo}}"
-sanitized_cargo_home="${hermetic_root}/cargo-home"
+# The sanitized Cargo home is one stable path per host, deliberately outside
+# the per-invocation hermetic root. Cargo hashes the absolute source path of
+# every registry crate into that crate's fingerprint, so a Cargo home whose
+# path changed on every invocation marked the whole dependency closure
+# `PathToSourceChanged` on the next one: the crate buckets compiled their
+# closure twice per job (nextest show-config, then nextest run), and a
+# restored CI cache could never be fresh inside the boundary. The directory
+# still links only the offline `registry` and `git` caches — never host Cargo
+# configuration or credentials — and `scripts/ci/test-hermetic-test-process.sh`
+# pins both halves. Override with IRONCLAW_HERMETIC_CARGO_HOME for a
+# differently placed (never the host's own) Cargo home.
+sanitized_cargo_home="${IRONCLAW_HERMETIC_CARGO_HOME:-${temp_parent%/}/ironclaw-hermetic-cargo-home}"
+if [[ -n "${original_cargo_home}" && "${sanitized_cargo_home}" == "${original_cargo_home}" ]]; then
+  echo "IRONCLAW_HERMETIC_CARGO_HOME must not be the host Cargo home: ${sanitized_cargo_home}" >&2
+  exit 2
+fi
 mkdir -p "${sanitized_cargo_home}"
 for cargo_cache in registry git; do
-  if [[ -n "${original_cargo_home}" && -d "${original_cargo_home}/${cargo_cache}" ]]; then
-    ln -s "${original_cargo_home}/${cargo_cache}" "${sanitized_cargo_home}/${cargo_cache}"
+  source_cache="${original_cargo_home:+${original_cargo_home}/${cargo_cache}}"
+  cache_link="${sanitized_cargo_home}/${cargo_cache}"
+  if [[ -z "${source_cache}" || ! -d "${source_cache}" ]]; then
+    continue
   fi
+  if [[ -L "${cache_link}" && "$(readlink "${cache_link}")" == "${source_cache}" ]]; then
+    continue
+  fi
+  # Concurrent invocations race to create the same link; whichever wins, the
+  # link must point at the host cache afterwards.
+  ln -sfn "${source_cache}" "${cache_link}" 2>/dev/null \
+    || [[ -L "${cache_link}" && "$(readlink "${cache_link}")" == "${source_cache}" ]]
 done
 
 tool_path="${PATH:-/usr/bin:/bin}"

@@ -87,6 +87,9 @@ if [[ " $* " != *" --cargo-test-arg --lib --cargo-test-arg authorize_contract "*
   echo "scoped cargo test args were not forwarded" >&2
   exit 8
 fi
+if [ -n "${STUB_ARGV_FILE:-}" ]; then
+  printf '%s\n' "$*" >"${STUB_ARGV_FILE}"
+fi
 out=""
 pattern=""
 while [ "$#" -gt 0 ]; do
@@ -137,16 +140,37 @@ passes=0
 failures=0
 capture_at() {
   local root="$1" mode="$2" manifest="$3" changed="$4"
+  shift 4
   set +e
-  CAP_OUT="$(PATH="${work}/bin:${PATH}" STUB_MODE="${mode}" python3 "${gate}" \
+  CAP_OUT="$(PATH="${work}/bin:${PATH}" STUB_MODE="${mode}" \
+    STUB_ARGV_FILE="${work}/argv.txt" python3 "${gate}" \
     --manifest "${manifest}" \
     --repo-root "${root}" \
-    --changed-files "${changed}" 2>&1)"
+    --changed-files "${changed}" "$@" 2>&1)"
   CAP_RC=$?
   set -e
 }
 capture() {
-  capture_at "${case_root}" "${1}" "${work}/manifest.toml" "${work}/changed.txt"
+  local mode="$1"
+  shift
+  capture_at "${case_root}" "${mode}" "${work}/manifest.toml" "${work}/changed.txt" "$@"
+}
+check_argv() {
+  local label="$1" needle="$2" expect="$3"
+  local argv=""
+  if [ -f "${work}/argv.txt" ]; then
+    argv=" $(cat "${work}/argv.txt") "
+  fi
+  if [ "${expect}" = present ] && [[ "${argv}" == *" ${needle} "* ]]; then
+    echo "  ok   ${label}"
+    passes=$((passes + 1))
+  elif [ "${expect}" = absent ] && [[ "${argv}" != *" ${needle} "* ]]; then
+    echo "  ok   ${label}"
+    passes=$((passes + 1))
+  else
+    echo "  FAIL ${label}: cargo-mutants argv was: ${argv}" >&2
+    failures=$((failures + 1))
+  fi
 }
 check_rc() {
   local label="$1" expected="$2"
@@ -175,6 +199,20 @@ echo "▶ named critical gate happy path"
 capture caught
 check_rc "all named mutants caught passes" 0
 check_text "pass summary refuses a score" "0 survived; 0 timed out"
+check_argv "copy mode keeps three parallel tree copies" "--jobs 3" present
+check_argv "copy mode does not mutate the checkout" "--in-place" absent
+
+echo "▶ in-place mode reuses the checkout's warm target directory"
+rm -f "${work}/argv.txt"
+capture caught --in-place
+check_rc "in-place run passes" 0
+check_argv "in-place is forwarded to cargo-mutants" "--in-place" present
+check_argv "in-place runs one job at a time" "--jobs 1" present
+capture caught --in-place --jobs 3
+check_rc "in-place with parallel jobs is refused" 1
+check_text "the refusal explains the tree-copy constraint" "one cargo-mutants job at a time"
+capture caught --in-place --jobs 1
+check_rc "in-place with an explicit single job passes" 0
 
 echo "▶ survivor and timeout sabotage"
 capture missed
