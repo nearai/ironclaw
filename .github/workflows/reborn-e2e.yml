@@ -131,6 +131,12 @@ jobs:
     if: needs.changes.outputs.has_e2e_scope == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      # Full-runtime debug futures exceed libtest's default thread stack in
+      # merged-state runs. Match the root Reborn lane's measured headroom;
+      # job-level and identical across the hermetic lanes so this job shares
+      # reborn-tests.yml's `reborn-hermetic` cache key (see its crate-tests).
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       matrix:
@@ -163,10 +169,6 @@ jobs:
       - name: Run deterministic Reborn Rust gate
         env:
           CARGO_TEST_ARGS: "-- --nocapture"
-          # Full-runtime debug futures exceed libtest's default thread stack in
-          # merged-state runs. Match the root Reborn lane's measured headroom.
-          # Step-scoped so it stays out of the rust-cache key.
-          RUST_MIN_STACK: "67108864"
         run: >-
           scripts/ci/run-hermetic-deterministic-suite.sh
           rust-e2e

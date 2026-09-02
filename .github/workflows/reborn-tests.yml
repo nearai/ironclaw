@@ -230,10 +230,21 @@ jobs:
       LLM_USE_CODEX_AUTH: "false"
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
-      # RUST_* keys are set on the test step, not here: rust-cache hashes
-      # every job-level CARGO*/RUST* variable into its cache key, and a
-      # per-lane stack size or bootstrap flag would split the one shared
-      # `reborn-hermetic` lineage into keys no other lane can restore.
+      # The deep composed-runtime futures (turn -> capability -> skills script
+      # mount, and the channel admission chain) overflow the 2 MiB default
+      # test-thread stack on this lane's Linux codegen — first observed as a
+      # SIGABRT in composition-core's
+      # `the_model_runs_a_skills_script_from_the_workdir_the_body_advertises`;
+      # 8 MiB was the measured headroom, and the deepest subtrees stay
+      # Box::pin'd at their seams — this is headroom, not a substitute.
+      # Job-level on purpose, and the same 64 MiB in every hermetic lane:
+      # rust-cache hashes job-level RUST* variables into its cache key, so a
+      # per-lane value would split the shared `reborn-hermetic` lineage into
+      # keys no other lane can restore, and
+      # tests/reborn_coverage_lane_stack_headroom.rs reads the job-level value.
+      # A larger minimum than a lane strictly needs is a virtual reservation
+      # per thread, not committed memory.
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}
@@ -432,18 +443,10 @@ jobs:
           CARGO_PACKAGES: ${{ toJSON(matrix.bucket.cargo_packages || fromJSON('[]')) }}
           EXACT_TARGETS: ${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}
           COLLECT_COVERAGE: ${{ needs.changes.outputs.run_coverage }}
-          # The deep composed-runtime futures (turn -> capability -> skills script
-          # mount, and the channel admission chain) overflow the 2 MiB default
-          # test-thread stack on this lane's Linux codegen — first observed as a
-          # SIGABRT in composition-core's
-          # `the_model_runs_a_skills_script_from_the_workdir_the_body_advertises`.
-          # 8 MiB matches the integration-lane headroom below; the deepest
-          # subtrees stay Box::pin'd at their seams — this is headroom, not a
-          # substitute. Step-scoped so it stays out of the rust-cache key.
-          RUST_MIN_STACK: "8388608"
           # Branch-coverage compatibility envelope for the instrumented push
-          # run (scripts/ci/check-reborn-branch-coverage-flags.py counts it);
-          # step-scoped for the same reason as RUST_MIN_STACK.
+          # run (scripts/ci/check-reborn-branch-coverage-flags.py counts it).
+          # Step-scoped: the hermetic wrapper drops it either way, and a
+          # job-level RUST* key would enter the shared rust-cache key.
           RUSTC_BOOTSTRAP: "1"
         run: |
           echo "Running Reborn crate bucket: ${BUCKET_NAME}"
@@ -602,6 +605,13 @@ jobs:
       REBORN_ROOT_TEST_PARTITION: ${{ matrix.partition }}
       REBORN_ROOT_TEST_TIMEOUT: 28m
       CARGO_INCREMENTAL: "0"
+      # The QA smoke binaries build a full Reborn runtime and drive whole
+      # turns on the libtest current-thread stack; the combined debug async
+      # frames of that pipeline overflow the 8 MiB default (measured need:
+      # ~10 MiB for reborn_qa_smoke_scenarios_e2e). Same pathology and value
+      # as the documented RUST_MIN_STACK in reborn_qa_recorded_behavior.rs.
+      # Job-level and identical across the hermetic lanes: see crate-tests.
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       max-parallel: ${{ github.event_name == 'pull_request' && 1 || 4 }}
@@ -655,14 +665,6 @@ jobs:
           redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
 
       - name: Run Reborn root tests
-        env:
-          # The QA smoke binaries build a full Reborn runtime and drive whole
-          # turns on the libtest current-thread stack; the combined debug async
-          # frames of that pipeline overflow the 8 MiB default (measured need:
-          # ~10 MiB for reborn_qa_smoke_scenarios_e2e). Same pathology and value
-          # as the documented RUST_MIN_STACK in reborn_qa_recorded_behavior.rs.
-          # Step-scoped so it stays out of the rust-cache key.
-          RUST_MIN_STACK: "67108864"
         run: >-
           scripts/ci/run-hermetic-deterministic-suite.sh
           command
@@ -740,8 +742,13 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
-      # RUST_MIN_STACK and RUSTC_BOOTSTRAP are set on the batch step (see
-      # crate-tests for why).
+      # llvm-cov instrumentation inflates stack frames; the deep channel
+      # admission futures (webhook -> pairing gate -> workflow) overflow the
+      # default 2 MiB test-thread stack under instrumentation only. The
+      # deepest subtrees are Box::pin'd at their seams; 8 MiB was the measured
+      # headroom for the instrumented lane, not a substitute.
+      # Job-level and identical across the hermetic lanes: see crate-tests.
+      RUST_MIN_STACK: "67108864"
     strategy:
       fail-fast: false
       matrix:
@@ -855,16 +862,10 @@ jobs:
           REBORN_COV_LANES_JSON: ${{ toJSON(matrix.batch.lanes) }}
           REBORN_COV_LANE_TEST_TIMEOUT: 45m
           REBORN_COV_COLLECT: ${{ needs.changes.outputs.run_coverage }}
-          # llvm-cov instrumentation inflates stack frames; the deep channel
-          # admission futures (webhook -> pairing gate -> workflow) overflow the
-          # default 2 MiB test-thread stack under instrumentation only. The
-          # deepest subtrees are Box::pin'd at their seams; this is headroom for
-          # the instrumented lane, not a substitute. Step-scoped so it stays
-          # out of the rust-cache key.
-          RUST_MIN_STACK: "8388608"
           # Branch-coverage compatibility envelope for the instrumented push
-          # run (scripts/ci/check-reborn-branch-coverage-flags.py counts it);
-          # step-scoped for the same reason as RUST_MIN_STACK.
+          # run (scripts/ci/check-reborn-branch-coverage-flags.py counts it).
+          # Step-scoped: the hermetic wrapper drops it either way, and a
+          # job-level RUST* key would enter the shared rust-cache key.
           RUSTC_BOOTSTRAP: "1"
         run: |
           if [[ "${REBORN_COV_COLLECT}" == "true" ]]; then
@@ -1109,7 +1110,16 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
-      # RUST_MIN_STACK is set on the replay step (see crate-tests for why).
+      # This job runs `reborn_qa_recorded_behavior`, whose own module docs
+      # require this value: its replay tests build a full Reborn runtime and
+      # drive whole turns, and the combined debug async frames sit within a few
+      # percent of whatever stack they are given. Measured on this suite: it
+      # overflows below 2 MiB and clears at 2 MiB, i.e. the libtest default is
+      # the boundary itself, so any layout shift decides it. The root-tests and
+      # group-suite jobs already set this for the same pathology; this job was
+      # the one that ran the documented binary without it.
+      # Job-level and identical across the hermetic lanes: see crate-tests.
+      RUST_MIN_STACK: "67108864"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -1192,17 +1202,6 @@ jobs:
           python3 -m unittest scripts/ci/test-check-regression-promotions.py
 
       - name: Run Reborn QA fixture contracts and replay
-        env:
-          # This job runs `reborn_qa_recorded_behavior`, whose own module docs
-          # require this value: its replay tests build a full Reborn runtime and
-          # drive whole turns, and the combined debug async frames sit within a few
-          # percent of whatever stack they are given. Measured on this suite: it
-          # overflows below 2 MiB and clears at 2 MiB, i.e. the libtest default is
-          # the boundary itself, so any layout shift decides it. The root-tests and
-          # group-suite jobs already set this for the same pathology; this job was
-          # the one that ran the documented binary without it. Step-scoped so it
-          # stays out of the rust-cache key.
-          RUST_MIN_STACK: "67108864"
         run: |
           scripts/ci/run-hermetic-deterministic-suite.sh prepare-command
           IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1 \
