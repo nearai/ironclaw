@@ -120,6 +120,14 @@ case "${STUB_MODE:-caught}" in
       >"${out}/mutants.out/caught.txt"
     exit 0
     ;;
+  extra)
+    # cargo-mutants 27.1 examines struct-field-deletion mutants regardless of
+    # `--re`: the named mutant is caught, an unnamed one rides along missed.
+    echo "${mutant}" >"${out}/mutants.out/caught.txt"
+    echo 'crates/ironclaw_demo/src/lib.rs:2:1: delete field flag from struct Demo expression in Demo::authorize_helper' \
+      >"${out}/mutants.out/missed.txt"
+    exit 2
+    ;;
   zero) exit 0 ;;
 esac
 STUB
@@ -191,8 +199,12 @@ check_rc "a similarly named sibling does not satisfy discovery" 1
 check_text "substring discovery failure names the exact function" \
   "named critical function produced zero mutants: ${source_path}::authorize"
 capture unexpected
-check_rc "a result outside the named-mutant allowlist fails" 1
-check_text "unexpected result reports an allowlist mismatch" "exact named-mutant allowlist"
+check_rc "a missing named mutant fails even when another result appears" 1
+check_text "a missing named mutant reports an allowlist mismatch" "exact named-mutant allowlist"
+capture extra
+check_rc "an unnamed mutant the tool examined anyway carries no verdict" 0
+check_text "the unnamed mutant is reported as ignored" "outside the named functions"
+check_text "the named verdict still passes" "0 survived; 0 timed out"
 capture zero
 check_rc "an empty result is not a pass" 1
 check_text "empty result explains zero mutants" "produced zero mutants"

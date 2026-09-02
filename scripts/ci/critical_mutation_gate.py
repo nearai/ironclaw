@@ -378,12 +378,28 @@ def main() -> int:
                 if total == 0:
                     raise GateError(f"critical mutation run produced zero mutants for {path}")
                 reported_mutants = missed + caught + unviable + timed_out
-                if set(reported_mutants) != set(selected_mutants) or len(
-                    reported_mutants
-                ) != len(selected_mutants):
+                # cargo-mutants (27.1) examines struct-field-deletion mutants
+                # regardless of `--re`. Only the named functions' tests ran,
+                # so a mutant outside them carries no verdict here: report it
+                # and judge the named set exactly.
+                named = set(selected_mutants)
+                extras = [mutant for mutant in reported_mutants if mutant not in named]
+                if extras:
+                    print(
+                        "  NOTE: ignored mutants cargo-mutants examined outside the named "
+                        "functions (no verdict — only the named tests ran):\n  "
+                        + "\n  ".join(extras),
+                        flush=True,
+                    )
+                reported_named = [mutant for mutant in reported_mutants if mutant in named]
+                if set(reported_named) != named or len(reported_named) != len(selected_mutants):
                     raise GateError(
                         "cargo-mutants results did not match the exact named-mutant allowlist"
                     )
+                timed_out = [mutant for mutant in timed_out if mutant in named]
+                missed = [mutant for mutant in missed if mutant in named]
+                caught = [mutant for mutant in caught if mutant in named]
+                unviable = [mutant for mutant in unviable if mutant in named]
                 if timed_out:
                     raise GateError(
                         "critical mutants timed out (no passing verdict):\n  "
