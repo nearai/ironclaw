@@ -77,7 +77,7 @@ impl AuthEngine {
             {
                 return stored_to_effective(stored);
             }
-            tracing::info!(
+            tracing::debug!(
                 vendor,
                 "replacing dynamic OAuth client registered for an old callback"
             );
@@ -216,7 +216,7 @@ impl AuthEngine {
         let material = match self.secret_store.consume(scope, lease.id).await {
             Ok(material) => material,
             Err(error) if error.is_unreadable_material() => {
-                tracing::warn!(
+                tracing::debug!(
                     vendor,
                     "replacing unreadable machine-generated OAuth client registration"
                 );
@@ -227,7 +227,7 @@ impl AuthEngine {
         let stored: StoredDcrClient = match serde_json::from_str(material.expose_secret()) {
             Ok(stored) => stored,
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     vendor,
                     error = %error,
                     "replacing malformed machine-generated OAuth client registration"

@@ -599,16 +599,16 @@ impl DeliveryCoordinator {
         }
         reject_caller_supplied_files(&request.parts)?;
         // Notice-class intents are SOURCE-routed: they target the originating
-        // conversation, never a policy-resolved notification target. For a
-        // channel whose reply half is a progressive sink, the originating
-        // conversation is carried by the reply publication module (status,
-        // attention, and terminal facts ride the reply document), and the
-        // vendor-message operations in this class (`Retract`, `React`) have no
-        // counterpart there — so `drive_prepared` settles such a send as
-        // `NoTarget` rather than persisting a failed attempt. Background-run
-        // notices, the sends that must reach a closed tab, are policy-class
-        // and flow through `deliver`'s notification path instead. Pinned by
-        // `streaming_channel_skips_source_routed_notices_but_not_notifications`.
+        // conversation, never a policy-resolved notification target — and
+        // they always ride the channel's delivery half, whatever its reply
+        // cadence. The coordinator is transport-blind here: which notices a
+        // progressive (`stream`) channel still gets is the observer's
+        // decision (its working indicator, status, attention, and terminal
+        // facts ride the published reply document instead), not a routing
+        // rule. Background-run notices, the sends that must reach a closed
+        // tab, are policy-class and flow through `deliver`'s notification
+        // path instead. Pinned by
+        // `a_stream_channel_still_receives_source_routed_notices_and_notifications`.
         let route = OutboundRoute::for_notice();
 
         // Persist the attempt before anything else. The synthetic reply

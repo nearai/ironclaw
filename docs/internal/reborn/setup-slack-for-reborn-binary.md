@@ -484,7 +484,6 @@ This is by design: `/ironclaw` requires a direct conversation, so an invocation 
 - Streaming: https://docs.slack.dev/reference/methods/chat.startStream,
   https://docs.slack.dev/reference/methods/chat.appendStream,
   https://docs.slack.dev/reference/methods/chat.stopStream
-- Sessions: https://docs.slack.dev/reference/methods/agents.sessions.setStatus,
-  https://docs.slack.dev/reference/methods/agents.sessions.rename
+- Sessions: https://docs.slack.dev/reference/methods/agents.sessions.setStatus
 - Events: https://docs.slack.dev/reference/events/agent_session_stopped,
   https://docs.slack.dev/reference/events/agent_session_title_changed

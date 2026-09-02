@@ -72,7 +72,11 @@ struct FrozenPathCount {
 /// test-support-only, then #7171 did the same for the skill mount view once
 /// `skill_mounts_for` began deriving it per gate.
 const WS0_PRODUCTION_STRUCT_DEBT_PATH_BASELINE: usize = 79;
-const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 267;
+// 269 -> 268 (2026-08-31/09-01): the delivery-coordinator handle on
+// `RebornRuntime` became an ungated production field (shutdown reads it);
+// its accessor stays test-support (integration harnesses wiring their own
+// run-delivery observer are its only callers).
+const WS0_PRODUCTION_STRUCT_DEBT_MEMBER_BASELINE: usize = 268;
 
 const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
     FrozenPathCount {
@@ -455,9 +459,12 @@ const FROZEN_PATH_COUNTS: &[FrozenPathCount] = &[
         category: "test-support",
         item_kind: "method",
         path: "crates/ironclaw_composition/src/runtime.rs",
-        // 44 -> 43 (2026-08-31): the delivery-coordinator accessor became an
-        // ungated production method when the reply publication folded onto it.
-        count: 43,
+        // 43 -> 44 (2026-09-01): the delivery-coordinator accessor is
+        // test-support again — production wiring takes the coordinator from
+        // the factory; only integration harnesses that wire their own
+        // run-delivery observer read it back. The field stays ungated
+        // (shutdown uses it).
+        count: 44,
     },
     FrozenPathCount {
         category: "test-support",

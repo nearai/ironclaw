@@ -563,12 +563,17 @@ message; an absent required value still prevents activation. Verifying a
 syntactically valid but incorrect identity would require a separate mediated
 `getMe` step.
 
-For final replies and target-resolved delivery, the coordinator recognizes
-confined `/workspace/...` file references, reads them through the turn-scoped
-filesystem, and appends transient `OutboundPart::File` values. The package owns
-vendor rendering/upload only; callers cannot inject pre-materialized parts,
-and raw outbound bytes never enter attempts, events, projections, or
-transcripts.
+Final-reply attachments are materialized inside reply publication, at the
+terminal revision: `materialize_workspace_files` (`delivery_coordinator.rs`)
+is called only from the publication worker
+(`delivery_coordinator/publication/worker.rs`), which resolves the reply's
+confined `/workspace/...` references through the turn-scoped filesystem and
+hands the files to `ReplySink::reconcile` as transient
+`materialized_attachments`. The coordinator's `deliver`/`deliver_notice` path
+never materializes files and rejects caller-supplied `OutboundPart::File`
+values (`reject_caller_supplied_files`). The package owns vendor
+rendering/upload only, and raw outbound bytes never enter attempts, events,
+projections, or transcripts.
 
 ### 4.3 Auth — one host engine, recipes, no adapter
 
@@ -743,25 +748,32 @@ Sending a message decomposes into two halves, and the split is the design:
   method, threading syntax, DM provisioning, vendor error mapping. Different
   per channel → the adapter's **`deliver()`**.
 
-Every user-visible channel output is a semantic [`DeliveryIntent`], not an API
-call: `FinalReply`, `GatePrompt`, `AuthPrompt`, `FailureNotice`,
-`ConnectRequired`, `ConnectionStatus`, `Working`, `Cleanup` (e.g. delete the
-working message), `BackgroundRunNotice` (a background/routine run's gate,
+A run's own reply is not a `DeliveryIntent` at all: it is *published* — every
+revision of the reply document, at the cadence `ReplyTransport::reconciles_at`
+allows — through `ReplySink::reconcile` by the coordinator's reply-publication
+lane (the flow table above; the design doc). Revision, checkpoint, and
+reconcile semantics belong to that path, never to `deliver()`. Every other
+user-visible channel output is a semantic [`DeliveryIntent`], not an API
+call: `GatePrompt`, `AuthPrompt`, `FailureNotice`, `ConnectRequired`,
+`ConnectionStatus`, `CommandFeedback`, `Working`, `Cleanup` (e.g. delete the
+working message), `Reaction`, `BackgroundRunNotice` (a background/routine run's gate,
 auth, or failure notice, fanned out over its creator's notification-channel
 set), and `ModelDelivery` — an explicit, model-invoked delivery via the
 `builtin.outbound_deliver` tool (mid-run, up to a fixed per-run cap of 16
 calls — `MODEL_DELIVERY_PER_RUN_CAP` — further calls return a model-visible
 Failed result naming the cap,
 one catalog target per call). `DeliveryIntent` splits into **policy-class** intents
-(`FinalReply`, `GatePrompt`, `AuthPrompt`, `BackgroundRunNotice`,
-`ModelDelivery` — driven through `deliver()`, outbound-policy validated) and
-**notice-class** intents (`FailureNotice`, `ConnectRequired`,
-`ConnectionStatus`, `Working`, `Cleanup` — driven through `deliver_notice()`,
-source-routed to the originating conversation). Host-emitted intents never
+(`GatePrompt`, `AuthPrompt`, `BackgroundRunNotice`, `ModelDelivery` — driven
+through `deliver()`, outbound-policy validated) and **notice-class** intents
+(`FailureNotice`, `ConnectRequired`, `ConnectionStatus`, `CommandFeedback`,
+`Working`, `Cleanup`, `Reaction` — driven through `deliver_notice()`,
+source-routed to the originating conversation; re-derive the split from
+`DeliveryIntent::runs_outbound_policy`). Host-emitted intents never
 know what channel the user is on; the model does, for exactly the one target
 it named on its one call. One delivery, end to end:
 
-1. An intent is emitted (a host pipeline emits "`FinalReply` for run X"; the
+1. An intent is emitted (a host pipeline emits "`GatePrompt` for run X", or
+   "`BackgroundRunNotice` for background run Y"; the
    `builtin.outbound_deliver` tool handler emits `ModelDelivery` for the
    catalog target id the model chose).
 2. The coordinator resolves the target: reply where the message came from

@@ -383,6 +383,7 @@ channel-delivery journeys (two-lane model):
 | Sub-agents spawn end-to-end | `reborn_subagent_spawn_e2e.rs` (5) |
 | The shipped Docker image has a usable runtime home and an in-worker public-key SSH shell | `dockerfile_runtime_home.rs` (21) |
 | Live GitHub API contracts still hold (ignored canary, needs a real PAT) | `reborn_live_github_pat_contract.rs` |
+| See the answer's first text over SSE before the run completes — a live `text:` item streams ahead of the terminal event and the finalized item names the same run, and the first text update reaches the stream while the model is still producing (composed runtime, crate tier) | `crates/app/ironclaw_composition/tests/webui_v2_e2e.rs::{webui_v2_sse_streams_assistant_text_before_terminal_completion,webui_v2_sse_streams_first_assistant_text_update_before_model_completion}` |
 
 **Scope isolation parity** — one bin per boundary; each proves data from one scope is
 unreachable from another: `reborn_agent_scope_isolation_parity.rs`,

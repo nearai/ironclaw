@@ -1331,15 +1331,16 @@ fn working_notice(scope: TurnScope, extension_id: &str) -> NoticeDeliveryRequest
     }
 }
 
-/// Regression pin (unified-channel-model §5, review finding): `deliver_notice`
-/// skips EVERY notice-class intent for a streaming channel — unlike `deliver`,
-/// which carves out notification-routed sends. The asymmetry is intentional:
-/// notice-class intents are source-routed to the originating conversation,
-/// which for a streaming channel is the durable projection stream the client
-/// already renders from, and the vendor-message operations in this class have
-/// no counterpart there. The sends that must reach a closed tab are
-/// policy-class and travel through `deliver`'s notification path, which this
-/// test also pins in the same breath so the two can never drift apart.
+/// Regression pin (progressive reply publication): `deliver_notice` is
+/// transport-blind. A notice-class intent — command feedback, a connection
+/// status, a failure notice, a reaction — is a discrete message on the
+/// channel's delivery half whatever the channel's reply cadence, so a
+/// `stream` channel receives every one of them exactly like a `message`
+/// channel does. Which notices a progressive channel still gets is the
+/// observer's decision (its working indicator lives inside the published
+/// reply document), never a routing rule here. The policy-class notification
+/// path is pinned in the same breath so the two can never drift apart: a
+/// background-run notice must still reach a user whose tab is closed.
 #[tokio::test]
 async fn a_stream_channel_still_receives_source_routed_notices_and_notifications() {
     let scope = scope();

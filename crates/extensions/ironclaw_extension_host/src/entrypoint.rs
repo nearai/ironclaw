@@ -31,9 +31,13 @@ use ironclaw_extension_registry::{CapabilityVisibility, ResolvedExtensionManifes
 #[derive(Clone, Default)]
 pub struct ExtensionBindings {
     pub tools: Option<Arc<dyn ToolAdapter>>,
-    /// The channel halves this extension implements. An all-`None` value can
-    /// be valid when every declared axis is host-owned (authenticated-session
-    /// ingress plus stream reply); [`check_binding`] proves agreement per axis.
+    /// The channel halves this extension implements. Only
+    /// `authenticated_session` ingress is host-owned, so an all-`None` value
+    /// is valid only for a channel that declares nothing but that ingress;
+    /// every declared `[channel.reply]` still needs a `ReplySink` (composition
+    /// attaches the host projection sink to the session channel's binding
+    /// before [`check_binding`] runs). [`check_binding`] proves agreement per
+    /// axis.
     pub channel: ChannelSurfaces,
     /// The device-link adapter, bound iff the resolved contract declares an
     /// `[auth.<vendor>] method = "device_link"` surface.

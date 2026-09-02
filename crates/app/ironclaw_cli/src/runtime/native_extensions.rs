@@ -335,6 +335,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn web_app_is_the_session_reply_channel_and_binds_delivery_only() {
+        let bundled = bundled_channel_extensions(None);
+        assert_eq!(
+            bundled
+                .session_reply_channel
+                .as_ref()
+                .map(|extension_id| extension_id.as_str()),
+            Some("web-app"),
+            "the binary names web-app as the deployment's session-reply channel"
+        );
+        let web_app = bundled
+            .bindings
+            .iter()
+            .find(|binding| binding.extension_id.as_str() == "web-app")
+            .expect("the named session-reply channel has a binding");
+        assert!(
+            web_app.surfaces.reply.is_none(),
+            "the package leaves the reply slot empty: composition attaches the projection sink"
+        );
+        assert!(
+            web_app.surfaces.ingress.is_none(),
+            "authenticated-session ingress is host-owned; an adapter may never mint its trust"
+        );
+        assert!(
+            web_app.surfaces.delivery.is_some(),
+            "web-push delivery is the one half the package binds"
+        );
+    }
+
     #[tokio::test]
     async fn bundled_telegram_binding_routes_targeted_commands_through_generic_sink() {
         let bindings = bundled_channel_extension_bindings();

@@ -1175,9 +1175,11 @@ impl RebornRuntime {
             .unwrap_or_default()
     }
 
-    /// The runtime's delivery coordinator. A caller that wires its own
-    /// run-delivery observer shares it so one publication owns each run's
-    /// answer.
+    /// The runtime's delivery coordinator. Tests only: an integration harness
+    /// that wires its own run-delivery observer shares it so one publication
+    /// owns each run's answer; production wiring receives the coordinator
+    /// through the factory, never through this accessor.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn delivery_coordinator(&self) -> Option<Arc<ironclaw_assistant::DeliveryCoordinator>> {
         self.delivery_coordinator.clone()
     }

@@ -88,11 +88,6 @@ mod workflow;
 
 pub use project_create_capability::{PROJECT_CREATE_CAPABILITY_ID, project_create_capability};
 
-pub use delivery_coordinator::publication::{
-    ReplyPublicationError, ReplyPublicationSettings, ReplyPublicationWiring,
-    ReplyTargetRegistration,
-};
-
 pub use action::{ActionDispatchKind, ActionPhase, ProductInboundAction};
 pub use admin_user_directory::{
     AdminSecretProvisioner, RebornAdminUserDirectory, RejectingAdminApiTokenMinter,
@@ -249,6 +244,12 @@ pub use delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest,
     DeliveryCoordinator, DeliveryIntent, DeliveryRetryPolicy, NoDeliveryRegistrations,
     NoReplyContext, NoticeDeliveryRequest,
+};
+// Reply publication rides the same coordinator: composition wires it through
+// these, and integration harnesses register their own reply targets.
+pub use delivery_coordinator::publication::{
+    ReplyPublicationError, ReplyPublicationSettings, ReplyPublicationWiring,
+    ReplyTargetRegistration,
 };
 pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
 // The generic run-delivery components (§5.4): channel hosts wire these over

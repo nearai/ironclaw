@@ -137,7 +137,7 @@ or switch an existing app knowingly.
   recorded as failed with a reason naming `features.agent_view` — until an operator
   enables **Agents** in the app settings and reinstalls the app. The same applies to a
   bot token that lacks `chat:write` (`missing_scope`): the session and streaming methods
-  (`agents.sessions.setStatus`, `agents.sessions.rename`, `chat.startStream`,
+  (`agents.sessions.setStatus`, `chat.startStream`,
   `chat.appendStream`, `chat.stopStream`) all require it, and `assistant:write` is added
   automatically when the feature is enabled.
 - **Channels.** Streaming into a channel needs the person's user and team ids

@@ -1377,11 +1377,6 @@ pub(super) async fn build_backend_production(
                     // poller reads: the same-origin check resolves which
                     // thread a sealed reply-target ref is bound to.
                     binding_service: Arc::new(trigger_conversation_services.clone()),
-                    // Model deliveries never carry attachments, so nothing
-                    // materializes through this reader in practice; wired to
-                    // the same caller-scoped workspace view the channel-host
-                    // delivery services read so the contract holds if that
-                    // ever changes.
                     fallback_agent_id: turn_state_scope
                         .agent_id
                         .clone()

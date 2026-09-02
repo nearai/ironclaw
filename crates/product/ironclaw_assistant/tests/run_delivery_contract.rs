@@ -2005,10 +2005,6 @@ async fn observer_replaces_working_indicator_with_failure_notice_and_x_reaction(
     );
 }
 
-/// The other half of the single-terminal-reply rule: when the reply
-/// publication cannot deliver (the sink fails permanently), the conventional
-/// failure notice is the fallback that keeps the user out of silence —
-/// exactly one terminal user-visible message either way.
 /// Another target's delivery must not silence THIS channel's failure notice:
 /// the session channel (a different extension) registered for the same run
 /// and delivered, but the channel's own publication settled Failed — the
@@ -2166,6 +2162,10 @@ async fn a_foreign_targets_delivery_does_not_suppress_this_channels_failure_noti
     );
 }
 
+/// The other half of the single-terminal-reply rule: when the reply
+/// publication cannot deliver (the sink fails permanently), the conventional
+/// failure notice is the fallback that keeps the user out of silence —
+/// exactly one terminal user-visible message either way.
 #[tokio::test]
 async fn observer_posts_the_failure_notice_only_when_the_reply_did_not_deliver() {
     let harness = build_harness(

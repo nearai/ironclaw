@@ -44,11 +44,12 @@ display_name = "Web UI"
 conversation_model = "isolated"
 
 # The reply axis: answering the run's input, source-routed. Replies stream to
-# the browser over the durable projection pipeline (SSE/WebSocket) — the
-# existing WebChat event stream IS this channel's reply sink. `stream` means
-# the HOST publishes and this channel's adapter is never called for a reply,
-# which is why the package implements no reply half at all. That absence is
-# meaningful, not an omission.
+# the browser over the durable projection pipeline (SSE/WebSocket): the
+# product projection reply sink IS this channel's reply sink, attached by
+# composition to this binding's `surfaces.reply` slot rather than bound by
+# this package (every declared `[channel.reply]` needs a sink; activation
+# fails without one). `stream` is cadence only — the sink hears every
+# revision, not just the terminal one — never who binds it.
 [channel.reply]
 transport = "stream"
 

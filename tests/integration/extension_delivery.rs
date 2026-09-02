@@ -9,7 +9,8 @@
 //! against a scripted model → the canonical `RunDeliveryObserver` and
 //! per-channel event handler → the factory-built `DeliveryCoordinator` (sole
 //! delivery-state writer, §5.4) →
-//! the real adapter's `deliver` → the policy-enforced channel egress with
+//! the real adapter's `ReplySink::reconcile` (a run's reply) or `deliver`
+//! (a target-resolved send) → the policy-enforced channel egress with
 //! host-side credential injection → the recorded network wire. Assertions
 //! land at two seams: the wire recorder (vendor call + injected credential)
 //! and the coordinator's outbound-state store (terminal `Delivered` attempt —
@@ -17,9 +18,12 @@
 //!
 //! Pinned here, matrixed over libSQL and PostgreSQL (a provisioning failure
 //! is a test failure, never a skip):
-//! - The Slack proof: a signed threaded channel event yields a `FinalReply` coordinated
-//!   through the REAL coordinator to `chat.postMessage`, with the §11
-//!   bridged bot token injected host-side (OUT-1/2/5, ING-11 read half).
+//! - The Slack proof: a signed threaded channel event yields a run whose
+//!   reply is PUBLISHED through the REAL coordinator's reply-publication lane
+//!   onto Slack's native Agent stream (`chat.startStream` →
+//!   `chat.appendStream` → one `chat.stopStream`, never a plain
+//!   `chat.postMessage`), with the §11 bridged bot token injected host-side
+//!   (OUT-1/2/5, ING-11 read half).
 //!   The Slack lane still owns its ingress registration in production
 //!   (setup-store secrets + per-revision sink fed to the assembly as a
 //!   lane override), so this test keeps its lane-shaped manual
@@ -1387,11 +1391,12 @@ async fn telegram_identity_configuration_errors_are_retryable_on_the_real_router
 }
 
 /// The Slack outbound proof (OUT-1/2/5 + ING-11 read half): a signed threaded
-/// channel
-/// event on the production mount becomes a real turn whose `FinalReply` is
-/// coordinated through the REAL factory-built `DeliveryCoordinator` to
-/// `chat.postMessage`, with the §11 bridged bot token injected host-side —
-/// asserted on the wire recorder AND in the coordinator's outbound store.
+/// channel event on the production mount becomes a real turn whose reply is
+/// PUBLISHED through the REAL factory-built `DeliveryCoordinator` onto Slack's
+/// native Agent stream (`chat.startStream` → `chat.appendStream` → one
+/// `chat.stopStream`, never a plain `chat.postMessage`), with the §11 bridged
+/// bot token injected host-side — asserted on the wire recorder AND in the
+/// coordinator's outbound store.
 #[rstest]
 #[case::libsql(StorageMode::LibSql)]
 #[case::postgres(StorageMode::Postgres)]
@@ -1789,14 +1794,14 @@ async fn slack_tool_run_with_streamed_preamble_answers_exactly_once() {
     // The wire settles exactly once: one stream carrying commentary, a task
     // card, and the answer; one close; zero conventional posts of either.
     let wire_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let requests = loop {
+    loop {
         let requests = inbound.captured_network_requests_for_test();
         let stops = requests
             .iter()
             .filter(|request| request.url.ends_with("/api/chat.stopStream"))
             .count();
         if stops >= 1 {
-            break requests;
+            break;
         }
         assert!(
             tokio::time::Instant::now() < wire_deadline,
@@ -1804,7 +1809,13 @@ async fn slack_tool_run_with_streamed_preamble_answers_exactly_once() {
             requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    }
+    // The first close is not settlement: wait until the publication's attempt
+    // is terminal (`Delivered`, nothing left `Sending`) before sampling the
+    // wire, so a late duplicate worker opening a second stream would already
+    // be on the wire when the exactly-once pins below read it.
+    assert_delivered_attempt(services, &vendor_scope).await;
+    let requests = inbound.captured_network_requests_for_test();
     let stream_opens: Vec<serde_json::Value> = requests
         .iter()
         .filter(|request| request.url.ends_with("/api/chat.startStream"))

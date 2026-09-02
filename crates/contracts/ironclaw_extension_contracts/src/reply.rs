@@ -441,11 +441,19 @@ pub struct ReplyActivity {
     pub updated_ordinal: u64,
 }
 
+/// Why the run is parked on the user — the gate family behind a
+/// [`ReplyAttention`], so a sink can choose its headline and the publisher
+/// can enrich the prompt (approval context, a serviceable sign-in URL) per
+/// kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyAttentionKind {
+    /// A capability call waits on an explicit approval.
     Approval,
+    /// A credential must be connected before the run can continue.
     Auth,
+    /// The run waits on something neither party answers directly (a resource
+    /// reservation, or any gate kind the projection does not name).
     Resource,
 }
 

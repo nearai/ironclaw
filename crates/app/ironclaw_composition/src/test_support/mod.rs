@@ -65,13 +65,6 @@
 //!     neutral manifest-backed session channel for composition tests that must
 //!     not link the concrete Web App package.
 
-/// Build the production runtime and return the exact resource governor wired
-/// into its capability path.
-///
-/// This mirrors [`crate::build_runtime`] while keeping the lower substrate
-/// authority out of [`crate::RebornRuntime`]'s service-shaped public surface.
-/// Integration tests use the returned governor only for post-transition
-/// reservation read-back.
 /// Leave reply publication unstarted at build, so an integration harness
 /// whose runs execute on its own turn runtime can start the coordinator's
 /// one publication lane itself with the kernel handles those runs actually
@@ -82,6 +75,13 @@ pub fn defer_reply_publication_for_test(input: &mut crate::RebornRuntimeInput) {
     }
 }
 
+/// Build the production runtime and return the exact resource governor wired
+/// into its capability path.
+///
+/// This mirrors [`crate::build_runtime`] while keeping the lower substrate
+/// authority out of [`crate::RebornRuntime`]'s service-shaped public surface.
+/// Integration tests use the returned governor only for post-transition
+/// reservation read-back.
 pub async fn build_runtime_with_resource_governor_for_test(
     input: crate::RebornRuntimeInput,
 ) -> Result<

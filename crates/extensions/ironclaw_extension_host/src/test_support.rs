@@ -564,9 +564,12 @@ impl ToolAdapter for FakeToolAdapter {
 /// what a lifecycle test observes now — through the egress it drives.
 #[derive(Default)]
 pub struct FakeChannelAdapter {
-    /// Counts reply reconciliations + `deliver` calls, so a test can prove the
-    /// coordinator picked an axis rather than that "something was sent".
+    /// Counts `ReplySink::reconcile` calls, so a test can prove the
+    /// coordinator picked the reply axis rather than that "something was
+    /// sent".
     pub reply_calls: Arc<AtomicUsize>,
+    /// Counts `ChannelDelivery::deliver` calls — the delivery axis, kept
+    /// apart from `reply_calls` for the same reason.
     pub delivery_calls: Arc<AtomicUsize>,
 }
 

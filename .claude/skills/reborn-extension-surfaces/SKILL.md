@@ -118,8 +118,12 @@ Re-verify the module list: `grep -n 'ID,' crates/extensions/ironclaw_extension_s
    that converges the vendor's presentation onto the run's reply document
    (`transport = "stream"` hears every revision, `"message"` the terminal
    one; the host publishes, the sink renders; verify with
-   `rg -n "impl ReplySink for" crates/extensions/packages`); idempotent `activate`/`cleanup`
-   vendor wiring) — see the trait doc for the method contract. The binary
+   `rg -n "impl ReplySink for" crates/extensions/packages`) — see each trait
+   doc for the method contract. Vendor-side webhook wiring is manifest data,
+   not adapter code: the `[channel.ingress.registration]` /
+   `[channel.ingress.deregistration]` recipes the host executes (worked
+   example: `rg -n "channel.ingress.registration" crates/extensions/packages/telegram/manifest.toml`).
+   The binary
    supplies the adapter to composition through the
    `RebornHostBindings::with_channel_extension_bindings` seam
    (`crates/app/ironclaw_composition/src/input.rs`, `ChannelExtensionBinding`);
