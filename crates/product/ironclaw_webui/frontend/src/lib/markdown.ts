@@ -92,12 +92,34 @@ function renderGemojiShortcodes(token: Token): void {
   );
 }
 
+// A line holding only an ordered-list marker (`19.`, `42. `) is, to
+// CommonMark, a list with one empty item, which renders as nothing at all. In
+// a chat it is a sentence — a model answering "19." must stay visible — so the
+// marker's delimiter is escaped. Fenced code is left untouched.
+const BARE_ORDERED_MARKER = /^(\s{0,3})(\d{1,9})([.)])\s*$/;
+const CODE_FENCE = /^\s{0,3}(?:`{3,}|~{3,})/;
+
+function keepBareNumbersVisible(content: string): string {
+  let inFence = false;
+  return content
+    .split("\n")
+    .map((line) => {
+      if (CODE_FENCE.test(line)) {
+        inFence = !inFence;
+        return line;
+      }
+      if (inFence) return line;
+      return line.replace(BARE_ORDERED_MARKER, "$1$2\\$3");
+    })
+    .join("\n");
+}
+
 export function renderMarkdown(
   content: string | null | undefined,
   { workspaceFileLinks = false }: RenderMarkdownOptions = {},
 ): string {
   if (!content) return "";
-  const raw = marked.parse(content, {
+  const raw = marked.parse(keepBareNumbersVisible(content), {
     async: false,
     gfm: true,
     breaks: true,
