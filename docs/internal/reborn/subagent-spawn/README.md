@@ -360,7 +360,7 @@ substitute for it.
    later run touches — the result row is already in the transcript, only the
    autonomous wake is lost. A cross-scope re-drive needs a partition-leading
    dependency query the kernel charter does not have today; it is R4 work
-   alongside boot-recovery fairness. restart re-drives every non-closed background edge
+   alongside boot-recovery fairness. The design intent, once built: restart re-drives every non-closed background edge
    (`Settled`, `ResultAppended`, `AttentionScheduled`) through the same
    recovery logic as the run-start sweep — `Settled`/`ResultAppended`
    re-enter the deliver path, **including activation of parked parents**
