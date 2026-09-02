@@ -95,7 +95,10 @@ pub(super) fn plan_chunks(
     let publish = if document.is_terminal() || document.answer.finalized || attention_is_new {
         delta
     } else {
-        &delta[..publishable_len(prefix, delta)]
+        // `publishable_len` only ever returns a line end or a position past a
+        // whitespace char, both char boundaries; should that ever change,
+        // hold the text rather than slice inside a char.
+        delta.get(..publishable_len(prefix, delta)).unwrap_or("")
     };
     if !publish.is_empty() {
         for piece in markdown_pieces(publish) {

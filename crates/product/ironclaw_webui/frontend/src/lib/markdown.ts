@@ -97,18 +97,32 @@ function renderGemojiShortcodes(token: Token): void {
 // a chat it is a sentence — a model answering "19." must stay visible — so the
 // marker's delimiter is escaped. Fenced code is left untouched.
 const BARE_ORDERED_MARKER = /^(\s{0,3})(\d{1,9})([.)])\s*$/;
-const CODE_FENCE = /^\s{0,3}(?:`{3,}|~{3,})/;
+const CODE_FENCE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
 
 function keepBareNumbersVisible(content: string): string {
-  let inFence = false;
+  // CommonMark closes a fence only with the same delimiter character, at
+  // least as long as the opening run, and nothing but whitespace after it.
+  let fence: { delimiter: string; width: number } | null = null;
   return content
     .split("\n")
     .map((line) => {
-      if (CODE_FENCE.test(line)) {
-        inFence = !inFence;
+      const match = CODE_FENCE.exec(line);
+      if (match) {
+        const [, run, rest] = match;
+        if (!fence) {
+          fence = { delimiter: run[0], width: run.length };
+          return line;
+        }
+        if (
+          run[0] === fence.delimiter &&
+          run.length >= fence.width &&
+          rest.trim() === ""
+        ) {
+          fence = null;
+        }
         return line;
       }
-      if (inFence) return line;
+      if (fence) return line;
       return line.replace(BARE_ORDERED_MARKER, "$1$2\\$3");
     })
     .join("\n");

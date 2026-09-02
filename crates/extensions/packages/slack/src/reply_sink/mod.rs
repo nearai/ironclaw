@@ -1125,6 +1125,16 @@ mod tests {
             "the hash covers exactly the published prefix so a rewrite is still detected"
         );
 
+        // Multibyte text ahead of the boundary never moves it off a char.
+        let mut multibyte = ReplyDocument::default();
+        multibyte.append_answer("héllo 世界 — ünïcode.\n\nnächster Absatz");
+        let plan = plan_for(&multibyte);
+        assert_eq!(text_chunks(&plan), vec!["héllo 世界 — ünïcode.\n\n"]);
+        assert_eq!(
+            plan.applied.to_chars,
+            "héllo 世界 — ünïcode.\n\n".chars().count() as u64
+        );
+
         let mut unfinished = ReplyDocument::default();
         unfinished.append_answer("Still typing the first");
         let plan = plan_for(&unfinished);

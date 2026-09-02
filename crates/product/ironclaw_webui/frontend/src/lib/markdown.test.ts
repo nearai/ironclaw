@@ -78,3 +78,17 @@ test("renderMarkdown keeps a standalone numeric sentence visible instead of an e
     /<pre><code class="language-text">19\.\n?<\/code>/,
   );
 });
+
+test("renderMarkdown closes a fence only on its own delimiter at its own width", () => {
+  // A ``` block may contain a ~~~ line; it does not close the block, so a
+  // bare number inside stays literal code, never an escaped `19\.`.
+  const other = renderMarkdown("```text\n~~~\n19.\n```");
+  assert.match(other, /<pre><code class="language-text">~~~\n19\.\n<\/code><\/pre>/);
+  assert.doesNotMatch(other, /19\\\./);
+
+  // Nor does a shorter run of the same delimiter.
+  const shorter = renderMarkdown("````text\n```\n19.\n````\n\n19.");
+  assert.match(shorter, /<pre><code class="language-text">```\n19\.\n<\/code><\/pre>/);
+  assert.match(shorter, />19\.</, "the bare number after the block is still visible text");
+  assert.doesNotMatch(shorter, /<ol/);
+});

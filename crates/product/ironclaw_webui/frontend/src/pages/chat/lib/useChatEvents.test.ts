@@ -3193,13 +3193,24 @@ test("useChatEvents: a final reply for a locally stopped run lifts the stop befo
   // instead of being fenced away.
   harness.handleEvent({
     type: "final_reply",
-    frame: { reply: { turn_run_id: "run-1", text: "The answer is 42." } },
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "The answer is 42.",
+        generated_at: "2026-09-02T09:00:00Z",
+      },
+    },
   });
 
   const assistant = harness.messages.filter((m) => m.role === "assistant");
   assert.equal(assistant.length, 1, "the final reply is rendered");
   assert.equal(assistant[0].content, "The answer is 42.");
   assert.equal(assistant[0].isFinalReply, true);
+  assert.equal(
+    assistant[0].timestamp,
+    "2026-09-02T09:00:00Z",
+    "the wire's generated_at is the rendered timestamp",
+  );
   assert.equal(
     harness.messages.some((message) => isRunStoppedMessageId(message.id)),
     false,
