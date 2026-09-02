@@ -1279,6 +1279,89 @@ async fn the_sink_timeout_is_bounded_by_the_remaining_lease_not_the_full_ttl() {
     coordinator.shutdown_reply_publication().await;
 }
 
+/// A claim whose lease has already lapsed by the time the provider call would
+/// start covers nothing: the call must not be made at all — a zero budget
+/// would still poll the sink once and then read the timeout as an ambiguity
+/// that, with no checkpoint, settles `Unknown` without any provider call.
+/// Instead the worker retries (re-claiming on the next pass), and a terminal
+/// revision that keeps lapsing fails closed under the retry budget with the
+/// lease named in its evidence.
+#[tokio::test]
+async fn a_lapsed_lease_skips_the_provider_call_instead_of_reading_a_zero_budget_as_ambiguity() {
+    let mut lapsed = settings();
+    lapsed.lease_ttl = Duration::from_millis(300);
+    lapsed.reconcile_timeout = Duration::from_secs(30);
+    lapsed.terminal_attempt_budget = 1;
+    let base = harness("lapsed-lease", ReplyTransport::Message, None);
+    let probe = ProbeStore::new();
+    // The desired-revision write after the claim outlives the whole lease.
+    *probe.advance_delay.lock().unwrap() = Duration::from_millis(600);
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&probe) as Arc<dyn OutboundStateStorePort>,
+        Arc::new(AnySinkResolver {
+            sink: Arc::new(StallingSink {
+                delay: Duration::from_secs(20),
+            }),
+            transport: ReplyTransport::Message,
+        }),
+        Arc::new(FixedReplyContext(Some(b"vendor-ctx".to_vec()))),
+        Arc::new(NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+        },
+    ));
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
+        projection: Arc::clone(&base.projection),
+        turn_coordinator: Arc::clone(&base.kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&base.threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
+        project_filesystem: Arc::new(crate::NoProjectFilesystem),
+        session_channel: None,
+        settings: lapsed,
+    }));
+    coordinator
+        .register_reply_target(base.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+    base.complete_with("answer after a lapsed lease").await;
+    coordinator
+        .reply_run_terminal(&base.scope, base.run_id)
+        .await;
+    let settled = wait_until(|| async {
+        probe
+            .list_reply_publications(base.scope.clone(), base.run_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| !record.publication.status.is_active())
+    })
+    .await;
+
+    assert_eq!(
+        settled.publication.status,
+        ironclaw_outbound::ReplyPublicationStatus::Settled(
+            ironclaw_outbound::ReplyPublicationSettlement::Failed(
+                ironclaw_outbound::DeliveryFailureKind::TransportUnavailable
+            )
+        ),
+        "a lapsed lease is a retry that fails closed under the budget, never an ambiguity"
+    );
+    let reason = settled
+        .publication
+        .evidence
+        .last_outcome
+        .as_ref()
+        .map(|reason| reason.as_str().to_string())
+        .unwrap_or_default();
+    assert!(
+        reason.contains("lease"),
+        "the evidence names the lapsed lease, not a provider timeout: {reason:?}"
+    );
+    coordinator.shutdown_reply_publication().await;
+}
+
 /// The stored ingress context is snapshotted at registration and persisted
 /// on the descriptor for resumes. What is persisted is the SEAM-BOUNDED
 /// value the worker publishes with — an oversized stored context is dropped

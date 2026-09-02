@@ -766,6 +766,21 @@ async fn reconcile(
                 .unwrap_or(Duration::ZERO)
         })
         .unwrap_or(publication.settings.lease_ttl);
+    // A lapsed lease covers nothing: a zero budget would still poll the sink
+    // once and then read the timeout as an ambiguity, which without a
+    // checkpoint settles `Unknown` although no provider call was made. Retry
+    // instead: the next pass re-claims, and a terminal revision that keeps
+    // lapsing fails closed under the retry budget with the lease named.
+    if remaining.is_zero() {
+        return Step::Retry {
+            reason: Some(ReplyOutcomeReason::new(
+                "the claim's lease lapsed before the provider call; re-claiming",
+            )),
+            retry_after: None,
+            generation,
+            checkpoint: None,
+        };
+    }
     let timeout = publication.settings.reconcile_timeout.min(remaining);
     let reconcile =
         tokio::time::timeout(timeout, sink.reconcile(request, channel.egress.as_ref())).await;

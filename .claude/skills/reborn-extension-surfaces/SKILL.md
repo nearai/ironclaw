@@ -48,7 +48,8 @@ Adapters implement **behavior only** (overview §4): they never report ids,
 schemas, effects, scopes, routes, or credentials — the resolved manifest is the
 sole authority. Trait homes:
 `ToolAdapter` — `crates/contracts/ironclaw_extension_contracts/src/tool_adapter.rs`;
-`ChannelAdapter` — `crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`;
+`ChannelIngress`/`ChannelDelivery` — `crates/contracts/ironclaw_extension_contracts/src/channel_adapter.rs`;
+`ReplySink` — `crates/contracts/ironclaw_extension_contracts/src/reply.rs`;
 `ExtensionEntrypoint`/`ExtensionBindings` —
 `crates/extensions/ironclaw_extension_host/src/entrypoint.rs`. Auth has **no** adapter
 trait — it is one host engine driving manifest recipes (overview §4.3).

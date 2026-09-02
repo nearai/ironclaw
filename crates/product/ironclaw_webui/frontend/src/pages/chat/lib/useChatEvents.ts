@@ -414,9 +414,8 @@ function runIdOfItem(
   item,
   { activeRunId, activeRunRef, latestRunIdRef, batchRunId },
 ) {
-  if (item.run_status) return item.run_status.run_id || null;
-  if (item.text) return item.text.run_id || null;
-  if (item.thinking) return item.thinking.run_id || null;
+  const direct = item.run_status ?? item.text ?? item.thinking;
+  if (direct) return direct.run_id || null;
   if (item.capability_activity) {
     return fallbackTurnRunIdForActivity({
       explicitRunId: item.capability_activity.turn_run_id,
