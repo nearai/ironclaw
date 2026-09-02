@@ -311,7 +311,17 @@ fn harness_over_files(
         resolver,
         kernel,
         threads,
-        scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+        // Production run scopes carry their owner (`turn_scope_for_thread`,
+        // `new_with_owner(.., Some(actor))`): publication rows are written under
+        // the owner's mount and the run key includes the owner, so the harness
+        // must too or recovery paths that drop the owner pass here and fail live.
+        scope: TurnScope::new_with_owner(
+            tenant_id,
+            Some(agent_id),
+            None,
+            thread_id,
+            Some(user_id.clone()),
+        ),
         actor: TurnActor::new(user_id),
         run_id: TurnRunId::new(),
     }

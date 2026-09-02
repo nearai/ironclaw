@@ -3562,12 +3562,8 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // reply revisions through the same live source the SSE/WebSocket
     // transports tail. Bound here because the binary assembled the binding
     // before this projection graph existed.
-    if let Some(sink) = services.projection_reply_sink.as_ref()
-        && !sink.bind_publisher(Arc::clone(&live_projection_publisher))
-    {
-        tracing::debug!(
-            "projection reply sink publisher was already bound; keeping the first source"
-        );
+    if let Some(sink) = services.projection_reply_sink.as_ref() {
+        _ = sink.bind_publisher(Arc::clone(&live_projection_publisher)); // first bind wins
     }
     if let Some(skill_activation_source) = &skill_activation_source {
         skill_activation_source
@@ -4422,11 +4418,14 @@ pub(crate) async fn build_runtime_with_resource_governor(
                 reason: format!("reply publication recovery thread id: {reason}"),
             }
         })?;
-        let recovery_scope = TurnScope::new(
+        // `/outbound` is a per-user mount: the sweep must carry the deployment
+        // actor as owner; runs owned by other users resume via the journal.
+        let recovery_scope = TurnScope::new_with_owner(
             thread_scope.tenant_id.clone(),
             Some(thread_scope.agent_id.clone()),
             thread_scope.project_id.clone(),
             recovery_thread_id,
+            thread_scope.owner_user_id.clone(),
         );
         reply_publication_recovery = Some(tokio::spawn(async move {
             match coordinator.resume_reply_publications(&recovery_scope).await {

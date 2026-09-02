@@ -589,7 +589,8 @@ pub(crate) fn start_channel_host(
     // other channel surface uses.
     if start_reply_publication && let Some(coordinator) = delivery_coordinator.as_ref() {
         use ironclaw_assistant::{ReplyPublicationSettings, ReplyPublicationWiring};
-        if !coordinator.start_reply_publication(ReplyPublicationWiring {
+        // A second start is refused by the coordinator (first wiring wins).
+        _ = coordinator.start_reply_publication(ReplyPublicationWiring {
             projection: Arc::clone(&reply_projection),
             turn_coordinator: Arc::clone(&turn_coordinator),
             thread_service: Arc::clone(&thread_service),
@@ -598,11 +599,7 @@ pub(crate) fn start_channel_host(
             project_filesystem: Arc::clone(project_filesystem),
             session_channel: session_reply_channel,
             settings: ReplyPublicationSettings::default(),
-        }) {
-            tracing::debug!(
-                "reply publication was already started on this coordinator; keeping it"
-            );
-        }
+        });
     }
     let delivery = delivery_coordinator.clone().map(|coordinator| {
         ironclaw_assistant::ChannelWorkflowDeliveryServices {

@@ -58,6 +58,7 @@ use ironclaw_product_contracts::prompt_source::{
 };
 use ironclaw_threads::{AttachmentRef, SessionThreadService};
 use ironclaw_turns::TurnCoordinator;
+use ironclaw_turns::process_projection::turn_scope_from_process_scope;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -560,18 +561,17 @@ impl ProcessJournalCommitObserver for DeliveryCoordinator {
         {
             return Ok(());
         }
-        let (Some(thread_id), Some(agent_id)) = (
-            snapshot.scope.thread_id.clone(),
-            snapshot.scope.agent_id.clone(),
-        ) else {
+        if snapshot.scope.agent_id.is_none() {
+            return Ok(());
+        }
+        // Rebuild the scope the way the kernel does for the same snapshot —
+        // owner slot included. Publication rows live under the owner's mount
+        // and the run key includes the owner, so a scope rebuilt without it
+        // would read an empty subtree and never match the registered target.
+        let Ok(scope) = turn_scope_from_process_scope(snapshot.scope.clone()) else {
+            // A commit without a thread id is not an agent-turn run's.
             return Ok(());
         };
-        let scope = TurnScope::new(
-            snapshot.scope.tenant_id.clone(),
-            Some(agent_id),
-            snapshot.scope.project_id.clone(),
-            thread_id,
-        );
         let run_id = TurnRunId::from_uuid(snapshot.process_id.as_uuid());
         let key = RunKey::new(&scope, run_id);
         // Await recovery so the acknowledgement means what it says; an error
