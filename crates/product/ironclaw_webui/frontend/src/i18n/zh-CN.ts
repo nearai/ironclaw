@@ -82,6 +82,11 @@ registerPack("zh-CN", {
   "notifications.approval.title": "需要审批",
   "notifications.approval.detail": "等待你审批",
   "notifications.approval.untitled": "未命名对话",
+  // Run completions
+  "runCompletions.toastOne": "一个智能体运行已完成。打开该会话查看回复。",
+  "runCompletions.toastMany": "同一会话中已完成 {count} 个智能体运行。",
+  "runCompletions.listItemOne": "智能体运行完成 — 回复已就绪",
+  "runCompletions.listItemMany": "已完成 {count} 个运行 — 回复已就绪",
 
   // Status
   "status.online": "在线",

@@ -82,6 +82,11 @@ registerPack("hi", {
   "notifications.approval.title": "अनुमोदन आवश्यक",
   "notifications.approval.detail": "आपकी मंज़ूरी चाहिए",
   "notifications.approval.untitled": "बिना शीर्षक थ्रेड",
+  // Run completions
+  "runCompletions.toastOne": "एक एजेंट रन पूरा हुआ। उत्तर देखने के लिए थ्रेड खोलें।",
+  "runCompletions.toastMany": "एक थ्रेड में {count} एजेंट रन पूरे हुए।",
+  "runCompletions.listItemOne": "एजेंट रन पूरा — उत्तर तैयार",
+  "runCompletions.listItemMany": "{count} रन पूरे — उत्तर तैयार",
 
   // Status
   "status.online": "ऑनलाइन",

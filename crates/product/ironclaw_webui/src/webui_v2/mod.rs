@@ -45,15 +45,16 @@ mod handlers;
 mod inspector;
 mod router;
 mod schema;
+mod session_events;
 mod sse_capacity;
 // Browser SPA asset bundle: the JSON route surface and the static bytes it
 // drives now ship from one crate.
 pub mod static_assets;
 
 pub use descriptors::{
-    WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER, WEBUI_V2_ROUTE_ADMIN_CREATE_USER,
-    WEBUI_V2_ROUTE_ADMIN_DELETE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET,
-    WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT,
+    WEBUI_V2_PATTERN_SESSION_WEBSOCKET, WEBUI_V2_ROUTE_ADD_PROJECT_MEMBER,
+    WEBUI_V2_ROUTE_ADMIN_CREATE_USER, WEBUI_V2_ROUTE_ADMIN_DELETE_USER,
+    WEBUI_V2_ROUTE_ADMIN_DELETE_USER_SECRET, WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_ARTIFACT,
     WEBUI_V2_ROUTE_ADMIN_GET_THREAD_SCRAPE_RUN_ARTIFACT, WEBUI_V2_ROUTE_ADMIN_GET_USER,
     WEBUI_V2_ROUTE_ADMIN_LIST_THREAD_SCRAPE_THREADS, WEBUI_V2_ROUTE_ADMIN_LIST_USER_SECRETS,
     WEBUI_V2_ROUTE_ADMIN_LIST_USERS, WEBUI_V2_ROUTE_ADMIN_PUT_USER_SECRET,
@@ -93,7 +94,10 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_REMOVE_PROJECT_MEMBER, WEBUI_V2_ROUTE_REMOVE_SKILL,
     WEBUI_V2_ROUTE_RENAME_AUTOMATION, WEBUI_V2_ROUTE_RESOLVE_GATE,
     WEBUI_V2_ROUTE_RESUME_AUTOMATION, WEBUI_V2_ROUTE_RETRY_RUN, WEBUI_V2_ROUTE_RUN_AUTOMATION,
+    WEBUI_V2_ROUTE_RUN_COMPLETION_ACKNOWLEDGE, WEBUI_V2_ROUTE_RUN_COMPLETION_INTENT,
+    WEBUI_V2_ROUTE_RUN_COMPLETION_THREAD_READ, WEBUI_V2_ROUTE_RUN_COMPLETIONS_UNREAD,
     WEBUI_V2_ROUTE_SEARCH_SKILLS, WEBUI_V2_ROUTE_SESSION_CHANNEL_MESSAGE,
+    WEBUI_V2_ROUTE_SESSION_WEBSOCKET, WEBUI_V2_ROUTE_SESSION_WEBSOCKET_TICKET,
     WEBUI_V2_ROUTE_SET_ACTIVE_LLM, WEBUI_V2_ROUTE_SET_AUTO_ACTIVATE_LEARNED,
     WEBUI_V2_ROUTE_SET_NOTIFICATION_CHANNELS, WEBUI_V2_ROUTE_SET_SETTINGS_TOOL_PERMISSION,
     WEBUI_V2_ROUTE_SET_SETTINGS_TOOLS_AUTO_APPROVE, WEBUI_V2_ROUTE_SET_SKILL_AUTO_ACTIVATE,
@@ -101,25 +105,25 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_SETUP_EXTENSION, WEBUI_V2_ROUTE_START_CODEX_LOGIN,
     WEBUI_V2_ROUTE_START_NEARAI_LOGIN, WEBUI_V2_ROUTE_STAT_FS_PATH,
     WEBUI_V2_ROUTE_STAT_PROJECT_FILE, WEBUI_V2_ROUTE_STREAM_EVENTS,
-    WEBUI_V2_ROUTE_STREAM_EVENTS_WS, WEBUI_V2_ROUTE_SUGGESTION_DISMISS,
-    WEBUI_V2_ROUTE_SUGGESTION_START, WEBUI_V2_ROUTE_SUGGESTIONS_GENERATE,
-    WEBUI_V2_ROUTE_SUGGESTIONS_LIST, WEBUI_V2_ROUTE_TEST_LLM_CONNECTION,
-    WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK, WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES,
-    WEBUI_V2_ROUTE_TRACE_CREDITS, WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE,
-    WEBUI_V2_ROUTE_UPDATE_PROJECT, WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER,
-    WEBUI_V2_ROUTE_UPDATE_SKILL, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER,
-    is_webui_v2_operator_webui_config_route_id, webui_v2_routes,
-    webui_v2_routes_with_artifact_flags, webui_v2_routes_with_regression_artifact_export,
+    WEBUI_V2_ROUTE_SUGGESTION_DISMISS, WEBUI_V2_ROUTE_SUGGESTION_START,
+    WEBUI_V2_ROUTE_SUGGESTIONS_GENERATE, WEBUI_V2_ROUTE_SUGGESTIONS_LIST,
+    WEBUI_V2_ROUTE_TEST_LLM_CONNECTION, WEBUI_V2_ROUTE_TRACE_ACCOUNT_LOGIN_LINK,
+    WEBUI_V2_ROUTE_TRACE_ACCOUNT_TRACES, WEBUI_V2_ROUTE_TRACE_CREDITS,
+    WEBUI_V2_ROUTE_TRACE_HOLD_AUTHORIZE, WEBUI_V2_ROUTE_UPDATE_PROJECT,
+    WEBUI_V2_ROUTE_UPDATE_PROJECT_MEMBER, WEBUI_V2_ROUTE_UPDATE_SKILL,
+    WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, is_webui_v2_operator_webui_config_route_id,
+    webui_v2_routes, webui_v2_routes_with_artifact_flags,
+    webui_v2_routes_with_regression_artifact_export,
 };
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 pub use handlers::{
-    admin_get_thread_scrape_artifact, admin_get_thread_scrape_run_artifact,
-    admin_list_thread_scrape_threads, archive_notification, browse_fs_dir, cancel_run,
-    complete_nearai_wallet_login, create_thread, delete_automation, delete_llm_provider,
-    delete_thread, dismiss_suggestion, execute_command, generate_suggestions, get_attachment,
-    get_extension_setup, get_llm_config, get_notification_channels, get_operator_config_key,
-    get_operator_diagnostics, get_operator_setup, get_operator_status, get_run_artifact,
-    get_session, get_skill_content, get_timeline, get_user_model_catalog,
+    SessionSocketTicketResponse, admin_get_thread_scrape_artifact,
+    admin_get_thread_scrape_run_artifact, admin_list_thread_scrape_threads, archive_notification,
+    browse_fs_dir, cancel_run, complete_nearai_wallet_login, create_thread, delete_automation,
+    delete_llm_provider, delete_thread, dismiss_suggestion, execute_command, generate_suggestions,
+    get_attachment, get_extension_setup, get_llm_config, get_notification_channels,
+    get_operator_config_key, get_operator_diagnostics, get_operator_setup, get_operator_status,
+    get_run_artifact, get_session, get_skill_content, get_timeline, get_user_model_catalog,
     get_user_model_preference, install_extension, install_skill, ironhub_deliver_install,
     list_automations, list_commands, list_extension_admin_configuration, list_extension_registry,
     list_extensions, list_fs_mounts, list_llm_models, list_notifications, list_operator_config,
@@ -128,11 +132,11 @@ pub use handlers::{
     query_logs, query_operator_logs, read_fs_file, register_hosted_mcp_extension, remove_extension,
     remove_skill, rename_automation, replace_extension_admin_configuration, resolve_gate,
     resume_automation, retry_run, run_automation, run_operator_service_lifecycle,
-    run_operator_setup, search_skills, session_channel_message, set_active_llm,
-    set_auto_activate_learned, set_notification_channels, set_operator_config_key,
-    set_settings_tool_permission, set_settings_tools_auto_approve, set_skill_auto_activate,
-    set_user_model_policy, set_user_model_preference, setup_extension, start_codex_login,
-    start_nearai_login, start_suggestion, stat_fs_path, stream_events, stream_events_ws,
+    run_operator_setup, search_skills, session_channel_message, session_websocket,
+    session_websocket_ticket, set_active_llm, set_auto_activate_learned, set_notification_channels,
+    set_operator_config_key, set_settings_tool_permission, set_settings_tools_auto_approve,
+    set_skill_auto_activate, set_user_model_policy, set_user_model_preference, setup_extension,
+    start_codex_login, start_nearai_login, start_suggestion, stat_fs_path, stream_events,
     test_llm_connection, trace_account_traces, trace_credits, update_skill, upsert_llm_provider,
 };
 pub use inspector::{

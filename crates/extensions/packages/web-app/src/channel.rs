@@ -35,14 +35,20 @@ use ironclaw_extension_contracts::tool_adapter::{
 use ironclaw_host_api::action::NetworkMethod;
 use ironclaw_host_api::ids::SecretHandle;
 use ironclaw_web_app::{
-    DEFAULT_TTL_SECONDS, PushEndpoint, PushSubscriptionKeys, PushSubscriptionRecord, PushUrgency,
+    DEFAULT_TTL_SECONDS, PushEndpoint, PushSubscriptionRecord, PushUrgency, RegistrationDocument,
     WEB_APP_VAPID_CREDENTIAL_HANDLE, WebAppError, WebAppNotificationPayload, build_push_request,
 };
 
 /// Deep link a notification opens; the service worker resolves it against
 /// the app origin.
 const NOTIFICATION_URL: &str = "/automations";
+/// SPA route a run-completion push deep-links into; the typed thread id is
+/// appended as one percent-encoded segment by the payload builder.
+const RUN_COMPLETION_THREAD_ROUTE: &str = "/chat";
 const NOTIFICATION_TITLE: &str = "IronClaw";
+/// Fixed run-completion copy (design §7.10): a push payload never carries
+/// generated or protected content, only this generic sentence.
+const RUN_COMPLETION_BODY: &str = "An agent run finished.";
 
 /// Per-registration send outcomes, folded into one part outcome.
 #[derive(Default)]
@@ -69,37 +75,20 @@ impl WebAppChannelAdapter {
 
 /// One registration parsed into the vendor record this half sends with.
 ///
-/// This is where the opaque half of a registration is interpreted, and the
-/// only place it ever is (design §8: "everything else validates where it is
-/// used"). A malformed document fails **this** registration — not the
-/// delivery, and not the other registrations — and is reported for pruning on
-/// the same path an expired endpoint takes.
+/// The opaque half of a registration is interpreted by the web-app domain's
+/// [`RegistrationDocument`] grammar — the one owner the host's enrollment
+/// probe reads through as well (design §8: "everything else validates where
+/// it is used"). A malformed document fails **this** registration — not the
+/// delivery, and not the other registrations — and is reported for pruning
+/// on the same path an expired endpoint takes.
 fn parse_registration(
     registration: &DeliveryRegistration,
 ) -> Result<PushSubscriptionRecord, WebAppError> {
-    #[derive(serde::Deserialize)]
-    struct RegistrationDocument {
-        keys: RegistrationKeys,
-        #[serde(default)]
-        user_agent: Option<String>,
-    }
-    #[derive(serde::Deserialize)]
-    struct RegistrationKeys {
-        p256dh: String,
-        auth: String,
-    }
-
     let endpoint = PushEndpoint::new(registration.endpoint.clone())?;
-    let document: RegistrationDocument =
-        serde_json::from_str(&registration.document).map_err(|error| {
-            WebAppError::InvalidSubscription {
-                reason: format!("registration document is not a push subscription: {error}"),
-            }
-        })?;
-    let keys = PushSubscriptionKeys::new(document.keys.p256dh, document.keys.auth)?;
+    let document = RegistrationDocument::parse(&registration.document)?;
     Ok(PushSubscriptionRecord::new(
         endpoint,
-        keys,
+        document.keys,
         document.user_agent,
         registration.created_at.clone(),
     ))
@@ -117,6 +106,9 @@ impl ChannelDelivery for WebAppChannelAdapter {
         let mut lines: Vec<String> = Vec::new();
         let mut urgency = PushUrgency::Normal;
         let mut part_supported: Vec<Result<(), &'static str>> = Vec::new();
+        // §7.10: a typed run-completion part builds its own fixed-copy v2
+        // payload; it never mixes with free-text rendering.
+        let mut run_completion: Option<WebAppNotificationPayload> = None;
         for part in &envelope.parts {
             match part {
                 OutboundPart::Text(text) => {
@@ -131,6 +123,21 @@ impl ChannelDelivery for WebAppChannelAdapter {
                     urgency = PushUrgency::High;
                     part_supported.push(Ok(()));
                 }
+                OutboundPart::RunCompletion(view) => {
+                    // Fixed copy only (design §7.10): the payload carries no
+                    // generated or protected content, and the URL derives
+                    // from the typed thread id inside the payload builder.
+                    run_completion = Some(WebAppNotificationPayload::run_completion(
+                        NOTIFICATION_TITLE,
+                        RUN_COMPLETION_BODY,
+                        RUN_COMPLETION_THREAD_ROUTE,
+                        view.thread_id.as_str(),
+                        view.notice_id.clone(),
+                        view.opaque_thread_tag.clone(),
+                        view.unread_count_for_thread,
+                    ));
+                    part_supported.push(Ok(()));
+                }
                 OutboundPart::File(_) => {
                     part_supported.push(Err("attachments are not supported by browser push"));
                 }
@@ -143,6 +150,22 @@ impl ChannelDelivery for WebAppChannelAdapter {
             }
         }
 
+        // §7.10: a typed run-completion push is a complete, fixed-copy
+        // payload. Mixing it with free-text parts would send ONE push and
+        // then report `Sent` for text the push service never accepted —
+        // forged delivery evidence. Reject the mixed shape outright.
+        if run_completion.is_some() && lines.iter().any(|line| !line.is_empty()) {
+            return Ok(DeliveryReport::from_parts(
+                envelope
+                    .parts
+                    .iter()
+                    .map(|_| PartDeliveryOutcome::Permanent {
+                        reason: "run-completion pushes cannot be mixed with other parts"
+                            .to_string(),
+                    })
+                    .collect(),
+            ));
+        }
         let has_deliverable = part_supported.iter().any(Result::is_ok);
         if !has_deliverable {
             return Ok(DeliveryReport::from_parts(
@@ -170,12 +193,15 @@ impl ChannelDelivery for WebAppChannelAdapter {
                 reason: "no clients are enrolled for browser push".to_string(),
             }
         } else {
-            let payload = WebAppNotificationPayload::new(
-                NOTIFICATION_TITLE,
-                lines.join("\n\n"),
-                NOTIFICATION_URL,
-                None,
-            );
+            let payload = match run_completion {
+                Some(payload) => payload,
+                None => WebAppNotificationPayload::new(
+                    NOTIFICATION_TITLE,
+                    lines.join("\n\n"),
+                    NOTIFICATION_URL,
+                    None,
+                ),
+            };
             tally = self
                 .fan_out(&envelope.registrations, &payload, urgency, egress)
                 .await;
@@ -346,5 +372,117 @@ fn fold_tally(tally: &FanOutTally) -> PartDeliveryOutcome {
     }
     PartDeliveryOutcome::Permanent {
         reason: "no push delivery was attempted".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_extension_contracts::channel_adapter::{
+        OutboundEnvelope, OutboundTarget, OutboundVisibility, RunCompletionNoticeView,
+    };
+    use ironclaw_extension_contracts::external::ExternalConversationRef;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct ScriptedEgress {
+        requests: Mutex<Vec<RestrictedEgressRequest>>,
+    }
+
+    #[async_trait]
+    impl RestrictedEgress for ScriptedEgress {
+        async fn send(
+            &self,
+            request: RestrictedEgressRequest,
+        ) -> Result<
+            ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse,
+            RestrictedEgressError,
+        > {
+            self.requests.lock().expect("lock").push(request);
+            Ok(
+                ironclaw_extension_contracts::tool_adapter::RestrictedEgressResponse {
+                    status: 201,
+                    body: Vec::new(),
+                },
+            )
+        }
+    }
+
+    fn envelope(parts: Vec<OutboundPart>) -> OutboundEnvelope {
+        OutboundEnvelope {
+            target: OutboundTarget {
+                conversation: ExternalConversationRef::new(None, "web-app", None, None)
+                    .expect("conversation"),
+                thread_anchor: None,
+            },
+            parts,
+            reply_context: None,
+            registrations: Vec::new(),
+            visibility: OutboundVisibility::Public,
+        }
+    }
+
+    fn completion_part() -> OutboundPart {
+        OutboundPart::RunCompletion(Box::new(RunCompletionNoticeView {
+            notice_id: "rcn-test".to_string(),
+            thread_id: ironclaw_host_api::ids::ThreadId::new("thread-rc").expect("thread id"),
+            opaque_thread_tag: "rct-test".to_string(),
+            unread_count_for_thread: 2,
+        }))
+    }
+
+    #[tokio::test]
+    async fn mixed_completion_and_text_envelopes_are_rejected_wholesale() {
+        // §7.10: one push per envelope. Reporting `Sent` for a text part the
+        // push service never separately accepted would forge delivery
+        // evidence, so the mixed shape fails as Permanent for every part.
+        let egress = ScriptedEgress::default();
+        let report = WebAppChannelAdapter::new()
+            .deliver(
+                envelope(vec![
+                    completion_part(),
+                    OutboundPart::Text("free text".to_string()),
+                ]),
+                &egress,
+            )
+            .await
+            .expect("deliver reports");
+        assert_eq!(report.parts.len(), 2);
+        for part in &report.parts {
+            assert!(
+                matches!(
+                    part,
+                    PartDeliveryOutcome::Permanent { reason }
+                        if reason.contains("cannot be mixed")
+                ),
+                "unexpected outcome: {part:?}"
+            );
+        }
+        assert!(
+            egress.requests.lock().expect("lock").is_empty(),
+            "no push may be attempted for a rejected mixed envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_part_alone_reports_no_enrollment_without_forged_send() {
+        // With zero registrations the honest outcome is Permanent
+        // ("no clients enrolled"), never a fabricated Sent.
+        let egress = ScriptedEgress::default();
+        let report = WebAppChannelAdapter::new()
+            .deliver(envelope(vec![completion_part()]), &egress)
+            .await
+            .expect("deliver reports");
+        assert_eq!(report.parts.len(), 1);
+        assert!(
+            matches!(
+                &report.parts[0],
+                PartDeliveryOutcome::Permanent { reason }
+                    if reason.contains("enrolled")
+            ),
+            "unexpected outcome: {:?}",
+            report.parts[0]
+        );
+        assert!(egress.requests.lock().expect("lock").is_empty());
     }
 }

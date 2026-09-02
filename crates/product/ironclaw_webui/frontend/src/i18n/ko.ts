@@ -82,6 +82,11 @@ registerPack("ko", {
   "notifications.approval.title": "승인 필요",
   "notifications.approval.detail": "승인이 필요합니다",
   "notifications.approval.untitled": "제목 없는 스레드",
+  // Run completions
+  "runCompletions.toastOne": "에이전트 실행이 완료되었습니다. 스레드를 열어 답변을 확인하세요.",
+  "runCompletions.toastMany": "한 스레드에서 {count}개의 에이전트 실행이 완료되었습니다.",
+  "runCompletions.listItemOne": "에이전트 실행 완료 — 답변 준비됨",
+  "runCompletions.listItemMany": "{count}개 실행 완료 — 답변 준비됨",
 
   // Status
   "status.online": "온라인",

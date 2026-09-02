@@ -82,6 +82,11 @@ registerPack("ja", {
   "notifications.approval.title": "承認が必要です",
   "notifications.approval.detail": "あなたの承認をお待ちしています",
   "notifications.approval.untitled": "無題のスレッド",
+  // Run completions
+  "runCompletions.toastOne": "エージェントの実行が完了しました。スレッドを開いて返信を確認してください。",
+  "runCompletions.toastMany": "1つのスレッドで{count}件のエージェント実行が完了しました。",
+  "runCompletions.listItemOne": "エージェント実行完了 — 返信があります",
+  "runCompletions.listItemMany": "{count}件の実行完了 — 返信があります",
 
   // Status
   "status.online": "オンライン",

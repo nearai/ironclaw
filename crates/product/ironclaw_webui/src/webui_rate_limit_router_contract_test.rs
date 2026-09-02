@@ -1,6 +1,6 @@
 //! Caller-level contract tests for PR #6592 review comments about
 //! `enforce_rate_limit` ↔ `SseCapacity` refund behavior driven through the
-//! real, fully-wired v2 router (real `stream_events` / `stream_events_ws`
+//! real, fully-wired v2 router (real `stream_events` / `session_websocket`
 //! handlers, real `SseCapacity`) rather than a synthetic always-429
 //! handler.
 //!
@@ -30,7 +30,7 @@ use tower::ServiceExt;
 
 /// Minimal `ProductSurface` fake shared by the tests in this file. Only
 /// `stream_events` needs a real body: the SSE/WS capacity slot is reserved
-/// synchronously at the top of the `stream_events` / `stream_events_ws`
+/// synchronously at the top of the `stream_events` / `session_websocket`
 /// handlers before the surface is ever touched, so the other operations are
 /// unreachable for these tests and panic loudly if that ever changes.
 #[derive(Default)]
@@ -106,11 +106,11 @@ fn stream_events_route(max_requests: u32) -> RouteLimit {
     }
 }
 
-fn stream_events_ws_route(max_requests: u32) -> RouteLimit {
+fn session_websocket_route(max_requests: u32) -> RouteLimit {
     RouteLimit {
-        route_id: "webui_v2.stream_events_ws".into(),
+        route_id: "webui_v2.session_websocket".into(),
         method: Method::GET,
-        segments: parse_pattern("/api/webchat/v2/threads/{thread_id}/ws"),
+        segments: parse_pattern("/api/webchat/v2/session/websocket"),
         policy: ResolvedPolicy::Limited {
             scope: RateLimitScope::PerCaller,
             max_requests,
@@ -300,24 +300,23 @@ async fn sse_capacity_429_burst_past_refund_limit_drains_budget_to_middleware_42
     drop(held);
 }
 
-/// Finding C3 (PR #6592 review): `stream_events_ws` also marks capacity
-/// 429s refundable (`handlers.rs`, mirroring `stream_events`), but no test
-/// drove the WebSocket route through `enforce_rate_limit` — a bare
-/// `tower::oneshot` request cannot reach a WS handler because axum's
-/// `WebSocketUpgrade` extractor requires a real `hyper::upgrade::OnUpgrade`
-/// extension, which only a real connection provides. This mirrors the raw
-/// TCP + real WS handshake pattern in
-/// `webui_v2_handlers_contract::stream_events_ws_shares_capacity_with_sse_streams`,
+/// Finding C3 (PR #6592 review), carried onto the session socket:
+/// `session_websocket` also marks capacity 429s refundable (mirroring
+/// `stream_events`), but a bare `tower::oneshot` request cannot reach a WS
+/// handler because axum's `WebSocketUpgrade` extractor requires a real
+/// `hyper::upgrade::OnUpgrade` extension, which only a real connection
+/// provides. This mirrors the raw TCP + real WS handshake pattern in
+/// `webui_v2_handlers_contract::session_websocket_shares_capacity_with_sse_streams`,
 /// adding the real `enforce_rate_limit` middleware in front and asserting
 /// the same budget-untouched refund property the SSE test above asserts,
 /// but through a real WebSocket upgrade over a real socket.
 #[tokio::test]
-async fn stream_events_ws_429_through_real_socket_is_refunded() {
+async fn session_websocket_429_through_real_socket_is_refunded() {
     // max_requests = 2: the initial successful WS upgrade charges 1 (1
     // left). If the refundable capacity 429s fired below drained that
     // last unit, the final reconnect attempt would get the middleware's
     // own 429 instead of completing the upgrade.
-    let app = test_router(1, vec![stream_events_ws_route(2)])
+    let app = test_router(1, vec![session_websocket_route(2)])
         // Caller identity injected the same way as the other raw-TCP WS
         // test in `webui_v2_handlers_contract.rs`: a router-wide
         // `Extension` layer standing in for the bearer-auth middleware,
@@ -332,7 +331,7 @@ async fn stream_events_ws_429_through_real_socket_is_refunded() {
     let serve_handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    let ws_url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let ws_url = format!("ws://{addr}/api/webchat/v2/session/websocket");
 
     // First upgrade succeeds and reserves the caller's only SseCapacity
     // slot (shared between the SSE and WS transports). Keep the socket
@@ -381,7 +380,7 @@ async fn stream_events_ws_429_through_real_socket_is_refunded() {
     // A fresh upgrade must succeed. If the five refundable capacity 429s
     // above had actually drained the (max_requests = 2) rate-limit
     // budget, `enforce_rate_limit` would reject this upgrade itself
-    // (before `stream_events_ws` — and therefore `SseCapacity` — ever
+    // (before `session_websocket` — and therefore `SseCapacity` — ever
     // ran) instead of completing it.
     let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {

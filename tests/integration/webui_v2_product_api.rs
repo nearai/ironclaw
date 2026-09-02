@@ -44,9 +44,10 @@ use ironclaw_product_contracts::admin_users::{
 use ironclaw_product_contracts::operator_tools::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
-use ironclaw_product_contracts::outbound::{ProductOutboundEnvelope, ProductOutboundPayload};
+use ironclaw_product_contracts::outbound::ProductOutboundPayload;
 use ironclaw_product_contracts::surface::{
-    ProductSurface, ProductSurfaceCaller, ProductSurfaceStreamRequest,
+    ProductStreamEvent, ProductStreamSelector, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceStreamRequest,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -2074,7 +2075,9 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
         services.stream_events(
             caller.clone(),
             ProductSurfaceStreamRequest {
-                stream_id: Some(thread_id.clone()),
+                selector: ProductStreamSelector::Thread {
+                    thread_id: thread_id.clone(),
+                },
                 after_cursor: None,
             },
         ),
@@ -2087,17 +2090,17 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
         .take()
         .expect("post-refresh stream carries its live continuation");
     let gate_prompt = loop {
-        let events = replayed
-            .events
-            .into_iter()
-            .map(serde_json::from_value::<ProductOutboundEnvelope>)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("stream events decode");
-        if let Some(prompt) = events.iter().find_map(|envelope| match &envelope.payload {
-            ProductOutboundPayload::GatePrompt(view) if view.gate_ref == gate_ref.as_str() => {
-                Some(view.clone())
+        let events = replayed.events;
+        if let Some(prompt) = events.iter().find_map(|envelope| {
+            let ProductStreamEvent::Thread(payload) = &envelope.event else {
+                panic!("expected a thread stream event, got {:?}", envelope.event);
+            };
+            match payload {
+                ProductOutboundPayload::GatePrompt(view) if view.gate_ref == gate_ref.as_str() => {
+                    Some(view.clone())
+                }
+                _ => None,
             }
-            _ => None,
         }) {
             break prompt;
         }

@@ -274,6 +274,17 @@ pub struct WebuiServeConfig {
     /// fragments with one shared descriptor inventory. Product-auth is the
     /// current production user.
     pub(crate) split_mounts: Vec<SplitRouteMount>,
+    /// Single-use session-socket ticket store, selected by host composition
+    /// for the deployment shape: the bounded in-memory adapter for
+    /// single-process deployments, a shared CAS-backed adapter when replicas
+    /// share durable storage. The `ironclaw` binary always wires one; `None`
+    /// (a library embedder or test that wires none) disables the session
+    /// WebSocket capability entirely (fail closed): the mint route answers
+    /// 503, the upgrade cannot authenticate, and `GET /session` does not
+    /// advertise `features.session_events`, so browsers keep using
+    /// compatibility SSE.
+    pub(crate) session_socket_tickets:
+        Option<Arc<dyn ironclaw_product_contracts::session_transport::SessionSocketTicketStore>>,
 }
 
 pub struct WebuiV2App {
@@ -312,6 +323,7 @@ impl WebuiServeConfig {
             public_mounts: Vec::new(),
             protected_mounts: Vec::new(),
             split_mounts: Vec::new(),
+            session_socket_tickets: None,
         }
     }
 
@@ -361,6 +373,18 @@ impl WebuiServeConfig {
     /// descriptors feed the same gateway policy derivation as every other mount.
     pub fn with_split_route_mount(mut self, mount: SplitRouteMount) -> Self {
         self.split_mounts.push(mount);
+        self
+    }
+
+    /// Wire the deployment's single-use session-socket ticket store. See the
+    /// field documentation: composition selects the adapter by deployment
+    /// shape, and leaving it unset keeps the session WebSocket capability
+    /// off (compatibility SSE only).
+    pub fn with_session_socket_ticket_store(
+        mut self,
+        store: Arc<dyn ironclaw_product_contracts::session_transport::SessionSocketTicketStore>,
+    ) -> Self {
+        self.session_socket_tickets = Some(store);
         self
     }
 
@@ -632,6 +656,7 @@ pub fn webui_v2_app_with_lifecycle(
         default_project_id: config.default_project_id.clone(),
         authenticator: config.authenticator.clone(),
         operator_routes,
+        session_socket_tickets: config.session_socket_tickets.clone(),
     };
 
     // Inner: the v2 route surface, retagged to `Router<()>` so it can
@@ -647,7 +672,8 @@ pub fn webui_v2_app_with_lifecycle(
         .with_session_channel_extension_id(config.session_channel_extension_id.clone())
         .with_workspace_requires_scoped_projection(config.workspace_requires_scoped_projection)
         .with_regression_artifact_export_enabled(regression_artifact_export_enabled)
-        .with_admin_thread_scrape_enabled(admin_thread_scrape_enabled);
+        .with_admin_thread_scrape_enabled(admin_thread_scrape_enabled)
+        .with_session_socket_tickets(config.session_socket_tickets.clone());
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
@@ -799,6 +825,8 @@ struct AuthLayerState {
     default_project_id: Option<ProjectId>,
     authenticator: Arc<dyn WebuiAuthenticator>,
     operator_routes: OperatorWebuiConfigRouteState,
+    session_socket_tickets:
+        Option<Arc<dyn ironclaw_product_contracts::session_transport::SessionSocketTicketStore>>,
 }
 
 /// This crate is the host transport that performs bearer/session authentication
@@ -827,6 +855,14 @@ async fn authenticate_request(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // The session WebSocket upgrade cannot carry a bearer header, so it
+    // authenticates with a single-use ticket minted over bearer HTTP.
+    // Consuming the ticket here — in the same middleware that performs
+    // bearer authentication — keeps caller-extension injection uniform and
+    // guarantees no other route can authenticate with a ticket.
+    if is_session_websocket_request(&request) {
+        return authenticate_session_socket_upgrade(state, request, next).await;
+    }
     let token = match extract_bearer_token(&request) {
         Some(token) => token,
         None => return unauthorized(),
@@ -885,6 +921,79 @@ async fn authenticate_request(
         };
         request.extensions_mut().insert(caller);
     }
+    next.run(request).await
+}
+
+/// `GET /api/webchat/v2/session/websocket` — the one route that
+/// authenticates with a single-use socket ticket instead of a bearer.
+pub(crate) fn is_session_websocket_request(request: &Request) -> bool {
+    request.method() == axum::http::Method::GET
+        && request.uri().path() == crate::webui_v2::WEBUI_V2_PATTERN_SESSION_WEBSOCKET
+}
+
+/// Authenticate a session-socket upgrade by atomically consuming its
+/// single-use ticket. The ticket record — not anything on the request —
+/// supplies the caller identity, so the exact caller binding from mint time
+/// is preserved. A bearer in the query string is never accepted here, and a
+/// ticket is never accepted on any other route.
+async fn authenticate_session_socket_upgrade(
+    state: AuthLayerState,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let Some(store) = state.session_socket_tickets.clone() else {
+        // Deployment shape without ticket storage: the capability is not
+        // advertised, and probes fail closed.
+        return unauthorized();
+    };
+    let Some(nonce) = request
+        .uri()
+        .query()
+        .and_then(|query| url_query_value(query, "ticket"))
+    else {
+        return unauthorized();
+    };
+    let ticket = match store.consume(&nonce).await {
+        Ok(Some(ticket)) => ticket,
+        Ok(None) => return unauthorized(),
+        Err(error) => {
+            tracing::debug!(
+                target: "ironclaw::reborn::webui_serve",
+                error = %error,
+                "session socket ticket consume failed",
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session ticket store unavailable",
+            )
+                .into_response();
+        }
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    if ticket.expires_at_unix_ms <= now_ms {
+        return unauthorized();
+    }
+    // A shared ticket store may serve several deployments; a ticket minted
+    // for another host installation must not authenticate here.
+    if ticket.tenant_id != state.tenant_id {
+        return unauthorized();
+    }
+    let caller = ProductSurfaceCaller::new(
+        state.tenant_id.clone(),
+        ticket.user_id,
+        state.default_agent_id.clone(),
+        state.default_project_id.clone(),
+    )
+    .with_operator_config(ticket.operator_config);
+    request.extensions_mut().insert(caller);
+    request
+        .extensions_mut()
+        .insert(crate::webui_v2::WebUiV2Capabilities {
+            operator_webui_config: ticket.operator_config,
+        });
     next.run(request).await
 }
 

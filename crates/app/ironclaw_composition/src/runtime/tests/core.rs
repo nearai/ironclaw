@@ -741,8 +741,7 @@ use ironclaw_assistant::{
     CREATE_THREAD_COMMAND, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
     LifecycleReadinessBlocker, ProductSurfaceCommandDescriptor, RESOLVE_GATE_COMMAND,
     RebornExtensionCredentialSetup, RebornSetupExtensionResponse, RebornSkillListResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    SUBMIT_TURN_COMMAND, approval_gate_ref,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, SUBMIT_TURN_COMMAND, approval_gate_ref,
 };
 use ironclaw_extension_contracts::state::{InstallationState, LifecyclePublicState};
 use ironclaw_host_api::ids::ProjectId;
@@ -5687,9 +5686,9 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
             )
             .await
             .expect("webui event stream");
-            if stream.events.iter().any(|event| {
+            if stream.iter().any(|event| {
                 matches!(
-                    event.payload(),
+                    thread_stream_payload(event),
                     ProductOutboundPayload::ProjectionSnapshot { state }
                         | ProductOutboundPayload::ProjectionUpdate { state }
                         if state.items.iter().any(|item| matches!(
@@ -5705,10 +5704,7 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
             }) {
                 break stream;
             }
-            after_cursor = stream
-                .events
-                .last()
-                .map(|event| event.projection_cursor().clone());
+            after_cursor = stream.last().map(|event| event.cursor.clone());
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -5721,8 +5717,8 @@ async fn standalone_runtime_webui_bundle_reuses_thread_and_turn_services() {
         &runtime.product_turn_coordinator()
     ));
     assert!(
-        stream.events.iter().all(|event| matches!(
-            event.payload(),
+        stream.iter().all(|event| matches!(
+            thread_stream_payload(event),
             ProductOutboundPayload::CapabilityActivity(_)
                 | ProductOutboundPayload::CapabilityDisplayPreview(_)
                 | ProductOutboundPayload::ProjectionSnapshot { .. }
@@ -6549,25 +6545,32 @@ async fn stream_product_events(
     api: &dyn ironclaw_product_contracts::surface::ProductSurface,
     caller: ProductSurfaceCaller,
     request: RebornStreamEventsRequest,
-) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
+) -> Result<Vec<ironclaw_product_contracts::surface::ProductStreamEventEnvelope>, ProductSurfaceError>
+{
     let response = ironclaw_product_contracts::surface::ProductSurface::stream_events(
         api,
         caller,
         ironclaw_product_contracts::surface::ProductSurfaceStreamRequest {
-            stream_id: Some(request.thread_id),
+            selector: ironclaw_product_contracts::surface::ProductStreamSelector::Thread {
+                thread_id: request.thread_id,
+            },
             after_cursor: request
                 .after_cursor
                 .map(|cursor| cursor.as_str().to_string()),
         },
     )
     .await?;
-    let events = response
-        .events
-        .into_iter()
-        .map(serde_json::from_value)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(ProductSurfaceError::internal_from)?;
-    Ok(RebornStreamEventsResponse { events })
+    Ok(response.events)
+}
+
+fn thread_stream_payload(
+    envelope: &ironclaw_product_contracts::surface::ProductStreamEventEnvelope,
+) -> &ProductOutboundPayload {
+    let ironclaw_product_contracts::surface::ProductStreamEvent::Thread(payload) = &envelope.event
+    else {
+        panic!("expected a thread stream event, got {:?}", envelope.event);
+    };
+    payload
 }
 
 async fn submit_webui_extension_setup(

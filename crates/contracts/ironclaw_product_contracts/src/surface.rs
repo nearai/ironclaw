@@ -20,6 +20,7 @@ use ironclaw_host_api::{
 use crate::inbound::{
     ChannelInboundClassification, ProductInboundAck, ProductInboundEnvelope, TrustedInboundContext,
 };
+use crate::outbound::{ProductOutboundPayload, ProjectionCursor};
 
 /// One verified, normalized channel message admitted through a product surface.
 ///
@@ -170,19 +171,61 @@ pub struct ProductSurfaceQueryPage {
     pub next_cursor: Option<String>,
 }
 
+/// Closed selector for one logical product event stream.
+///
+/// Each variant names its own authorization, cursor domain, replay, and
+/// failure isolation; selectors never share a synthetic global cursor. The
+/// request carries no caller-selectable tenant or user identity: `Thread`
+/// resolves ordinary thread access for the bound caller, and future
+/// caller-wide selectors bind directly to the authenticated caller's owner
+/// scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProductStreamSelector {
+    /// The existing per-thread projection stream (runtime + live + turn
+    /// lifecycle sources behind one composite cursor).
+    Thread { thread_id: String },
+    /// The authenticated caller's own run-completion notification stream —
+    /// one durable owner-scoped notice sequence. Carries no
+    /// caller-selectable identity: authorization binds directly to the
+    /// bound caller's tenant/user owner scope.
+    RunCompletions,
+}
+
 /// Generic product event stream request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProductSurfaceStreamRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream_id: Option<String>,
+    pub selector: ProductStreamSelector,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_cursor: Option<String>,
+}
+
+/// One typed product stream event within a selector's own cursor domain.
+///
+/// The extension-delivery envelope (`ProductOutboundEnvelope`) stops at the
+/// product boundary: adapter, installation, target, and delivery-attempt
+/// metadata never cross toward a browser transport.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProductStreamEventEnvelope {
+    pub cursor: ProjectionCursor,
+    pub event: ProductStreamEvent,
+}
+
+/// Closed vocabulary of typed product stream events, one family per
+/// selector variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+pub enum ProductStreamEvent {
+    /// A thread projection payload (the existing per-thread vocabulary).
+    Thread(ProductOutboundPayload),
+    /// A run-completion notification event (notice/grant/clear).
+    RunCompletion(crate::run_completions::RunCompletionStreamEvent),
 }
 
 /// Generic product event stream response.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProductSurfaceStreamResponse {
-    pub events: Vec<serde_json::Value>,
+    pub events: Vec<ProductStreamEventEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     /// Optional continuation of this same logical stream.

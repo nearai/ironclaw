@@ -570,24 +570,44 @@ async def test_reborn_v2_sse_reconnect_resumes_without_gap_or_duplicate_served(
         assert _latest_projection_items(replayed_cursor_events) == expected_items
 
 
-async def test_reborn_v2_websocket_origin_projection_and_shared_capacity_served(
+async def _mint_session_socket_ticket(client, reborn_v2_server):
+    minted = await client.post(
+        f"{reborn_v2_server}/api/webchat/v2/session/websocket-ticket",
+        timeout=15,
+    )
+    assert minted.status_code == 200, minted.text
+    body = minted.json()
+    assert body["ticket"], body
+    return body["ticket"], body.get("socket_path") or "/api/webchat/v2/session/websocket"
+
+
+async def test_reborn_v2_session_websocket_origin_projection_and_shared_capacity_served(
     reborn_v2_server,
 ):
+    """The ticketed session WebSocket: a foreign origin is rejected before the
+    ticket is spent, a same-origin upgrade with a minted single-use ticket
+    admits a thread subscription, the socket shares the per-caller event
+    budget with SSE, and a submitted turn's projection arrives as a typed
+    session event carrying its resume cursor."""
     headers = reborn_bearer_headers()
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await create_thread(client, reborn_v2_server)
+        rejected_ticket, socket_path = await _mint_session_socket_ticket(
+            client, reborn_v2_server
+        )
+        admitted_ticket, _ = await _mint_session_socket_ticket(client, reborn_v2_server)
 
     ws_base = reborn_v2_server.replace("http://", "ws://", 1).replace(
         "https://", "wss://", 1
     )
-    ws_url = f"{ws_base}/api/webchat/v2/threads/{thread_id}/ws"
     events_url = f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
     timeout = aiohttp.ClientTimeout(total=60, sock_read=45)
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        # The bearer never rides the socket URL: the upgrade authenticates
+        # with the single-use ticket alone. Origin enforcement runs first.
         with pytest.raises(aiohttp.WSServerHandshakeError) as rejected:
             await session.ws_connect(
-                ws_url,
-                headers=headers,
+                f"{ws_base}{socket_path}?ticket={rejected_ticket}",
                 origin="https://attacker.invalid",
             )
         assert rejected.value.status == 403
@@ -596,10 +616,28 @@ async def test_reborn_v2_websocket_origin_projection_and_shared_capacity_served(
         streams = []
         try:
             websocket = await session.ws_connect(
-                ws_url,
-                headers=headers,
+                f"{ws_base}{socket_path}?ticket={admitted_ticket}",
                 origin=reborn_v2_server,
             )
+            await websocket.send_json(
+                {
+                    "type": "subscribe",
+                    "subscription_id": "chat",
+                    "selector": {"kind": "thread", "thread_id": thread_id},
+                }
+            )
+            async with asyncio.timeout(30):
+                while True:
+                    message = await websocket.receive()
+                    assert message.type == aiohttp.WSMsgType.TEXT, message
+                    frame = json.loads(message.data)
+                    if frame.get("type") == "subscribed":
+                        assert frame["schema"] == "webui.session_event.v1"
+                        assert frame["subscription_id"] == "chat"
+                        break
+                    assert frame.get("type") != "subscription_error", frame
+
+            # The socket holds one of the caller's three event slots.
             for _ in range(2):
                 response = await session.get(
                     events_url,
@@ -631,7 +669,7 @@ async def test_reborn_v2_websocket_origin_projection_and_shared_capacity_served(
                     client,
                     reborn_v2_server,
                     thread_id,
-                    "served WebSocket projection: what is 2+2?",
+                    "served session WebSocket projection: what is 2+2?",
                 )
 
             async with asyncio.timeout(45):
@@ -639,8 +677,11 @@ async def test_reborn_v2_websocket_origin_projection_and_shared_capacity_served(
                     message = await websocket.receive()
                     assert message.type == aiohttp.WSMsgType.TEXT, message
                     frame = json.loads(message.data)
-                    if _contains_field(frame, "run_id", submitted["run_id"]):
-                        assert frame.get("projection_cursor"), frame
+                    if frame.get("type") != "event":
+                        continue
+                    assert frame["subscription_id"] == "chat"
+                    if _contains_field(frame["event"], "run_id", submitted["run_id"]):
+                        assert frame.get("cursor"), frame
                         break
         finally:
             for stream in streams:

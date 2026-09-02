@@ -132,7 +132,13 @@ fn plan_push_targets_from_policy(
     let mut candidates = Vec::new();
     if matches!(
         request.kind,
-        OutboundPushKind::FinalReply | OutboundPushKind::ModelDelivery
+        OutboundPushKind::FinalReply
+            | OutboundPushKind::ModelDelivery
+            // §7.9: the run-completion push candidate IS the explicit,
+            // already capability-filtered reply-target binding the
+            // coordinator supplies; per-thread notification-policy targets
+            // never add completion candidates.
+            | OutboundPushKind::RunCompletion
     ) {
         push_candidate(
             &request,
@@ -149,6 +155,7 @@ fn plan_push_targets_from_policy(
             | OutboundPushKind::GateRequired
             | OutboundPushKind::AuthPrompt
             | OutboundPushKind::DeliveryStatus => target.progress,
+            OutboundPushKind::RunCompletion => false,
         };
         if allowed {
             push_candidate(&request, target.target.clone(), &mut seen, &mut candidates);

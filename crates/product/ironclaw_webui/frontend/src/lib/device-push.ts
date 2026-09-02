@@ -171,6 +171,15 @@ export async function enrollThisBrowser({ vapidPublicKey } = {}) {
     });
     createdSubscription = true;
   }
+  // Correlate this enrollment with the run-completion arbitration identity
+  // (2026-08-13 design §5.5): the id rides the channel-opaque enrollment
+  // document and is interpreted only by the host-side enrollment probe.
+  let browserInstance;
+  try {
+    ({ browserInstanceId: browserInstance } = await import("./run-completions/ids"));
+  } catch (_) {
+    browserInstance = null;
+  }
   try {
     await enableNotificationSetup({
       extensionId: getSessionChannelExtensionId(),
@@ -178,6 +187,7 @@ export async function enrollThisBrowser({ vapidPublicKey } = {}) {
         endpoint: subscription.endpoint,
         keys: subscriptionKeys(subscription),
         user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        browser_instance_id: browserInstance ? browserInstance() : undefined,
       },
     });
   } catch (error) {

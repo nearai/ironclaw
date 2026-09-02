@@ -15,10 +15,10 @@ use axum::response::{IntoResponse, Response};
 use futures_core::Stream;
 use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_product_contracts::outbound::{
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
-    ProjectionCursor,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProjectionCursor,
 };
 use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
+use ironclaw_product_contracts::surface::{ProductStreamEvent, ProductStreamEventEnvelope};
 use serde::Serialize;
 use serde_json::json;
 
@@ -65,12 +65,12 @@ pub trait OpenAiCompatProjectionStreamer: Send + Sync {
     async fn drain_chat(
         &self,
         request: OpenAiChatProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError>;
+    ) -> Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError>;
 
     async fn drain_response(
         &self,
         request: OpenAiResponseProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError>;
+    ) -> Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError>;
 }
 
 pub(crate) fn chat_sse_response(
@@ -144,8 +144,13 @@ fn chat_sse_stream(
                     }
                     pacing.reset_backoff();
                     for envelope in envelopes {
-                        after_cursor = Some(envelope.projection_cursor().clone());
-                        let payload_view = payload_view(envelope.payload());
+                        after_cursor = Some(envelope.cursor.clone());
+                        // The OpenAI-compat surface only opens Thread
+                        // selectors; any other event family is skipped.
+                        let ProductStreamEvent::Thread(payload) = &envelope.event else {
+                            continue;
+                        };
+                        let payload_view = payload_view(payload);
                         match payload_view.text {
                             PayloadText::None => {}
                             PayloadText::Update(text) => match state.delta_for(text) {
@@ -241,8 +246,13 @@ fn response_sse_stream(
                     }
                     pacing.reset_backoff();
                     for envelope in envelopes {
-                        after_cursor = Some(envelope.projection_cursor().clone());
-                        let payload_view = payload_view(envelope.payload());
+                        after_cursor = Some(envelope.cursor.clone());
+                        // The OpenAI-compat surface only opens Thread
+                        // selectors; any other event family is skipped.
+                        let ProductStreamEvent::Thread(payload) = &envelope.event else {
+                            continue;
+                        };
+                        let payload_view = payload_view(payload);
                         match payload_view.text {
                             PayloadText::None => {}
                             PayloadText::Update(text) => match state.delta_for(text) {

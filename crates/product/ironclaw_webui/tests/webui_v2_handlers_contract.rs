@@ -144,6 +144,11 @@ use ironclaw_product_contracts::product_wire::{
     RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
     RebornSuggestionStartResponse, RebornSuggestionsResponse,
 };
+use ironclaw_product_contracts::run_completions::{
+    RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID, RUN_COMPLETION_INTENT_COMMAND_ID,
+    RUN_COMPLETION_THREAD_READ_COMMAND_ID, RUN_COMPLETION_UNREAD_VIEW,
+    RunCompletionMutationResponse, RunCompletionUnreadResponse,
+};
 use ironclaw_product_contracts::suggestions::{
     SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
     SUGGESTIONS_LIST_VIEW,
@@ -940,6 +945,14 @@ impl StubServices {
     ) -> Result<RebornViewPage, ProductSurfaceError> {
         self.view_queries.lock().expect("lock").push(query.clone());
         match query.view_id.as_str() {
+            id if id == RUN_COMPLETION_UNREAD_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RunCompletionUnreadResponse {
+                    notices: Vec::new(),
+                    resume_sequence: "42".to_string(),
+                })
+                .expect("unread payload"),
+                next_cursor: None,
+            }),
             id if id == RUN_ARTIFACT_VIEW.id => {
                 let request: RebornRunArtifactRequest =
                     serde_json::from_value(query.params).expect("artifact params");
@@ -1994,6 +2007,27 @@ impl ProductSurface for StubServices {
     > {
         if matches!(
             request.operation_id.as_str(),
+            RUN_COMPLETION_INTENT_COMMAND_ID
+                | RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID
+                | RUN_COMPLETION_THREAD_READ_COMMAND_ID
+        ) {
+            // Typed run-completion mutations: record the dispatched operation
+            // and echo one settled id in the wire response shape.
+            self.invoke_calls.lock().expect("lock").push((
+                request.operation_id,
+                request.input,
+                request.activity_id,
+            ));
+            let output = serde_json::to_value(RunCompletionMutationResponse {
+                settled_notice_ids: vec!["rcn-settled".to_string()],
+            })
+            .map_err(ProductSurfaceError::internal_from)?;
+            return Ok(
+                ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
+            );
+        }
+        if matches!(
+            request.operation_id.as_str(),
             NOTIFICATIONS_MARK_READ_COMMAND_ID
                 | NOTIFICATIONS_MARK_ALL_READ_COMMAND_ID
                 | NOTIFICATIONS_ARCHIVE_COMMAND_ID
@@ -2068,9 +2102,12 @@ impl ProductSurface for StubServices {
         ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
         ProductSurfaceError,
     > {
-        let thread_id = request.stream_id.ok_or_else(|| {
-            ProductSurfaceError::validation("stream_id", ProductSurfaceValidationCode::MissingField)
-        })?;
+        let ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id } =
+            request.selector
+        else {
+            // This double backs thread-stream handler tests only.
+            return Err(ProductSurfaceError::not_found());
+        };
         let after_cursor = request
             .after_cursor
             .map(ProjectionCursor::new)
@@ -2084,9 +2121,8 @@ impl ProductSurface for StubServices {
         let events = response
             .events
             .into_iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProductSurfaceError::internal_from)?;
+            .map(typed_stream_event_envelope)
+            .collect();
         let subscription = if self.event_subscription_enabled.load(Ordering::Acquire) {
             self.subscribe_events_calls
                 .lock()
@@ -2102,18 +2138,14 @@ impl ProductSurface for StubServices {
             let (sender, receiver) = mpsc::channel(1);
             tokio::spawn(async move {
                 for response in responses {
-                    let response = response.and_then(|response| {
-                        let events = response
+                    let response = response.map(|response| ProductSurfaceStreamResponse {
+                        events: response
                             .events
                             .into_iter()
-                            .map(serde_json::to_value)
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(ProductSurfaceError::internal_from)?;
-                        Ok(ProductSurfaceStreamResponse {
-                            events,
-                            next_cursor: None,
-                            subscription: None,
-                        })
+                            .map(typed_stream_event_envelope)
+                            .collect(),
+                        next_cursor: None,
+                        subscription: None,
                     });
                     if sender.send(response).await.is_err() {
                         return;
@@ -2134,6 +2166,15 @@ impl ProductSurface for StubServices {
                 subscription,
             },
         )
+    }
+}
+
+fn typed_stream_event_envelope(
+    envelope: ironclaw_product_contracts::outbound::ProductOutboundEnvelope,
+) -> ironclaw_product_contracts::surface::ProductStreamEventEnvelope {
+    ironclaw_product_contracts::surface::ProductStreamEventEnvelope {
+        cursor: envelope.projection_cursor,
+        event: ironclaw_product_contracts::surface::ProductStreamEvent::Thread(envelope.payload),
     }
 }
 
@@ -3354,6 +3395,116 @@ async fn list_threads_forwards_needs_approval_filter() {
         Some("thread-active")
     );
     assert!(calls[0].needs_approval);
+}
+
+/// The four run-completion routes (2026-08-13 design §7.8) are thin typed
+/// dispatchers: each POST maps to exactly its frozen operation id with the
+/// typed request forwarded intact, the GET maps to the unread view, and a
+/// body that does not satisfy the typed request never reaches the surface.
+#[tokio::test]
+async fn run_completion_routes_dispatch_typed_operations() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for (path, body, operation_id, echoed) in [
+        (
+            "/api/webchat/v2/run-completions/intent",
+            r#"{"notice_id":"rcn-1","browser_instance_id":"rbi-1","tab_id":"rtb-1","state_revision":7,"focus_epoch":2,"intent":"in_app"}"#,
+            RUN_COMPLETION_INTENT_COMMAND_ID,
+            ("intent", serde_json::json!("in_app")),
+        ),
+        (
+            "/api/webchat/v2/run-completions/acknowledge",
+            r#"{"notice_id":"rcn-1","grant_id":"rcg-1","state_revision":8,"outcome":"presented"}"#,
+            RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID,
+            ("grant_id", serde_json::json!("rcg-1")),
+        ),
+        (
+            "/api/webchat/v2/run-completions/thread-read",
+            r#"{"thread_id":"thread-1","through_sequence":"12","browser_instance_id":"rbi-1"}"#,
+            RUN_COMPLETION_THREAD_READ_COMMAND_ID,
+            ("through_sequence", serde_json::json!("12")),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("run-completion mutation");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let json = read_json(response).await;
+        assert_eq!(
+            json["settled_notice_ids"],
+            serde_json::json!(["rcn-settled"]),
+            "{path}: the typed mutation response reaches the wire unchanged"
+        );
+        let (dispatched, input, _) = services
+            .invoke_calls
+            .lock()
+            .expect("lock")
+            .last()
+            .cloned()
+            .expect("run-completion invoke recorded");
+        assert_eq!(dispatched.as_str(), operation_id, "{path}");
+        assert_eq!(
+            input[echoed.0], echoed.1,
+            "{path}: typed request forwarded intact"
+        );
+
+        // A body missing the typed request's fields is rejected at the
+        // route, never dispatched.
+        let before = services.invoke_calls.lock().expect("lock").len();
+        let rejected = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"notice_id":"rcn-1"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("malformed run-completion mutation");
+        assert!(
+            rejected.status().is_client_error(),
+            "{path}: malformed body must be a client error, got {}",
+            rejected.status()
+        );
+        assert_eq!(
+            services.invoke_calls.lock().expect("lock").len(),
+            before,
+            "{path}: a malformed body never reaches the product surface"
+        );
+    }
+
+    let unread = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/run-completions/unread")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("unread view");
+    assert_eq!(unread.status(), StatusCode::OK);
+    let json = read_json(unread).await;
+    assert_eq!(json["resume_sequence"], "42");
+    assert_eq!(json["notices"], serde_json::json!([]));
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(
+        queries.last().expect("unread query").view_id.as_str(),
+        RUN_COMPLETION_UNREAD_VIEW.id
+    );
 }
 
 #[tokio::test]
@@ -7710,9 +7861,9 @@ async fn stream_events_same_connection_id_supersedes_stale_stream() {
     serve_handle.abort();
 }
 
-// Regression for the WS-shares-SSE-pool review (Medium): the WS
-// transport must draw from the same `SseCapacity` pool as the SSE
-// transport for the same `(tenant, user)`. If they kept independent
+// Regression for the WS-shares-SSE-pool review (Medium), carried onto the
+// session socket: the session WebSocket must draw from the same
+// event-connection pool as the SSE transport for the same `(tenant, user)`. If they kept independent
 // counters, a caller could open `cap` SSE streams *and* `cap` WS
 // streams concurrently — doubling the backend `stream_events` drain
 // the cap is supposed to bound.
@@ -7722,7 +7873,7 @@ async fn stream_events_same_connection_id_supersedes_stale_stream() {
 // with an held-open SSE response, then asserting a same-caller WS
 // upgrade attempt returns 429 until the SSE body is dropped.
 #[tokio::test]
-async fn stream_events_ws_shares_capacity_with_sse_streams() {
+async fn session_websocket_shares_capacity_with_sse_streams() {
     let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     // Pool size 1: any one open stream (SSE or WS) must exhaust the
     // budget for the caller.
@@ -7773,7 +7924,7 @@ async fn stream_events_ws_shares_capacity_with_sse_streams() {
     // real WS handshake against the same listener; the upgrade
     // response carries the 429 from `try_acquire` before any frames
     // flow.
-    let ws_url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let ws_url = format!("ws://{addr}/api/webchat/v2/session/websocket");
     let ws_attempt = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio_tungstenite::connect_async(ws_url.clone()),
@@ -8676,39 +8827,84 @@ async fn missing_caller_extension_returns_500() {
     let _ = response.into_body().collect().await.expect("drain body");
 }
 
-// Regression for the "WS transport's projection payload + redacted
-// error frame untested" review (Medium). The composition crate's WS
-// caller-level test verifies the upgrade returns 101, but only a real
-// WS connection that pumps frames can catch breakage in the
-// per-envelope JSON serialization, cursor advancement on the
-// `after_cursor` field, or the redacted error frame the handler emits
-// on service failure.
-#[tokio::test]
-async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
+// ─── session WebSocket protocol tests ─────────────────────────────────
+//
+// The session socket multiplexes independent typed logical subscriptions
+// over one read-only connection. These tests drive the REAL handler over a
+// real TCP WebSocket (axum's `WebSocketUpgrade` extractor needs a genuine
+// `hyper::upgrade::OnUpgrade`), with the caller extension injected the same
+// way the bearer middleware would after consuming a single-use ticket.
+
+async fn connect_session_socket(
+    addr: std::net::SocketAddr,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let url = format!("ws://{addr}/api/webchat/v2/session/websocket");
+    let (ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .expect("session ws connect within 5s")
+    .expect("session ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+    ws
+}
+
+fn session_subscribe_frame(
+    subscription_id: &str,
+    thread_id: &str,
+    after_cursor: Option<&str>,
+) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "subscribe",
+        "subscription_id": subscription_id,
+        "selector": {"kind": "thread", "thread_id": thread_id},
+        "after_cursor": after_cursor,
+    }))
+    .expect("subscribe frame serializes")
+}
+
+async fn next_session_frame(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Value {
     use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => {
+                return serde_json::from_str(&text).expect("session frame parses");
+            }
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => panic!("socket closed early"),
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(error))) => panic!("socket error: {error}"),
+            Err(_) => panic!("no session frame within deadline"),
+        }
+    }
+}
+
+/// The core multiplexing contract: one socket carries several logical
+/// subscriptions; each is admitted with a connection-scoped generation,
+/// delivers typed browser event bodies with per-event cursors through the
+/// shared codec, and fails independently — a failed subscription emits a
+/// typed `subscription_error` and cancels only its own generation while the
+/// socket (and every other subscription) stays open.
+#[tokio::test]
+async fn session_websocket_multiplexes_subscriptions_and_isolates_failures() {
+    use futures::SinkExt;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     let services = Arc::new(StubServices::default());
-
     let envelope_a = make_projection_envelope("cursor:a", "hello");
     let envelope_b = make_projection_envelope("cursor:b", "world");
     services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
         events: vec![envelope_a.clone(), envelope_b.clone()],
     }));
-    // After draining the two real events, the next drain produces a
-    // service error so the handler exercises the redacted-error-frame +
-    // close path before lifetime expiry.
-    services.enqueue_stream_events(Err(ProductSurfaceError {
-        code: ProductSurfaceErrorCode::Unavailable,
-        kind: ProductSurfaceErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    }));
 
     let router = router_with(services.clone());
-
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -8717,100 +8913,98 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         let _ = axum::serve(listener, router).await;
     });
 
-    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
-    let (mut ws, response) = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio_tungstenite::connect_async(url),
-    )
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat-active", "thread-x", None).into(),
+    ))
     .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade");
-    assert_eq!(response.status().as_u16(), 101);
+    .expect("send subscribe");
 
-    // Read frames until we see both projection envelopes and the
-    // redacted error frame, or the stream closes.
-    let mut text_frames: Vec<String> = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline && text_frames.len() < 3 {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(remaining, ws.next()).await {
-            Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
-            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
-            Ok(Some(Ok(_))) => continue, // ignore ping/pong/binary
-            Ok(Some(Err(_))) => break,
-            Err(_) => break,
-        }
-    }
+    let subscribed = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed["schema"], "webui.session_event.v1");
+    assert_eq!(subscribed["type"], "subscribed");
+    assert_eq!(subscribed["subscription_id"], "chat-active");
+    let chat_generation = subscribed["generation"].as_u64().expect("generation");
+
+    // The two events arrive in order, tagged with the subscription id and
+    // generation, carrying the typed browser event body (never adapter or
+    // delivery metadata) plus the per-event resume cursor.
+    let event_a = next_session_frame(&mut ws).await;
+    assert_eq!(event_a["type"], "event");
+    assert_eq!(event_a["subscription_id"], "chat-active");
+    assert_eq!(event_a["generation"], chat_generation);
+    let expected_body_a = serde_json::to_value(ironclaw_webui::webui_v2::WebChatV2Event::from(
+        envelope_a.payload().clone(),
+    ))
+    .expect("body a");
+    assert_eq!(event_a["event"], expected_body_a);
+    assert_eq!(
+        event_a["cursor"],
+        Value::String(serde_json::to_string(envelope_a.projection_cursor()).expect("cursor token")),
+    );
+    let event_b = next_session_frame(&mut ws).await;
+    assert_eq!(event_b["subscription_id"], "chat-active");
+    let expected_body_b = serde_json::to_value(ironclaw_webui::webui_v2::WebChatV2Event::from(
+        envelope_b.payload().clone(),
+    ))
+    .expect("body b");
+    assert_eq!(event_b["event"], expected_body_b);
+
+    // A second logical subscription whose service call fails receives its
+    // own typed subscription_error with its own generation...
+    services.enqueue_stream_events(Err(ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    }));
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("other-thread", "thread-y", None).into(),
+    ))
+    .await
+    .expect("send second subscribe");
+    let error_frame = next_session_frame(&mut ws).await;
+    assert_eq!(error_frame["type"], "subscription_error");
+    assert_eq!(error_frame["subscription_id"], "other-thread");
+    assert_eq!(error_frame["error"], "unavailable");
+    assert_eq!(error_frame["retryable"], true);
+    assert!(
+        error_frame["generation"]
+            .as_u64()
+            .expect("error generation")
+            > chat_generation,
+        "each admission attempt gets a newer connection-scoped generation",
+    );
+    assert!(
+        error_frame.get("detail").is_none() && error_frame.get("field").is_none(),
+        "subscription errors carry only the redacted taxonomy",
+    );
+
+    // ...and the socket plus the healthy subscription survive: the
+    // transport still answers pings after the sibling failure.
+    ws.send(WsMessage::Text(r#"{"type":"ping"}"#.to_string().into()))
+        .await
+        .expect("send ping");
+    let pong = next_session_frame(&mut ws).await;
+    assert_eq!(pong["type"], "pong");
+
     let _ = ws.close(None).await;
     serve_handle.abort();
-
-    assert!(
-        text_frames.len() >= 3,
-        "expected projection envelopes + error frame; got {} text frame(s): {:?}",
-        text_frames.len(),
-        text_frames,
-    );
-
-    // First two frames carry the projection envelopes, in order.
-    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
-    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
-    assert_eq!(
-        envelope_a_json, expected_a,
-        "first WS frame must carry the first ProductOutboundEnvelope verbatim",
-    );
-    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
-    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
-    assert_eq!(envelope_b_json, expected_b);
-
-    // Third frame is the redacted error payload — `error` code +
-    // `retryable` flag only. No `detail`, `field`, `validation_code`,
-    // or any internal diagnostic must leak through.
-    let error_json: Value =
-        serde_json::from_str(&text_frames[2]).expect("error frame parses as json");
-    assert_eq!(error_json["error"], serde_json::json!("unavailable"));
-    assert_eq!(error_json["retryable"], serde_json::json!(true));
-    assert!(
-        error_json.get("detail").is_none(),
-        "redacted error frame must not carry server diagnostics",
-    );
-    assert!(error_json.get("field").is_none());
-    assert!(error_json.get("validation_code").is_none());
-
-    // The handler must have advanced `after_cursor` between the two
-    // drains so the browser would resume from cursor:b on reconnect.
-    let calls = services.stream_events_calls.lock().expect("lock").clone();
-    assert!(
-        calls.len() >= 2,
-        "second poll must occur for the redacted-error path to fire",
-    );
-    assert_eq!(
-        calls[1].after_cursor.as_ref(),
-        Some(envelope_b.projection_cursor()),
-        "second WS poll must advance after_cursor to the last emitted projection cursor",
-    );
 }
 
+/// A resume token the server never issued (anything but the JSON-quoted
+/// cursor the codec hands out) fails the admission attempt with a typed
+/// `subscription_error` and never reaches the surface: silently resuming
+/// from the origin would replay the whole history. The properly quoted
+/// token is admitted and echoed back as the resume cursor.
 #[tokio::test]
-async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+async fn session_websocket_rejects_resume_cursors_it_never_issued() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     let services = Arc::new(StubServices::default());
-    services.enqueue_stream_events(Err(ProductSurfaceError {
-        code: ProductSurfaceErrorCode::Unavailable,
-        kind: ProductSurfaceErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    }));
-
-    let query_cursor = make_projection_envelope("cursor:query", "query");
-    let header_cursor = make_projection_envelope("cursor:header", "header");
-    let query_cursor_json =
-        serde_json::to_string(query_cursor.projection_cursor()).expect("query cursor");
-    let header_cursor_json =
-        serde_json::to_string(header_cursor.projection_cursor()).expect("header cursor");
-
     let router = router_with(services.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -8820,71 +9014,57 @@ async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
         let _ = axum::serve(listener, router).await;
     });
 
-    let url = format!(
-        "ws://{addr}/api/webchat/v2/threads/thread-x/ws?after_cursor={}",
-        url_encode(&query_cursor_json)
-    );
-    let mut request = url.into_client_request().expect("ws request");
-    request.headers_mut().insert(
-        "Last-Event-ID",
-        header_cursor_json.parse().expect("header cursor value"),
-    );
-
-    let (mut ws, response) = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio_tungstenite::connect_async(request),
-    )
+    let mut ws = connect_session_socket(addr).await;
+    // A raw, unquoted token is not something the server ever handed out.
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat", "thread-x", Some("cursor:raw")).into(),
+    ))
     .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade");
-    assert_eq!(response.status().as_u16(), 101);
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        if !services
+    .expect("send malformed-cursor subscribe");
+    let rejected = next_session_frame(&mut ws).await;
+    assert_eq!(rejected["type"], "subscription_error");
+    assert_eq!(rejected["subscription_id"], "chat");
+    assert_eq!(rejected["error"], "invalid_request");
+    assert_eq!(rejected["retryable"], false);
+    assert!(
+        services
             .stream_events_calls
             .lock()
             .expect("lock")
-            .is_empty()
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "WS handler did not call stream_events"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+            .is_empty(),
+        "a rejected cursor never opens a stream on the surface",
+    );
+
+    // The quoted form the codec emits is admitted and echoed as the resume
+    // cursor; the socket survived the rejection.
+    let quoted = serde_json::to_string("cursor:raw").expect("quoted token");
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat", "thread-x", Some(&quoted)).into(),
+    ))
+    .await
+    .expect("send quoted-cursor subscribe");
+    let subscribed = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed["type"], "subscribed");
+    assert_eq!(subscribed["subscription_id"], "chat");
+    assert_eq!(subscribed["cursor"], Value::String(quoted));
+
     let _ = ws.close(None).await;
     serve_handle.abort();
-
-    let calls = services.stream_events_calls.lock().expect("lock").clone();
-    assert_eq!(
-        calls[0].after_cursor.as_ref(),
-        Some(header_cursor.projection_cursor()),
-        "Last-Event-ID must win over ?after_cursor= for WS reconnects, matching SSE"
-    );
 }
 
-// Regression for the WS-idle-close review (Medium): the WS drain
-// loop must observe socket close immediately. Without this, an
-// idle peer (closed tab, dropped network) leaves the loop polling
-// the service at the 1Hz cadence — its per-caller `SseSlot` stays
-// reserved until `SSE_MAX_LIFETIME` (5 min). With the recv-aware
-// select, a peer close releases the slot within one poll cycle.
-//
-// The test pins the budget at 1 stream per caller, opens a WS,
-// closes the browser side, and asserts a subsequent WS upgrade from
-// the same caller succeeds within ~2s (well under the 5-minute
-// lifetime). If the loop didn't observe the close, the second
-// upgrade would 429 for minutes.
+/// Subscribe frames are budgeted per socket: every admission attempt costs
+/// authorization plus a replay on the backend, so a client that re-sends
+/// `subscribe` faster than any legitimate page (32 per 10-second window,
+/// `MAX_SUBSCRIBES_PER_WINDOW`) trips a typed protocol error and the socket
+/// closes — the concurrent-subscription cap alone does not bound the rate,
+/// because re-subscribing an existing id replaces rather than adds.
 #[tokio::test]
-async fn stream_events_ws_releases_slot_on_peer_close() {
+async fn session_websocket_bounds_subscribe_frames_per_window() {
     use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
-    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
-
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -8893,46 +9073,365 @@ async fn stream_events_ws_releases_slot_on_peer_close() {
         let _ = axum::serve(listener, router).await;
     });
 
-    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
-
-    // Open WS #1, send a Close frame, drop the client.
-    let (mut ws_one, response) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio_tungstenite::connect_async(url.clone()),
-    )
-    .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade");
-    assert_eq!(response.status().as_u16(), 101);
-    let _ = ws_one
-        .send(tokio_tungstenite::tungstenite::Message::Close(None))
-        .await;
-    drop(ws_one);
-
-    // Wait briefly for the server-side WS task to observe the close
-    // and release the slot. With the recv-aware select the slot
-    // returns within one poll cycle; without it, it would be pinned
-    // for SSE_MAX_LIFETIME.
-    let recovered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            match tokio_tungstenite::connect_async(url.clone()).await {
-                Ok(pair) => return pair,
-                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-            }
+    let mut ws = connect_session_socket(addr).await;
+    for _ in 0..33 {
+        ws.send(WsMessage::Text(
+            session_subscribe_frame("chat", "thread-x", None).into(),
+        ))
+        .await
+        .expect("send subscribe");
+    }
+    let mut violation = None;
+    for _ in 0..80 {
+        let frame = next_session_frame(&mut ws).await;
+        if frame["type"] == "protocol_error" {
+            violation = Some(frame);
+            break;
         }
-    })
+        assert_eq!(
+            frame["type"], "subscribed",
+            "only admissions precede the violation"
+        );
+    }
+    let violation = violation.expect("the 33rd subscribe in one window closes the socket");
+    assert_eq!(violation["violation"], "too_many_subscribe_frames");
+
+    serve_handle.abort();
+}
+
+/// `unsubscribe` cancels exactly the named logical subscription and answers
+/// with its generation; the socket and every other subscription stay open.
+#[tokio::test]
+async fn session_websocket_unsubscribe_cancels_the_generation_and_acks() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat", "thread-x", None).into(),
+    ))
     .await
-    .expect(
-        "second WS upgrade must succeed within 3s after peer close \
-         — the slot should have been released by the recv-aware select",
+    .expect("send subscribe");
+    let subscribed = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed["type"], "subscribed");
+    let generation = subscribed["generation"].as_u64().expect("generation");
+
+    ws.send(WsMessage::Text(
+        r#"{"type":"unsubscribe","subscription_id":"chat"}"#.to_string().into(),
+    ))
+    .await
+    .expect("send unsubscribe");
+    let unsubscribed = next_session_frame(&mut ws).await;
+    assert_eq!(unsubscribed["type"], "unsubscribed");
+    assert_eq!(unsubscribed["subscription_id"], "chat");
+    assert_eq!(unsubscribed["generation"], generation);
+
+    // Unknown ids are ignored, and the socket still answers afterwards.
+    ws.send(WsMessage::Text(
+        r#"{"type":"unsubscribe","subscription_id":"never-subscribed"}"#
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send stray unsubscribe");
+    ws.send(WsMessage::Text(r#"{"type":"ping"}"#.to_string().into()))
+        .await
+        .expect("send ping");
+    let pong = next_session_frame(&mut ws).await;
+    assert_eq!(
+        pong["type"], "pong",
+        "a stray unsubscribe is silently ignored"
+    );
+
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+}
+
+/// The concurrent-subscription cap counts distinct logical ids: replacing
+/// an active id never counts against it, while the seventeenth distinct id
+/// (`MAX_ACTIVE_SUBSCRIPTIONS` = 16) is a protocol violation that closes
+/// the socket.
+#[tokio::test]
+async fn session_websocket_caps_distinct_subscriptions_but_allows_replacing_an_active_one() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    for index in 0..16 {
+        ws.send(WsMessage::Text(
+            session_subscribe_frame(&format!("sub-{index}"), "thread-x", None).into(),
+        ))
+        .await
+        .expect("send subscribe");
+        let subscribed = next_session_frame(&mut ws).await;
+        assert_eq!(subscribed["type"], "subscribed", "{index}");
+    }
+    // Replacing an existing id is not a seventeenth subscription.
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("sub-0", "thread-y", None).into(),
+    ))
+    .await
+    .expect("send replacement");
+    let replaced = next_session_frame(&mut ws).await;
+    assert_eq!(replaced["type"], "subscribed");
+    assert_eq!(replaced["subscription_id"], "sub-0");
+
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("sub-16", "thread-x", None).into(),
+    ))
+    .await
+    .expect("send seventeenth");
+    let violation = next_session_frame(&mut ws).await;
+    assert_eq!(violation["type"], "protocol_error");
+    assert_eq!(violation["violation"], "too_many_subscriptions");
+
+    serve_handle.abort();
+}
+
+/// Every product mutation stays on authenticated HTTP: mutation-shaped
+/// frames (operation IDs, turn submissions, gate resolutions) are protocol
+/// violations that close the socket, and the handler never reaches
+/// `ProductSurface::invoke`.
+#[tokio::test]
+async fn session_websocket_rejects_mutation_frames_without_reaching_invoke() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        r#"{"type":"invoke","operation_id":"webui.submit_turn.v1","input":{"text":"hi"}}"#
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send mutation frame");
+
+    let violation = next_session_frame(&mut ws).await;
+    assert_eq!(violation["type"], "protocol_error");
+    assert_eq!(violation["violation"], "malformed_frame");
+
+    // The server closes after a protocol violation.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(_))) => break,
+            Err(_) => panic!("socket must close after a protocol violation"),
+        }
+    }
+
+    assert!(
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "no WebSocket frame may reach ProductSurface::invoke",
+    );
+    assert!(
+        services
+            .stream_events_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "a rejected frame must not open a subscription either",
+    );
+    serve_handle.abort();
+}
+
+/// Independent resume: each logical subscription supplies its own cursor,
+/// and the service sees exactly that cursor for exactly that selector —
+/// there is no session-wide cursor.
+#[tokio::test]
+async fn session_websocket_subscriptions_resume_from_independent_cursors() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+
+    let cursor_a = make_projection_envelope("cursor:sub-a", "a");
+    let cursor_b = make_projection_envelope("cursor:sub-b", "b");
+    let cursor_a_json = serde_json::to_string(cursor_a.projection_cursor()).expect("cursor a");
+    let cursor_b_json = serde_json::to_string(cursor_b.projection_cursor()).expect("cursor b");
+
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("sub-a", "thread-a", Some(&cursor_a_json)).into(),
+    ))
+    .await
+    .expect("subscribe a");
+    let subscribed_a = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed_a["type"], "subscribed");
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("sub-b", "thread-b", Some(&cursor_b_json)).into(),
+    ))
+    .await
+    .expect("subscribe b");
+    let subscribed_b = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed_b["type"], "subscribed");
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    // Drain-only stubs re-poll on the idle cadence, so assert on the first
+    // call per selector rather than the total count: each selector's
+    // authorization-bearing first drain must carry exactly its own cursor.
+    assert!(calls.len() >= 2, "both selectors must reach the service");
+    let call_for = |thread: &str| {
+        calls
+            .iter()
+            .find(|call| call.thread_id == thread)
+            .unwrap_or_else(|| panic!("no stream call for {thread}"))
+            .clone()
+    };
+    assert_eq!(
+        call_for("thread-a").after_cursor.as_ref(),
+        Some(cursor_a.projection_cursor()),
+        "subscription A resumes from its own cursor",
     );
     assert_eq!(
-        recovered.1.status().as_u16(),
-        101,
-        "second WS upgrade must complete once the slot has been released",
+        call_for("thread-b").after_cursor.as_ref(),
+        Some(cursor_b.projection_cursor()),
+        "subscription B resumes from its own cursor",
     );
-    let mut ws_two = recovered.0;
-    let _ = ws_two.close(None).await;
+
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+}
+
+/// Reusing an active subscription id authorizes the replacement first: a
+/// failed replacement is rejected with its own (newer) generation while the
+/// existing authorized subscription continues unchanged, and a successful
+/// replacement swaps generations atomically.
+#[tokio::test]
+async fn session_websocket_replacement_authorizes_before_swapping_generations() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat-active", "thread-x", None).into(),
+    ))
+    .await
+    .expect("subscribe");
+    let admitted = next_session_frame(&mut ws).await;
+    assert_eq!(admitted["type"], "subscribed");
+    let original_generation = admitted["generation"].as_u64().expect("generation");
+
+    // Unauthorized replacement: rejected with the attempted generation;
+    // the original subscription keeps its id.
+    services.enqueue_stream_events(Err(ProductSurfaceError::not_found()));
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat-active", "thread-foreign", None).into(),
+    ))
+    .await
+    .expect("attempt replacement");
+    let rejected = next_session_frame(&mut ws).await;
+    assert_eq!(rejected["type"], "subscription_error");
+    assert_eq!(rejected["subscription_id"], "chat-active");
+    let rejected_generation = rejected["generation"].as_u64().expect("generation");
+    assert!(rejected_generation > original_generation);
+
+    // Successful replacement: admitted under a still-newer generation.
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat-active", "thread-z", None).into(),
+    ))
+    .await
+    .expect("replace");
+    let replaced = next_session_frame(&mut ws).await;
+    assert_eq!(replaced["type"], "subscribed");
+    assert!(replaced["generation"].as_u64().expect("generation") > rejected_generation);
+
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+}
+
+/// A dropped browser tab releases the caller's connection slot promptly:
+/// with a per-caller budget of one, closing the first session socket lets
+/// the next upgrade succeed instead of pinning the slot for the lifetime
+/// budget.
+#[tokio::test]
+async fn session_websocket_releases_slot_on_peer_close() {
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut first = connect_session_socket(addr).await;
+    let _ = first.close(None).await;
+    drop(first);
+
+    // The close needs a moment to propagate through the socket task.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let url = format!("ws://{addr}/api/webchat/v2/session/websocket");
+        match tokio_tungstenite::connect_async(url).await {
+            Ok((mut ws, response)) => {
+                assert_eq!(response.status().as_u16(), 101);
+                let _ = ws.close(None).await;
+                break;
+            }
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("slot never released after peer close: {error}"),
+        }
+    }
     serve_handle.abort();
 }
 

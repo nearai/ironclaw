@@ -576,6 +576,17 @@ impl ServeCommand {
                 serve_config =
                     serve_config.with_session_channel_extension_id(extension_id.to_string());
             }
+            // Session-socket tickets: composition owns the deployment-shape
+            // decision. Replica-shared storage shapes hand back a durable
+            // one-shot adapter; every single-process shape gets the host's
+            // bounded in-memory store here, so the shipped binary always
+            // advertises `features.session_events`. (Only a library embedder
+            // that wires no store at all leaves it off, on compatibility SSE.)
+            let session_socket_tickets =
+                runtime.session_socket_ticket_store().unwrap_or_else(|| {
+                    Arc::new(ironclaw_webui::InMemorySessionSocketTicketStore::new())
+                });
+            serve_config = serve_config.with_session_socket_ticket_store(session_socket_tickets);
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }

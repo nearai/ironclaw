@@ -52,10 +52,12 @@ mod product_surface;
 mod production_runtime_policy;
 mod readiness;
 mod root;
+mod run_completion_push;
 mod runtime;
 mod runtime_input;
 mod runtime_mounts;
 mod sandbox;
+mod session_socket_ticket_store;
 mod standalone_bootstrap_assembly;
 mod storage_catalog;
 mod support;
@@ -445,6 +447,7 @@ const PER_USER_ALIASES: &[&str] = &[
     // The web-app channel keeps its own alias above rather than moving here,
     // because moving it would relocate live enrollment documents.
     "/delivery-registrations",
+    "/run-notices",
     "/run-state",
     "/checkpoint-state",
     "/approvals",

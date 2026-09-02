@@ -733,22 +733,74 @@ export function eventStreamRequest({ threadId, connectionId } = {}) {
   };
 }
 
-// --- Streaming (WebSocket) ---
+// --- Session event transport ---
 
-// Same-origin enforcement happens at the composition layer. The
-// browser sends Origin automatically; the bearer travels via the
-// `?token=` URL parameter (the WS handshake API in browsers has no
-// way to set a custom request header).
-export function openEventSocket({ threadId } = {}) {
-  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = new URL(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/ws`,
-    window.location.origin,
-  );
-  url.protocol = scheme;
-  const token = readStoredToken();
-  if (token) url.searchParams.set("token", token);
-  return new WebSocket(url.toString());
+// Mint a short-lived, single-use socket ticket over bearer HTTP. The
+// session WebSocket then authenticates with `?ticket=<nonce>` so the
+// long-lived bearer never appears in a WebSocket URL, browser history,
+// or proxy access log.
+export async function mintSessionSocketTicket() {
+  return apiFetch(`${V2_BASE}/session/websocket-ticket`, { method: "POST" });
+}
+
+// --- Run-completion notifications (authenticated HTTP mutations; the
+// session socket only ever carries the read-only event stream) ---
+
+export async function fetchUnreadRunCompletions() {
+  return apiFetch(`${V2_BASE}/run-completions/unread`);
+}
+
+export async function submitRunCompletionIntent({
+  noticeId,
+  browserInstanceId,
+  tabId,
+  stateRevision,
+  focusEpoch,
+  intent,
+}) {
+  return apiFetch(`${V2_BASE}/run-completions/intent`, {
+    method: "POST",
+    body: JSON.stringify({
+      notice_id: noticeId,
+      browser_instance_id: browserInstanceId,
+      tab_id: tabId,
+      state_revision: stateRevision,
+      focus_epoch: focusEpoch,
+      intent,
+    }),
+  });
+}
+
+export async function acknowledgeRunCompletion({
+  noticeId,
+  grantId,
+  stateRevision,
+  outcome,
+}) {
+  return apiFetch(`${V2_BASE}/run-completions/acknowledge`, {
+    method: "POST",
+    body: JSON.stringify({
+      notice_id: noticeId,
+      grant_id: grantId,
+      state_revision: stateRevision,
+      outcome,
+    }),
+  });
+}
+
+export async function reportRunCompletionThreadRead({
+  threadId,
+  throughSequence,
+  browserInstanceId,
+}) {
+  return apiFetch(`${V2_BASE}/run-completions/thread-read`, {
+    method: "POST",
+    body: JSON.stringify({
+      thread_id: threadId,
+      through_sequence: throughSequence,
+      browser_instance_id: browserInstanceId,
+    }),
+  });
 }
 
 // --- Run cancellation ---

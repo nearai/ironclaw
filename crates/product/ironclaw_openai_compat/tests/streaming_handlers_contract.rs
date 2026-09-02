@@ -8,10 +8,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;
-use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
 use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
-use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
 use ironclaw_openai_compat::{
     OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
     OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
@@ -23,12 +21,14 @@ use ironclaw_openai_compat::{
 };
 use ironclaw_product_contracts::inbound::ProductInboundAck;
 use ironclaw_product_contracts::outbound::{
-    FinalReplyView, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProjectionCursor,
+    FinalReplyView, ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProjectionCursor,
 };
 use ironclaw_product_contracts::projection::ProjectionSubscriptionRequest;
-use ironclaw_product_contracts::surface::ProductSurface;
-use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use ironclaw_product_contracts::surface::{
+    ProductStreamEvent, ProductStreamEventEnvelope, ProductSurface,
+};
+use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::json;
 use support::{FakeProductSurface, in_memory_openai_compat_ref_store};
 use tower::ServiceExt;
@@ -599,8 +599,8 @@ async fn chat_stream_rejected_busy_ack_returns_429() {
 
 #[derive(Default)]
 struct QueuedStreamer {
-    chat: Mutex<VecDeque<Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError>>>,
-    response: Mutex<VecDeque<Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError>>>,
+    chat: Mutex<VecDeque<Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError>>>,
+    response: Mutex<VecDeque<Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError>>>,
     chat_calls: Mutex<usize>,
     response_calls: Mutex<usize>,
     chat_requests: Mutex<Vec<OpenAiChatProjectionStreamRequest>>,
@@ -612,7 +612,7 @@ impl QueuedStreamer {
         Self::default()
     }
 
-    fn push_chat(&self, envelopes: Vec<ProductOutboundEnvelope>) {
+    fn push_chat(&self, envelopes: Vec<ProductStreamEventEnvelope>) {
         self.chat.lock().expect("lock").push_back(Ok(envelopes));
     }
 
@@ -620,7 +620,7 @@ impl QueuedStreamer {
         self.chat.lock().expect("lock").push_back(Err(error));
     }
 
-    fn push_response(&self, envelopes: Vec<ProductOutboundEnvelope>) {
+    fn push_response(&self, envelopes: Vec<ProductStreamEventEnvelope>) {
         self.response.lock().expect("lock").push_back(Ok(envelopes));
     }
 
@@ -647,7 +647,7 @@ impl OpenAiCompatProjectionStreamer for QueuedStreamer {
     async fn drain_chat(
         &self,
         request: OpenAiChatProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+    ) -> Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError> {
         *self.chat_calls.lock().expect("lock") += 1;
         self.chat_requests.lock().expect("lock").push(request);
         Ok(self
@@ -662,7 +662,7 @@ impl OpenAiCompatProjectionStreamer for QueuedStreamer {
     async fn drain_response(
         &self,
         request: OpenAiResponseProjectionStreamRequest,
-    ) -> Result<Vec<ProductOutboundEnvelope>, OpenAiCompatHttpError> {
+    ) -> Result<Vec<ProductStreamEventEnvelope>, OpenAiCompatHttpError> {
         *self.response_calls.lock().expect("lock") += 1;
         self.response_requests.lock().expect("lock").push(request);
         Ok(self
@@ -858,7 +858,7 @@ async fn response_body(response: axum::response::Response) -> String {
     String::from_utf8(bytes.to_vec()).expect("utf8 body")
 }
 
-fn projection_text_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
+fn projection_text_envelope(cursor: &str, text: &str) -> ProductStreamEventEnvelope {
     envelope(
         cursor,
         ProductOutboundPayload::ProjectionUpdate {
@@ -876,7 +876,7 @@ fn projection_text_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope
     )
 }
 
-fn final_reply_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
+fn final_reply_envelope(cursor: &str, text: &str) -> ProductStreamEventEnvelope {
     envelope(
         cursor,
         ProductOutboundPayload::FinalReply(FinalReplyView {
@@ -887,7 +887,7 @@ fn final_reply_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
     )
 }
 
-fn run_status_envelope(cursor: &str, status: &str) -> ProductOutboundEnvelope {
+fn run_status_envelope(cursor: &str, status: &str) -> ProductStreamEventEnvelope {
     envelope(
         cursor,
         ProductOutboundPayload::ProjectionUpdate {
@@ -906,23 +906,15 @@ fn run_status_envelope(cursor: &str, status: &str) -> ProductOutboundEnvelope {
     )
 }
 
-fn keepalive_envelope(cursor: &str) -> ProductOutboundEnvelope {
+fn keepalive_envelope(cursor: &str) -> ProductStreamEventEnvelope {
     envelope(cursor, ProductOutboundPayload::KeepAlive)
 }
 
-fn envelope(cursor: &str, payload: ProductOutboundPayload) -> ProductOutboundEnvelope {
-    ProductOutboundEnvelope::new(
-        ProductAdapterId::new("openai_compat").expect("adapter id"),
-        AdapterInstallationId::new("openai_compat_default").expect("installation id"),
-        ProductOutboundTarget::new(
-            ReplyTargetBindingRef::new("reply:test").expect("reply target"),
-            ExternalConversationRef::new(None, "conversation:test", None, None)
-                .expect("conversation ref"),
-            None,
-        ),
-        ProjectionCursor::new(format!("cursor:{cursor}")).expect("cursor"),
-        payload,
-    )
+fn envelope(cursor: &str, payload: ProductOutboundPayload) -> ProductStreamEventEnvelope {
+    ProductStreamEventEnvelope {
+        cursor: ProjectionCursor::new(format!("cursor:{cursor}")).expect("cursor"),
+        event: ProductStreamEvent::Thread(payload),
+    }
 }
 
 fn deferred_busy_ack() -> ProductInboundAck {

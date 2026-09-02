@@ -82,6 +82,11 @@ registerPack("de", {
   "notifications.approval.title": "Genehmigung erforderlich",
   "notifications.approval.detail": "Benötigt deine Genehmigung",
   "notifications.approval.untitled": "Unbenannter Thread",
+  // Run completions
+  "runCompletions.toastOne": "Ein Agentenlauf ist abgeschlossen. Öffne den Thread, um die Antwort zu sehen.",
+  "runCompletions.toastMany": "{count} Agentenläufe in einem Thread abgeschlossen.",
+  "runCompletions.listItemOne": "Agentenlauf abgeschlossen — Antwort bereit",
+  "runCompletions.listItemMany": "{count} Agentenläufe abgeschlossen — Antworten bereit",
 
   // Status
   "status.online": "online",

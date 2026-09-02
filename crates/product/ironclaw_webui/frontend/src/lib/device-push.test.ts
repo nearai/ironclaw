@@ -211,14 +211,24 @@ test("enrollThisBrowser subscribes with the VAPID key and registers with the bac
   assert.equal(subscribeCalls[0].userVisibleOnly, true);
   assert.deepEqual(Array.from(subscribeCalls[0].applicationServerKey), [1, 0, 1]);
   assert.equal(enableNotificationSetup.mock.calls.length, 1);
-  assert.deepEqual(enableNotificationSetup.mock.calls[0][0], {
-    extensionId: "session-channel",
-    payload: {
-      endpoint: "https://fcm.googleapis.com/fcm/send/new",
-      keys: { p256dh: "pk", auth: "as" },
-      user_agent: "TestBrowser/1.0",
+  const enrollCall = enableNotificationSetup.mock.calls[0][0];
+  // The arbitration correlation id is opaque and randomly minted per
+  // browser profile; assert its presence and shape, not its value.
+  const browserInstance = enrollCall.payload.browser_instance_id;
+  assert.equal(typeof browserInstance, "string");
+  assert.ok(browserInstance.startsWith("rbi-"), "browser instance id shape");
+  assert.deepEqual(
+    { ...enrollCall, payload: { ...enrollCall.payload, browser_instance_id: undefined } },
+    {
+      extensionId: "session-channel",
+      payload: {
+        endpoint: "https://fcm.googleapis.com/fcm/send/new",
+        keys: { p256dh: "pk", auth: "as" },
+        user_agent: "TestBrowser/1.0",
+        browser_instance_id: undefined,
+      },
     },
-  });
+  );
 });
 
 test("enrollThisBrowser rolls back a freshly created subscription when the backend rejects", async () => {

@@ -109,6 +109,10 @@ pub enum RunNotificationEventKind {
     /// `OutboundPushKind::ModelDelivery` so attempts stay
     /// distinguishable in the durable audit trail and per-run accounting.
     ModelDelivery,
+    /// A web-app run-completion notification (2026-08-13 design §7.9). The
+    /// push fallback for a completed top-level run when no browser surface
+    /// answered arbitration; carries fixed copy only, never reply content.
+    RunCompleted,
 }
 
 impl RunNotificationEventKind {
@@ -120,6 +124,7 @@ impl RunNotificationEventKind {
             Self::AuthRequired => OutboundPushKind::AuthPrompt,
             Self::DeliveryStatus => OutboundPushKind::DeliveryStatus,
             Self::ModelDelivery => OutboundPushKind::ModelDelivery,
+            Self::RunCompleted => OutboundPushKind::RunCompletion,
         }
     }
 }
@@ -175,6 +180,12 @@ pub struct DeliveryTargetCapabilities {
     /// (until it gains outbound thread creation).
     #[serde(default)]
     pub notifications: bool,
+    /// This target receives web-app run-completion notifications (2026-08-13
+    /// design §7.9). Defaults false everywhere; only the web-app provider
+    /// advertises true, so capability filtering structurally yields zero or
+    /// one completion target with no extension-name conditions in fanout.
+    #[serde(default)]
+    pub run_completions: bool,
     pub modalities: Vec<CommunicationModality>,
 }
 
@@ -295,6 +306,10 @@ mod tests {
             OutboundPushKind::FinalReply
         );
         assert_eq!(
+            RunNotificationEventKind::RunCompleted.delivery_kind(),
+            OutboundPushKind::RunCompletion
+        );
+        assert_eq!(
             RunNotificationEventKind::ProgressUpdate.delivery_kind(),
             OutboundPushKind::Progress
         );
@@ -406,6 +421,7 @@ mod tests {
             gate_prompts: false,
             auth_prompts: true,
             notifications: true,
+            run_completions: false,
             modalities: vec![CommunicationModality::Text, CommunicationModality::Mixed],
         };
 
@@ -424,7 +440,24 @@ mod tests {
         assert!(!capabilities.gate_prompts);
         assert!(!capabilities.auth_prompts);
         assert!(!capabilities.notifications);
+        assert!(
+            !capabilities.run_completions,
+            "completion pushes are opt-in per provider; the default must fail closed"
+        );
         assert!(capabilities.modalities.is_empty());
+    }
+
+    #[test]
+    fn delivery_target_capabilities_deserialize_defaults_run_completions_to_false() {
+        // Capability payloads persisted before `run_completions` existed must
+        // decode with it false, so an old web-app catalog entry never becomes
+        // a completion-push target by accident.
+        let decoded: DeliveryTargetCapabilities = from_str(
+            r#"{"final_replies":true,"progress":false,"gate_prompts":true,"auth_prompts":true,"notifications":true,"modalities":[]}"#,
+        )
+        .expect("deserialize legacy capabilities without run_completions");
+        assert!(!decoded.run_completions);
+        assert!(decoded.notifications);
     }
 
     #[test]

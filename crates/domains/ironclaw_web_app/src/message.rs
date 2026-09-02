@@ -48,6 +48,18 @@ impl PushUrgency {
     }
 }
 
+/// The v2 payload schema tag for typed run-completion pushes (2026-08-13
+/// design §7.10). v1 payloads carry no `schema` field; older service
+/// workers ignore the extra fields and still render title/body/url/tag.
+pub const WEB_APP_NOTIFICATION_SCHEMA_V2: &str = "web_app_notification.v2";
+
+/// The v2 `kind` value for run-completion pushes.
+pub const WEB_APP_NOTIFICATION_KIND_RUN_COMPLETION: &str = "run_completion";
+
+/// Cap for the v2 `unread_count` field: grouped copy never needs more, and
+/// a capped count cannot become a covert content channel.
+pub const MAX_UNREAD_COUNT: u16 = 99;
+
 /// What the service worker receives after the browser decrypts the push.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebAppNotificationPayload {
@@ -58,6 +70,22 @@ pub struct WebAppNotificationPayload {
     /// Coalescing tag: notifications with the same tag replace each other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    /// v2 schema tag ([`WEB_APP_NOTIFICATION_SCHEMA_V2`]); absent on v1
+    /// payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    /// v2 payload kind (e.g. [`WEB_APP_NOTIFICATION_KIND_RUN_COMPLETION`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// v2: opaque run-completion notice id, for worker-ledger dedupe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_id: Option<String>,
+    /// v2: typed thread id the completion belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// v2: capped unread-completion count for the thread's grouped copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_count: Option<u16>,
 }
 
 impl WebAppNotificationPayload {
@@ -79,7 +107,51 @@ impl WebAppNotificationPayload {
             body: truncate_chars(&sanitize_text(body.into()), MAX_BODY_CHARS),
             url: app_relative_url(url.into()),
             tag: tag.map(sanitize_tag),
+            schema: None,
+            kind: None,
+            notice_id: None,
+            thread_id: None,
+            unread_count: None,
         };
+        payload.fit_body_to_byte_budget();
+        payload
+    }
+
+    /// Build the §7.10 typed run-completion payload. Fixed copy only — no
+    /// generated or protected content ever rides a push. The deep link is
+    /// derived right here from the caller's app route prefix plus the typed
+    /// thread id (percent-encoded as one path segment); no caller supplies a
+    /// full path, and the SPA route itself is the channel package's
+    /// knowledge, not this crate's. All grammar rules of [`Self::new`] apply,
+    /// and the extra typed fields are bounded opaque identifiers plus a
+    /// capped count.
+    pub fn run_completion(
+        title: impl Into<String>,
+        body: impl Into<String>,
+        thread_route: &str,
+        thread_id: &str,
+        notice_id: impl Into<String>,
+        tag: impl Into<String>,
+        unread_count: u16,
+    ) -> Self {
+        let encoded_thread = percent_encode_path_segment(thread_id);
+        let mut payload = Self::new(
+            title,
+            body,
+            format!("{}/{encoded_thread}", thread_route.trim_end_matches('/')),
+            Some(tag.into()),
+        );
+        payload.schema = Some(WEB_APP_NOTIFICATION_SCHEMA_V2.to_string());
+        payload.kind = Some(WEB_APP_NOTIFICATION_KIND_RUN_COMPLETION.to_string());
+        payload.notice_id = Some(truncate_chars(
+            &sanitize_text(notice_id.into()),
+            MAX_TAG_CHARS * 3,
+        ));
+        payload.thread_id = Some(truncate_chars(
+            &sanitize_text(thread_id.to_string()),
+            MAX_TAG_CHARS * 3,
+        ));
+        payload.unread_count = Some(unread_count.min(MAX_UNREAD_COUNT));
         payload.fit_body_to_byte_budget();
         payload
     }
@@ -123,6 +195,25 @@ impl WebAppNotificationPayload {
         }
         Ok(bytes)
     }
+}
+
+/// Percent-encode one path segment: unreserved bytes (RFC 3986) pass
+/// through, everything else is `%XX`-escaped. Used for the typed thread id
+/// inside the thread deep link so an id can never smuggle path structure.
+fn percent_encode_path_segment(raw: &str) -> String {
+    let mut encoded = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            other => {
+                encoded.push('%');
+                encoded.push_str(&format!("{other:02X}"));
+            }
+        }
+    }
+    encoded
 }
 
 /// Coerce a caller-supplied deep link into the app-relative form the service
@@ -262,6 +353,36 @@ mod tests {
             serialized.len() <= MAX_PAYLOAD_JSON_BYTES,
             "serialized {} bytes exceeds the {MAX_PAYLOAD_JSON_BYTES}-byte budget",
             serialized.len()
+        );
+    }
+
+    #[test]
+    fn run_completion_payload_derives_the_thread_link_and_carries_the_dedupe_fields() {
+        let payload = WebAppNotificationPayload::run_completion(
+            "IronClaw",
+            "An agent run finished.",
+            "/chat/",
+            "thr/ead?id=ü",
+            "rcn-abc",
+            "rct-thread",
+            250,
+        );
+        assert_eq!(payload.url, "/chat/thr%2Fead%3Fid%3D%C3%BC");
+        assert_eq!(
+            payload.schema.as_deref(),
+            Some(WEB_APP_NOTIFICATION_SCHEMA_V2)
+        );
+        assert_eq!(
+            payload.kind.as_deref(),
+            Some(WEB_APP_NOTIFICATION_KIND_RUN_COMPLETION)
+        );
+        assert_eq!(payload.notice_id.as_deref(), Some("rcn-abc"));
+        assert_eq!(payload.thread_id.as_deref(), Some("thr/ead?id=ü"));
+        assert_eq!(payload.tag.as_deref(), Some("rct-thread"));
+        assert_eq!(payload.unread_count, Some(MAX_UNREAD_COUNT));
+        assert!(
+            payload.to_json_bytes().is_ok(),
+            "the typed payload stays inside the push byte budget"
         );
     }
 

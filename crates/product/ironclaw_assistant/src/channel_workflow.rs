@@ -41,6 +41,10 @@ use ironclaw_loop_host::HostInputEnqueuePort;
 /// services. Never a channel selector — the notifier picks the delivering
 /// extension per notification target from that target's catalog entry.
 const BACKGROUND_RUN_NOTIFIER_ID: &str = "background-run-notifier";
+/// Attribution bucket for the run-completions push facade's delivery
+/// services (2026-08-13 design §7.9). Same shape and rules as
+/// [`BACKGROUND_RUN_NOTIFIER_ID`].
+const RUN_COMPLETION_NOTIFIER_ID: &str = "run-completion-notifier";
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundDeliveryTargetProvider,
     OutboundStateStorePort, TriggeredRunDelivery, TriggeredRunDeliveryStore,
@@ -194,35 +198,7 @@ impl RebornChannelWorkflowFactory {
     ) -> Option<Arc<dyn TriggeredRunDelivery>> {
         let delivery = self.services.delivery.as_ref()?;
         let identity = &self.services.identity;
-        let notice_thread_id =
-            match ThreadId::new(format!("{BACKGROUND_RUN_NOTIFIER_ID}-channel-notices")) {
-                Ok(thread_id) => thread_id,
-                Err(error) => {
-                    tracing::warn!(
-                        target: "ironclaw::reborn::channel_workflow",
-                        %error,
-                        "invalid channel-notice thread id; background run notification unavailable"
-                    );
-                    return None;
-                }
-            };
-        let services = RunDeliveryServices {
-            project_filesystem: Arc::clone(&delivery.project_filesystem),
-            binding_service: Arc::new(TriggeredNoopConversationBindingService),
-            thread_service: Arc::clone(&self.services.thread_service),
-            turn_coordinator: Arc::clone(&self.services.turn_coordinator),
-            outbound_store: Arc::clone(&delivery.outbound_store),
-            route_store: Arc::clone(&delivery.route_store),
-            communication_preferences: Arc::clone(&delivery.communication_preferences),
-            notification_inbox: self.services.notification_inbox.clone(),
-            delivery_targets: Arc::clone(&delivery.delivery_targets),
-            coordinator: Arc::clone(&delivery.coordinator),
-            extension_id: BACKGROUND_RUN_NOTIFIER_ID.to_string(),
-            fallback_notice_scope: self.notice_scope(notice_thread_id),
-            approval_context: delivery.approval_context.clone(),
-            blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
-            auth_flow_cancel: delivery.auth_flow_cancel.clone(),
-        };
+        let services = self.notifier_delivery_services(delivery, BACKGROUND_RUN_NOTIFIER_ID)?;
         Some(Arc::new(TriggeredRunDeliveryDriver::with_settings(
             services,
             crate::run_delivery::triggered_run_delivery_settings(),
@@ -230,6 +206,57 @@ impl RebornChannelWorkflowFactory {
             target_codecs,
             identity.agent_id.clone(),
         )) as Arc<dyn TriggeredRunDelivery>)
+    }
+
+    /// The run-completions push facade's delivery bundle (2026-08-13 design
+    /// §7.9): the same background-notifier-shaped [`RunDeliveryServices`]
+    /// under its own notifier identity, or `None` when the composed runtime
+    /// has no delivery coordinator (nothing can push).
+    pub fn run_completion_delivery_services(&self) -> Option<RunDeliveryServices> {
+        let delivery = self.services.delivery.as_ref()?;
+        self.notifier_delivery_services(delivery, RUN_COMPLETION_NOTIFIER_ID)
+    }
+
+    /// The one place a notifier-shaped [`RunDeliveryServices`] bundle is
+    /// assembled. Both notifier identities (background runs, run
+    /// completions) share every port; keeping a single literal means a new
+    /// `RunDeliveryServices` field cannot silently diverge between them.
+    fn notifier_delivery_services(
+        &self,
+        delivery: &ChannelWorkflowDeliveryServices,
+        notifier_id: &str,
+    ) -> Option<RunDeliveryServices> {
+        let notice_thread_id = match ThreadId::new(format!("{notifier_id}-channel-notices")) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                // debug!, not warn!: internal construction diagnostic (the
+                // REPL renders warn), and unreachable for the two compiled-in
+                // notifier ids.
+                tracing::debug!(
+                    target: "ironclaw::reborn::channel_workflow",
+                    %error,
+                    "invalid notifier notice thread id; delivery unavailable"
+                );
+                return None;
+            }
+        };
+        Some(RunDeliveryServices {
+            project_filesystem: Arc::clone(&delivery.project_filesystem),
+            binding_service: Arc::new(TriggeredNoopConversationBindingService),
+            thread_service: Arc::clone(&self.services.thread_service),
+            turn_coordinator: Arc::clone(&self.services.turn_coordinator),
+            outbound_store: Arc::clone(&delivery.outbound_store),
+            route_store: Arc::clone(&delivery.route_store),
+            communication_preferences: Arc::clone(&delivery.communication_preferences),
+            delivery_targets: Arc::clone(&delivery.delivery_targets),
+            coordinator: Arc::clone(&delivery.coordinator),
+            extension_id: notifier_id.to_string(),
+            fallback_notice_scope: self.notice_scope(notice_thread_id),
+            approval_context: delivery.approval_context.clone(),
+            blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
+            auth_flow_cancel: delivery.auth_flow_cancel.clone(),
+            notification_inbox: self.services.notification_inbox.clone(),
+        })
     }
 
     fn notice_scope(&self, notice_thread_id: ThreadId) -> TurnScope {

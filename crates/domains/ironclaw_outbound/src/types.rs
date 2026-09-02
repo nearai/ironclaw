@@ -20,6 +20,10 @@ pub enum OutboundPushKind {
     AuthPrompt,
     DeliveryStatus,
     ModelDelivery,
+    /// A web-app run-completion notification (2026-08-13 design §7.9): the
+    /// distinct push vocabulary for "an agent run finished", never encoded
+    /// as `FinalReply` and never carrying reply text.
+    RunCompletion,
 }
 
 #[allow(dead_code)] // retained for future debug/log surfaces — not yet wired
@@ -32,6 +36,7 @@ impl OutboundPushKind {
             Self::AuthPrompt => "auth_prompt",
             Self::DeliveryStatus => "delivery_status",
             Self::ModelDelivery => "model_delivery",
+            Self::RunCompletion => "run_completion",
         }
     }
 }

@@ -82,6 +82,11 @@ registerPack("fr", {
   "notifications.approval.title": "Approbation requise",
   "notifications.approval.detail": "Nécessite votre approbation",
   "notifications.approval.untitled": "Conversation sans titre",
+  // Run completions
+  "runCompletions.toastOne": "Une exécution de l'agent est terminée. Ouvrez le fil pour voir la réponse.",
+  "runCompletions.toastMany": "{count} exécutions de l'agent terminées dans un fil.",
+  "runCompletions.listItemOne": "Exécution de l'agent terminée — réponse prête",
+  "runCompletions.listItemMany": "{count} exécutions terminées — réponses prêtes",
 
   // Status
   "status.online": "en ligne",

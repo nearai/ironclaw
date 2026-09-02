@@ -104,6 +104,7 @@ fn external_target_entry(id: &str, binding: &str) -> OutboundDeliveryTargetEntry
             gate_prompts: false,
             auth_prompts: false,
             notifications: true,
+            run_completions: false,
             modalities: Vec::new(),
         },
         destination: reply_ref(binding),

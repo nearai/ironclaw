@@ -86,6 +86,17 @@ impl fmt::Display for SecretLeaseId {
     }
 }
 
+/// Parse the `Display` form back into a lease id — the explicit boundary
+/// for a lease id that travelled through an external carrier (a query
+/// string, a stored nonce) rather than an incidental serde round trip.
+impl std::str::FromStr for SecretLeaseId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value).map(Self)
+    }
+}
+
 /// Redacted metadata for a stored secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretMetadata {
@@ -1271,6 +1282,16 @@ pub trait SecretStorePort: Send + Sync {
     ) -> Result<SecretMaterial, SecretStoreError>;
 
     /// Revokes an active one-shot lease without returning material.
+    /// Remove a lease row outright. Unlike [`SecretStorePort::revoke`], which
+    /// keeps the row as a terminal marker, this reclaims storage for a lease
+    /// whose one-shot purpose is fully spent (a consumed transport ticket).
+    /// `Ok(false)` when no such lease exists.
+    async fn delete_lease(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<bool, SecretStoreError>;
+
     async fn revoke(
         &self,
         scope: &ResourceScope,

@@ -545,6 +545,31 @@ pub enum OutboundPart {
         reaction: RunReaction,
         action: ReactionAction,
     },
+    /// A web-app run-completion notification (2026-08-13 design §7.9): a
+    /// typed "an agent run finished" fact, deliberately not `Text`. It
+    /// carries no reply content — the web-app adapter builds the safe
+    /// same-origin URL and fixed copy from the typed fields; adapters whose
+    /// target capability excludes run completions report it unsupported.
+    RunCompletion(Box<RunCompletionNoticeView>),
+}
+
+/// The typed view an adapter renders a run-completion notification from
+/// (2026-08-13 design §7.9). Every field is opaque or typed: no generated
+/// or protected content crosses toward a push service.
+#[derive(Debug, Clone)]
+pub struct RunCompletionNoticeView {
+    /// Opaque purpose-separated notice id (`rcn-…`).
+    pub notice_id: String,
+    /// The typed thread the completion belongs to; adapters derive
+    /// same-origin URLs from this, never from caller-supplied paths.
+    pub thread_id: ironclaw_host_api::ids::ThreadId,
+    /// Opaque purpose-separated collapse digest of owner scope and thread
+    /// (`rct-…`) — the OS notification tag, never a display string or
+    /// authorization token.
+    pub opaque_thread_tag: String,
+    /// Bounded unread-completion count for this thread, for grouped
+    /// notification copy.
+    pub unread_count_for_thread: u16,
 }
 
 /// A neutral run-lifecycle reaction. The adapter owns the vendor emoji so the

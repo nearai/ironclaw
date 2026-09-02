@@ -606,6 +606,25 @@ pub struct RebornRuntime {
     pub(crate) skill_management: Arc<ScopedSkillManagementPort>,
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
+    /// Shared single-use session-socket ticket store, present only when the
+    /// deployment's storage shape shares a durable backend across replicas
+    /// (mint and consume may land on different processes). `None` for
+    /// single-process shapes, where the `ironclaw` binary always substitutes
+    /// the WebUI's bounded in-memory adapter — so the shipped binary always
+    /// advertises the session socket; only a library embedder that wires no
+    /// store at all leaves the capability unadvertised (fail closed).
+    pub(crate) session_socket_tickets:
+        Option<Arc<dyn ironclaw_product_contracts::session_transport::SessionSocketTicketStore>>,
+    /// Run-completion notification services: the durable notice store over
+    /// the `/run-notices` per-user mount, the per-owner stream hub, and the
+    /// coordinator wake channel (2026-08-13 design §5). Wired into the
+    /// product surface so the `RunCompletions` stream selector and the
+    /// notification operations answer.
+    pub(crate) run_completions:
+        Arc<ironclaw_assistant::run_completions::RunCompletionSurfaceServices>,
+    /// Arbitration-coordinator worker handle, drained in [`Self::shutdown`].
+    run_completion_coordinator_handle:
+        Option<ironclaw_assistant::run_completions::coordinator::RunCompletionCoordinatorHandle>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) suggestions_store: Arc<dyn ironclaw_assistant::SuggestionsStore>,
     pub(crate) llm_config_service: Option<Arc<ironclaw_operator::RebornLlmConfigService>>,
@@ -922,6 +941,24 @@ impl RebornRuntime {
 
     pub fn readiness(&self) -> &RebornReadiness {
         &self.readiness
+    }
+
+    /// The deployment-shape-selected shared session-socket ticket store, if
+    /// this deployment requires one. See the field documentation.
+    pub fn session_socket_ticket_store(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_contracts::session_transport::SessionSocketTicketStore>>
+    {
+        self.session_socket_tickets.clone()
+    }
+
+    /// Run-completion notification bundle (notice store, stream hub, wake
+    /// channel) shared by the product surface and the composition-owned
+    /// observer/coordinator workers.
+    pub fn run_completion_services(
+        &self,
+    ) -> Arc<ironclaw_assistant::run_completions::RunCompletionSurfaceServices> {
+        Arc::clone(&self.run_completions)
     }
 
     /// Build the canonical product surface over this runtime graph.
@@ -1922,6 +1959,8 @@ impl RebornRuntime {
                     // notification channel, mirroring the generic channel
                     // provider's `full_capabilities`.
                     notifications: true,
+                    // §7.9: run-completion pushes are exclusively web-app.
+                    run_completions: false,
                     modalities: Vec::new(),
                 },
                 reply_target_binding_ref,
@@ -2515,6 +2554,13 @@ impl RebornRuntime {
                 .await;
         }
         self.trace_flush_worker.shutdown().await;
+        if let Some(coordinator) = self.run_completion_coordinator_handle {
+            coordinator
+                .shutdown(
+                    ironclaw_assistant::run_completions::coordinator::COORDINATOR_SHUTDOWN_TIMEOUT,
+                )
+                .await;
+        }
         if let Some(skill_learning_extraction_tasks) = self.skill_learning_extraction_tasks {
             skill_learning_extraction_tasks.shutdown().await;
         }
@@ -4649,6 +4695,94 @@ pub(crate) async fn build_runtime_with_resource_governor(
         }
     }
 
+    // Run-completion notifications (2026-08-13 design §5): the durable
+    // notice store rides the `/run-notices` per-user mount on the shared
+    // consumer filesystem; the journal-commit observer feeds product ingest
+    // durably (cursor-tracked, retried, replayed across restarts); the
+    // arbitration coordinator drains due work (Phase 1 fallbacks: no push
+    // transport, local-OS intents denied).
+    let run_completion_notices = Arc::new(
+        ironclaw_assistant::run_completions::store::RunCompletionNoticeStore::new(
+            crate::wrap_scoped(Arc::clone(&services.extension_filesystem)),
+        ),
+    )
+        as Arc<dyn ironclaw_assistant::run_completions::store::RunCompletionNotices>;
+    let run_completion_hub = Arc::new(
+        ironclaw_assistant::run_completions::stream::RunCompletionStreamHub::new(Arc::clone(
+            &run_completion_notices,
+        )),
+    );
+    let run_completions = Arc::new(
+        ironclaw_assistant::run_completions::RunCompletionSurfaceServices::new(
+            run_completion_notices,
+            run_completion_hub,
+            // Read bridge to the durable Inbox: evidence that settles a
+            // completion notice also marks the run's `run_completed` Inbox
+            // row read, so the bell list and live surfaces agree.
+            Arc::clone(&services.notification_inbox),
+        ),
+    );
+    let run_completion_ingest = Arc::new(
+        ironclaw_assistant::run_completions::ingest::RunCompletionIngest::new(
+            Arc::clone(&run_completions),
+            Arc::clone(&thread_service),
+        ),
+    );
+    processes
+        .subscribe_process_observer(Arc::new(
+            ironclaw_assistant::run_completions::observer::RunCompletionJournalObserver::new(
+                run_completion_ingest,
+            ),
+        ))
+        .map_err(|reason| RebornRuntimeError::MalformedConfig {
+            reason: format!("run-completion journal observer registration failed: {reason}"),
+        })?;
+    // External presentation (§6.1, §7.9): when the channel-host cone exists,
+    // the facade validates `local_os` intents (Selected + Enrolled) and owns
+    // the Web Push fallback through the ordinary outbound chain. Without a
+    // delivery coordinator the Phase-1 fail-closed defaults stand: no OS
+    // grants, every no-presenter notice settles in-app-unread.
+    let web_app_extension = ironclaw_host_api::ids::ExtensionId::new(
+        ironclaw_web_app::WEB_APP_EXTENSION_ID,
+    )
+    .map_err(|error| RebornRuntimeError::MalformedConfig {
+        reason: format!("web-app extension id: {error}"),
+    })?;
+    let run_completion_external_delivery = channel_workflow_factory
+        .as_ref()
+        .zip(channel_host_assembly.as_ref())
+        .and_then(|(workflow_factory, assembly)| {
+            workflow_factory
+                .run_completion_delivery_services()
+                .map(|delivery_services| {
+                    Arc::new(
+                        ironclaw_assistant::run_completions::push::RunCompletionExternalDelivery::new(
+                            delivery_services,
+                            Arc::clone(&run_completions.notices),
+                            Arc::new(
+                                ironclaw_extension_host::channel_triggered_delivery::AssemblyPreferenceTargetCodecs::new(
+                                    Arc::clone(assembly),
+                                ),
+                            ),
+                            Arc::new(crate::run_completion_push::RegistrationEnrollmentProbe::new(
+                                services.delivery_registrations.clone(),
+                                web_app_extension.clone(),
+                            )),
+                        ),
+                    )
+                })
+        });
+    let (run_completion_push_fallback, run_completion_local_os): (
+        Arc<dyn ironclaw_assistant::run_completions::coordinator::CompletionPushFallback>,
+        Arc<dyn ironclaw_assistant::run_completions::coordinator::LocalOsIntentPolicy>,
+    ) = match run_completion_external_delivery {
+        Some(external) => (Arc::clone(&external) as _, external as _),
+        None => (
+            Arc::new(ironclaw_assistant::run_completions::coordinator::NoPushFallback) as _,
+            Arc::new(ironclaw_assistant::run_completions::coordinator::DenyLocalOsIntents) as _,
+        ),
+    };
+
     let ironhub_link_state = Arc::clone(&services.ironhub_link_state);
     let ironhub_link_service = match ironhub_agent_shared_key {
         Some(shared_key) => {
@@ -4678,6 +4812,30 @@ pub(crate) async fn build_runtime_with_resource_governor(
         None => None,
     };
 
+    // Spawned after the last fallible assembly step: a build error must not
+    // leave an orphaned coordinator whose handle nobody will shut down.
+    let run_completion_coordinator_handle = Some(
+        ironclaw_assistant::run_completions::coordinator::spawn_run_completion_coordinator(
+            Arc::new(
+                ironclaw_assistant::run_completions::coordinator::RunCompletionCoordinator::new(
+                    Arc::clone(&run_completions),
+                    run_completion_push_fallback,
+                    run_completion_local_os,
+                ),
+            ),
+            Arc::clone(&run_completions.wake),
+            // Boot reconciliation reads this deployment tenant's durable
+            // due-owner registry (§5.4); the user half only addresses the
+            // tenant-shared mount.
+            Some(
+                ironclaw_assistant::run_completions::store::RunCompletionOwner {
+                    tenant_id: validated_identity.tenant_id.clone(),
+                    user_id: actor_user_id.clone(),
+                },
+            ),
+        ),
+    );
+
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),
         user_sandbox_process_port: services.user_sandbox_process_port.clone(),
@@ -4686,6 +4844,22 @@ pub(crate) async fn build_runtime_with_resource_governor(
         skill_management: services.skill_management.clone(),
         extension_lifecycle_surface_context: services.extension_lifecycle_surface_context.clone(),
         secret_store: Arc::clone(&services.secret_store),
+        // Replica-shared storage shapes get the durable one-shot ticket
+        // adapter so socket tickets stay single-use across processes;
+        // single-process shapes leave this None and the host uses its
+        // bounded in-memory adapter.
+        session_socket_tickets: match deployment.storage_shape() {
+            crate::deployment::StorageShape::HostedSingleTenantPool
+            | crate::deployment::StorageShape::OperatorSupplied => Some(Arc::new(
+                crate::session_socket_ticket_store::SecretStoreSessionSocketTicketStore::new(
+                    Arc::clone(&services.secret_store),
+                ),
+            )),
+            crate::deployment::StorageShape::None
+            | crate::deployment::StorageShape::LocalFilesystemRoot => None,
+        },
+        run_completions,
+        run_completion_coordinator_handle,
         scoped_filesystem,
         suggestions_store,
         llm_config_service,

@@ -8,7 +8,7 @@
 //! Same-origin enforcement on WS therefore has to run inline.
 //!
 //! Today the v2 surface has exactly one WS descriptor
-//! (`stream_events_ws`); the middleware ignores any path the
+//! (`session_websocket`); the middleware ignores any path the
 //! descriptor table doesn't claim. A future descriptor adding more WS
 //! routes is picked up automatically.
 

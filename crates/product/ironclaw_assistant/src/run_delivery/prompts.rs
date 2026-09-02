@@ -125,6 +125,7 @@ pub(crate) fn run_notification_projection_id(
         RunNotificationEventKind::RunBlocked => "blocked",
         RunNotificationEventKind::DeliveryStatus => "delivery-status",
         RunNotificationEventKind::ModelDelivery => "model-delivery",
+        RunNotificationEventKind::RunCompleted => "run-completion",
     };
     match discriminator {
         Some(discriminator) => {
@@ -447,6 +448,13 @@ mod tests {
         let shared_prefix = "g".repeat(240);
         let ref_a = format!("{shared_prefix}-a");
         let ref_b = format!("{shared_prefix}-b");
+        let completion =
+            run_notification_projection_id(run_id, RunNotificationEventKind::RunCompleted, None);
+        assert_eq!(
+            completion,
+            format!("run-notification:run-completion:{run_id}"),
+            "the persisted run-completion projection-id suffix is wire identity",
+        );
         let id_a = run_notification_projection_id(
             run_id,
             RunNotificationEventKind::ApprovalNeeded,

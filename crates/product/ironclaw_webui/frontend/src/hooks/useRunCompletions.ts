@@ -1,0 +1,129 @@
+// @ts-nocheck
+// App-root run-completion notifications (2026-08-13 design §5–§9): boots
+// the orchestrator once per authenticated page, exposes the unread cache
+// for the header badge/list, and reports the active thread for
+// focused-thread suppression. The orchestrator module is lazily imported so
+// the eager /chat bundle stays flat.
+
+import React from "react";
+import { useNavigate } from "react-router";
+import { useT } from "../lib/i18n";
+import {
+  runCompletionSnapshot,
+  subscribeRunCompletionStore,
+} from "../lib/run-completions/store";
+
+export function useRunCompletions({ enabled = true, activeThreadId = null } = {}) {
+  const t = useT();
+  const navigate = useNavigate();
+  const snapshot = React.useSyncExternalStore(
+    subscribeRunCompletionStore,
+    runCompletionSnapshot,
+    runCompletionSnapshot,
+  );
+  const clientRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!enabled) return undefined;
+    let cancelled = false;
+    let stop = null;
+    import("../lib/run-completions/client").then((module) => {
+      if (cancelled) return;
+      clientRef.current = module;
+      stop = module.startRunCompletions({
+        inAppMessage: (unreadForThread) =>
+          unreadForThread > 1
+            ? t("runCompletions.toastMany", { count: unreadForThread })
+            : t("runCompletions.toastOne"),
+        navigateToThread: (threadId) =>
+          navigate(`/chat/${encodeURIComponent(threadId)}`),
+      });
+    });
+    return () => {
+      cancelled = true;
+      if (stop) stop();
+    };
+    // The orchestrator is a page-lifetime singleton; navigate/t are stable
+    // enough that re-running on their identity would only churn options.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled]);
+
+  // Route presence and badge changes only *offer* thread-read evidence: the
+  // client issues `thread_read` solely for a thread whose history the chat
+  // view has confirmed rendered (`reportThreadHistoryRendered` from useChat),
+  // so a freshly opened route cannot settle notices before its reply is on
+  // screen (§9.3). The badge-count dependency re-offers after the boot
+  // rebase populates the cache while the confirmed thread is on screen.
+  React.useEffect(() => {
+    if (!enabled) return;
+    const module = clientRef.current;
+    if (module) {
+      module.reportActiveThread(activeThreadId);
+      if (activeThreadId) module.reportThreadViewed(activeThreadId);
+      return;
+    }
+    import("../lib/run-completions/client").then((loaded) => {
+      loaded.reportActiveThread(activeThreadId);
+      if (activeThreadId) loaded.reportThreadViewed(activeThreadId);
+    });
+  }, [enabled, activeThreadId, snapshot.unreadCount]);
+
+  // Returning focus to a thread tab is fresh read evidence (§9.3): the
+  // rendered history is on screen again, so unread completions for the
+  // thread settle without requiring a new event.
+  React.useEffect(() => {
+    if (!enabled || !activeThreadId) return undefined;
+    const onFocus = () => {
+      const module = clientRef.current;
+      if (module) module.reportThreadViewed(activeThreadId);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [enabled, activeThreadId]);
+
+  // Rows share the inbox row shape (`lib/notifications.ts`) so the merged
+  // bell list sorts, partitions, and formats every row the same way.
+  const messages = React.useMemo(
+    () =>
+      snapshot.notices.map((notice) => {
+        const completedAt = notice.completed_at ? Date.parse(notice.completed_at) : NaN;
+        const timestamp = Number.isFinite(completedAt) ? completedAt : null;
+        return {
+          id: `run-completion:${notice.notice_id}`,
+          type: "run_completion",
+          icon: "bell",
+          // The panel renders title/body/timeLabel; completion rows carry
+          // the fixed generic copy only (no generated content).
+          title:
+            notice.unread_count_for_thread > 1
+              ? t("runCompletions.listItemMany", {
+                  count: notice.unread_count_for_thread,
+                })
+              : t("runCompletions.listItemOne"),
+          body: t("runCompletions.toastOne"),
+          detail: null,
+          timeLabel: timestamp
+            ? new Date(timestamp).toLocaleString([], {
+                month: "short",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : "",
+          timestamp,
+          href: `/chat/${encodeURIComponent(notice.thread_id)}`,
+          threadId: notice.thread_id,
+          turnRunId: notice.run_id,
+          read: false,
+          resolved: false,
+        };
+      }),
+    [snapshot.notices, t],
+  );
+
+  return {
+    unreadCount: snapshot.unreadCount,
+    notices: snapshot.notices,
+    messages,
+  };
+}

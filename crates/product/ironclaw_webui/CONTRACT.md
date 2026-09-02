@@ -138,8 +138,10 @@ candidate module.
 | `workspace-fs` | Project-file and mount-catalog reads, and the workspace path-scoping rules that keep a served path inside its projection | Attachment download (that is `attachments`) | `PROJECT_FS_ROOT`, `ProjectFsQuery`, `list_project_files`, `stat_project_file`, `read_project_file`, `project_fs_download_response`, `FsBrowseQuery`, `list_fs_mounts`, `browse_fs_dir`, `stat_fs_path`, `read_fs_file`, `require_fs_browse_path`, `workspace_scoped_projection_required`, `workspace_projection_for`, `workspace_served_path`, `strip_workspace_prefix`, `project_fs_list_path`, `require_project_fs_path` |
 | `projects` | Project CRUD and project membership | Project *files* — those are `workspace-fs` | `ListProjectsQuery`, `list_projects`, `create_project`, `get_project`, `update_project`, `delete_project`, `list_project_members`, `add_project_member`, `update_project_member`, `remove_project_member`, `read_project_member` |
 | `attachments` | Attachment download and the filename sanitizing that download depends on | A filesystem path rule — that is `workspace-fs` | `MAX_DOWNLOAD_FILENAME_BYTES`, `sanitized_download_filename`, `get_attachment` |
-| `streaming` | Both live transports and everything that shapes a frame: SSE poll/keepalive tuning, capacity and concurrency rejection, cursor tokens, the envelope→event mapping, and the WebSocket drain loop | A product decision — a stream carries what the surface already produced | `SSE_POLL_INTERVAL`, `SSE_IDLE_POLL_MAX_INTERVAL`, `SSE_KEEPALIVE_INTERVAL`, `LAST_EVENT_ID_HEADER`, `sse_poll_interval_for_idle_polls`, `stream_events`, `sse_capacity_rejected`, `sse_concurrency_exhausted`, `StreamEventsQuery`, `stream_connection_id`, `SseErrorPayload`, `webchat_sse_event_from_envelope`, `sse_error_event`, `sse_keep_alive_event`, `build_sse_stream`, `parse_cursor_token`, `cursor_token`, `stream_events_ws`, `ws_drain_loop`, `ws_send_with_timeout` |
+| `streaming` | The compatibility per-thread SSE transport: capacity and concurrency rejection, cursor tokens, and the SSE error/keep-alive framing (poll cadence and the browser codec both transports share live in `src/webui_v2/session_events/{driver,codec}.rs`) | A product decision — a stream carries what the surface already produced | `LAST_EVENT_ID_HEADER`, `stream_events`, `sse_capacity_rejected`, `sse_concurrency_exhausted`, `StreamEventsQuery`, `stream_connection_id`, `SseErrorPayload`, `sse_event_from_stream`, `sse_error_event`, `sse_keep_alive_event`, `build_sse_stream`, `parse_cursor_token` |
+| `session-events` | The ticketed app-wide session WebSocket: ticket minting, the read-only multiplexing socket loop, its per-subscription driver tasks, and fair queue draining | A product decision or mutation — the socket carries only what the surface already produced, and no session frame reaches `ProductSurface::invoke` | `handlers/session_events.rs::SessionSocketTicketResponse`, `handlers/session_events.rs::session_websocket_ticket`, `handlers/session_events.rs::unix_now_ms`, `handlers/session_events.rs::session_websocket`, `handlers/session_events.rs::SubscriptionEmit`, `handlers/session_events.rs::SubscriptionEntry`, `handlers/session_events.rs::run_subscription`, `handlers/session_events.rs::forward_stream_event`, `handlers/session_events.rs::poll_next_emit`, `handlers/session_events.rs::session_socket_loop`, `handlers/session_events.rs::close_session_socket`, `handlers/session_events.rs::cancel_all`, `handlers/session_events.rs::send_session_frame` |
 | `runs` | Run control: cancel, retry, and gate resolution | Anything that reads a run — that is `threads` or `streaming` | `cancel_run`, `CancelRunPath`, `resolve_gate`, `ResolveGatePath`, `retry_run`, `RetryRunPath` |
+| `run-completions` | Run-completion notification operations: intent offers, grant acknowledgement, thread-read evidence, and the unread snapshot — all ordinary authenticated `ProductSurface` calls | A stream frame — live notice/grant/clear delivery is `session-events`/`streaming` transport riding the surface's `RunCompletions` selector | `run_completion_intent`, `run_completion_acknowledge`, `run_completion_thread_read`, `run_completions_unread` |
 | `commands` | The product command surface: listing and executing | A command *constant* — those are `ironclaw_assistant`'s frozen inventory | `list_commands`, `ExecuteCommandBody`, `execute_command` |
 | `automations` | Automation listing and lifecycle (run/pause/resume/rename/delete) | Trigger evaluation — that is the triggers domain | `list_automations`, `run_automation`, `pause_automation`, `resume_automation`, `rename_automation`, `delete_automation`, `ListAutomationsQuery` |
 | `suggestions` | Suggestion snapshot reads and generation/start/dismiss actions | Suggestion orchestration and durable state — those belong behind `ProductSurface` | `SUGGESTIONS_MAX_RETRY_AFTER_SECONDS`, `list_suggestions`, `generate_suggestions`, `start_suggestion`, `dismiss_suggestion` |
@@ -148,7 +150,7 @@ candidate module.
 | `skills` | Skill discovery, install/update/remove, content reads, and auto-activation | Skill *selection* — that is `ironclaw_skills` | `list_skills`, `search_skills`, `install_skill`, `get_skill_content`, `update_skill`, `remove_skill`, `set_skill_auto_activate`, `set_auto_activate_learned`, `skill_mutation_succeeded`, `skill_mutation_forbidden`, `skill_mutation_unavailable`, `SkillPath`, `SearchSkillsBody`, `InstallSkillBody`, `UpdateSkillBody`, `SetSkillAutoActivateBody` |
 | `extensions` | Extension listing, registry browse, install/import/remove, hosted-MCP registration, the setup handshake, and the lifecycle response projections | Admin *configuration* of an installed extension — that is `admin-config` | `list_extensions`, `list_extension_registry`, `install_extension`, `register_hosted_mcp_extension`, `import_extension`, `ironhub_deliver_install`, `remove_extension`, `extension_lifecycle_mutation_succeeded`, `extension_install_succeeded`, `membership_is_visible`, `membership_landed_pending_setup`, `ensure_extension_inventory_readback`, `extension_lifecycle_forbidden`, `extension_lifecycle_unavailable`, `extension_action_completed`, `get_extension_setup`, `setup_extension`, `public_lifecycle_json`, `extension_lifecycle_activity_id`, `ExtensionPackagePath`, `InstallExtensionBody`, `RegisterHostedMcpBody`, `RegisterHostedMcpResponse`, `bounded_hosted_mcp_name`, `RemoveExtensionBody`, `extension_package_ref_for_request` |
 | `admin-config` | Per-extension admin configuration: read, replace, idempotency, and its failure projections | Extension lifecycle — that is `extensions` | `ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES`, `require_operator_webui_config`, `ExtensionAdminConfigurationPath`, `ExtensionAdminConfigurationValue`, `ReplaceExtensionAdminConfigurationBody`, `ReplaceExtensionAdminConfigurationInput`, `list_extension_admin_configuration`, `replace_extension_admin_configuration`, `query_extension_admin_configuration`, `select_extension_admin_configuration_group`, `admin_configuration_activity_id`, `admin_configuration_conflict`, `admin_configuration_unavailable`, `admin_configuration_forbidden`, `admin_configuration_done_failure`, `admin_configuration_blocked` |
-| `dispatch` | The shared `ProductSurface` call shapes every other owner goes through: invoke/query/page helpers, the generic activity-id derivation, and idempotency/client-action-id validation | A route-specific decision — those belong to the owner that made them | `CLIENT_ACTION_ID_MAX_BYTES`, `product_surface_input`, `invoke_product_capability`, `invoke_product_capability_with_activity_id`, `invoke_product_command`, `product_capability_activity_id`, `product_surface_activity_id`, `query_product_view`, `query_product_page`, `decode_product_outbound_events`, `validate_idempotency_key`, `parse_client_action_id` |
+| `dispatch` | The shared `ProductSurface` call shapes every other owner goes through: invoke/query/page helpers, the generic activity-id derivation, and idempotency/client-action-id validation | A route-specific decision — those belong to the owner that made them | `CLIENT_ACTION_ID_MAX_BYTES`, `product_surface_input`, `invoke_product_capability`, `invoke_product_capability_with_activity_id`, `invoke_product_command`, `product_capability_activity_id`, `product_surface_activity_id`, `query_product_view`, `query_product_page`, `validate_idempotency_key`, `parse_client_action_id` |
 | `operator` | The operator console: first-run setup, tool settings, operator config keys, diagnostics, status, logs, and service lifecycle | LLM provider administration — that is `llm-admin` | `SETTINGS_TOOLS_AUTO_APPROVE_KEY`, `SETTINGS_TOOL_CONFIG_PREFIX`, `SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES`, `get_operator_setup`, `query_operator_setup_response`, `run_operator_setup`, `list_settings_tools`, `SettingsToolsAutoApproveRequest`, `set_settings_tools_auto_approve`, `SettingsToolPermissionPath`, `SettingsToolPermissionRequest`, `set_settings_tool_permission`, `validate_settings_tool_capability_id`, `validate_settings_tool_config_response`, `list_operator_config`, `OperatorConfigKeyPath`, `OPERATOR_CONFIG_KEY_MAX_BYTES`, `OPERATOR_CONFIG_RESERVED_VALIDATE_KEY`, `validate_operator_config_key`, `operator_config_key_error`, `query_operator_config_key_response`, `get_operator_config_key`, `set_operator_config_key`, `reject_reserved_operator_config_key`, `validate_operator_config`, `get_operator_diagnostics`, `get_operator_status`, `query_operator_logs`, `query_logs`, `run_operator_service_lifecycle` |
 | `llm-admin` | LLM provider administration, tenant user-model policy/catalog, caller-scoped model preference, and the provider login flows: config snapshot, upsert/delete, active-model selection, connection test, model listing, NEAR AI and Codex login | Anything that *calls* a model | `LlmProviderPath`, `get_user_model_catalog`, `query_user_model_catalog`, `set_user_model_policy`, `get_user_model_preference`, `query_user_model_preference`, `set_user_model_preference`, `get_llm_config`, `query_llm_config_snapshot`, `upsert_llm_provider`, `delete_llm_provider`, `set_active_llm`, `test_llm_connection`, `list_llm_models`, `start_nearai_login`, `complete_nearai_wallet_login`, `start_codex_login`, `llm_provider_upsert_activity_id` |
 | `run-artifact` | Run and thread artifact reads — already its own file, the one seam plan #5985 has taken so far | Anything not artifact-shaped | `handlers/run_artifact.rs::RunArtifactPath`, `handlers/run_artifact.rs::ThreadArtifactPath`, `handlers/run_artifact.rs::AdminThreadScrapeListQuery`, `handlers/run_artifact.rs::AdminThreadScrapeThreadPath`, `handlers/run_artifact.rs::AdminThreadScrapeRunPath`, `handlers/run_artifact.rs::query_single`, `handlers/run_artifact.rs::get_run_artifact`, `handlers/run_artifact.rs::get_thread_artifact`, `handlers/run_artifact.rs::admin_list_thread_scrape_threads`, `handlers/run_artifact.rs::admin_get_thread_scrape_artifact`, `handlers/run_artifact.rs::admin_get_thread_scrape_run_artifact` |
@@ -197,8 +199,11 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.get_thread_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
-| `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
-| `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
+| `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** (compatibility adapter) | `ProjectionOnly` |
+| `webui.v2.session_websocket_ticket` | POST | `/api/webchat/v2/session/websocket-ticket` | — | `NoEffect` (transport-auth mint) |
+| `webui.v2.session_websocket` | GET | `/api/webchat/v2/session/websocket` | **WebSocket** (ticket-authenticated, read-only, multiplexing) | `ProjectionOnly` |
+| `webui.v2.run_completion_intent` / `run_completion_acknowledge` / `run_completion_thread_read` | POST | `/api/webchat/v2/run-completions/{intent,acknowledge,thread-read}` | — | `ProductSurface` |
+| `webui.v2.run_completions_unread` | GET | `/api/webchat/v2/run-completions/unread` | — | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
 | `webui.v2.list/run/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductSurface` |
 | `webui.v2.suggestions.list/generate/start/dismiss` | GET/POST/DELETE | `/api/webchat/v2/suggestions…` | — | `ProductSurface` |
@@ -258,17 +263,32 @@ last-admin protection); `create_user` returns the one-time API bearer exactly
 once in `api_token`. `webui.v2.settings.tools` is a normal authenticated-caller
 route (tenant/user-scoped tool-approval settings), not an operator route.
 
-### Streaming model (SSE + WebSocket)
+### Streaming model (compatibility SSE + session WebSocket)
 
-- `stream_events` (SSE) and `stream_events_ws` (WebSocket) render each
-  `ProductOutboundEnvelope` into the redacted `WebChatV2EventFrame` schema
-  (never raw adapter routing/delivery metadata) with the projection cursor as
-  the SSE `id`; the browser resumes via `Last-Event-ID` (preferred over
-  `?after_cursor=`).
+- `stream_events` (the compatibility per-thread SSE) and `session_websocket`
+  (the ticket-authenticated, read-only, multiplexing session socket) share
+  **one** `ProductStreamDriver` and **one** browser codec
+  (`src/webui_v2/session_events/`): each typed `ProductStreamEventEnvelope`
+  is rendered into the redacted `WebChatV2EventFrame` schema (never raw
+  adapter routing/delivery metadata) with the projection cursor as the SSE
+  `id` / session-frame `cursor`. SSE resumes via `Last-Event-ID` (preferred
+  over `?after_cursor=`); every session-socket subscription resumes from its
+  own `after_cursor` — there is no session-wide cursor, and the `rc:`
+  run-completion cursor namespace can never resume a thread selector.
+- The session socket is an event transport, not a command bus: its client
+  vocabulary is `subscribe` / `unsubscribe` / `ping` only, it never dispatches
+  `ProductSurface::invoke` or an operation id, and every product mutation
+  (including the run-completion intent/acknowledge/thread-read operations)
+  stays on authenticated HTTP. Upgrades authenticate with a single-use,
+  15-second ticket minted over bearer HTTP (`session_websocket_ticket`) and
+  bound to the exact caller; the long-lived bearer never appears in a
+  WebSocket URL, and same-origin is enforced before upgrade. Inbound frames
+  are bounded at 8 KiB at both the transport (`max_message_size`) and the
+  protocol parser; at most 16 logical subscriptions per socket.
 - Both transports share **one** `SseCapacity` budget keyed by `(tenant, user)`
   (default 3 concurrent; override via `WebUiV2State::with_sse_concurrency_limit`)
-  — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
-  `429` with `retryable: true`.
+  — a caller cannot bypass the cap by mixing SSE and the session socket.
+  Exhaustion returns `429` with `retryable: true`.
 - The SPA consumes SSE through `event-source-plus`, which owns event framing,
   `Last-Event-ID`, fetch, and cancellation over `fetch`/`ReadableStream`.
   IronClaw owns one reconnect coordinator across transport failures, stream
@@ -327,8 +347,9 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   subscription/drain await is `timeout`-bounded, so a back-pressuring client or
   a stalled facade cannot pin a slot past the budget. Slots are RAII
   (`SseSlot`), released on disconnect / expiry / error. Regressions locked by
-  `stream_events_ws_shares_capacity_with_sse_streams` and
-  `stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime`.
+  `session_websocket_shares_capacity_with_sse_streams`,
+  `session_websocket_releases_slot_on_peer_close`, and
+  `stream_events_releases_slot_when_service_drain_stalls_past_max_lifetime`.
 - `capability_activity` / `capability_display_preview` frames carry only
   bounded, secret-redacted input/output *summaries* (host paths rejected, URLs
   stripped, byte-bounded) — never raw args/results. Full output stays behind the

@@ -82,6 +82,11 @@ registerPack("uk", {
   "notifications.approval.title": "Потрібне підтвердження",
   "notifications.approval.detail": "Потребує вашого підтвердження",
   "notifications.approval.untitled": "Гілка без назви",
+  // Run completions
+  "runCompletions.toastOne": "Запуск агента завершено. Відкрийте гілку, щоб побачити відповідь.",
+  "runCompletions.toastMany": "У одній гілці завершено {count} запусків агента.",
+  "runCompletions.listItemOne": "Запуск агента завершено — відповідь готова",
+  "runCompletions.listItemMany": "Завершено {count} запусків — відповіді готові",
 
   // Status
   "status.online": "онлайн",

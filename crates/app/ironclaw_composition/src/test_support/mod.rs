@@ -173,7 +173,9 @@ pub use outbound_delivery::{
 #[cfg(feature = "test-support")]
 pub use project_create::PROJECT_CREATE_CAPABILITY_ID;
 #[cfg(feature = "test-support")]
-pub use projection::build_product_event_stream_for_test;
+pub use projection::{
+    build_product_event_stream_for_test, build_product_event_stream_with_thread_service_for_test,
+};
 #[cfg(feature = "test-support")]
 pub use refreshing_capability_port::{
     ExtensionManagementTestHandle, RefreshingCapabilityPortTestParts,

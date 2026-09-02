@@ -67,6 +67,29 @@ pub struct ChannelNotification {
     pub notice_discriminator: Option<String>,
 }
 
+impl ChannelNotification {
+    fn shape(&self) -> NotificationDeliveryShape<'_> {
+        NotificationDeliveryShape {
+            event_kind: self.event_kind,
+            intent: self.intent,
+            require_direct_message_target: self.require_direct_message_target,
+            notice_discriminator: self.notice_discriminator.as_deref(),
+        }
+    }
+}
+
+/// The policy vocabulary one coordinated notification send records, minus
+/// its content: what the outbound pipeline needs to derive the durable
+/// delivery identity and apply target rules. Text notifications and the
+/// typed run-completion push share it through
+/// [`deliver_notification_parts`].
+pub(crate) struct NotificationDeliveryShape<'a> {
+    pub event_kind: RunNotificationEventKind,
+    pub intent: DeliveryIntent,
+    pub require_direct_message_target: bool,
+    pub notice_discriminator: Option<&'a str>,
+}
+
 /// One resolved notification target: the vendor binding ref plus the
 /// extension whose channel carries the delivery — read from the catalog
 /// entry, never guessed.
@@ -140,56 +163,14 @@ pub(super) async fn notify_with_outcome(
     notification: &ChannelNotification,
     target: &NotificationChannelTarget,
 ) -> Result<NotificationDeliveryOutcome, NotificationDeliveryFailure> {
-    let projection_access_policy = AllowNoProjectionAccess;
-    let outbound_policy = OutboundPolicyService::new(
-        services.outbound_store.as_ref(),
-        &projection_access_policy,
-        context.reply_target_authority,
-    );
-    let projection_id = prompts::run_notification_projection_id(
-        context.run_id,
-        notification.event_kind,
-        notification.notice_discriminator.as_deref(),
-    );
-    let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
-        NotificationDeliveryFailure::Other(format!("invalid_projection_ref: {reason}"))
-    })?;
-    let delivery = PrepareCommunicationDeliveryRequest {
-        resolution_request: CommunicationDeliveryResolutionRequest {
-            scope: context.scope.clone(),
-            actor: context.actor.clone(),
-            modality: CommunicationModality::Text,
-            intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
-                event_kind: notification.event_kind,
-                origin: RunNotificationOrigin::RunScopedTarget {
-                    target: target.target.clone(),
-                },
-            }),
-        },
-        turn_run_id: Some(context.run_id),
-        projection_ref,
-        attempted_at: Utc::now(),
-    };
-
-    let outcome = services
-        .coordinator
-        .deliver(
-            &outbound_policy,
-            context.target_resolver,
-            services.project_filesystem.as_ref(),
-            CoordinatedDeliveryRequest {
-                intent: notification.intent,
-                delivery,
-                parts: vec![OutboundPart::Text(notification.text.clone())],
-                attachments: Vec::new(),
-                thread_anchor: None,
-                require_direct_message_target: notification.require_direct_message_target,
-                extension_id: &target.extension_id,
-                thread_scope: context.thread_scope,
-            },
-        )
-        .await
-        .map_err(classify_notification_delivery_error)?;
+    let outcome = deliver_notification_parts(
+        services,
+        context,
+        &notification.shape(),
+        vec![OutboundPart::Text(notification.text.clone())],
+        target,
+    )
+    .await?;
     match &outcome {
         CoordinatedDeliveryOutcome::NoDelivery => Ok(NotificationDeliveryOutcome::NoDelivery),
         CoordinatedDeliveryOutcome::Rejected { .. } => Ok(NotificationDeliveryOutcome::Rejected),
@@ -206,6 +187,72 @@ pub(super) async fn notify_with_outcome(
             NotificationDeliveryOutcome::Unconfirmed(delivered_messages_from_outcome(&outcome)),
         ),
     }
+}
+
+/// The content-agnostic core every notification send crosses: outbound
+/// policy assembly over the caller's reply-target authority, the durable
+/// projection identity, the prepared communication request, and the
+/// coordinated send. Text notifications ([`notify`]) and the typed
+/// run-completion push both go through here so policy, attempt metadata,
+/// and request shape cannot diverge; callers own the typed `parts` and how
+/// they read the outcome.
+pub(crate) async fn deliver_notification_parts(
+    services: &RunDeliveryServices,
+    context: &ChannelNotificationContext<'_>,
+    shape: &NotificationDeliveryShape<'_>,
+    parts: Vec<OutboundPart>,
+    target: &NotificationChannelTarget,
+) -> Result<CoordinatedDeliveryOutcome, NotificationDeliveryFailure> {
+    let projection_access_policy = AllowNoProjectionAccess;
+    let outbound_policy = OutboundPolicyService::new(
+        services.outbound_store.as_ref(),
+        &projection_access_policy,
+        context.reply_target_authority,
+    );
+    let projection_id = prompts::run_notification_projection_id(
+        context.run_id,
+        shape.event_kind,
+        shape.notice_discriminator,
+    );
+    let projection_ref = ProjectionUpdateRef::new(projection_id).map_err(|reason| {
+        NotificationDeliveryFailure::Other(format!("invalid_projection_ref: {reason}"))
+    })?;
+    let delivery = PrepareCommunicationDeliveryRequest {
+        resolution_request: CommunicationDeliveryResolutionRequest {
+            scope: context.scope.clone(),
+            actor: context.actor.clone(),
+            modality: CommunicationModality::Text,
+            intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                event_kind: shape.event_kind,
+                origin: RunNotificationOrigin::RunScopedTarget {
+                    target: target.target.clone(),
+                },
+            }),
+        },
+        turn_run_id: Some(context.run_id),
+        projection_ref,
+        attempted_at: Utc::now(),
+    };
+
+    services
+        .coordinator
+        .deliver(
+            &outbound_policy,
+            context.target_resolver,
+            services.project_filesystem.as_ref(),
+            CoordinatedDeliveryRequest {
+                intent: shape.intent,
+                delivery,
+                parts,
+                attachments: Vec::new(),
+                thread_anchor: None,
+                require_direct_message_target: shape.require_direct_message_target,
+                extension_id: &target.extension_id,
+                thread_scope: context.thread_scope,
+            },
+        )
+        .await
+        .map_err(classify_notification_delivery_error)
 }
 
 /// `notify_user(user, content)`: resolve the user's configured notification

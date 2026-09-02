@@ -82,6 +82,11 @@ registerPack("ar", {
   "notifications.approval.title": "الموافقة مطلوبة",
   "notifications.approval.detail": "يحتاج إلى موافقتك",
   "notifications.approval.untitled": "محادثة بدون عنوان",
+  // Run completions
+  "runCompletions.toastOne": "اكتمل تشغيل الوكيل. افتح المحادثة لرؤية الرد.",
+  "runCompletions.toastMany": "اكتمل {count} من عمليات تشغيل الوكيل في محادثة واحدة.",
+  "runCompletions.listItemOne": "اكتمل تشغيل الوكيل — الرد جاهز",
+  "runCompletions.listItemMany": "اكتمل {count} من عمليات التشغيل — الردود جاهزة",
 
   // Status
   "status.online": "متصل",

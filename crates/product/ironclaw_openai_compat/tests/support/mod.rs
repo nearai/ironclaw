@@ -383,7 +383,12 @@ impl ProductSurface for FakeProductSurface {
         ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
         ProductSurfaceError,
     > {
-        let thread_id = request.stream_id.ok_or_else(invalid_request)?;
+        let ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id } =
+            request.selector
+        else {
+            // This double backs thread-stream handler tests only.
+            return Err(invalid_request());
+        };
         let after_cursor = request
             .after_cursor
             .map(ironclaw_product_contracts::outbound::ProjectionCursor::new)
@@ -401,9 +406,15 @@ impl ProductSurface for FakeProductSurface {
         let events = response
             .events
             .into_iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProductSurfaceError::internal_from)?;
+            .map(
+                |envelope| ironclaw_product_contracts::surface::ProductStreamEventEnvelope {
+                    cursor: envelope.projection_cursor,
+                    event: ironclaw_product_contracts::surface::ProductStreamEvent::Thread(
+                        envelope.payload,
+                    ),
+                },
+            )
+            .collect();
         Ok(
             ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
                 events,

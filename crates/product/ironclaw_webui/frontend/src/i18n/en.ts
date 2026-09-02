@@ -82,6 +82,11 @@ registerPack("en", {
   "notifications.generic.title": "Notification",
   "notifications.generic.body": "There is an update that may need your attention.",
   "notifications.generic.detail": "Open for details",
+  // Run completions
+  "runCompletions.toastOne": "An agent run finished. Open the thread to see the reply.",
+  "runCompletions.toastMany": "{count} agent runs finished in one thread.",
+  "runCompletions.listItemOne": "Agent run finished — reply ready",
+  "runCompletions.listItemMany": "{count} agent runs finished — replies ready",
 
   // Status
   "status.online": "online",

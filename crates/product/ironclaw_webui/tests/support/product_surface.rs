@@ -205,13 +205,14 @@ impl ProductSurface for ProgrammableProductSurface {
         ironclaw_product_contracts::surface::ProductSurfaceStreamResponse,
         ProductSurfaceError,
     > {
+        let ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id } =
+            request.selector
+        else {
+            // This double backs thread-stream handler tests only.
+            return Err(ProductSurfaceError::not_found());
+        };
         let stream_request = RebornStreamEventsRequest {
-            thread_id: request.stream_id.ok_or_else(|| {
-                ProductSurfaceError::validation(
-                    "stream_id",
-                    ironclaw_product_contracts::surface::ProductSurfaceValidationCode::MissingField,
-                )
-            })?,
+            thread_id,
             after_cursor: request
                 .after_cursor
                 .map(ironclaw_product_contracts::outbound::ProjectionCursor::new)
@@ -236,9 +237,15 @@ impl ProductSurface for ProgrammableProductSurface {
         let events = response
             .events
             .into_iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProductSurfaceError::internal_from)?;
+            .map(
+                |envelope| ironclaw_product_contracts::surface::ProductStreamEventEnvelope {
+                    cursor: envelope.projection_cursor,
+                    event: ironclaw_product_contracts::surface::ProductStreamEvent::Thread(
+                        envelope.payload,
+                    ),
+                },
+            )
+            .collect();
         Ok(
             ironclaw_product_contracts::surface::ProductSurfaceStreamResponse {
                 events,

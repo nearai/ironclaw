@@ -35,6 +35,7 @@ pub use store::{
     FilesystemWebAppSubscriptionStore, PushSubscriptionUpsertOutcome, WebAppSubscriptionStore,
 };
 pub use subscription::{
-    MAX_SUBSCRIPTIONS_PER_USER, PushEndpoint, PushSubscriptionKeys, PushSubscriptionRecord,
+    MAX_BROWSER_INSTANCE_ID_BYTES, MAX_SUBSCRIPTIONS_PER_USER, PushEndpoint, PushSubscriptionKeys,
+    PushSubscriptionRecord, RegistrationDocument,
 };
 pub use vapid::{GeneratedVapidKeyMaterial, generate_vapid_key_material, validate_vapid_subject};

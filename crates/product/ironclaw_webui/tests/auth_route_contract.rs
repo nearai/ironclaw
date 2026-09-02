@@ -81,6 +81,28 @@ fn compose(authenticator: Arc<dyn WebuiAuthenticator>) -> (axum::Router, Arc<Stu
     (app, services)
 }
 
+fn session_app_with_ticket_store() -> (
+    axum::Router,
+    Arc<StubServices>,
+    Arc<SignedTokenSessionStore>,
+) {
+    let store = signed_store_for(&TenantId::new(TENANT).expect("tenant"));
+    let authenticator = Arc::new(SessionAuthenticator::new(store.clone()));
+    let services = Arc::new(StubServices::default());
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        authenticator,
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+    .with_session_socket_ticket_store(Arc::new(
+        ironclaw_webui::InMemorySessionSocketTicketStore::new(),
+    ));
+    let app = webui_v2_app(services.clone(), config).expect("webui v2 app");
+    (app, services, store)
+}
+
 fn env_bearer_app() -> (axum::Router, Arc<StubServices>) {
     let authenticator = Arc::new(
         EnvBearerAuthenticator::new(
@@ -618,15 +640,14 @@ async fn query_token_rejected_on_mutation_route() {
     assert_eq!(callers_len(&services), 0, "service must not be reached");
 }
 
-/// `GET /api/webchat/v2/threads/{id}/ws` (the WebSocket upgrade route)
-/// with an optional `?token=` and no `Authorization` header. A matching
-/// `Origin` is supplied so the same-origin middleware (which runs before
-/// auth) passes and the verdict isolates to the auth layer. `t1` matches
-/// the SSE helper's thread id.
+/// `GET /api/webchat/v2/session/websocket` (the session WebSocket upgrade
+/// route) with an optional `?token=` and no `Authorization` header. A
+/// matching `Origin` is supplied so the same-origin middleware (which runs
+/// before auth) passes and the verdict isolates to the auth layer.
 fn ws_events_request(token: Option<&str>) -> Request<Body> {
     let uri = match token {
-        Some(token) => format!("/api/webchat/v2/threads/t1/ws?token={token}"),
-        None => "/api/webchat/v2/threads/t1/ws".to_string(),
+        Some(token) => format!("/api/webchat/v2/session/websocket?token={token}"),
+        None => "/api/webchat/v2/session/websocket".to_string(),
     };
     with_peer(
         Request::builder()
@@ -646,10 +667,11 @@ fn ws_events_request(token: Option<&str>) -> Request<Body> {
 async fn query_token_rejected_on_websocket_route() {
     // v1 allowed `?token=` on three GET routes including the WS stream
     // (`/api/chat/ws`); v2 drops it everywhere except the SSE event
-    // stream. This is a WS-specific beta-break, so lock it directly
-    // rather than inferring it from the POST-mutation rejection: a VALID
-    // session token on the query string of the WS upgrade, with no
-    // `Authorization` header, must NOT authenticate.
+    // stream. The session WebSocket authenticates ONLY with a single-use
+    // socket ticket, so lock it directly rather than inferring it from
+    // the POST-mutation rejection: a VALID session bearer on the query
+    // string of the WS upgrade, with no `Authorization` header, must NOT
+    // authenticate — a logged/leaked bearer must never open a socket.
     let (app, _services, store) = session_app();
     let bearer = store
         .create_session(
@@ -672,6 +694,164 @@ async fn query_token_rejected_on_websocket_route() {
         StatusCode::UNAUTHORIZED,
         "`?token=` must not authenticate the WebSocket route (v1 WS query-token exception dropped)",
     );
+}
+
+// ─── single-use session-socket tickets ────────────────────────────────
+
+async fn mint_socket_ticket(app: &axum::Router, bearer: &str) -> String {
+    let response = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/session/websocket-ticket")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "an authenticated bearer must mint a socket ticket",
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(body["socket_path"], "/api/webchat/v2/session/websocket");
+    assert!(body["expires_in_ms"].as_u64().expect("ttl") <= 15_000);
+    body["ticket"].as_str().expect("ticket").to_string()
+}
+
+fn session_socket_upgrade_request(ticket: Option<&str>) -> Request<Body> {
+    let uri = match ticket {
+        Some(ticket) => format!("/api/webchat/v2/session/websocket?ticket={ticket}"),
+        None => "/api/webchat/v2/session/websocket".to_string(),
+    };
+    with_peer(
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::HOST, "localhost:1234")
+            .header(header::ORIGIN, "http://localhost:1234")
+            .body(Body::empty())
+            .expect("request"),
+    )
+}
+
+/// The complete ticket lifecycle through the composed gateway: a bearer
+/// mints a ticket over HTTP, the upgrade authenticates with exactly that
+/// ticket exactly once, and a replayed nonce fails closed. The bearer never
+/// authenticates the upgrade and the ticket never authenticates any other
+/// route.
+#[tokio::test]
+async fn session_socket_ticket_authenticates_upgrade_exactly_once() {
+    let (app, _services, store) = session_app_with_ticket_store();
+    let bearer = store
+        .create_session(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new("session-user").expect("user"),
+            ChronoDuration::hours(1),
+            false,
+        )
+        .await
+        .expect("create_session")
+        .expose_secret()
+        .to_string();
+
+    let ticket = mint_socket_ticket(&app, &bearer).await;
+
+    // First presentation authenticates: the middleware consumed the ticket
+    // and injected the bound caller, so the request reaches the handler
+    // (which then rejects the non-upgrade request shape — anything but 401
+    // proves authentication succeeded).
+    let response = app
+        .clone()
+        .oneshot(session_socket_upgrade_request(Some(&ticket)))
+        .await
+        .expect("oneshot");
+    assert_ne!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a fresh single-use ticket must authenticate the upgrade",
+    );
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
+
+    // Replay fails closed.
+    let replay = app
+        .clone()
+        .oneshot(session_socket_upgrade_request(Some(&ticket)))
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        replay.status(),
+        StatusCode::UNAUTHORIZED,
+        "a consumed ticket must never authenticate again",
+    );
+
+    // A ticket is not a bearer: it must not authenticate an ordinary route.
+    let cross_route = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {ticket}"))
+                .body(Body::from(r#"{"client_action_id":"act-1"}"#))
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(cross_route.status(), StatusCode::UNAUTHORIZED);
+
+    // And a missing ticket fails closed on the upgrade.
+    let missing = app
+        .oneshot(session_socket_upgrade_request(None))
+        .await
+        .expect("oneshot");
+    assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Deployments without ticket storage fail closed: the mint route answers
+/// 503 and the upgrade 401, so the capability is unusable rather than
+/// insecurely approximated.
+#[tokio::test]
+async fn missing_ticket_store_disables_the_session_socket() {
+    let (app, _services, store) = session_app();
+    let bearer = store
+        .create_session(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new("session-user").expect("user"),
+            ChronoDuration::hours(1),
+            false,
+        )
+        .await
+        .expect("create_session")
+        .expose_secret()
+        .to_string();
+
+    let mint = app
+        .clone()
+        .oneshot(with_peer(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/session/websocket-ticket")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .expect("request"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(mint.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let upgrade = app
+        .oneshot(session_socket_upgrade_request(Some("any-nonce")))
+        .await
+        .expect("oneshot");
+    assert_eq!(upgrade.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ─── cookie session is not a v2 credential ────────────────────────────

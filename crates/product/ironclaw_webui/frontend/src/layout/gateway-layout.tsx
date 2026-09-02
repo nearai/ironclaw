@@ -3,6 +3,7 @@ import { Navigate, Outlet, useLocation, useNavigate } from "react-router";
 import { useInterfaceTheme } from "../design-system/theme";
 import { useGatewayStatus } from "../hooks/useGatewayStatus";
 import { useNotifications } from "../hooks/useNotifications";
+import { useRunCompletions } from "../hooks/useRunCompletions";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders";
 import { shouldRouteToOnboarding } from "../lib/onboarding-gate";
 import {
@@ -57,6 +58,55 @@ export function GatewayLayout({
     profile,
     enabled: Boolean(token),
   });
+  // Run-completion notices ride the durable owner-scoped stream and merge
+  // into the same bell: server-owned read state, so items disappear on the
+  // clear event rather than on local dismissal.
+  const runCompletions = useRunCompletions({
+    enabled: Boolean(token),
+    activeThreadId: activeRouteThreadId,
+  });
+  const mergedNotificationsState = React.useMemo(() => {
+    // Partition with the durable inbox: the inbox owns the list row for
+    // scheduled-trigger runs (its rows carry read/archive controls and a
+    // reply-render acknowledgement flow), so a run-completion notice whose
+    // run already has an inbox row is presentation-deduped here and only
+    // drives the live surfaces (toast/OS/push/suppression). Foreground runs
+    // never get inbox rows, so our rows are their only bell presence.
+    const inboxRunIds = new Set(
+      notificationsState.messages
+        .map((message) => message.turnRunId)
+        .filter(Boolean),
+    );
+    const completionRows = runCompletions.messages.filter(
+      (message) => !inboxRunIds.has(message.turnRunId),
+    );
+    const completionRowIds = new Set(completionRows.map((message) => message.id));
+    return {
+      ...notificationsState,
+      messages: [...completionRows, ...notificationsState.messages],
+      unreadIds: new Set([...completionRowIds, ...notificationsState.unreadIds]),
+      unreadCount: notificationsState.unreadCount + completionRows.length,
+      hasUnread: notificationsState.hasUnread || completionRows.length > 0,
+      dismissMessage: (messageId) => {
+        // Run-completion read state is server-owned (§9.3): navigation to
+        // the thread clears it; local dismissal only affects inbox rows.
+        if (!completionRowIds.has(messageId)) {
+          notificationsState.dismissMessage(messageId);
+        }
+      },
+      prepareMessageOpen: (message) => {
+        // Our rows settle through thread-read evidence after navigation —
+        // the click needs no local bookkeeping. Inbox rows keep their own
+        // open flow (reply-render acknowledgement for run_completed rows).
+        if (message?.id && completionRowIds.has(message.id)) return;
+        notificationsState.prepareMessageOpen?.(message);
+      },
+      archiveMessage: (messageId) => {
+        if (completionRowIds.has(messageId)) return;
+        notificationsState.archiveMessage?.(messageId);
+      },
+    };
+  }, [notificationsState, runCompletions.messages]);
   const sidebar = useSidebar({
     onNewChat: () => threadsState.setActiveThreadId(null),
   });
@@ -152,7 +202,7 @@ export function GatewayLayout({
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <PageHeader
           threadsState={routeThreadsState}
-          notificationsState={notificationsState}
+          notificationsState={mergedNotificationsState}
           status={headerStatus}
           onToggleSidebar={sidebar.toggle}
           sidebarOpen={sidebar.currentOpen}

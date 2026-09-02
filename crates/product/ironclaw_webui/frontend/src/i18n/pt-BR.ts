@@ -82,6 +82,11 @@ registerPack("pt-BR", {
   "notifications.approval.title": "Aprovação necessária",
   "notifications.approval.detail": "Precisa da sua aprovação",
   "notifications.approval.untitled": "Conversa sem título",
+  // Run completions
+  "runCompletions.toastOne": "Uma execução do agente terminou. Abra a conversa para ver a resposta.",
+  "runCompletions.toastMany": "{count} execuções do agente terminaram em uma conversa.",
+  "runCompletions.listItemOne": "Execução do agente concluída — resposta pronta",
+  "runCompletions.listItemMany": "{count} execuções concluídas — respostas prontas",
 
   // Status
   "status.online": "online",
