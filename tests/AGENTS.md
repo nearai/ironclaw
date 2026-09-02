@@ -343,7 +343,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A canonical 10-tool-call agent turn's database write volume is measured and reported (for tracking, not gated) on both libSQL and Postgres, and custom-actor group threads are rejected from canonical durable milestones | `db_write_canonical.rs` |
 | A downloaded run artifact carries per-iteration model-call timing evidence for a completed run, and still carries durable per-message timestamps (with an explicit `run_not_resident` reason) when the process-local timing buffer was evicted or the process restarted | `run_artifact_timings.rs` |
 
-One of the 62 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 63 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |

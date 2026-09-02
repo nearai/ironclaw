@@ -119,7 +119,7 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
     assert!(
         detail
             .as_deref()
-            .is_some_and(|text| text.contains("user declined its approval request")),
+            .is_some_and(|text| text.contains("pending gate was denied or cancelled")),
         "gate-declined observation must tell the model why the capability did not run"
     );
     let recovery = observation

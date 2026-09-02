@@ -71,6 +71,10 @@ async fn external_tool_gate_denied_resume_does_not_redispatch_parked_call() {
         .await
         .expect("denial is persisted as a model-visible tool outcome");
     harness
+        .assert_model_request_contains("pending gate was denied or cancelled")
+        .await
+        .expect("the external-tool diagnostic is gate-neutral");
+    harness
         .assert_tool_invocation_count("builtin.time", 1)
         .await
         .expect("an unrelated capability still dispatches after denial");

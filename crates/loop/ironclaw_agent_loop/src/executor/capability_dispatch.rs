@@ -136,7 +136,7 @@ impl CapabilityStage {
                 error_kind: FailureKind::GateDeclined,
                 safe_summary: "The user declined the capability request.".to_string(),
                 detail: CapabilityFailureDetail::Diagnostic {
-                    text: "The capability did not run because the user declined its approval request. Revise the approach or ask the user before trying again.".to_string(),
+                    text: "The capability did not run because its pending gate was denied or cancelled. Revise the approach or ask the user before trying again.".to_string(),
                 },
             };
             state
