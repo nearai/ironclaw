@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::reply::{
-    ReplyAudience, ReplyOutcomeReason, ReplyPhase, ReplyReconcilePoint, ReplySinkOutcome,
+    ReplyAudience, ReplyOutcome, ReplyOutcomeReason, ReplyPhase, ReplyReconcilePoint,
+    ReplySinkOutcome,
 };
 use ironclaw_extension_contracts::test_support::fakes::RecordingReplySink;
 use ironclaw_extension_contracts::tool_adapter::{
@@ -73,10 +74,15 @@ struct SinkResolver {
     sink: Arc<RecordingReplySink>,
     transport: Mutex<ReplyTransport>,
     generation: Mutex<u64>,
+    /// `false` = the channel is no longer active (deactivated, uninstalled).
+    available: std::sync::atomic::AtomicBool,
 }
 
 impl ChannelDeliveryResolver for SinkResolver {
     fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
+        if !self.available.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         Some(ResolvedChannelDelivery {
             extension_id: ExtensionId::new(extension_id).ok()?,
             installation_id: AdapterInstallationId::new("inst-1").ok()?,
@@ -114,6 +120,7 @@ impl DeliveryReplyContextSource for FixedReplyContext {
 /// service; a sink's `StoppedByUser` lands here as a recorded cancel.
 struct FakeTurnKernel {
     status: Mutex<TurnStatus>,
+    failure: Mutex<Option<ironclaw_host_api::turn::SanitizedFailure>>,
     stops: Mutex<Vec<TurnRunId>>,
 }
 
@@ -121,6 +128,7 @@ impl Default for FakeTurnKernel {
     fn default() -> Self {
         Self {
             status: Mutex::new(TurnStatus::Running),
+            failure: Mutex::new(None),
             stops: Mutex::new(Vec::new()),
         }
     }
@@ -129,6 +137,12 @@ impl Default for FakeTurnKernel {
 impl FakeTurnKernel {
     fn set_status(&self, status: TurnStatus) {
         *self.status.lock().unwrap() = status;
+    }
+
+    /// The run failed with a kernel-recorded (model-visible) failure record.
+    fn fail_with(&self, failure: ironclaw_host_api::turn::SanitizedFailure) {
+        *self.failure.lock().unwrap() = Some(failure);
+        *self.status.lock().unwrap() = TurnStatus::Failed;
     }
 
     fn stops(&self) -> Vec<TurnRunId> {
@@ -200,7 +214,7 @@ impl TurnCoordinator for FakeTurnKernel {
             gate_ref: None,
             blocked_activity_id: None,
             credential_requirements: Vec::new(),
-            failure: None,
+            failure: self.failure.lock().unwrap().clone(),
             event_cursor: EventCursor::default(),
             product_context: None,
             resume_disposition: None,
@@ -279,6 +293,7 @@ fn harness_over_files(
         sink: Arc::clone(&sink),
         transport: Mutex::new(transport),
         generation: Mutex::new(3),
+        available: std::sync::atomic::AtomicBool::new(true),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&store),
@@ -450,6 +465,94 @@ where
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+/// The kernel's failure record carries a model-visible `detail` (paths,
+/// provider error text). A channel audience only ever sees the neutral
+/// per-category copy — never the detail.
+#[tokio::test]
+async fn a_failed_runs_terminal_reply_carries_neutral_copy_never_the_failure_detail() {
+    let harness = harness("failure-copy", ReplyTransport::Stream, None);
+    harness
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+    harness.text("partial");
+    harness.kernel.fail_with(
+        ironclaw_host_api::turn::SanitizedFailure::new("model_error")
+            .unwrap()
+            .with_detail("HTTP 502 from https://provider.internal/v1 (/tmp/prompt-4711.json)"),
+    );
+    harness
+        .coordinator
+        .reply_run_terminal(&harness.scope, harness.run_id)
+        .await;
+    harness.wait_settled().await;
+
+    let terminal = harness
+        .sink
+        .requests()
+        .into_iter()
+        .find(|request| request.point == ReplyReconcilePoint::Terminal)
+        .expect("a terminal reconcile");
+    let Some(ReplyOutcome::Failed { summary }) = terminal.revision.document.outcome else {
+        panic!("a failed run publishes a failed outcome");
+    };
+    assert!(
+        !summary.as_str().contains("provider.internal") && !summary.as_str().contains("/tmp/"),
+        "the model-visible detail leaked into the user-facing reply: {summary}"
+    );
+    assert_eq!(
+        summary.as_str(),
+        "The run failed before producing a reply.",
+        "the terminal copy is the same neutral per-category copy the WebUI shows"
+    );
+}
+
+/// A channel that disappears mid-publication (deactivated, uninstalled)
+/// must not leave the row `Active` forever: once the document is terminal,
+/// the unresolved-channel wait counts toward the terminal attempt budget
+/// and the publication settles `Failed(Rejected)`.
+#[tokio::test]
+async fn a_channel_that_vanishes_mid_publication_settles_failed_instead_of_waiting_forever() {
+    let harness = harness("vanished", ReplyTransport::Stream, None);
+    harness
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+    harness.text("hello");
+    wait_until(|| async {
+        harness
+            .publications()
+            .await
+            .first()
+            .filter(|record| record.publication.published_revision >= 1)
+            .cloned()
+    })
+    .await;
+    let calls_before = harness.sink.requests().len();
+    harness
+        .resolver
+        .available
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    harness.complete_with("done").await;
+
+    let settled = harness.wait_settled().await;
+    assert_eq!(
+        settled.publication.status,
+        ironclaw_outbound::ReplyPublicationStatus::Settled(
+            ironclaw_outbound::ReplyPublicationSettlement::Failed(
+                ironclaw_outbound::DeliveryFailureKind::Rejected
+            )
+        )
+    );
+    assert_eq!(
+        harness.sink.requests().len(),
+        calls_before,
+        "nothing reaches a sink the channel no longer binds"
+    );
 }
 
 #[tokio::test]
@@ -875,6 +978,7 @@ async fn a_publisher_on_another_node_resumes_an_open_publication_from_the_store(
     let resolver = Arc::new(SinkResolver {
         sink: Arc::clone(&second_sink),
         transport: Mutex::new(ReplyTransport::Stream),
+        available: std::sync::atomic::AtomicBool::new(true),
         generation: Mutex::new(4),
     });
     let coordinator = Arc::new(DeliveryCoordinator::new(

@@ -170,7 +170,34 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
         )
         .await;
         if let Err(Step::Later { delay }) = prep {
-            // Nothing was attempted and nothing needs a durable write.
+            // Nothing was attempted and nothing needs a durable write — but a
+            // channel that never comes back must not keep the row `Active`
+            // forever: once the document is terminal the wait counts toward
+            // the terminal attempt budget and then fails closed.
+            if terminal {
+                attempts = attempts.saturating_add(1);
+                if attempts >= publication.settings.terminal_attempt_budget {
+                    if let Ok(ReplyPublicationClaim::Acquired(claimed)) = coordinator
+                        .claim_reply_publication(
+                            run_key.scope.clone(),
+                            target.delivery_id,
+                            publication.publisher_id.clone(),
+                            publication.settings.lease_ttl,
+                        )
+                        .await
+                    {
+                        settle(
+                            &coordinator,
+                            &target,
+                            &run_key,
+                            claimed.publication.fence,
+                            ReplyPublicationSettlement::Failed(DeliveryFailureKind::Rejected),
+                        )
+                        .await;
+                    }
+                    return;
+                }
+            }
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
                 _ = target.wake.notified() => {}

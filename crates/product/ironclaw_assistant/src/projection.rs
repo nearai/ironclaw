@@ -1714,7 +1714,9 @@ fn run_failure_summary(run: &RunStatusProjection) -> Option<String> {
         .map(str::to_string)
 }
 
-fn runtime_failure_summary_for_category(category: &str) -> &'static str {
+/// The one user-facing copy for a failed run, by sanitized category. Shared
+/// by the WebUI run-status projection and the terminal reply document.
+pub(crate) fn runtime_failure_summary_for_category(category: &str) -> &'static str {
     // `category` comes from `RunStatusProjection.error_kind` (see
     // `run_failure_category`). The only sanitized value that resolves to a
     // dedicated message is the process fallback `unknown`; every other

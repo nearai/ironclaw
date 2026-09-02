@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_extension_contracts::reply::{
     REPLY_REASONING_SEGMENT_MAX_BYTES, ReplyActivityState, ReplyAttentionKind, ReplyAudience,
-    ReplyOutcome, ReplyPhase, ReplyReconcilePoint,
+    ReplyDisplayPreview, ReplyItemId, ReplyOutcome, ReplyPhase, ReplyReconcilePoint,
 };
 use ironclaw_host_api::ids::{
     AgentId, CapabilityId, ExtensionId, InvocationId, TenantId, ThreadId, UserId,
@@ -106,6 +106,59 @@ impl Fixture {
             .expect("the run is tracked")
             .document
     }
+}
+
+#[test]
+fn terminal_facts_applied_twice_leave_the_revision_unchanged() {
+    let fixture = fixture("terminal-twice");
+    fixture.observe(LoopHostMilestoneKind::ModelTextDelta {
+        safe_text: "final answer".to_string(),
+    });
+    let facts = TerminalReplyFacts {
+        actor: Some(fixture.actor.clone()),
+        status: TurnStatus::Completed,
+        nothing_to_report: false,
+        answer: Some("final answer".to_string()),
+        attachments: Vec::new(),
+        failure_summary: None,
+    };
+    let first =
+        fixture
+            .projection
+            .apply_terminal_facts(&fixture.scope, fixture.run_id, facts.clone());
+    assert!(first.document.is_terminal());
+
+    let second = fixture
+        .projection
+        .apply_terminal_facts(&fixture.scope, fixture.run_id, facts);
+    assert_eq!(
+        second.revision, first.revision,
+        "idempotent: no second terminal revision"
+    );
+    assert_eq!(second.document, first.document);
+}
+
+#[test]
+fn a_failed_model_calls_partial_text_is_discarded_when_the_call_is_retried() {
+    let fixture = fixture("model-failed");
+    fixture.observe(LoopHostMilestoneKind::ModelStarted {
+        requested_model_profile_id: None,
+    });
+    fixture.observe(LoopHostMilestoneKind::ModelTextDelta {
+        safe_text: "Wor".to_string(),
+    });
+    fixture.observe(LoopHostMilestoneKind::ModelFailed {
+        reason_kind: ironclaw_loop_contracts::AgentLoopHostErrorKind::Invalid,
+    });
+    // The loop retries the call: a fresh ModelStarted, then the cumulative
+    // text of the NEW call. The failed call's fragment is not finished text.
+    fixture.observe(LoopHostMilestoneKind::ModelStarted {
+        requested_model_profile_id: None,
+    });
+    fixture.observe(LoopHostMilestoneKind::ModelTextDelta {
+        safe_text: "World".to_string(),
+    });
+    assert_eq!(fixture.document().answer.text.as_str(), "World");
 }
 
 #[test]
@@ -548,8 +601,29 @@ fn shared_audience_disclosure_strips_reasoning_and_bearer_links() {
         "a private target sees the whole document"
     );
 
+    // An activity's input and output previews are owner-facing (a shell
+    // command, a fetched URL, a workspace path): a shared room keeps the
+    // row but not the previews.
+    let activity = ReplyItemId::new("act:1").unwrap();
+    document.activity_started(
+        activity.clone(),
+        ironclaw_extension_contracts::reply::ReplyDisplayText::new("shell").unwrap(),
+        Some(ReplyDisplayPreview::new("command: cat ~/.ssh/config").unwrap()),
+    );
+    document.activity_finished(
+        activity,
+        ReplyActivityState::Completed,
+        Some(ReplyDisplayPreview::new("Host github.com").unwrap()),
+        None,
+    );
+
     let shared = disclose_for_audience(&document, ReplyAudience::Shared);
     assert!(shared.reasoning.is_empty(), "no reasoning in a shared room");
+    assert_eq!(shared.activities.len(), 1, "the row itself stays");
+    assert!(
+        shared.activities[0].detail.is_none() && shared.activities[0].output_preview.is_none(),
+        "previews never land in a shared conversation"
+    );
     assert!(!shared.reasoning_open);
     assert!(
         shared.attention.as_ref().unwrap().action_url.is_none(),

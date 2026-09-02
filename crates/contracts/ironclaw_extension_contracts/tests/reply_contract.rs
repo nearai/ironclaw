@@ -284,6 +284,24 @@ fn the_first_terminal_outcome_wins_and_later_mutations_are_ignored() {
 }
 
 #[test]
+fn an_activity_finish_after_the_terminal_outcome_is_ignored() {
+    let mut document = ReplyDocument::default();
+    assert!(document.activity_started(item("act:1"), text("search"), None));
+    assert!(document.fail(text("The run was cancelled.")));
+    let applied_before = document.applied_changes;
+
+    assert!(
+        !document.activity_finished(item("act:1"), ReplyActivityState::Completed, None, None),
+        "first-terminal-wins covers activity finishes too"
+    );
+    assert_eq!(
+        document.applied_changes, applied_before,
+        "no post-terminal ordinal"
+    );
+    assert_eq!(document.activities[0].state, ReplyActivityState::Started);
+}
+
+#[test]
 fn the_canonical_finalized_answer_replaces_progressive_text_even_after_terminal() {
     let mut document = ReplyDocument::default();
     document.append_answer("draft that will be superseded");

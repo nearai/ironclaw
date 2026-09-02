@@ -715,7 +715,8 @@ impl ReplyDocument {
 
     /// Finish one activity row. A finish for a row this document never saw
     /// start (a producer that only observed the terminal milestone) still
-    /// lands as a row: dropping it would hide a failure.
+    /// lands as a row: dropping it would hide a failure. Ignored once
+    /// terminal, like every other mutation.
     pub fn activity_finished(
         &mut self,
         id: ReplyItemId,
@@ -723,6 +724,9 @@ impl ReplyDocument {
         output_preview: Option<ReplyDisplayPreview>,
         provenance: Option<ReplyActivityProvenance>,
     ) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
         let ordinal = self.next_ordinal();
         if let Some(existing) = self.activities.iter_mut().find(|row| row.id == id) {
             existing.state = state;

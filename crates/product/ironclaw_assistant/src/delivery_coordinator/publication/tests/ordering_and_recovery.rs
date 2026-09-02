@@ -523,6 +523,7 @@ fn the_journal_observer_identity_is_stable() {
     let coordinator = DeliveryCoordinator::new(
         store,
         Arc::new(SinkResolver {
+            available: std::sync::atomic::AtomicBool::new(true),
             sink: Arc::new(RecordingReplySink::new("id")),
             transport: Mutex::new(ReplyTransport::Stream),
             generation: Mutex::new(1),

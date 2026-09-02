@@ -20,6 +20,7 @@ use ironclaw_turns::{CancelRunRequest, GetRunStateRequest, TurnCoordinator, Turn
 
 use super::ReplyPublicationError;
 use crate::projection::reply::TerminalReplyFacts;
+use crate::projection::runtime_failure_summary_for_category;
 use crate::run_delivery::prompts;
 
 const LOG_TARGET: &str = "ironclaw::reborn::reply_publication";
@@ -48,7 +49,12 @@ pub(super) async fn terminal_reply_facts(
         nothing_to_report: state.execution_outcome == Some(TurnExecutionOutcome::NothingToReport),
         answer: None,
         attachments: Vec::new(),
-        failure_summary: state.failure.as_ref().and_then(sanitized_failure_text),
+        // Only the stable category reaches a user: `detail` is the
+        // model-visible diagnostic (provider errors, paths) and never copy.
+        failure_summary: state
+            .failure
+            .as_ref()
+            .map(|failure| runtime_failure_summary_for_category(failure.category()).to_string()),
     };
     // Only a completion that produced an answer has a transcript row to
     // read; a nothing-to-report completion publishes an empty terminal
@@ -83,26 +89,6 @@ pub(super) async fn terminal_reply_facts(
         facts.attachments = message.attachments;
     }
     Ok(facts)
-}
-
-/// The kernel's failure record serializes to `{category, detail}`; the
-/// category is a stable classification and the detail is already sanitized
-/// by the kernel. Read through the wire shape (the fields are private).
-fn sanitized_failure_text(failure: &ironclaw_host_api::turn::SanitizedFailure) -> Option<String> {
-    let value = serde_json::to_value(failure).ok()?;
-    let category = value.get("category")?.as_str()?.trim().to_string();
-    let detail = value
-        .get("detail")
-        .and_then(|detail| detail.as_str())
-        .map(str::trim)
-        .filter(|detail| !detail.is_empty());
-    if category.is_empty() {
-        return None;
-    }
-    Some(match detail {
-        Some(detail) => format!("{category}: {detail}"),
-        None => category,
-    })
 }
 
 /// `StoppedByUser` from a sink becomes an ordinary cancel through the turn

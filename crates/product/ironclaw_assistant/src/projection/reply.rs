@@ -374,6 +374,14 @@ impl ReplyProjection {
             if run.actor.is_none() {
                 run.actor = facts.actor.clone();
             }
+            if run.document.is_terminal() {
+                // Idempotent: the terminal fact is durable; a second
+                // application (another resume path, a redelivered commit)
+                // must not mint a revision the store's fixed terminal
+                // revision can never advance to.
+                run.terminal_pending = false;
+                return run.snapshot(&key);
+            }
             let mut folded = Folded::default();
             fold_terminal_facts(run, &facts, &mut folded);
             let event = run.seal(&folded).map(ReplyProjectionEvent::Revised);
@@ -448,6 +456,12 @@ pub fn disclose_for_audience(document: &ReplyDocument, audience: ReplyAudience) 
         ReplyAudience::Shared => {
             disclosed.reasoning.clear();
             disclosed.reasoning_open = false;
+            // Input/output previews are owner-facing (commands, paths, hosts);
+            // a shared room sees the activity row, never its previews.
+            for activity in disclosed.activities.iter_mut() {
+                activity.detail = None;
+                activity.output_preview = None;
+            }
             if let Some(attention) = disclosed.attention.as_mut() {
                 attention.action_url = None;
             }
@@ -559,7 +573,15 @@ fn fold_milestone(
             run.fold_answer(&stripped, folded);
         }
         LoopHostMilestoneKind::ModelCompleted { .. } => run.close_text_phase(),
-        LoopHostMilestoneKind::ModelFailed { .. } => {}
+        // The failed call's fragment is not finished text: drop it so a
+        // retried call (a fresh `ModelStarted`) starts from the phases that
+        // actually completed instead of freezing "Wor\n\nWorld" into the reply.
+        LoopHostMilestoneKind::ModelFailed { .. } => {
+            let finished = run.finished_phases_text.clone();
+            if run.document.answer.text.as_str() != finished {
+                folded.note(run.document.rewrite_answer(&finished));
+            }
+        }
         LoopHostMilestoneKind::CapabilityInvoked {
             activity_id,
             capability_id,
