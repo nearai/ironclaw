@@ -657,6 +657,43 @@ test("useChatEvents: final_reply keeps its run's narration and converges only th
   );
 });
 
+test("useChatEvents: a narration republish that arrives after the final reply still joins the run's activity", () => {
+  const harness = createUseChatEventsHarness();
+  const projection = (items) =>
+    harness.handleEvent({ type: "projection_update", frame: { state: { items } } });
+
+  projection([
+    { run_status: { run_id: "run-1", status: "running" } },
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look." } },
+    { text: { id: "text:run-1:2", run_id: "run-1", body: "Here you" } },
+  ]);
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "Here you go.",
+        generated_at: "2026-09-02T13:00:00Z",
+      },
+    },
+  });
+  // The live rail delivers the flagged republish after the durable final
+  // reply; an unflagged late phase for the run stays ignored.
+  projection([
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
+    { text: { id: "text:run-1:2", run_id: "run-1", body: "Here you go." } },
+  ]);
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [message.id, message.isFinalReply, message.isNarration]),
+    [
+      ["reply-run-1", true, undefined],
+      ["text-text:run-1:1", false, true],
+    ],
+    "the narration lands (the grouping places it inside the run's activity); the stale phase does not",
+  );
+});
+
 test("useChatEvents: final_reply collapses earlier assistant phases from the same run", () => {
   const harness = createUseChatEventsHarness();
 

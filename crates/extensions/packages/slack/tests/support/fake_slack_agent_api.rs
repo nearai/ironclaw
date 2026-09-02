@@ -202,7 +202,7 @@ impl FakeSlackAgentApi {
 
     /// Messages retracted through `chat.delete`, in order.
     pub fn deleted(&self) -> Vec<String> {
-        self.state.lock().unwrap().deleted.clone()
+        self.lock().deleted.clone()
     }
 
     pub fn stream(&self, ts: &str) -> Option<FakeStream> {

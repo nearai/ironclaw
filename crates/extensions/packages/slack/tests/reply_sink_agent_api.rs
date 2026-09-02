@@ -1224,38 +1224,54 @@ async fn a_streamed_narration_paragraph_is_retracted_when_the_answer_resets() {
     );
 }
 
-/// A retraction whose `chat.delete` never gets an answer is retried: the
-/// next reconcile finds the stale stream already closed, deletes it, and
-/// opens the fresh stream exactly once.
+/// A retraction whose `chat.delete` never gets an answer is retried, in
+/// both shapes: the request never reached Slack (the retry deletes for the
+/// first time) and the request was applied before the transport failed
+/// (the retry finds the message gone — `message_not_found` on the close and
+/// on the delete — which is the state it wanted). Either way the fresh
+/// stream opens exactly once.
 #[tokio::test]
 async fn a_lost_retraction_answer_is_retried_without_a_second_fresh_stream() {
-    let mut harness = Harness::dm();
-    harness.append("Let me look at two things first.\n\n");
-    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
-    let stale = harness.stream_ts();
+    for fault in [
+        Fault::TransportBeforeAccept {
+            method: SlackWebApiMethod::ChatDelete,
+        },
+        Fault::TransportAfterAccept {
+            method: SlackWebApiMethod::ChatDelete,
+        },
+    ] {
+        let mut harness = Harness::dm();
+        harness.append("Let me look at two things first.\n\n");
+        assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+        let stale = harness.stream_ts();
 
-    assert!(harness.document.reset_answer());
-    harness
-        .document
-        .activity_started(item("act-0"), text("Search Slack"), None);
-    harness.fake.inject(Fault::TransportBeforeAccept {
-        method: SlackWebApiMethod::ChatDelete,
-    });
-    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
-    assert!(
-        matches!(report.outcome, ReplySinkOutcome::Retryable { .. }),
-        "a transport failure on the retraction is retried, got {:?}",
-        report.outcome
-    );
-    let before = harness.fake.calls().len();
-    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
-    assert_eq!(
-        harness.fake.calls()[before..],
-        ["chat.stopStream", "chat.delete", "chat.startStream"],
-        "the retry closes (already closed: tolerated), retracts, and opens once"
-    );
-    assert_eq!(harness.fake.deleted(), [stale]);
-    assert_eq!(harness.fake.streams().len(), 1);
+        assert!(harness.document.reset_answer());
+        harness
+            .document
+            .activity_started(item("act-0"), text("Search Slack"), None);
+        let applied_before_loss = matches!(fault, Fault::TransportAfterAccept { .. });
+        harness.fake.inject(fault);
+        let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
+        assert!(
+            matches!(report.outcome, ReplySinkOutcome::Retryable { .. }),
+            "a transport failure on the retraction is retried, got {:?}",
+            report.outcome
+        );
+        assert_eq!(
+            harness.fake.deleted().len(),
+            usize::from(applied_before_loss),
+            "an applied-then-lost delete already removed the message"
+        );
+        let before = harness.fake.calls().len();
+        assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+        assert_eq!(
+            harness.fake.calls()[before..],
+            ["chat.stopStream", "chat.delete", "chat.startStream"],
+            "the retry closes (already closed or gone: tolerated), retracts (or finds it gone), and opens once"
+        );
+        assert_eq!(harness.fake.deleted(), [stale.as_str()]);
+        assert_eq!(harness.fake.streams().len(), 1);
+    }
 }
 
 // ── No conventional fallback ─────────────────────────────────────────────

@@ -1051,7 +1051,24 @@ pub enum ProductProjectionItem {
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body, .. } | Self::Thinking { id, body, .. } => {
+            Self::Text {
+                id,
+                body,
+                finalized,
+                narration,
+                ..
+            } => {
+                validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
+                validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)?;
+                if *finalized && *narration {
+                    return Err(invalid(
+                        "projection_text",
+                        "a finalized transcript row is never narration",
+                    ));
+                }
+                Ok(())
+            }
+            Self::Thinking { id, body, .. } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }

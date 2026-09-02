@@ -952,6 +952,61 @@ fn text_ahead_of_a_gate_is_narration_not_answer() {
     assert_eq!(document.answer.phase, 2);
 }
 
+/// Narration is bounded like every facet of this display document (the
+/// durable transcript keeps every model call in full): at most
+/// `REPLY_MAX_NARRATION_ENTRIES` entries, each cut to
+/// `REPLY_NARRATION_ENTRY_MAX_BYTES` on a character boundary. The answer
+/// still resets and moves to the next phase past the bound.
+#[test]
+fn narration_is_bounded_like_reasoning() {
+    use ironclaw_extension_contracts::reply::{
+        REPLY_MAX_NARRATION_ENTRIES, REPLY_NARRATION_ENTRY_MAX_BYTES,
+    };
+    let fixture = fixture("narration-bounds");
+    let long = "é".repeat(REPLY_NARRATION_ENTRY_MAX_BYTES);
+    for phase in 1..=(REPLY_MAX_NARRATION_ENTRIES as u64 + 1) {
+        fixture.observe(LoopHostMilestoneKind::ModelStarted {
+            requested_model_profile_id: None,
+        });
+        fixture.observe(LoopHostMilestoneKind::ModelTextDelta {
+            safe_text: if phase == 1 {
+                long.clone()
+            } else {
+                format!("phase {phase}")
+            },
+        });
+        fixture.observe(LoopHostMilestoneKind::CapabilityInvoked {
+            activity_id: CapabilityActivityId::new(),
+            capability_id: CapabilityId::new("acme.search").unwrap(),
+        });
+    }
+    let document = fixture.document();
+    assert_eq!(document.narration.len(), REPLY_MAX_NARRATION_ENTRIES);
+    assert_eq!(
+        document.narration[0].text.as_str().len(),
+        REPLY_NARRATION_ENTRY_MAX_BYTES,
+        "cut to the byte bound on a character boundary"
+    );
+    assert!(
+        document.narration[0]
+            .text
+            .as_str()
+            .chars()
+            .all(|c| c == 'é')
+    );
+    assert_eq!(
+        document.narration.last().map(|entry| entry.text.as_str()),
+        Some("phase 32"),
+        "the entry past the bound is dropped"
+    );
+    assert_eq!(document.answer.text.as_str(), "");
+    assert_eq!(
+        document.answer.phase,
+        REPLY_MAX_NARRATION_ENTRIES as u64 + 2,
+        "the answer still moves on past the bound"
+    );
+}
+
 /// A call's provider reasoning stays reasoning and its narration stays
 /// narration: two facets, never merged.
 #[test]

@@ -784,8 +784,13 @@ function applyProjectionItems({
                   : message,
               )
             : prev;
+        // Once the run's final reply is rendered, late answer phases are
+        // stale and ignored — but a narration republish is activity for the
+        // run's collapsible section, and the live and durable rails are
+        // independent, so it may legitimately arrive after the final reply.
         if (
           textRunId &&
+          !narration &&
           phaseAware.some((m) => isFinalAssistantForRun(m, textRunId))
         ) {
           return phaseAware;

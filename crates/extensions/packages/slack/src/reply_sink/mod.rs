@@ -546,7 +546,9 @@ impl Reconciler<'_> {
     /// longer matches the document — a call the loop went on past had its
     /// paragraph streamed, or the canonical text differs). Close the stale
     /// stream, retract its message, and forget the presentation; the caller
-    /// opens a fresh one with what the document shows now.
+    /// opens a fresh one with what the document shows now. A stale stream
+    /// already closed, or a message already gone (a retraction whose answer
+    /// was lost), is the state this wanted.
     async fn re_present(
         &mut self,
         route: &SlackReplyRoute,
@@ -564,7 +566,10 @@ impl Reconciler<'_> {
         match self.api.post(SlackWebApiMethod::ChatStopStream, body).await {
             Ok(_) => {}
             Err(SlackApiFailure::Rejected { error, .. })
-                if error == "message_not_in_streaming_state" => {}
+                if matches!(
+                    error.as_str(),
+                    "message_not_in_streaming_state" | "message_not_found"
+                ) => {}
             Err(SlackApiFailure::Ambiguous { reason }) => {
                 return Err(ReplySinkOutcome::Ambiguous {
                     reason: ReplyOutcomeReason::new(reason),
@@ -796,16 +801,7 @@ impl Reconciler<'_> {
                 // the canonical text on ONE fresh native stream, opened and
                 // closed in this reconcile. Never as a conventional message
                 // beside the stream — that is the duplicate-answer shape.
-                self.stop_stream(
-                    route,
-                    document,
-                    stream,
-                    Vec::new(),
-                    &SlackAppliedState::default(),
-                )
-                .await?;
-                self.retract_message(stream).await?;
-                self.checkpoint.forget_presentation();
+                self.re_present(route, stream).await?;
                 return self.open_and_close_terminal_stream(route, document).await;
             }
         };

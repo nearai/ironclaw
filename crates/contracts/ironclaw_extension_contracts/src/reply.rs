@@ -540,7 +540,10 @@ pub struct ReplyDocument {
     /// Text of the model calls the loop went on past, in phase order
     /// ([`ReplyDocument::reset_answer`]). Progress, not the answer: a
     /// surface with an activity panel shows it there; a stream surface
-    /// never shows it.
+    /// never shows it. Bounded like every facet of this display document
+    /// ([`REPLY_MAX_NARRATION_ENTRIES`] entries of
+    /// [`REPLY_NARRATION_ENTRY_MAX_BYTES`]); the durable transcript keeps
+    /// every model call in full.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub narration: Vec<ReplyNarration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
