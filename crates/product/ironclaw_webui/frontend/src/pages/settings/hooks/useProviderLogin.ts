@@ -281,6 +281,7 @@ export function useProviderLogin(
       popup.opener = null;
       const signed = await awaitWalletSignature(popup, channelName);
       if (!signed) {
+        popup.close();
         setNearaiError(t("onboarding.nearaiFailed"));
         return;
       }

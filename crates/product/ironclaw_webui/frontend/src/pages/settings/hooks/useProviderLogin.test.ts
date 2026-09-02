@@ -13,6 +13,7 @@ function runProviderLogin({ walletMessages, onSuccess }: ProviderLoginHarnessOpt
   const httpCalls: string[] = [];
   const walletPayloads: unknown[] = [];
   let stateIndex = 0;
+  let popupClosed = false;
 
   class FakeBroadcastChannel {
     private listener: ((event: { data: unknown }) => void) | null = null;
@@ -69,7 +70,13 @@ function runProviderLogin({ walletMessages, onSuccess }: ProviderLoginHarnessOpt
     }),
     window: {
       location: { hostname: "app.example.com", origin: "https://app.example.com" },
-      open: () => ({ opener: null, closed: false, close() {} }),
+      open: () => ({
+        opener: null,
+        closed: false,
+        close() {
+          popupClosed = true;
+        },
+      }),
       crypto: { randomUUID: () => "uuid" },
       BroadcastChannel: FakeBroadcastChannel,
     },
@@ -90,6 +97,7 @@ function runProviderLogin({ walletMessages, onSuccess }: ProviderLoginHarnessOpt
       stateLog.filter((entry) => entry.idx === NEARAI_ERROR_SLOT).map((entry) => entry.value),
     nearaiBusyCleared: () =>
       stateLog.some((entry) => entry.idx === NEARAI_BUSY_SLOT && entry.value === false),
+    popupClosed: () => popupClosed,
   };
 }
 
@@ -106,6 +114,7 @@ test("wallet cancellation settles the production login flow without waiting for 
   assert.equal(completed, true);
   assert.ok(run.nearaiErrors().includes("onboarding.nearaiFailed"));
   assert.ok(run.nearaiBusyCleared());
+  assert.ok(run.popupClosed());
   assert.ok(!run.httpCalls.includes("completeNearaiWalletLogin"));
 });
 
