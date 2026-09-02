@@ -219,6 +219,8 @@ pub(super) fn shared_await_dependent_gate(
             Resolution::Suspended(Suspension::DependentRun { waypoint, .. }) => {
                 // Coalesce on the preserved originating loop gate ref; a missing
                 // origin (never produced by the mapping) can't be coalesced.
+                // silent-ok: malformed origin refs cannot be coalesced, so the
+                // caller falls back to the per-outcome gate path.
                 let gate_ref = waypoint
                     .origin
                     .as_ref()

@@ -84,6 +84,8 @@ fn approval_request_id_from_loop_gate_ref(gate_ref: &LoopGateRef) -> Option<Appr
     gate_ref
         .as_str()
         .strip_prefix("gate:approval-")
+        // silent-ok: an invalid approval identifier makes this resume
+        // reconstruction inapplicable; the caller safely re-prompts.
         .and_then(|id| ApprovalRequestId::parse(id).ok())
 }
 
@@ -97,6 +99,8 @@ pub(super) fn approval_resume_from_gate(
     resume_token: Option<&ResumeToken>,
     call: &CapabilityCallCandidate,
 ) -> Option<CapabilityApprovalResume> {
+    // silent-ok: invalid or absent resume tokens cannot reconstruct an approval
+    // resume; the caller safely re-prompts instead.
     let resume_token = CapabilityResumeToken::new(resume_token?.as_str()).ok()?;
     let approval_request_id = approval_request_id_from_loop_gate_ref(gate_ref)?;
     Some(CapabilityApprovalResume {

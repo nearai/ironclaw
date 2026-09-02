@@ -385,6 +385,10 @@ name = "reborn_integration_extension_visibility"
 path = "tests/integration/extension_visibility.rs"
 
 [[test]]
+name = "reborn_integration_external_tool_gate_denied_resume"
+path = "tests/integration/external_tool_gate_denied_resume.rs"
+
+[[test]]
 name = "reborn_integration_extension_user_lifecycle_isolation"
 path = "tests/integration/extension_user_lifecycle_isolation.rs"
 

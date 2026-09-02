@@ -776,7 +776,7 @@ impl CapabilityStage {
                                 } => capability_failure_from_recoverable(
                                     error_kind, diagnostic, &outcome,
                                 ),
-                                _ => unreachable!("guarded to RecoverableFailure"),
+                                _ => unreachable!("guarded to RecoverableFailure"), // safety: the enclosing match only enters this branch for a recoverable failure.
                             };
                             if failure.error_kind == FailureKind::Cancelled {
                                 return self.cancelled_for_batch_drain(ctx, state);

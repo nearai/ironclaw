@@ -75,10 +75,10 @@ use ironclaw_loop_contracts::{
     CommunicationContextProvider, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
     LoopHostMilestone, LoopHostMilestoneSink, ModelProfileId,
 };
-use ironclaw_loop_host::ToolDisclosureMode;
 use ironclaw_loop_host::{
     CapabilitySurfaceProfileResolver, HostManagedModelGateway, HostUserProfileSource,
-    JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits, ZeroCostTable,
+    JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits, ToolDisclosureMode,
+    ZeroCostTable,
 };
 use ironclaw_loop_host::{LlmModelProfilePolicy, LlmProviderModelGateway};
 use ironclaw_product_contracts::binding::ProductBindingResolver;
@@ -117,6 +117,7 @@ use super::builder::{
     thread_scope_from_binding,
 };
 use super::doubles::{FailingTranscriptWriteThreadService, RecordingSecurityAuditSink};
+use super::external_tool_factory::ExternalToolCapabilityPortFactory;
 use super::harness::{
     EmptyIdentityContextSource, HarnessCapabilityMode, HarnessCapabilityRecorder,
     HostRuntimeCapabilityHarness, RecordingTestCapabilityPort,
@@ -515,6 +516,7 @@ impl RebornIntegrationGroup {
             real_gate_dispatch_services: false,
             channel_connection: None,
             bound_memory: None,
+            external_tool_specs: None,
         }
     }
 
@@ -947,6 +949,9 @@ pub struct RebornIntegrationGroupBuilder {
         Arc<dyn ironclaw_memory::MemoryService>,
         ironclaw_extension_contracts::memory::MemoryDescriptor,
     )>,
+    /// Test-only client-tool specs installed at run-port construction. `None`
+    /// preserves the normal group capability factory exactly.
+    external_tool_specs: Option<Vec<ironclaw_turns::ExternalToolSpec>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -1098,6 +1103,18 @@ impl RebornIntegrationGroupBuilder {
             process_system.clone(),
             self.trajectory_observer.clone(),
         )?;
+        let external_tool_specs = self.external_tool_specs.clone();
+        let capability_factory: Arc<dyn ironclaw_loop_host::LoopCapabilityPortFactory> =
+            match external_tool_specs {
+                Some(specs) => Arc::new(ExternalToolCapabilityPortFactory {
+                    inner: capability_factory,
+                    catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
+                    specs,
+                    input_resolver: Arc::clone(&capability_input_resolver),
+                    result_writer: Arc::clone(&capability_result_writer),
+                }),
+                None => capability_factory,
+            };
 
         // Enabler (b): production resolves `CapabilitySurfacePolicy::allow_all()` for a
         // top-level user turn; mirror that for bridged groups (narrowed

@@ -63,7 +63,8 @@ pub(super) fn gate_outcome_kind(resolution: &Resolution) -> Option<GateKind> {
         Resolution::Blocked(Blocked::Resource(_)) => Some(GateKind::Resource),
         Resolution::Suspended(Suspension::ExternalTool(_)) => Some(GateKind::ExternalTool),
         Resolution::Suspended(Suspension::DependentRun { .. }) => Some(GateKind::AwaitDependentRun),
-        _ => None,
+        Resolution::Done(_) | Resolution::Denied(_) => None,
+        Resolution::Suspended(Suspension::Process(_)) => None,
     }
 }
 

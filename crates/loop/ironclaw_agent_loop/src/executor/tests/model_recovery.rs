@@ -1192,7 +1192,7 @@ async fn retry_uses_single_call_invocation() {
         assert!(matches!(exit, LoopExit::Completed(_)));
         let final_state = final_staged_state(&host);
         assert_eq!(final_state.recovery_state, Default::default());
-        // Accounting invariant (executor/capability_recovery.rs): "every invocation
+        // Accounting invariant (executor/capability_dispatch.rs): "every invocation
         // that reaches dispatch counts, whatever its outcome." The initial
         // batch dispatch (1 call) plus the one same-call retry dispatch must
         // both count toward the budget, or a caller retrying failed calls
