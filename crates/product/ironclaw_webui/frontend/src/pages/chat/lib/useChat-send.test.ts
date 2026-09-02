@@ -2877,7 +2877,6 @@ test("useChat: a channel-connected event refreshes the connection caches without
   const threadId = "thread-cache-refresh";
   const stateUpdates = [];
   const invalidated = [];
-  const originalWindow = globalThis.window;
   const broadcasts = new Set<DynamicTestValue>();
   class FakeBroadcastChannel {
     name;
@@ -2901,7 +2900,7 @@ test("useChat: a channel-connected event refreshes the connection caches without
       broadcasts.delete(this);
     }
   }
-  replaceBrowserGlobal("window", {
+  const restoreWindow = replaceBrowserGlobal("window", {
     BroadcastChannel: FakeBroadcastChannel,
     localStorage: createMemoryStorage(),
     addEventListener: () => {},
@@ -2996,7 +2995,7 @@ test("useChat: a channel-connected event refreshes the connection caches without
       "the channel-connected event must not clear the pending gate itself",
     );
   } finally {
-    globalThis.window = originalWindow;
+    restoreWindow();
   }
 });
 
@@ -3750,7 +3749,6 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
   const threadId = "thread-cross-source-resume";
   const stateUpdates = [];
   const invalidated = [];
-  const originalWindow = globalThis.window;
   const broadcasts = new Set<DynamicTestValue>();
   class FakeBroadcastChannel {
     name;
@@ -3774,7 +3772,7 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
       broadcasts.delete(this);
     }
   }
-  replaceBrowserGlobal("window", {
+  const restoreWindow = replaceBrowserGlobal("window", {
     BroadcastChannel: FakeBroadcastChannel,
     localStorage: createMemoryStorage(),
     addEventListener: () => {},
@@ -3848,7 +3846,7 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
       "the pairing panel clears when the channel connects elsewhere",
     );
   } finally {
-    globalThis.window = originalWindow;
+    restoreWindow();
   }
 });
 
@@ -4520,10 +4518,9 @@ test("useChat.cancelRun: clears the pairing panel, forgets the waiter, and persi
     key: (index) => Array.from(store.keys())[index] ?? null,
   };
 
-  const originalWindow = globalThis.window;
   // The waiter registry reads window.localStorage; the dismissal store reads the
   // vm context's globalThis.localStorage. Back both with the same map.
-  replaceBrowserGlobal("window", {
+  const restoreWindow = replaceBrowserGlobal("window", {
     localStorage,
     addEventListener: () => {},
     removeEventListener: () => {},
@@ -4620,7 +4617,7 @@ test("useChat.cancelRun: clears the pairing panel, forgets the waiter, and persi
       "cancel forgets the waiter so a later connect won't resume the cancelled chat",
     );
   } finally {
-    globalThis.window = originalWindow;
+    restoreWindow();
   }
 });
 

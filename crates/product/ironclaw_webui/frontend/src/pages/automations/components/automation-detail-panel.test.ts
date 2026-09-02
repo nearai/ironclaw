@@ -126,9 +126,7 @@ function automation() {
   };
 }
 
-function createHarness({
-  onRenameAutomation = () => {},
-}: DynamicTestOptions = {}) {
+function createHarness({ onRenameAutomation = () => {} }: DynamicTestOptions = {}) {
   const hookValues = [];
   const effectDeps = [];
   let hookCursor = 0;
@@ -335,9 +333,7 @@ test("AutomationDetailPanel deletes only after confirming the shared dialog", ()
 test("AutomationDetailPanel submits a trimmed rename from the inline editor", () => {
   const calls = [];
   const harness = createHarness({
-    onRenameAutomation: (payload) => {
-      calls.push(payload);
-    },
+    onRenameAutomation: (payload) => calls.push(payload),
   });
 
   let rendered = harness.render();
@@ -370,9 +366,7 @@ test("AutomationDetailPanel submits a trimmed rename from the inline editor", ()
 test("AutomationDetailPanel keeps the editor open and reports blank names", () => {
   const calls = [];
   const harness = createHarness({
-    onRenameAutomation: (payload) => {
-      calls.push(payload);
-    },
+    onRenameAutomation: (payload) => calls.push(payload),
   });
 
   let rendered = harness.render();

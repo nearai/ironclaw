@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import {
-  runVmModuleForTest,
-  type VmComponentProps,
-} from "../../../test-support/vm-module-harness";
+import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
+import type { VmComponentProps } from "../../../test-support/vm-module-harness";
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };

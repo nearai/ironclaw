@@ -5,7 +5,10 @@ import {
   runVmModuleForTest,
   type VmModuleExports,
 } from "../../../test-support/vm-module-harness";
-import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
+import type {
+  DynamicTestOptions,
+  DynamicTestValue,
+} from "../../../test-support/dynamic-test-types";
 
 function visit(node, fn) {
   if (Array.isArray(node)) {
@@ -218,7 +221,7 @@ function loadDetailModule(harness): VmModuleExports {
   return { ...module, ConfirmDialog, ThreadScrapingPanel };
 }
 
-function loadDetailView(harness): VmModuleExports {
+function loadDetailView(harness): DynamicTestValue {
   return loadDetailModule(harness).UserDetailView;
 }
 

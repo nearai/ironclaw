@@ -46,7 +46,7 @@ import { useConnectLinkLanding } from "./useConnectLinkLanding";
 function fakePopup() {
   return {
     closed: false,
-    opener: null,
+    opener: { source: "parent-window" },
     location: { href: "about:blank" },
     close() {
       this.closed = true;
@@ -175,6 +175,7 @@ test("starting the connect flow drives setup, oauth start, and popup in order", 
   assert.equal(api.fetchExtensionSetup.mock.calls[0][0].id, "slack");
   assert.equal(api.startExtensionOauth.mock.calls[0][0].id, "slack");
   assert.equal(api.startExtensionOauth.mock.calls[0][1].name, "slack_oauth");
+  assert.equal(popup.opener, null, "the OAuth popup must not retain its opener");
   assert.equal(popup.location.href, "https://slack.com/oauth/authorize?client_id=abc");
 });
 
