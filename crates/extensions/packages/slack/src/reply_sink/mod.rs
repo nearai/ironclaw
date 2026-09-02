@@ -59,8 +59,8 @@ mod plan;
 use agent_api::{SlackAgentApi, SlackApiFailure, outcome_for_failure, outcome_for_part};
 use checkpoint::{
     SlackAppliedState, SlackReplyCheckpoint, SlackSessionStatus, SlackStreamState,
-    SlackTerminalState, char_prefix, encode_checkpoint, load_checkpoint, normalize_for_match,
-    normalized_tail,
+    SlackTerminalState, char_prefix, delta_landed_after, encode_checkpoint, load_checkpoint,
+    normalize_for_match, normalized_tail,
 };
 use plan::{AnswerRewritten, ChunkPlan, plan_chunks, terminal_note};
 
@@ -213,7 +213,13 @@ impl Reconciler<'_> {
             Ok(message) => message,
             Err(failure) => {
                 let outcome = outcome_for_failure(SlackWebApiMethod::ConversationsReplies, failure);
-                if matches!(outcome, ReplySinkOutcome::Retryable { .. }) {
+                if matches!(
+                    outcome,
+                    ReplySinkOutcome::Retryable { .. } | ReplySinkOutcome::Unauthorized { .. }
+                ) {
+                    // A rate limit is retried; a token that cannot read is
+                    // the contract's `Unauthorized`, never an ambiguity to
+                    // retry until the terminal budget lapses.
                     return Err(outcome);
                 }
                 if carried_text {
@@ -270,15 +276,34 @@ impl Reconciler<'_> {
         };
         // Compare the pending append's OWN delta, not the full answer
         // prefix: earlier attention/status chunks interleave with answer
-        // text in the message, so only the delta is guaranteed contiguous.
-        let landed = carried_text
-            && char_prefix(text, pending.to_chars).is_some_and(|prefix| {
-                let base_len = char_prefix(prefix, stream.appended_chars)
-                    .map(str::len)
-                    .unwrap_or(0);
-                let expected = normalized_tail(&prefix[base_len..]);
-                !expected.is_empty() && normalize_for_match(&message_text).contains(&expected)
-            });
+        // text in the message, so only the delta is guaranteed contiguous —
+        // and look for it PAST the text already applied, so a delta that
+        // repeats earlier text is proven by its own occurrence, never the
+        // old one.
+        let mut landed = false;
+        if carried_text && let Some(prefix) = char_prefix(text, pending.to_chars) {
+            // `applied` is a char-boundary prefix of `prefix` (both come
+            // from `char_prefix`), so slicing past it is safe.
+            let applied = char_prefix(prefix, stream.appended_chars).unwrap_or("");
+            let expected = normalized_tail(&prefix[applied.len()..]);
+            if expected.is_empty() {
+                // Punctuation or whitespace only: read-back has nothing to
+                // find, so the delta can be proven neither landed nor lost.
+                // Never re-send a fragment the user may already see; the
+                // pending stays for the host to settle `Unknown`.
+                return Err(ReplySinkOutcome::Ambiguous {
+                    reason: ReplyOutcomeReason::new(
+                        "slack read-back cannot verify a pending append with no comparable \
+                         text; not re-sending it",
+                    ),
+                });
+            }
+            landed = delta_landed_after(
+                &normalize_for_match(&message_text),
+                &normalized_tail(applied),
+                &expected,
+            );
+        }
         if landed {
             self.evidence.read_back_verified = true;
             self.apply_state(&pending);
@@ -324,6 +349,9 @@ impl Reconciler<'_> {
         }
         if state.attention_key.is_some() {
             self.checkpoint.attention_key = state.attention_key.clone();
+        }
+        if state.note_key.is_some() {
+            self.checkpoint.note_key = state.note_key.clone();
         }
     }
 
@@ -537,11 +565,7 @@ impl Reconciler<'_> {
                 ));
             }
         }
-        self.checkpoint.stream = None;
-        self.checkpoint.tasks.clear();
-        self.checkpoint.tasks_floor_ordinal = 0;
-        self.checkpoint.status_key = None;
-        self.checkpoint.attention_key = None;
+        self.checkpoint.forget_presentation();
         Ok(())
     }
 
@@ -661,7 +685,8 @@ impl Reconciler<'_> {
                 // records the ambiguity and settles `Unknown`.
                 return ReplySinkOutcome::Ambiguous {
                     reason: ReplyOutcomeReason::new(
-                        "an earlier slack attachment completion went unanswered;                          not re-uploading the files",
+                        "an earlier slack attachment completion went unanswered; \
+                         not re-uploading the files",
                     ),
                 };
             }
@@ -736,12 +761,7 @@ impl Reconciler<'_> {
                     &SlackAppliedState::default(),
                 )
                 .await?;
-                self.checkpoint.stream = None;
-                self.checkpoint.tasks.clear();
-                self.checkpoint.tasks_floor_ordinal = 0;
-                self.checkpoint.status_key = None;
-                self.checkpoint.plan_title_key = None;
-                self.checkpoint.attention_key = None;
+                self.checkpoint.forget_presentation();
                 return self.open_and_close_terminal_stream(route, document).await;
             }
         };

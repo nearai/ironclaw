@@ -58,7 +58,7 @@ fn the_documented_app_manifest_matches_the_canonical_package_file() {
     assert_eq!(
         documented,
         documented_app_manifest(),
-        "docs/channels/slack.mdx must embed exactly          crates/extensions/packages/slack/app_manifest.json"
+        "docs/channels/slack.mdx must embed exactly crates/extensions/packages/slack/app_manifest.json"
     );
 }
 
@@ -227,6 +227,52 @@ fn every_slack_call_the_package_makes_is_declared_bot_token_egress() {
         Some("message"),
         "[channel.delivery] transport stays message"
     );
+}
+
+/// The reverse direction for the native Agent surface: every `/api/agents.*`
+/// and `/api/chat.*Stream` path the manifest grants must be a call the
+/// package makes, so a dead grant (a method nothing calls) cannot survive in
+/// — or return to — the least-privilege allowlist.
+#[test]
+fn every_declared_agent_surface_path_is_a_call_the_package_makes() {
+    let manifest: toml::Value =
+        toml::from_str(&read("crates/extensions/packages/slack/manifest.toml"))
+            .expect("manifest.toml parses");
+    let egress = manifest
+        .get("channel")
+        .and_then(|channel| channel.get("egress"))
+        .and_then(toml::Value::as_array)
+        .expect("[[channel.egress]] entries");
+
+    let declared: Vec<&str> = egress
+        .iter()
+        .filter(|entry| entry.get("host").and_then(toml::Value::as_str) == Some("slack.com"))
+        .flat_map(|entry| {
+            entry
+                .get("paths")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(toml::Value::as_str)
+        })
+        .filter(|path| {
+            path.starts_with("/api/agents.")
+                || (path.starts_with("/api/chat.") && path.ends_with("Stream"))
+        })
+        .collect();
+    assert!(
+        !declared.is_empty(),
+        "manifest.toml declares the native Agent surface as exact bot-token egress"
+    );
+    for path in declared {
+        assert!(
+            SlackWebApiMethod::ALL
+                .iter()
+                .any(|method| method.path() == path),
+            "{path} is declared as bot-token egress in manifest.toml but no \
+             SlackWebApiMethod calls it — a dead grant"
+        );
+    }
 }
 
 #[test]

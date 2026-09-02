@@ -90,6 +90,13 @@ pub enum Fault {
         method: SlackWebApiMethod,
         error: &'static str,
     },
+    /// The request is applied provider-side and answered HTTP 200, but the
+    /// body is not JSON (a proxy page, a truncated body).
+    InvalidBody { method: SlackWebApiMethod },
+    /// The request is applied provider-side and answered HTTP 200
+    /// `{"ok":true}` with none of the method's documented fields (no
+    /// `messages`, no `ts`).
+    BareOk { method: SlackWebApiMethod },
 }
 
 impl Fault {
@@ -99,7 +106,9 @@ impl Fault {
             | Self::ServerError { method }
             | Self::TransportAfterAccept { method }
             | Self::TransportBeforeAccept { method }
-            | Self::SlackError { method, .. } => *method,
+            | Self::SlackError { method, .. }
+            | Self::InvalidBody { method }
+            | Self::BareOk { method } => *method,
         }
     }
 }
@@ -291,6 +300,18 @@ impl RestrictedEgress for FakeSlackAgentApi {
             Some(Fault::TransportAfterAccept { .. }) => {
                 let _ = handle(&mut state, &request, endpoint);
                 return Err(transport_error("connection reset after write"));
+            }
+            Some(Fault::InvalidBody { .. }) => {
+                let _ = handle(&mut state, &request, endpoint);
+                return Ok(RestrictedEgressResponse {
+                    status: 200,
+                    body: b"<html><body>upstream error</body></html>".to_vec(),
+                    retry_after: None,
+                });
+            }
+            Some(Fault::BareOk { .. }) => {
+                let _ = handle(&mut state, &request, endpoint);
+                return Ok(ok(json!({ "ok": true })));
             }
             None => {}
         }

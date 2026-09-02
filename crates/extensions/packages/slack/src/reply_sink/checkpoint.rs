@@ -43,6 +43,11 @@ pub(super) struct SlackReplyCheckpoint {
     /// Fingerprint of the attention block currently shown in the message.
     #[serde(default)]
     pub(super) attention_key: Option<String>,
+    /// Fingerprint of the terminal outcome note the stream already shows —
+    /// the note rides `chat.startStream` when the terminal opens its own
+    /// stream, so a retried `chat.stopStream` must not append it again.
+    #[serde(default)]
+    pub(super) note_key: Option<String>,
     #[serde(default)]
     pub(super) terminal: Option<SlackTerminalState>,
     #[serde(default)]
@@ -79,6 +84,23 @@ pub(super) struct SlackReplyCheckpoint {
     /// until the host settles it `Unknown`.
     #[serde(default)]
     pub(super) stream_open_ambiguous: bool,
+}
+
+impl SlackReplyCheckpoint {
+    /// Forget the stream presentation — the stream handle and every
+    /// fingerprint of what that stream showed — so the next reconcile
+    /// re-presents the document in full on a fresh stream. The session,
+    /// terminal, attachment, and ambiguity-latch state is untouched: it
+    /// describes the reply, not one stream of it.
+    pub(super) fn forget_presentation(&mut self) {
+        self.stream = None;
+        self.tasks.clear();
+        self.tasks_floor_ordinal = 0;
+        self.status_key = None;
+        self.plan_title_key = None;
+        self.attention_key = None;
+        self.note_key = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +157,8 @@ pub(super) struct SlackAppliedState {
     pub(super) plan_title_key: Option<String>,
     #[serde(default)]
     pub(super) attention_key: Option<String>,
+    #[serde(default)]
+    pub(super) note_key: Option<String>,
     #[serde(default)]
     pub(super) closes_stream: bool,
 }
@@ -259,6 +283,31 @@ pub(super) fn normalized_tail(text: &str) -> String {
         .chars()
         .skip(total.saturating_sub(READ_BACK_TAIL_CHARS))
         .collect()
+}
+
+/// Whether a pending delta landed: its normalized tail `expected` must occur
+/// in the normalized `message` AFTER the text already applied (located by
+/// that text's own normalized tail `applied_tail`), never merely anywhere —
+/// a delta that repeats earlier text ("ok" after "ok") would otherwise be
+/// proven by the OLD occurrence and its new copy lost. With nothing applied
+/// yet, or an applied tail the message no longer shows, the whole message
+/// is searched. An empty `expected` proves nothing.
+pub(super) fn delta_landed_after(message: &str, applied_tail: &str, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    let search_from = if applied_tail.is_empty() {
+        0
+    } else {
+        message
+            .find(applied_tail)
+            .map_or(0, |at| at + applied_tail.len())
+    };
+    // `search_from` is the end of a found substring, hence a char boundary;
+    // `get` keeps even a wrong offset from panicking.
+    message
+        .get(search_from..)
+        .is_some_and(|rest| rest.contains(expected))
 }
 
 /// FNV-1a 64 over the parts (unit-separated), rendered as 16 hex chars. A

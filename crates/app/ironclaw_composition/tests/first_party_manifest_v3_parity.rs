@@ -824,7 +824,6 @@ fn slack_v3_declares_only_bounded_file_transfer_egress() {
             "/api/chat.appendStream",
             "/api/chat.stopStream",
             "/api/agents.sessions.setStatus",
-            "/api/agents.sessions.rename",
         ]
     );
     assert_eq!(api_post.request_body_limit_bytes, Some(256 * 1024));

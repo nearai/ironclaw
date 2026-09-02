@@ -112,11 +112,15 @@ pub(super) fn plan_chunks(
     }
 
     if let Some(note) = terminal_note {
-        let separator = if applied.to_chars > 0 { "\n\n" } else { "" };
-        chunks.push(json!({
-            "type": "markdown_text",
-            "text": format!("{separator}{note}"),
-        }));
+        let key = fingerprint(&["note", note]);
+        if checkpoint.note_key.as_deref() != Some(key.as_str()) {
+            let separator = if applied.to_chars > 0 { "\n\n" } else { "" };
+            chunks.push(json!({
+                "type": "markdown_text",
+                "text": format!("{separator}{note}"),
+            }));
+            applied.note_key = Some(key);
+        }
     }
 
     Ok(ChunkPlan { chunks, applied })

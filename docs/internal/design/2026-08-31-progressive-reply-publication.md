@@ -432,7 +432,7 @@ regardless of route; the coordinator is transport-blind.
   session thread rides only the reply context), so the normalized stop
   keeps the DM conversation topic-less and carries the session thread in
   its reply context.
-- As built: manifest `[channel.reply] transport = "stream"` + the five agent
+- As built: manifest `[channel.reply] transport = "stream"` + the four agent
   endpoints as exact-path bot-token egress; `src/reply_sink/` renders the
   document (status line, markdown text by char offset, one hidden
   provider-rendering sentinel, grouped activity `task_update` rows and

@@ -255,7 +255,7 @@ pub(super) async fn send_files(
             };
         let ticket_response = match egress.send(ticket_request).await {
             Ok(response) => response,
-            Err(error) => return vec![part_outcome_for_egress_error(&error)],
+            Err(error) => return vec![part_outcome_for_private_step_egress_error(&error)],
         };
         if !(200..300).contains(&ticket_response.status) {
             return vec![part_outcome_for_kind(
@@ -300,7 +300,7 @@ pub(super) async fn send_files(
             };
         let upload_response = match egress.send(upload_request).await {
             Ok(response) => response,
-            Err(error) => return vec![part_outcome_for_egress_error(&error)],
+            Err(error) => return vec![part_outcome_for_private_step_egress_error(&error)],
         };
         if !(200..300).contains(&upload_response.status) {
             return vec![part_outcome_for_kind(
@@ -363,6 +363,20 @@ pub(super) async fn send_files(
         outcomes.push(read_back_staged_upload(egress, channel, thread_ts, &upload).await);
     }
     outcomes
+}
+
+/// Egress failures on the steps that share nothing into the conversation —
+/// the upload ticket and the private byte upload. A lost answer there is a
+/// plain retry from a fresh ticket: only `files.completeUploadExternal`
+/// makes a file visible, so only its ambiguity is kept as `Ambiguous` (the
+/// sink's fail-closed attachment latch).
+fn part_outcome_for_private_step_egress_error(
+    error: &RestrictedEgressError,
+) -> PartDeliveryOutcome {
+    match part_outcome_for_egress_error(error) {
+        PartDeliveryOutcome::Ambiguous { reason } => PartDeliveryOutcome::Retryable { reason },
+        outcome => outcome,
+    }
 }
 
 pub(crate) const SLACK_FILE_READBACK_MAX_ATTEMPTS: u8 = 8;

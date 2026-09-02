@@ -3,8 +3,8 @@
 //! path, idempotent repeats, char-boundary deltas, rate-limit and ambiguity
 //! handling with read-back, the stop button, generation and checkpoint
 //! version changes, the no-fallback rule, channel recipient requirements,
-//! the conventional terminal post, liveness re-assertion, and terminal
-//! attachments.
+//! the terminal stream opened and closed in one reconcile, liveness
+//! re-assertion, and terminal attachments.
 
 mod support;
 
@@ -1057,6 +1057,22 @@ async fn an_answer_rewritten_under_the_stream_is_re_presented_in_full() {
     let streams = harness.fake.streams();
     assert_eq!(streams.len(), 2);
     assert_eq!(streams[1].1.text, "Goodbye");
+    // The fresh stream re-presents EVERYTHING the stale one showed — the
+    // plan header included: a presentation forgotten in part leaves the
+    // replacement stream without its lifecycle title.
+    assert_eq!(
+        harness.fake.bodies(SlackWebApiMethod::ChatStartStream)[1]["chunks"],
+        json!([
+            { "type": "plan_update", "title": "Thinking" },
+            { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" },
+            { "type": "markdown_text", "text": "Goodbye" }
+        ]),
+        "the re-presented stream opens with the plan header, the sentinel, and the full text"
+    );
+    assert_eq!(
+        streams[1].1.plan_updates,
+        [json!({ "type": "plan_update", "title": "Thinking" })]
+    );
 }
 
 // ── No conventional fallback ─────────────────────────────────────────────
@@ -1262,6 +1278,52 @@ async fn a_terminal_without_an_open_stream_opens_and_closes_one_native_stream() 
     assert!(harness.fake.posted().is_empty());
 }
 
+/// The outcome note rides `chat.startStream` when the terminal opens its own
+/// stream; a refused `chat.stopStream` after it must not append the note a
+/// second time on the retry — the note is checkpointed like every other
+/// chunk the stream has already shown.
+#[tokio::test]
+async fn a_retried_terminal_close_never_repeats_the_outcome_note() {
+    let mut harness = Harness::dm();
+    harness.document.fail(text("The model provider timed out."));
+    harness.fake.inject(Fault::RateLimited {
+        method: SlackWebApiMethod::ChatStopStream,
+        retry_after: Duration::from_secs(3),
+    });
+    let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Retryable { .. }),
+        "got {:?}",
+        report.outcome
+    );
+    let ts = harness.stream_ts();
+    assert_eq!(
+        harness.fake.stream(&ts).expect("stream").state,
+        StreamState::Streaming,
+        "the refused close left the stream open"
+    );
+
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
+    assert_eq!(
+        harness.fake.calls(),
+        ["chat.startStream", "chat.stopStream", "chat.stopStream"],
+        "one open, one refused close, one retried close"
+    );
+    let stream = harness.fake.stream(&ts).expect("stream");
+    assert_eq!(
+        stream.state,
+        StreamState::Stopped {
+            session_status: "active".to_string()
+        }
+    );
+    assert_eq!(
+        stream.text, "**Failed:** The model provider timed out.",
+        "the retried close does not repeat the note the open already showed"
+    );
+    assert_eq!(harness.fake.streams().len(), 1);
+    assert_eq!(harness.checkpoint_json()["terminal"], "applied");
+}
+
 /// A terminal whose canonical answer is NOT an extension of the streamed
 /// text (a genuine mid-stream rewrite): the stale stream is closed as it
 /// stands and the canonical answer goes out on ONE fresh native stream —
@@ -1420,6 +1482,65 @@ async fn terminal_attachments_upload_after_the_stream_closes() {
     let before = harness.fake.calls().len();
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
     assert_eq!(harness.fake.calls().len(), before);
+}
+
+/// The upload ticket (`files.getUploadURLExternal`) and the private byte
+/// upload share nothing into the conversation — only
+/// `files.completeUploadExternal` does. A lost answer on the ticket is
+/// therefore a plain retry, never the fail-closed attachment ambiguity: the
+/// retry takes a fresh ticket and the file is shared exactly once.
+#[tokio::test]
+async fn a_lost_upload_ticket_answer_is_retryable_and_the_retry_shares_the_file_once() {
+    let mut harness = Harness::dm();
+    harness.attachments = vec![WorkspaceFile {
+        path: ScopedPath::new("/workspace/report.txt").expect("path"),
+        filename: Some("report.txt".to_string()),
+        mime_type: "text/plain".to_string(),
+        bytes: b"hello".to_vec(),
+    }];
+    harness.append("Hello");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    harness
+        .document
+        .finalize_answer(answer("Hello"), Vec::new());
+    harness.document.complete();
+
+    harness.fake.inject(Fault::TransportAfterAccept {
+        method: SlackWebApiMethod::FilesGetUploadUrlExternal,
+    });
+    let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Retryable { .. }),
+        "a lost ticket answer shares nothing, so it is retryable, got {:?}",
+        report.outcome
+    );
+    let checkpoint = harness.checkpoint_json();
+    assert_eq!(
+        checkpoint["attachment_upload_ambiguous"],
+        Value::Bool(false),
+        "the fail-closed latch is reserved for an unanswered completion"
+    );
+    assert_eq!(checkpoint["terminal"], "stream_closed");
+    assert_eq!(
+        harness.fake.calls()[2..],
+        ["chat.stopStream", "files.getUploadURLExternal"],
+        "no bytes went out on a ticket whose answer was lost"
+    );
+
+    let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
+    assert_applied(&report);
+    assert_eq!(
+        harness.fake.calls()[4..],
+        [
+            "files.getUploadURLExternal",
+            "upload",
+            "files.completeUploadExternal",
+            "files.info",
+        ],
+        "the retry takes a fresh ticket and completes the upload once"
+    );
+    assert_eq!(refs(&report), ["FAKE2".to_string()]);
+    assert_eq!(harness.checkpoint_json()["attachments_delivered"], true);
 }
 
 // ── Outcome mapping ──────────────────────────────────────────────────────

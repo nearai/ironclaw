@@ -30,7 +30,9 @@ pub(super) struct SlackAgentApi<'a> {
 /// the few errors that change control flow.
 #[derive(Debug)]
 pub(super) enum SlackApiFailure {
-    /// The request crossed into transport and Slack may have applied it.
+    /// The request crossed into transport and Slack may have applied it:
+    /// the transport failed after the send, or a 2xx answer arrived that
+    /// this sink cannot read (not JSON, or no boolean `ok`).
     Ambiguous { reason: String },
     /// Slack answered `ok: false`.
     Rejected {
@@ -44,7 +46,9 @@ pub(super) enum SlackApiFailure {
     },
     /// The host refused the request before the network.
     Egress(RestrictedEgressError),
-    /// A 2xx answer this sink cannot read.
+    /// An `ok: true` answer without the shape the call needs (a read-back
+    /// with no `messages` array): the call itself succeeded, its result
+    /// proves nothing.
     InvalidResponse { reason: String },
     /// The request could not be built.
     Local { reason: String },
@@ -125,14 +129,18 @@ impl SlackAgentApi<'_> {
                 ],
             )
             .await?;
-        let message = response
+        // No `messages` array is not "the message is gone" (which would
+        // re-send a pending delta): the answer proves nothing.
+        let messages = response
             .get("messages")
             .and_then(Value::as_array)
-            .and_then(|messages| {
-                messages
-                    .iter()
-                    .find(|message| message.get("ts").and_then(Value::as_str) == Some(ts))
-            });
+            .ok_or_else(|| SlackApiFailure::InvalidResponse {
+                reason: "slack conversations.replies answered ok without a messages array"
+                    .to_string(),
+            })?;
+        let message = messages
+            .iter()
+            .find(|message| message.get("ts").and_then(Value::as_str) == Some(ts));
         Ok(match message {
             None => SlackReadBack::NotFound,
             Some(message) => match message.get("text").and_then(Value::as_str) {
@@ -177,25 +185,35 @@ fn classify(
             retry_after: response.retry_after,
         });
     }
-    let value: Value = serde_json::from_slice(&response.body).map_err(|error| {
-        SlackApiFailure::InvalidResponse {
-            reason: format!(
-                "slack {} response was not valid JSON: {error}",
-                method.name()
-            ),
+    // A 2xx crossed transport and was acted on. Only an explicit `ok: false`
+    // is a rejection; a body this sink cannot read — not JSON, or `ok`
+    // missing or not a boolean — is the lost-answer shape, so the call sites
+    // arm the same pending / ghost-stream latches a transport loss arms.
+    let value: Value = match serde_json::from_slice(&response.body) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(SlackApiFailure::Ambiguous {
+                reason: format!(
+                    "slack {} answered 2xx with a body that is not valid JSON: {error}",
+                    method.name()
+                ),
+            });
         }
-    })?;
-    if value.get("ok").and_then(Value::as_bool) == Some(true) {
-        return Ok(value);
+    };
+    match value.get("ok").and_then(Value::as_bool) {
+        Some(true) => Ok(value),
+        Some(false) => Err(SlackApiFailure::Rejected {
+            error: value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown_error")
+                .to_string(),
+            retry_after: response.retry_after,
+        }),
+        None => Err(SlackApiFailure::Ambiguous {
+            reason: format!("slack {} answered 2xx without a boolean ok", method.name()),
+        }),
     }
-    Err(SlackApiFailure::Rejected {
-        error: value
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown_error")
-            .to_string(),
-        retry_after: response.retry_after,
-    })
 }
 
 // ── Outcome mapping ──────────────────────────────────────────────────────
@@ -326,5 +344,45 @@ pub(super) fn outcome_for_part(outcome: PartDeliveryOutcome) -> ReplySinkOutcome
         PartDeliveryOutcome::Unauthorized { reason } => ReplySinkOutcome::Unauthorized {
             reason: ReplyOutcomeReason::new(reason),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn answered_2xx(body: &[u8]) -> Result<Value, SlackApiFailure> {
+        classify(
+            SlackWebApiMethod::ChatAppendStream,
+            Ok(RestrictedEgressResponse {
+                status: 200,
+                body: body.to_vec(),
+                retry_after: None,
+            }),
+        )
+    }
+
+    /// A 2xx answer crossed transport and was acted on: only an explicit
+    /// `ok: false` is a rejection; a body that cannot be read (not JSON, or
+    /// `ok` missing or not a boolean) is the lost-answer shape.
+    #[test]
+    fn a_2xx_answer_is_ambiguous_unless_ok_is_a_boolean() {
+        assert!(answered_2xx(br#"{"ok":true,"ts":"1710000100.000001"}"#).is_ok());
+        assert!(matches!(
+            answered_2xx(br#"{"ok":false,"error":"invalid_arguments"}"#),
+            Err(SlackApiFailure::Rejected { error, .. }) if error == "invalid_arguments"
+        ));
+        for body in [
+            &b"<html><body>upstream error</body></html>"[..],
+            b"{}",
+            br#"{"ok":"yes"}"#,
+            br#"{"ok":1}"#,
+        ] {
+            assert!(
+                matches!(answered_2xx(body), Err(SlackApiFailure::Ambiguous { .. })),
+                "{} must be ambiguous",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 }

@@ -424,7 +424,6 @@ paths = [
   "/api/chat.appendStream",
   "/api/chat.stopStream",
   "/api/agents.sessions.setStatus",
-  "/api/agents.sessions.rename",
 ]
 request_body_limit_bytes = 262144
 response_body_limit_bytes = 262144
