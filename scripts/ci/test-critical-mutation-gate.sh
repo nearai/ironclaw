@@ -90,6 +90,12 @@ fi
 if [ -n "${STUB_ARGV_FILE:-}" ]; then
   printf '%s\n' "$*" >"${STUB_ARGV_FILE}"
 fi
+# cargo-mutants 27.1's real argument contract: `--in-place` and `--jobs` are
+# mutually exclusive (verified with the binary; the merge queue failed on it).
+if [[ " $* " == *" --in-place "* && " $* " == *" --jobs "* ]]; then
+  echo "error: the argument '--in-place' cannot be used with '--jobs <JOBS>'" >&2
+  exit 1
+fi
 out=""
 pattern=""
 while [ "$#" -gt 0 ]; do
@@ -207,12 +213,14 @@ rm -f "${work}/argv.txt"
 capture caught --in-place
 check_rc "in-place run passes" 0
 check_argv "in-place is forwarded to cargo-mutants" "--in-place" present
-check_argv "in-place runs one job at a time" "--jobs 1" present
+check_argv "in-place passes no --jobs (cargo-mutants rejects the pair)" "--jobs" absent
 capture caught --in-place --jobs 3
 check_rc "in-place with parallel jobs is refused" 1
 check_text "the refusal explains the tree-copy constraint" "one cargo-mutants job at a time"
+rm -f "${work}/argv.txt"
 capture caught --in-place --jobs 1
 check_rc "in-place with an explicit single job passes" 0
+check_argv "an explicit single job is still not forwarded in place" "--jobs" absent
 
 echo "▶ survivor and timeout sabotage"
 capture missed

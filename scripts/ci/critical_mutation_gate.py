@@ -232,7 +232,8 @@ def main() -> int:
     parser.add_argument(
         "--jobs",
         type=int,
-        help="parallel cargo-mutants jobs (default 3, or 1 with --in-place)",
+        help="parallel cargo-mutants jobs (default 3; not passed with --in-place, "
+        "which cargo-mutants runs as one job)",
     )
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument(
@@ -241,8 +242,8 @@ def main() -> int:
         help=(
             "mutate the checkout in place (cargo-mutants --in-place) so the "
             "baseline and every mutant build reuse its warm target directory; "
-            "CI-only, for a disposable checkout, and implies --jobs 1 because "
-            "cargo-mutants cannot run parallel jobs in one tree"
+            "CI-only, for a disposable checkout; cargo-mutants runs in-place "
+            "work as one job and rejects --jobs alongside --in-place"
         ),
     )
     args = parser.parse_args()
@@ -254,8 +255,10 @@ def main() -> int:
                 "--in-place runs one cargo-mutants job at a time (parallel jobs "
                 "need separate tree copies); drop --jobs or pass --jobs 1"
             )
-        jobs = args.jobs if args.jobs is not None else (1 if args.in_place else 3)
-        if jobs < 1 or args.timeout < 1:
+        # cargo-mutants 27.1 refuses `--jobs` next to `--in-place` even for a
+        # value of 1, so in-place runs pass no `--jobs` at all.
+        jobs = None if args.in_place else (args.jobs if args.jobs is not None else 3)
+        if (jobs is not None and jobs < 1) or args.timeout < 1:
             raise GateError("--jobs and --timeout must be positive integers")
         repo_root = args.repo_root.resolve()
         entries = load_manifest(args.manifest, repo_root)
@@ -374,9 +377,7 @@ def main() -> int:
                         pattern,
                         "--timeout",
                         str(args.timeout),
-                        "--jobs",
-                        str(jobs),
-                        *(("--in-place",) if args.in_place else ()),
+                        *(("--jobs", str(jobs)) if jobs is not None else ("--in-place",)),
                         "--output",
                         temp,
                         "--annotations",
