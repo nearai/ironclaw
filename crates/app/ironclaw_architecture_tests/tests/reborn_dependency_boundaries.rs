@@ -1012,7 +1012,15 @@ fn reborn_contracts_crates_carry_a_checked_size_ceiling() {
         // production prompt validation checks structural limits and control
         // characters only; decoded Basic-auth samples remain test-only. Count
         // read from this test's own failure message after merging #7416 and #6985.
-        ("ironclaw_loop_contracts", 13_608),
+        // 13_608 -> 13_773 (2026-09-02, model-derived prompt context budget):
+        // `PromptContextTokenBudget::from_advertised_window` derives the
+        // per-run budget on the type this crate owns, and `LoopRunContext`
+        // carries the optional resolved budget; derivation stays a pure
+        // function of the DTO, resolution and consumption stay in
+        // `ironclaw_loop_host` / `ironclaw_turn_runner` / `ironclaw_agent_loop`.
+        // `main` already sat 3 lines under the effective ceiling. Count read
+        // from this test's own failure message.
+        ("ironclaw_loop_contracts", 13_773),
         // Raised 15_685 -> 15_758 by #7220 (operator inspector API): the growth
         // is bounded, output-only read-view descriptors. Capture, retention,
         // authorization, and transport behavior remain in their owning
