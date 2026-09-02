@@ -461,6 +461,19 @@ test("thread-scoped workspace roots expose only the authorized project mount", a
   }
 });
 
+test("thread-scoped workspace rejects project-file entries missing required fields", async () => {
+  const harness = installFetch(() => jsonResponse({ entries: [{}] }));
+
+  try {
+    await assert.rejects(
+      listWorkspace("workspace/reports", { threadId: "thread-project-beta" }),
+      /invalid project file list response/,
+    );
+  } finally {
+    harness.restore();
+  }
+});
+
 test("thread-scoped directory listings preserve the source thread", async () => {
   const harness = installFetch((path) => {
     assert.equal(

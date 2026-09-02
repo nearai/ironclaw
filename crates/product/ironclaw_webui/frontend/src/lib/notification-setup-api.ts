@@ -38,7 +38,7 @@ export async function getNotificationSetupStatus({
 }: NotificationSetupOptions = {}): Promise<NotificationSetupStatusResponse> {
   if (!extensionId) throw new Error("extensionId is required");
   return decodeNotificationSetupStatus(
-    await apiFetch(notificationSetupPath(extensionId)),
+    await apiFetch(notificationSetupPath(extensionId), { cache: "no-store" }),
   );
 }
 

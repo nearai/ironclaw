@@ -70,6 +70,20 @@ test("apiFetch rejects non-object JSON instead of leaking an any response", asyn
   );
 });
 
+test("apiFetch accepts a JSON record with an own constructor field", async () => {
+  setSessionStorage();
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ constructor: "value", result: "ok" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  assert.deepEqual(await apiFetch("/api/webchat/v2/session"), {
+    constructor: "value",
+    result: "ok",
+  });
+});
+
 test("notification setup rejects malformed successful responses", async () => {
   setSessionStorage();
   globalThis.fetch = async () =>

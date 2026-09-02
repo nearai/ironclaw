@@ -41,10 +41,39 @@ function numberField(response, field, responseName) {
   return value;
 }
 
+function requiredStringField(record, field, responseName) {
+  const value = record?.[field];
+  if (typeof value !== "string") {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value;
+}
+
+function optionalStringField(record, field, responseName) {
+  const value = record?.[field];
+  if (value !== undefined && value !== null && typeof value !== "string") {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value ?? null;
+}
+
 // Map a wire `RebornProjectInfo` to the shape the Projects page components
 // expect. `goals` is read from the extensible `metadata` bag.
 function toPageProject(project) {
-  if (!project) return null;
+  if (typeof project !== "object" || project === null || Array.isArray(project)) {
+    throw new TypeError("invalid project response");
+  }
+  const projectId = requiredStringField(project, "project_id", "project");
+  const name = requiredStringField(project, "name", "project");
+  const description = requiredStringField(project, "description", "project");
+  const createdAt = requiredStringField(project, "created_at", "project");
+  const updatedAt = requiredStringField(project, "updated_at", "project");
+  if (!["active", "archived"].includes(project.state)) {
+    throw new TypeError("invalid project response");
+  }
+  if (!["owner", "editor", "viewer"].includes(project.role)) {
+    throw new TypeError("invalid project response");
+  }
   // The server constrains `metadata` to a JSON object or null
   // (`ProjectRecord::validate`), but guard against arrays defensively
   // (`typeof [] === "object"`) so the page always treats it as an object bag.
@@ -55,25 +84,30 @@ function toPageProject(project) {
       ? project.metadata
       : {};
   return {
-    id: project.project_id,
-    name: project.name,
-    description: project.description,
+    id: projectId,
+    name,
+    description,
     goals: Array.isArray(metadata.goals) ? metadata.goals : [],
-    icon: project.icon || null,
-    color: project.color || null,
+    icon: optionalStringField(project, "icon", "project"),
+    color: optionalStringField(project, "color", "project"),
     state: project.state,
     role: project.role,
     metadata,
-    created_at: project.created_at,
-    updated_at: project.updated_at,
+    created_at: createdAt,
+    updated_at: updatedAt,
   };
 }
 
 function toPageThread(thread) {
-  if (!thread) return null;
+  if (typeof thread !== "object" || thread === null || Array.isArray(thread)) {
+    throw new TypeError("invalid project thread response");
+  }
+  const threadId = requiredStringField(thread, "thread_id", "project thread");
+  optionalStringField(thread, "title", "project thread");
+  optionalStringField(thread, "updated_at", "project thread");
   return {
     ...thread,
-    id: thread.thread_id,
+    id: threadId,
     state: thread.state || null,
     turn_count: thread.turn_count || 0,
     updated_at: thread.updated_at || null,

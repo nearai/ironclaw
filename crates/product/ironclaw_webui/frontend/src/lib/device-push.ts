@@ -177,9 +177,6 @@ function notificationRegistrationDigests(
     }
     return registration.endpoint_digest.toLowerCase();
   });
-  if (response.enabled !== (digests.length > 0)) {
-    throw new Error("backend returned inconsistent push enrollment evidence");
-  }
   return digests;
 }
 

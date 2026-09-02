@@ -31,6 +31,7 @@ afterEach(() => {
 
 test("pairing endpoints decode their successful wire payloads", async () => {
   setSessionStorage();
+  const calls: Array<{ path: RequestInfo | URL; options?: RequestInit }> = [];
   const responses = [
     new Response(
       JSON.stringify({
@@ -46,7 +47,8 @@ test("pairing endpoints decode their successful wire payloads", async () => {
     }),
     new Response(null, { status: 204 }),
   ];
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
     const response = responses.shift();
     if (!response) throw new Error("unexpected fetch");
     return response;
@@ -61,6 +63,7 @@ test("pairing endpoints decode their successful wire payloads", async () => {
     connected: false,
     pending: null,
   });
+  assert.equal(calls[1].options?.cache, "no-store");
   assert.equal(await unpairExtension("telegram"), undefined);
 });
 

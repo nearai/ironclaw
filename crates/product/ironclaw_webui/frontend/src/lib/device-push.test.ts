@@ -339,3 +339,15 @@ test("unenrollThisBrowser unsubscribes after backend removal is confirmed", asyn
   assert.deepEqual(await unenrollThisBrowser(), { state: "not-enrolled" });
   assert.equal(subscription.unsubscribe.mock.calls.length, 1);
 });
+
+test("unenrollThisBrowser accepts removal while the account channel remains enabled", async () => {
+  const subscription = fakeSubscription("https://fcm.googleapis.com/fcm/send/old");
+  browserEnvironment({ permission: "granted", subscription });
+  disableNotificationSetupMock.mockResolvedValueOnce({
+    ...setupResponse([]),
+    enabled: true,
+  });
+
+  assert.deepEqual(await unenrollThisBrowser(), { state: "not-enrolled" });
+  assert.equal(subscription.unsubscribe.mock.calls.length, 1);
+});

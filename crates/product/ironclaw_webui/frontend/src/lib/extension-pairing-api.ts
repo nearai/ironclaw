@@ -78,7 +78,9 @@ export async function mintExtensionPairingCode(
 export async function getExtensionPairingStatus(
   extensionId: string,
 ): Promise<ExtensionPairingStatus> {
-  const response = await apiFetch(extensionPairingPath(extensionId, "status"));
+  const response = await apiFetch(extensionPairingPath(extensionId, "status"), {
+    cache: "no-store",
+  });
   return decodePairingStatus(response);
 }
 

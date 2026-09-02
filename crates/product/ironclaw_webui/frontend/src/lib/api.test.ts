@@ -604,6 +604,7 @@ test("getNotificationSetupStatus reads the channel's generic status route", asyn
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, "/api/webchat/v2/channels/some-channel/notifications");
+  assert.equal(calls[0].options.cache, "no-store");
   assert.equal(status.requires_setup, true);
   assert.equal(status.detail.bootstrap.vapid_public_key, "k");
   await assert.rejects(getNotificationSetupStatus(), /extensionId is required/);

@@ -195,7 +195,7 @@ export async function apiFetch(
 
   if (response.status === 204) return {};
   const payload: unknown = await response.json();
-  if ((payload as { constructor?: unknown })?.constructor !== Object) {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
     throw new TypeError("invalid API response");
   }
   return payload as ApiRecord;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test, vi } from "vitest";
 
 import {
+  fetchTraceCredits,
   fetchUserModelCatalog,
   fetchUserModelPreference,
   setUserModelPolicy,
@@ -169,6 +170,47 @@ test("updateSetting returns the backend-confirmed value", async () => {
     const result = await updateSetting("provider.default", " Requested Provider ");
     assert.equal(result.success, true);
     assert.equal(result.value, "normalized-provider");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("fetchTraceCredits rejects missing required collection fields", async () => {
+  const responses = [
+    {
+      enrolled: true,
+      submissions_total: 1,
+      submissions_submitted: 1,
+      submissions_accepted: 1,
+      manual_review_hold_count: 0,
+      holds: [],
+    },
+    {
+      enrolled: true,
+      submissions_total: 1,
+      submissions_submitted: 1,
+      submissions_accepted: 1,
+      manual_review_hold_count: 0,
+      recent_explanations: [],
+    },
+  ];
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    async () =>
+      new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+
+  try {
+    await assert.rejects(fetchTraceCredits(), /invalid trace credits response/);
+    await assert.rejects(fetchTraceCredits(), /invalid trace credits response/);
   } finally {
     vi.unstubAllGlobals();
   }

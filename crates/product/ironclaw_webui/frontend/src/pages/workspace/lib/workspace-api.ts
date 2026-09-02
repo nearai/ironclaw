@@ -420,7 +420,16 @@ export async function listWorkspace(
     }
     return {
       entries: response.entries.flatMap((entry) => {
-        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        if (
+          typeof entry !== "object" ||
+          entry === null ||
+          Array.isArray(entry) ||
+          typeof entry.name !== "string" ||
+          !entry.name ||
+          typeof entry.path !== "string" ||
+          !entry.path ||
+          !["file", "directory", "symlink", "other"].includes(entry.kind)
+        ) {
           throw new TypeError("invalid project file list response");
         }
         const path = qualifiedProjectPath(entry.path);

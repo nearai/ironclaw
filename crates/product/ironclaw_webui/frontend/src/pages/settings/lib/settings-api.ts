@@ -562,7 +562,7 @@ export async function fetchTraceCredits(): Promise<TraceCreditsResponse> {
   if (typeof response.enrolled !== "boolean") {
     throw new TypeError("invalid trace credits response");
   }
-  const recentExplanations = optionalUnknownArrayField(
+  const recentExplanations = unknownArrayField(
     response,
     "recent_explanations",
     "trace credits",
@@ -594,7 +594,7 @@ export async function fetchTraceCredits(): Promise<TraceCreditsResponse> {
       "trace credits",
     ),
     recent_explanations: recentExplanations,
-    holds: decodeTraceHolds(response.holds ?? []),
+    holds: decodeTraceHolds(response.holds),
   };
 }
 // Submitted Trace Commons traces for the authenticated caller (read-only,
