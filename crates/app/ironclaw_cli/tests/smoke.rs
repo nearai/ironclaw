@@ -2273,7 +2273,7 @@ fn serve_boots_without_user_id_env_var() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    wait_for_serve_ready(&mut child, port);
 
     let _ = child.kill();
     let _ = child.wait();
@@ -2313,7 +2313,7 @@ fn serve_boots_from_the_workspace_subdir_the_installed_service_now_uses_as_cwd()
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    wait_for_serve_ready(&mut child, port);
 
     let _ = child.kill();
     let _ = child.wait();
@@ -2395,7 +2395,7 @@ fn a_real_env_var_beats_the_config_default_end_to_end() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    wait_for_serve_ready(&mut child, port);
 
     let _ = child.kill();
     let _ = child.wait();
@@ -2429,42 +2429,7 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let stderr = child.stderr.take().expect("stderr should be piped");
-    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines() {
-            if stderr_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let mut stderr_text = String::new();
-    loop {
-        if let Some(status) = child.try_wait().expect("serve child status") {
-            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("serve did not reach listener banner; stderr: {stderr_text}");
-        }
-        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(Ok(line)) => {
-                stderr_text.push_str(&line);
-                stderr_text.push('\n');
-                if stderr_text.contains("ironclaw: WebChat v2 listener") {
-                    break;
-                }
-            }
-            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("serve stderr closed before banner; stderr: {stderr_text}");
-            }
-        }
-    }
+    wait_for_serve_ready(&mut child, port);
 
     let providers_status = match http_status_line(
         port,
@@ -2564,42 +2529,7 @@ fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let stderr = child.stderr.take().expect("stderr should be piped");
-    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines() {
-            if stderr_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let mut stderr_text = String::new();
-    loop {
-        if let Some(status) = child.try_wait().expect("serve child status") {
-            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("serve did not reach listener banner; stderr: {stderr_text}");
-        }
-        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(Ok(line)) => {
-                stderr_text.push_str(&line);
-                stderr_text.push('\n');
-                if stderr_text.contains("ironclaw: WebChat v2 listener") {
-                    break;
-                }
-            }
-            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("serve stderr closed before banner; stderr: {stderr_text}");
-            }
-        }
-    }
+    wait_for_serve_ready(&mut child, port);
 
     let _ = child.kill();
     let _ = child.wait();
@@ -2641,17 +2571,49 @@ fn unused_local_port() -> u16 {
         .port()
 }
 
-fn http_status_line(port: u16, request: &str, label: &str) -> Result<String, String> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut stream = loop {
+fn connect_to_serve_listener(
+    port: u16,
+    deadline: std::time::Instant,
+    mut while_waiting: impl FnMut() -> Result<(), String>,
+) -> Result<std::net::TcpStream, String> {
+    loop {
         match std::net::TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => break stream,
+            Ok(stream) => return Ok(stream),
             Err(_) if std::time::Instant::now() < deadline => {
+                while_waiting()?;
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(error) => return Err(format!("connect to serve listener failed: {error}")),
         }
-    };
+    }
+}
+
+#[test]
+fn connect_to_serve_listener_retries_until_delayed_bind() {
+    let _serve_port_guard = SERVE_PORT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let port = unused_local_port();
+    let listener_thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind delayed listener");
+        listener.accept().expect("accept readiness probe");
+    });
+
+    let stream = connect_to_serve_listener(
+        port,
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+        || Ok(()),
+    )
+    .expect("listener should become reachable before the deadline");
+    drop(stream);
+    listener_thread.join().expect("listener thread should join");
+}
+
+fn http_status_line(port: u16, request: &str, label: &str) -> Result<String, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut stream = connect_to_serve_listener(port, deadline, || Ok(()))?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
         .map_err(|error| format!("set {label} read timeout failed: {error}"))?;
@@ -2823,15 +2785,7 @@ fn serve_fails_closed_when_session_token_lacks_entropy_without_sso() {
 /// capture.
 fn http_response(port: u16, request: &str, label: &str) -> Result<HttpResponse, String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let stream = loop {
-        match std::net::TcpStream::connect(("127.0.0.1", port)) {
-            Ok(stream) => break stream,
-            Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(error) => return Err(format!("connect to serve listener failed: {error}")),
-        }
-    };
+    let stream = connect_to_serve_listener(port, deadline, || Ok(()))?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
         .map_err(|error| format!("set {label} read timeout failed: {error}"))?;
@@ -2914,7 +2868,7 @@ fn serve_mounts_cli_login_route_without_sso() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    wait_for_serve_ready(&mut child, port);
 
     let wrong_token_status = http_response(
         port,
@@ -3018,7 +2972,7 @@ fn serve_does_not_mount_cli_login_route_when_token_is_env_sourced() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    wait_for_serve_ready(&mut child, port);
 
     let login_response = http_response(
         port,
@@ -3087,7 +3041,7 @@ fn serve_with_sso_does_not_double_mount_session_exchange() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    wait_for_serve_ready(&mut child, port);
 
     let login_response = http_response(
         port,
@@ -3151,10 +3105,10 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// Blocks until `child`'s stderr carries the ready banner. Returns
-/// everything captured up to and including the banner line, so callers can
-/// also assert on pre-banner diagnostics without their own drain thread.
-fn wait_for_serve_banner(child: &mut std::process::Child) -> String {
+/// Blocks until `child` emits its diagnostic banner and its selected port
+/// accepts TCP connections. Returns everything captured up to and including
+/// the banner line so callers can also assert on pre-listener diagnostics.
+fn wait_for_serve_ready(child: &mut std::process::Child, port: u16) -> String {
     let stderr = child.stderr.take().expect("stderr should be piped");
     let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -3191,21 +3145,28 @@ fn wait_for_serve_banner(child: &mut std::process::Child) -> String {
             }
         }
     }
+
+    if let Err(error) = connect_to_serve_listener(port, deadline, || {
+        match child.try_wait().map_err(|error| error.to_string())? {
+            Some(status) => Err(format!("serve exited before binding with {status}")),
+            None => Ok(()),
+        }
+    }) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("serve did not bind after its listener banner: {error}; stderr: {stderr_text}");
+    }
     stderr_text
 }
 
-/// Like [`wait_for_serve_banner`], but keeps capturing `child`'s stderr for
+/// Like [`wait_for_serve_ready`], but keeps capturing `child`'s stderr for
 /// the rest of the test (returned as a live-updating buffer) instead of
-/// dropping the reader once the banner line is seen. The real-turn tests
-/// that use this drive several more HTTP round trips after the banner and
-/// occasionally hit a `Connection refused` under CPU-contended parallel test
-/// runs — the banner line is flushed just before the listener starts
-/// accepting, not after, so a loaded box can have a brief gap. Keeping the
-/// capture alive (rather than a one-shot channel that's dropped as soon as
-/// the caller returns) means a failure can print what `serve` actually did
-/// in that window instead of only "connection refused".
-fn wait_for_serve_banner_with_capture(
+/// dropping the reader after readiness. The banner is diagnostic and precedes
+/// the actual bind, so this helper also waits for the selected port before it
+/// returns.
+fn wait_for_serve_ready_with_capture(
     child: &mut std::process::Child,
+    port: u16,
     label: &str,
 ) -> std::sync::Arc<std::sync::Mutex<String>> {
     let stderr_all = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -3231,7 +3192,7 @@ fn wait_for_serve_banner_with_capture(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains("ironclaw: WebChat v2 listener")
         {
-            return stderr_all;
+            break;
         }
         if let Some(status) = child.try_wait().expect("serve child status") {
             panic!(
@@ -3242,6 +3203,8 @@ fn wait_for_serve_banner_with_capture(
             );
         }
         if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
             panic!(
                 "{label}: serve did not reach listener banner; stderr: {}",
                 stderr_all
@@ -3251,6 +3214,23 @@ fn wait_for_serve_banner_with_capture(
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+
+    if let Err(error) = connect_to_serve_listener(port, deadline, || {
+        match child.try_wait().map_err(|error| error.to_string())? {
+            Some(status) => Err(format!("serve exited before binding with {status}")),
+            None => Ok(()),
+        }
+    }) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!(
+            "{label}: serve did not bind after its listener banner: {error}; stderr: {}",
+            stderr_all
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        );
+    }
+    stderr_all
 }
 
 // Note: port `0` is intentionally accepted now — it lets the kernel
@@ -4432,7 +4412,7 @@ fn onboard_then_serve_boots_in_degraded_mode_with_an_empty_environment() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let pre_banner_stderr = wait_for_serve_banner(&mut child);
+    let pre_banner_stderr = wait_for_serve_ready(&mut child, port);
     assert!(
         pre_banner_stderr.contains("no LLM selection configured"),
         "serve must still bind (runtime resolution is unchanged: Ok(None) is not a boot-time \
@@ -4511,7 +4491,7 @@ fn onboard_with_complete_llm_env_then_serve_boots_from_the_env_seeded_slot() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_ready(&mut child, port));
     assert!(
         !pre_banner_stderr.contains("no LLM selection configured"),
         "serve must boot against the env-seeded slot without the degraded-mode warning; \
@@ -4592,7 +4572,7 @@ fn onboard_login_link_then_bearer_authorizes_a_protected_request() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    wait_for_serve_ready(&mut child, port);
 
     // 1. Onboard-provisioned token at /login?token= must redirect into the
     //    ticket hand-off.
@@ -5037,7 +5017,7 @@ fn stored_key_reaches_real_turn_via_product_surface() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let stderr_all = wait_for_serve_banner_with_capture(&mut child, "single-boot");
+    let stderr_all = wait_for_serve_ready_with_capture(&mut child, port, "single-boot");
 
     let turn_result = drive_real_turn_via_webui(port, &webui_token, "single-boot");
     if turn_result.is_err() {
@@ -5136,7 +5116,8 @@ fn stored_key_reaches_real_turn_across_fresh_boots() {
             .unwrap_or_else(|error| {
                 panic!("boot {boot}: ironclaw-reborn serve should start: {error}")
             });
-        let stderr_all = wait_for_serve_banner_with_capture(&mut child, &format!("boot {boot}"));
+        let stderr_all =
+            wait_for_serve_ready_with_capture(&mut child, port, &format!("boot {boot}"));
 
         let turn_result = drive_real_turn_via_webui(port, &webui_token, &format!("boot-{boot}"));
         if turn_result.is_err() {
@@ -5324,7 +5305,7 @@ fn onboard_openai_key_then_serve_boots_with_env_var_unset() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_ready(&mut child, port));
 
     let _ = child.kill();
     let _ = child.wait();
@@ -5424,7 +5405,7 @@ fn onboard_nearai_then_serve_boots_with_cloud_base_url() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_ready(&mut child, port));
 
     let _ = child.kill();
     let _ = child.wait();
@@ -5528,7 +5509,7 @@ fn onboard_nearai_stored_key_then_serve_boots_with_cloud_base_url() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    let pre_banner_stderr = strip_ansi(&wait_for_serve_banner(&mut child));
+    let pre_banner_stderr = strip_ansi(&wait_for_serve_ready(&mut child, port));
 
     let _ = child.kill();
     let _ = child.wait();
@@ -5609,7 +5590,7 @@ fn serve_boots_with_env_api_key_set_and_empty_secret_store() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("ironclaw-reborn serve should start");
-    wait_for_serve_banner(&mut child);
+    wait_for_serve_ready(&mut child, port);
 
     let _ = child.kill();
     let _ = child.wait();
