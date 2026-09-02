@@ -219,6 +219,9 @@ pub trait OutboundStateStorePort: Send + Sync {
     /// index over the delivery rows. `scope` authorizes the read and names
     /// the tenant; rows from every thread of that tenant are returned so a
     /// restarted publisher can resume work the journal already acknowledged.
+    /// Because `/outbound` is a per-user mount, one call sees the owner
+    /// subtree `scope` resolves to; a sweep passes each owner scope it wants
+    /// covered.
     async fn list_open_reply_publications(
         &self,
         scope: TurnScope,

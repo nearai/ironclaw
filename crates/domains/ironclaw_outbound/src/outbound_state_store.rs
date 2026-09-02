@@ -1543,8 +1543,15 @@ where
             for versioned in entries {
                 let row = decode_delivery_attempt_row(&versioned.entry.body)?;
                 // Defence-in-depth beyond the mount prefix: keep only rows
-                // whose persisted scope names the caller's tenant.
-                if row.attempt.scope.tenant_id == scope.tenant_id {
+                // whose persisted scope names the caller's tenant — and only
+                // those still carrying an `Active` publication. Settled
+                // publications and plain one-shot rows are dropped page by
+                // page here rather than retained until the sort.
+                let active_publication = row
+                    .publication
+                    .as_ref()
+                    .is_some_and(|publication| publication.status.is_active());
+                if row.attempt.scope.tenant_id == scope.tenant_id && active_publication {
                     rows.push(row);
                 }
             }
@@ -1561,11 +1568,6 @@ where
         });
         Ok(rows
             .iter()
-            .filter(|row| {
-                row.publication
-                    .as_ref()
-                    .is_some_and(|publication| publication.status.is_active())
-            })
             .filter_map(DeliveryAttemptRow::publication_record)
             .collect())
     }

@@ -17,7 +17,8 @@
 //! Covered: inbound outcomes are bounded and well-formed (and malformed input
 //! never panics), delivery honors the envelope with structured per-part
 //! reports, reply sinks apply and re-apply revisions against the scripted
-//! vendor with bounded reports, deferred post-ack fetch handles fail cleanly
+//! vendor with bounded reports and never treat a checkpoint they cannot read
+//! as evidence of application, deferred post-ack fetch handles fail cleanly
 //! when unimplemented, and unsupported surfaces error rather than panic.
 //!
 //! Not covered, deliberately: vendor-side ingress registration. That stopped
@@ -40,9 +41,9 @@ use crate::channel_adapter::{
     VerifiedInbound,
 };
 use crate::reply::{
-    ReplyAnswerText, ReplyAudience, ReplyContextBytes, ReplyDisplayText, ReplyDocument,
-    ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink, ReplySinkCheckpoint,
-    ReplySinkOutcome, ReplyTarget, ReplyThreadAnchor,
+    ReplyAnswerText, ReplyAttachmentRef, ReplyAudience, ReplyContextBytes, ReplyDisplayText,
+    ReplyDocument, ReplyItemId, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision,
+    ReplySink, ReplySinkCheckpoint, ReplySinkOutcome, ReplyTarget, ReplyThreadAnchor,
 };
 use ironclaw_host_api::ids::{TenantId, ThreadId, UserId};
 use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope};
@@ -307,7 +308,13 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
 /// an idempotent terminal repeat; a `message` sink through the terminal
 /// revision and its repeat only. Against the fixture's happy-path vendor
 /// script each must be `Applied`, and every report must stay within the host
-/// bounds a real publisher re-validates.
+/// bounds a real publisher re-validates. The terminal document lists the
+/// same attachments the request materializes, as the request contract
+/// requires. Finally the terminal revision is reconciled once more under a
+/// checkpoint of a foreign version: an unreadable checkpoint is never
+/// evidence the terminal was applied, so the sink must either drive the
+/// provider again or report a non-`Applied` outcome — never `Applied` off
+/// bytes it could not decode.
 async fn run_reply_sink_conformance(
     sink: &dyn ReplySink,
     transport: ReplyTransport,
@@ -421,9 +428,35 @@ async fn run_reply_sink_conformance(
         checkpoint = repeat.checkpoint.or(checkpoint);
     }
 
+    // The document and the request must agree: `materialized_attachments`
+    // is non-empty only when the document lists attachments, so derive the
+    // listed refs from the very files the terminal request carries.
+    let attachment_refs: Vec<ReplyAttachmentRef> = materialized_attachments
+        .iter()
+        .enumerate()
+        .map(|(index, file)| ReplyAttachmentRef {
+            id: conformance_value(
+                ReplyItemId::new(format!("attachment-{index}")),
+                "conformance: attachment id",
+            ),
+            filename: conformance_value(
+                ReplyDisplayText::new(
+                    file.filename
+                        .clone()
+                        .unwrap_or_else(|| file.path.to_string()),
+                ),
+                "conformance: attachment filename",
+            ),
+            mime_type: conformance_value(
+                ReplyDisplayText::new(file.mime_type.clone()),
+                "conformance: attachment mime type",
+            ),
+            size_bytes: file.size_bytes(),
+        })
+        .collect();
     document.finalize_answer(
         conformance_value(ReplyAnswerText::new(&answer_text), "conformance: answer"),
-        Vec::new(),
+        attachment_refs,
     );
     document.set_status(
         conformance_value(ReplyDisplayText::new("done"), "conformance: status"),
@@ -453,12 +486,37 @@ async fn run_reply_sink_conformance(
 
     let repeat = sink
         .reconcile(
-            reconcile(terminal, ReplyReconcilePoint::Terminal, checkpoint),
+            reconcile(terminal.clone(), ReplyReconcilePoint::Terminal, checkpoint),
             server,
         )
         .await
         .expect("conformance: repeating the terminal revision must not error"); // safety: test-support conformance failure should fail the caller's test.
     assert_stream_report_applied(&repeat.outcome, "repeated terminal revision");
+
+    // ── A checkpoint the sink cannot read is never evidence of application.
+    // A foreign checkpoint version is treated as absent: the sink either
+    // drives the provider again (calls recorded) or reports a non-`Applied`
+    // outcome. What it must never do is short-circuit to `Applied` off bytes
+    // it could not decode.
+    let foreign = conformance_value(
+        ReplySinkCheckpoint::new(u32::MAX, "foreign"),
+        "conformance: foreign checkpoint",
+    );
+    let calls_before = server.requests().len();
+    let report = sink
+        .reconcile(
+            reconcile(terminal, ReplyReconcilePoint::Terminal, Some(foreign)),
+            server,
+        )
+        .await
+        .expect("conformance: reconciling under an unreadable checkpoint must not error"); // safety: test-support conformance failure should fail the caller's test.
+    let calls_during = server.requests().len().saturating_sub(calls_before);
+    if report.outcome.is_applied() && calls_during == 0 {
+        panic!(
+            "conformance: the sink reported Applied off a checkpoint it cannot read without \
+             driving the provider"
+        );
+    }
 }
 
 fn assert_stream_report_applied(outcome: &ReplySinkOutcome, step: &str) {

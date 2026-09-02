@@ -36,7 +36,11 @@ only through its own policy service.
   there is no separate renew) /
   `advance_reply_publication` / `settle_reply_publication` /
   `release_reply_publication_lease` / `load_reply_publication` /
-  `list_reply_publications` (design
+  `list_reply_publications` / `list_open_reply_publications` (the
+  tenant-wide boot-time recovery read of every still-`Active` publication;
+  `/outbound` is a per-user mount, so one call sees the owner subtree the
+  caller's scope resolves to — a sweep passes each owner scope it wants
+  covered) (design
   `docs/internal/design/2026-08-31-progressive-reply-publication.md` §5).
 
 ## Depends on / consumed by
