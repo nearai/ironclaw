@@ -527,6 +527,9 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
     }
 
     async fn observe_process_commit(&self, commit: ProcessJournalCommit) -> Result<(), String> {
+        if let Some(metadata) = child_gate_run(&commit.state) {
+            return self.observe_child_gate_commit(&commit, &metadata).await;
+        }
         let Some(metadata) = eligible_user_run(&commit.state) else {
             return Ok(());
         };
@@ -631,6 +634,72 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
                 .await?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+}
+
+impl RunOutcomeProcessCommitObserver {
+    /// The child-run half of `observe_process_commit`: publish the child's
+    /// approval/auth gate to the owner's inbox on `Suspended`; retire it when
+    /// the child resumes or ends. Terminal outcomes of a child are never
+    /// published — R2 delivers them into the parent thread.
+    async fn observe_child_gate_commit(
+        &self,
+        commit: &ProcessJournalCommit,
+        metadata: &OutcomeMetadata,
+    ) -> Result<(), String> {
+        let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
+        let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
+        if commit.kind == ProcessJournalKind::Suspended
+            && commit.state.status == ProcessLifecycleStatus::Suspended
+        {
+            let Some(kind) = commit
+                .state
+                .suspension
+                .as_ref()
+                .and_then(|suspension| gate_notification_kind(suspension.kind))
+            else {
+                return Ok(());
+            };
+            return Self::publish_gate_required(
+                self.inbox.as_ref(),
+                self.process_journal_source.as_deref(),
+                &commit.state,
+                run_id,
+                kind,
+                occurred_at,
+            )
+            .await;
+        }
+        let resumed = commit.kind == ProcessJournalKind::Resumed;
+        if !resumed && !commit.state.status.is_terminal() {
+            return Ok(());
+        }
+        // ponytail: two inbox scans per child resume/terminal (the root-run
+        // path pays one per Resumed today). Ceiling: a parent with hundreds of
+        // children scans a large inbox hundreds of times. Upgrade path:
+        // resolve by deterministic id (`run_notification_inbox_id`) once the
+        // terminal snapshot carries the gate_ref it settled, or an inbox index
+        // by run id.
+        // An approval is decided either way once the child resumes; a denied
+        // auth resume keeps the auth item actionable until a verified recovery,
+        // exactly as the root-run path does.
+        self.resolve_open_run_notifications(
+            &commit.state,
+            run_id,
+            NotificationKind::ApprovalRequired,
+            occurred_at,
+        )
+        .await?;
+        if !resumed || metadata.resume_disposition != Some(GateResumeDisposition::Denied) {
+            self.resolve_open_run_notifications(
+                &commit.state,
+                run_id,
+                NotificationKind::AuthenticationRequired,
+                occurred_at,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -877,6 +946,31 @@ fn eligible_user_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetad
     Some(metadata)
 }
 
+/// A subagent child run (`parent_process_id` set, or journaled at depth > 0)
+/// with an owner and a thread. Children are screened out of every outcome
+/// notification by `eligible_user_run` — their results reach the parent thread
+/// through the await edge, never the inbox. A child's own approval or auth
+/// gate is the one outcome that path cannot carry: nothing resumes the child
+/// until a human decides, so it is the one child event that reaches the
+/// owner's inbox (subagent README §9, R3 slice 3a).
+fn child_gate_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
+    if snapshot.process_kind != ProcessKind::AgentTurn
+        || snapshot.owner_user_id.is_none()
+        || snapshot.scope.thread_id.is_none()
+        || snapshot.scope.agent_id.is_none()
+    {
+        return None;
+    }
+    let metadata = parse_outcome_metadata(snapshot)?;
+    if snapshot.parent_process_id.is_none() && metadata.subagent_depth == 0 {
+        return None;
+    }
+    if metadata.ownerless_thread {
+        return None;
+    }
+    Some(metadata)
+}
+
 fn is_background_run(metadata: &OutcomeMetadata) -> bool {
     metadata
         .product_context
@@ -983,11 +1077,11 @@ mod tests {
     };
     use ironclaw_notifications::{
         LifecycleRef, ListNotificationsRequest, MarkAllNotificationsReadRequest,
-        NotificationAction, NotificationInboxError, NotificationInboxStore,
-        NotificationInboxStorePort, NotificationInitialState, NotificationKind,
-        NotificationMutationOutcome, NotificationMutationRequest, NotificationPage,
-        NotificationRecipient, NotificationRecord, NotificationSeverity, NotificationSource,
-        PublishNotificationRequest,
+        NOTIFICATION_PAGE_LIMIT_MAX, NotificationAction, NotificationInboxError,
+        NotificationInboxStore, NotificationInboxStorePort, NotificationInitialState,
+        NotificationKind, NotificationMutationOutcome, NotificationMutationRequest,
+        NotificationPage, NotificationRecipient, NotificationRecord, NotificationSeverity,
+        NotificationSource, PublishNotificationRequest,
     };
     use ironclaw_processes::{
         ClaimProcessesRequest, GetProcessSnapshotRequest, JournaledProcessSnapshot,
@@ -2852,6 +2946,241 @@ mod tests {
         assert!(
             records(inbox.as_ref()).await.is_empty(),
             "neither a child run nor an ownerless thread reaches a user's inbox"
+        );
+    }
+
+    fn child_commit(
+        run_id: TurnRunId,
+        status: ProcessLifecycleStatus,
+        kind: ProcessJournalKind,
+        suspension: Option<ProcessSuspension>,
+    ) -> ProcessJournalCommit {
+        let mut commit = commit(run_id, status, kind, "web_ui");
+        commit.state.parent_process_id = Some(ProcessId::from_uuid(TurnRunId::new().as_uuid()));
+        commit.state.scope.thread_id = Some(child_thread());
+        commit.state.suspension = suspension;
+        commit.state.metadata = json!({
+            "agent_turn": {
+                "product_context": { "origin": "web_ui" },
+                "execution_outcome": "result_available",
+                "subagent_depth": 1,
+            }
+        });
+        commit
+    }
+
+    fn child_thread() -> ThreadId {
+        ThreadId::new("child-thread").expect("child thread id")
+    }
+
+    fn gate_suspension(kind: ProcessSuspensionKind, gate_ref: &str) -> ProcessSuspension {
+        ProcessSuspension {
+            kind,
+            gate_ref: Some(TurnGateRef::new(gate_ref).expect("gate ref")),
+            activity_id: None,
+            credential_requirements: Vec::new(),
+            detail: None,
+        }
+    }
+
+    async fn list_all(inbox: &dyn NotificationInboxStorePort) -> Vec<NotificationRecord> {
+        inbox
+            .list(ListNotificationsRequest {
+                recipient: NotificationRecipient {
+                    tenant_id: tenant(),
+                    user_id: user(),
+                },
+                limit: NOTIFICATION_PAGE_LIMIT_MAX,
+                cursor: None,
+                include_archived: true,
+            })
+            .await
+            .expect("list inbox")
+            .notifications
+    }
+
+    #[tokio::test]
+    async fn a_child_approval_gate_publishes_an_actionable_item_that_opens_the_child_thread() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let child_run = TurnRunId::new();
+
+        observer
+            .observe_process_commit(child_commit(
+                child_run,
+                ProcessLifecycleStatus::Suspended,
+                ProcessJournalKind::Suspended,
+                Some(gate_suspension(
+                    ProcessSuspensionKind::Approval,
+                    "gate:approval-1",
+                )),
+            ))
+            .await
+            .expect("child approval suspension");
+
+        let page = list_all(inbox.as_ref()).await;
+        assert_eq!(page.len(), 1, "exactly one item for one child gate");
+        let item = &page[0];
+        assert_eq!(item.kind, NotificationKind::ApprovalRequired);
+        assert_eq!(item.source.turn_run_id, Some(child_run));
+        assert_eq!(item.source.thread_id, Some(child_thread()));
+        assert_eq!(
+            item.action,
+            NotificationAction::OpenThread {
+                thread_id: child_thread()
+            }
+        );
+        assert!(item.resolved_at.is_none(), "a pending gate is actionable");
+        assert_eq!(
+            item.source.lifecycle_ref.as_ref().map(|r| r.as_str()),
+            Some("gate:approval-1"),
+            "the gate ref rides on the item so a later gate can be told apart"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_auth_gate_publishes_authentication_required() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+
+        observer
+            .observe_process_commit(child_commit(
+                TurnRunId::new(),
+                ProcessLifecycleStatus::Suspended,
+                ProcessJournalKind::Suspended,
+                Some(gate_suspension(
+                    ProcessSuspensionKind::Authorization,
+                    "gate:auth-1",
+                )),
+            ))
+            .await
+            .expect("child auth suspension");
+
+        assert_eq!(
+            records(inbox.as_ref()).await,
+            vec![NotificationKind::AuthenticationRequired]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_suspended_on_anything_but_a_gate_publishes_nothing() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+
+        for kind in [
+            ProcessSuspensionKind::Resource,
+            ProcessSuspensionKind::AwaitingChildProcess,
+            ProcessSuspensionKind::ExternalTool,
+        ] {
+            observer
+                .observe_process_commit(child_commit(
+                    TurnRunId::new(),
+                    ProcessLifecycleStatus::Suspended,
+                    ProcessJournalKind::Suspended,
+                    Some(gate_suspension(kind, "gate:other")),
+                ))
+                .await
+                .expect("non-gate child suspension is screened, not an error");
+        }
+        observer
+            .observe_process_commit(child_commit(
+                TurnRunId::new(),
+                ProcessLifecycleStatus::Completed,
+                ProcessJournalKind::Completed,
+                None,
+            ))
+            .await
+            .expect("child completion is delivered by the await edge, not the inbox");
+
+        assert!(records(inbox.as_ref()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_child_gate_item_resolves_when_the_child_resumes_or_ends() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let resumed_child = TurnRunId::new();
+        let cancelled_child = TurnRunId::new();
+
+        for run in [resumed_child, cancelled_child] {
+            observer
+                .observe_process_commit(child_commit(
+                    run,
+                    ProcessLifecycleStatus::Suspended,
+                    ProcessJournalKind::Suspended,
+                    Some(gate_suspension(
+                        ProcessSuspensionKind::Approval,
+                        "gate:approval-1",
+                    )),
+                ))
+                .await
+                .expect("child approval suspension");
+        }
+        observer
+            .observe_process_commit(child_commit(
+                resumed_child,
+                ProcessLifecycleStatus::Running,
+                ProcessJournalKind::Resumed,
+                None,
+            ))
+            .await
+            .expect("child resumed after the decision");
+        observer
+            .observe_process_commit(child_commit(
+                cancelled_child,
+                ProcessLifecycleStatus::Cancelled,
+                ProcessJournalKind::Cancelled,
+                None,
+            ))
+            .await
+            .expect("child cancelled while gated");
+
+        let page = list_all(inbox.as_ref()).await;
+        assert_eq!(page.len(), 2);
+        assert!(
+            page.iter().all(|item| item.resolved_at.is_some()),
+            "a decided or dead child gate must not stay actionable: {page:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_root_approval_gate_still_publishes_nothing_durable() {
+        let inbox = inbox();
+        let observer = RunOutcomeProcessCommitObserver::new(
+            Arc::clone(&inbox) as Arc<dyn NotificationInboxStorePort>,
+            Arc::new(InMemorySessionThreadService::default()) as Arc<dyn SessionThreadService>,
+        );
+        let mut root = commit(
+            TurnRunId::new(),
+            ProcessLifecycleStatus::Suspended,
+            ProcessJournalKind::Suspended,
+            "web_ui",
+        );
+        root.state.suspension = Some(gate_suspension(
+            ProcessSuspensionKind::Approval,
+            "gate:root",
+        ));
+
+        observer
+            .observe_process_commit(root)
+            .await
+            .expect("root approval suspension");
+
+        assert!(
+            records(inbox.as_ref()).await.is_empty(),
+            "root approval prompts stay with the live projection; this slice only widens child gates"
         );
     }
 }
