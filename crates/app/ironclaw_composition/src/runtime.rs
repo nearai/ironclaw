@@ -606,15 +606,6 @@ pub struct RebornRuntime {
     pub(crate) skill_management: Arc<ScopedSkillManagementPort>,
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
-    /// Shared single-use session-socket ticket store, present only when the
-    /// deployment's storage shape shares a durable backend across replicas
-    /// (mint and consume may land on different processes). `None` for
-    /// single-process shapes, where the `ironclaw` binary always substitutes
-    /// the WebUI's bounded in-memory adapter — so the shipped binary always
-    /// advertises the session socket; only a library embedder that wires no
-    /// store at all leaves the capability unadvertised (fail closed).
-    pub(crate) session_socket_tickets:
-        Option<Arc<dyn ironclaw_product_contracts::session_transport::SessionSocketTicketStore>>,
     /// Run-completion notification services: the durable notice store over
     /// the `/run-notices` per-user mount, the per-owner stream hub, and the
     /// coordinator wake channel (2026-08-13 design §5). Wired into the
@@ -941,15 +932,6 @@ impl RebornRuntime {
 
     pub fn readiness(&self) -> &RebornReadiness {
         &self.readiness
-    }
-
-    /// The deployment-shape-selected shared session-socket ticket store, if
-    /// this deployment requires one. See the field documentation.
-    pub fn session_socket_ticket_store(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_product_contracts::session_transport::SessionSocketTicketStore>>
-    {
-        self.session_socket_tickets.clone()
     }
 
     /// Run-completion notification bundle (notice store, stream hub, wake
@@ -4844,20 +4826,6 @@ pub(crate) async fn build_runtime_with_resource_governor(
         skill_management: services.skill_management.clone(),
         extension_lifecycle_surface_context: services.extension_lifecycle_surface_context.clone(),
         secret_store: Arc::clone(&services.secret_store),
-        // Replica-shared storage shapes get the durable one-shot ticket
-        // adapter so socket tickets stay single-use across processes;
-        // single-process shapes leave this None and the host uses its
-        // bounded in-memory adapter.
-        session_socket_tickets: match deployment.storage_shape() {
-            crate::deployment::StorageShape::HostedSingleTenantPool
-            | crate::deployment::StorageShape::OperatorSupplied => Some(Arc::new(
-                crate::session_socket_ticket_store::SecretStoreSessionSocketTicketStore::new(
-                    Arc::clone(&services.secret_store),
-                ),
-            )),
-            crate::deployment::StorageShape::None
-            | crate::deployment::StorageShape::LocalFilesystemRoot => None,
-        },
         run_completions,
         run_completion_coordinator_handle,
         scoped_filesystem,

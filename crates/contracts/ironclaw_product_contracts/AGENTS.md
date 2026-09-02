@@ -63,7 +63,6 @@ the `rg` command above before trusting either figure.
 | `session_ingress` | `SessionChannelDirectory` — the port telling the session-inbound lane whether an extension is the deployment's authenticated-session channel. Implemented by `ironclaw_extension_host` over the deployment channel registry. |
 | `shared_admission` | Shared-conversation admission: `SharedConversationAdmission` + `ProductConversationRouteKey` and its request. Fail-closed connected-channel gating, implemented by `ironclaw_extension_host` over `[channel.config]`. |
 | `run_completions` | The web-app run-completion notification wire vocabulary (2026-08-13 design §7.6–§7.8): the `Notice`/`Grant`/`Clear` stream events and their schema tags, the `intent` / `acknowledge` / `thread_read` command descriptors and the unread-snapshot view (+ ids), and the opaque-id, snapshot, and per-notice intent bounds. Descriptors and DTOs only — arbitration, the notice store, and the stream hub live in `ironclaw_assistant::run_completions`. |
-| `session_transport` | `SessionSocketTicket` (the caller a single-use socket ticket binds) and the `SessionSocketTicketStore` port with its TTL/outstanding bounds and opaque error. Implemented twice by design: the bounded in-memory adapter in `ironclaw_webui` for single-process shapes and the secret-lease adapter in `ironclaw_composition` for replica-shared storage. |
 
 ## What must never be here
 

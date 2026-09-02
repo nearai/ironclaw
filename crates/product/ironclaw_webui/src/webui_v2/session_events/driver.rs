@@ -1,13 +1,18 @@
 //! The shared product stream driver.
 //!
 //! One driver instance owns one logical `ProductSurface::stream_events`
-//! subscription: the initial drain, the continuous live subscription when the
-//! surface supports one, the idle-poll fallback cadence for drain-only
-//! surfaces, the per-connection lifetime budget, and the resume-cursor
-//! advance. Both the compatibility per-thread SSE generator and each session
-//! WebSocket subscription task consume the driver step-by-step, so the two
-//! transports share exactly one implementation of resume and failure
-//! behavior.
+//! subscription: the initial authorization-bearing drain, the continuous live
+//! subscription, the per-connection lifetime budget, and the resume-cursor
+//! advance. A surface that answers without a live subscription is a failed
+//! subscription (the client resubscribes with backoff); the server never
+//! polls on the client's behalf. Both the compatibility per-thread SSE
+//! generator and each session-stream subscription task consume the driver
+//! step-by-step, so the two transports share exactly one implementation of
+//! resume and failure behavior.
+//!
+//! The one exception is the compatibility per-thread route's legacy idle
+//! poll for drain-only surfaces ([`ProductStreamDriver::new_with_legacy_idle_polling`]),
+//! kept only until that route and its API-client tests are retired.
 
 use std::time::Duration;
 
@@ -19,17 +24,19 @@ use ironclaw_product_contracts::surface::{
 
 use crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME;
 
-/// Base interval between service polls while a drain-only stream is idle.
+/// Legacy per-thread route only: base interval between service polls while a
+/// drain-only stream is idle.
 pub(crate) const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Ceiling for the idle poll backoff on drain-only streams.
+/// Legacy per-thread route only: ceiling for the idle poll backoff.
 pub(crate) const STREAM_IDLE_POLL_MAX_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Cadence for typed application keep-alive liveness proof while a live
 /// subscription is legitimately quiet.
 pub(crate) const STREAM_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
-/// Idle poll backoff: two fast polls, one medium, then the ceiling.
+/// Legacy per-thread route only: idle poll backoff, two fast polls, one
+/// medium, then the ceiling.
 pub(crate) fn stream_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
     match idle_polls {
         0 | 1 => STREAM_POLL_INTERVAL,
@@ -60,11 +67,16 @@ pub(crate) struct ProductStreamDriver {
     after_cursor: Option<ProjectionCursor>,
     subscription: Option<ProductSurfaceEventSubscription>,
     idle_polls: u32,
+    /// Compatibility per-thread route only: poll a drain-only surface at the
+    /// idle cadence instead of failing the subscription.
+    legacy_idle_polling: bool,
     started_at: tokio::time::Instant,
     lifetime: Duration,
 }
 
 impl ProductStreamDriver {
+    /// A live-only driver: the surface must hand back a continuous
+    /// subscription, or the stream fails and the client resubscribes.
     pub(crate) fn new(
         surface: BoundProductSurface,
         selector: ProductStreamSelector,
@@ -76,8 +88,22 @@ impl ProductStreamDriver {
             after_cursor: initial_cursor,
             subscription: None,
             idle_polls: 0,
+            legacy_idle_polling: false,
             started_at: tokio::time::Instant::now(),
             lifetime: SSE_MAX_LIFETIME,
+        }
+    }
+
+    /// The compatibility per-thread route's driver: a drain-only surface is
+    /// polled at the legacy idle cadence. Retired with that route.
+    pub(crate) fn new_with_legacy_idle_polling(
+        surface: BoundProductSurface,
+        selector: ProductStreamSelector,
+        initial_cursor: Option<ProjectionCursor>,
+    ) -> Self {
+        Self {
+            legacy_idle_polling: true,
+            ..Self::new(surface, selector, initial_cursor)
         }
     }
 
@@ -117,6 +143,13 @@ impl ProductStreamDriver {
             Ok(Err(error)) => Err(error),
             Ok(Ok(mut response)) => {
                 self.subscription = response.subscription.take();
+                if self.subscription.is_none() && !self.legacy_idle_polling {
+                    // No live continuation: nothing here would ever deliver
+                    // a later event. Fail the subscription before the cursor
+                    // advances so the client resubscribes from the same
+                    // position and the drained events are not lost.
+                    return Err(ProductSurfaceError::unavailable(true));
+                }
                 self.record_batch_cursor(&response.events);
                 if !response.events.is_empty() {
                     self.idle_polls = 0;
@@ -158,6 +191,12 @@ impl ProductStreamDriver {
                 }
             }
 
+            if !self.legacy_idle_polling {
+                // The live continuation ended without a terminal step (or
+                // was never established): fail the subscription rather than
+                // poll on the client's behalf.
+                return DriverStep::ServiceError(ProductSurfaceError::unavailable(true));
+            }
             let request = ProductSurfaceStreamRequest {
                 selector: self.selector.clone(),
                 after_cursor: self

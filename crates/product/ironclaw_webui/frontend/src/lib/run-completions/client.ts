@@ -23,7 +23,6 @@ import {
   submitRunCompletionIntent,
 } from "../api";
 import { sessionEventClient } from "../session-events/client";
-import { isSessionEventsAdvertised } from "../session-events/transport-flag";
 import { toast } from "../toast";
 import { observedThroughSequence, resumeCursorFor } from "./evidence";
 import { browserInstanceId, currentStateRevision, tabId } from "./ids";
@@ -122,17 +121,6 @@ export function stopRunCompletions() {
 }
 
 async function boot() {
-  if (!isSessionEventsAdvertised()) {
-    // The deployment does not advertise the session transport: notices
-    // still exist durably and surface on next boot with the flag on. The
-    // unread snapshot alone still fills the badge.
-    try {
-      await rebase();
-    } catch (_) {
-      // Snapshot unavailable: leave the cache empty; nothing to clean up.
-    }
-    return;
-  }
   let resume = "0";
   try {
     resume = await rebase();

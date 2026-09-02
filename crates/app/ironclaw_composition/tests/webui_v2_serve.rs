@@ -1162,10 +1162,7 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
-    .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-    .with_session_socket_ticket_store(Arc::new(
-        ironclaw_webui::InMemorySessionSocketTicketStore::new(),
-    ));
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
     let app = webui_v2_app(product_surface.clone(), config).expect("webui v2 app");
     (app, services)
 }
@@ -2052,208 +2049,48 @@ async fn timeline_route_rejects_nonempty_body_with_413() {
     );
 }
 
-/// Spawn the composed v2 `Router` on a kernel-picked loopback port
-/// and return the bound `SocketAddr` plus an abort handle. The serve
-/// task runs until aborted at test teardown. `axum::serve` is forbidden
-/// in `crates/.../src` by the `reborn_product_api_crates_do_not_bind_http_ingress`
-/// architecture rule, but the rule scans `src/` only — host-owned tests
-/// are the right place to drive a true WS upgrade.
-async fn spawn_serve(app: axum::Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("local_addr");
-    let handle = tokio::spawn(async move {
-        #[allow(clippy::let_underscore_must_use)]
-        // background serve task; result observed via the spawned handle
-        let _ = axum::serve(listener, app).await;
-    });
-    (addr, handle)
-}
-
-fn ws_upgrade_request(
-    addr: std::net::SocketAddr,
-    ticket: &str,
-    origin: &str,
-) -> tokio_tungstenite::tungstenite::handshake::client::Request {
-    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    // The session socket authenticates with a single-use ticket in the
-    // query string; the long-lived bearer never appears in a WebSocket URL.
-    let url = format!("ws://{addr}/api/webchat/v2/session/websocket?ticket={ticket}");
-    let mut request = url.into_client_request().expect("ws client request");
-    request
-        .headers_mut()
-        .insert(http::header::ORIGIN, origin.parse().expect("origin header"));
-    request
-}
-
-/// Mint a session-socket ticket over ordinary bearer HTTP against the
-/// composed app, exactly as the SPA does before opening the socket.
-async fn mint_session_socket_ticket(app: &axum::Router, bearer: &str) -> String {
-    let response = app
+/// The page's session event stream is an ordinary bearer route through the
+/// assembled app: the same middleware stack authenticates it, and a missing
+/// bearer fails closed before any subscription exists.
+#[tokio::test]
+async fn session_events_stream_authenticates_with_bearer_through_the_assembled_app() {
+    let (app, _services) = build_app();
+    let body = r#"{"subscriptions":[{"subscription_id":"chat","selector":{"kind":"thread","thread_id":"thread-1"},"after_cursor":null}]}"#;
+    let unauthenticated = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/session/websocket-ticket")
-                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
-                .body(Body::empty())
+                .uri("/api/webchat/v2/session/events")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
                 .expect("request"),
         )
         .await
         .expect("oneshot");
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "ticket mint must succeed"
-    );
-    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
-        .await
-        .expect("body");
-    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-    body["ticket"].as_str().expect("ticket").to_string()
-}
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
 
-#[tokio::test]
-async fn ws_upgrade_with_matching_origin_succeeds_with_101() {
-    // Happy path: bind a real listener, open a real WebSocket from a
-    // tungstenite client whose Origin matches the bound address. The
-    // WS-origin middleware passes, auth passes, axum returns 101
-    // Switching Protocols, and the connection upgrades cleanly.
-    // Without this coverage a regression in the WS layer ordering
-    // (origin check → auth → upgrade) would only be visible through
-    // the rejection-path tests, which short-circuit BEFORE the upgrade
-    // extractor runs.
-    let (app, _services) = build_app();
-    let ticket = mint_session_socket_ticket(&app, VALID_TOKEN).await;
-    let (addr, handle) = spawn_serve(app).await;
-    let origin = format!("http://{addr}");
-    let request = ws_upgrade_request(addr, &ticket, &origin);
-    let (ws_stream, response) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio_tungstenite::connect_async(request),
-    )
-    .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade must succeed for matching Origin");
-    assert_eq!(
-        response.status().as_u16(),
-        101,
-        "valid bearer + same-origin must yield 101 Switching Protocols",
-    );
-    drop(ws_stream);
-    handle.abort();
-}
-
-#[tokio::test]
-async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
-    // Operators running the v2 listener behind a reverse proxy may
-    // receive an attacker-controlled `Host` header. When
-    // `canonical_host` is set, the WS-origin middleware compares
-    // `Origin` against that operator-trusted value instead of trusting
-    // Host. This test binds a real listener, configures canonical_host
-    // to a value the listener is NOT actually reachable at, then:
-    //   1. A WS upgrade with `Origin: http://127.0.0.1:<port>` (matching
-    //      Host, NOT canonical_host) must be rejected.
-    //   2. A WS upgrade with `Origin: http://app.example.com` (matching
-    //      canonical_host) must succeed.
-    use ironclaw_webui::WebuiServeConfig;
-
-    let services = Arc::new(StubServices::default());
-    let product_surface = services.clone();
-    let config = WebuiServeConfig::new(
-        TenantId::new(TENANT).expect("tenant"),
-        Arc::new(OnlyValidToken),
-        vec![HeaderValue::from_static("http://localhost:1234")],
-    )
-    .with_canonical_host("app.example.com")
-    .with_session_socket_ticket_store(Arc::new(
-        ironclaw_webui::InMemorySessionSocketTicketStore::new(),
-    ));
-    let app = ironclaw_webui::webui_v2_app(product_surface.clone(), config).expect("app");
-    let attack_ticket = mint_session_socket_ticket(&app, VALID_TOKEN).await;
-    let canonical_ticket = mint_session_socket_ticket(&app, VALID_TOKEN).await;
-    let (addr, handle) = spawn_serve(app).await;
-
-    // (1) Origin matches Host but NOT canonical_host — fail.
-    let host_matching_origin = format!("http://{addr}");
-    let attack_request = ws_upgrade_request(addr, &attack_ticket, &host_matching_origin);
-    let attack = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio_tungstenite::connect_async(attack_request),
-    )
-    .await
-    .expect("ws connect attempt within 5s");
-    assert!(
-        attack.is_err(),
-        "canonical_host must override Host: forged Origin must not pass same-origin",
-    );
-
-    // (2) Origin matches canonical_host — succeed. The origin-forged
-    // attempt above was rejected BEFORE auth, so its ticket was never
-    // consumed; a fresh ticket keeps the two verdicts independent anyway.
-    let canonical_request = ws_upgrade_request(addr, &canonical_ticket, "http://app.example.com");
-    let (ws_stream, response) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio_tungstenite::connect_async(canonical_request),
-    )
-    .await
-    .expect("ws connect within 5s")
-    .expect("ws upgrade must succeed for canonical_host Origin");
-    assert_eq!(
-        response.status().as_u16(),
-        101,
-        "Origin matching canonical_host must yield 101 even when Host disagrees",
-    );
-    drop(ws_stream);
-    handle.abort();
-}
-
-#[tokio::test]
-async fn ws_upgrade_without_origin_is_rejected_with_403() {
-    // WebChat v2 declares the session WebSocket as SameOriginRequired.
-    // A WS upgrade without the `Origin` header must be rejected at
-    // composition time before the v2 router sees the request — the
-    // origin check runs before auth, so no ticket is consumed.
-    let (app, _services) = build_app();
-    let response = app
+    let authenticated = app
         .oneshot(
             Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/session/websocket?ticket=unused")
-                // Deliberately no Origin header.
-                .header("connection", "upgrade")
-                .header("upgrade", "websocket")
-                .header("sec-websocket-version", "13")
-                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-                .body(Body::empty())
+                .method(Method::POST)
+                .uri("/api/webchat/v2/session/events")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .body(Body::from(body))
                 .expect("request"),
         )
         .await
         .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn ws_upgrade_with_disallowed_origin_is_rejected_with_403() {
-    let (app, _services) = build_app();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/session/websocket?ticket=unused")
-                .header(header::HOST, "127.0.0.1:3000")
-                .header(header::ORIGIN, "http://evil.example.com")
-                .header("connection", "upgrade")
-                .header("upgrade", "websocket")
-                .header("sec-websocket-version", "13")
-                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(authenticated.status(), StatusCode::OK);
+    assert_eq!(
+        authenticated
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.starts_with("text/event-stream")),
+        Some(true),
+    );
 }
 
 #[tokio::test]

@@ -55,24 +55,22 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_RUN_AUTOMATION, WEBUI_V2_PATTERN_RUN_COMPLETION_ACKNOWLEDGE,
     WEBUI_V2_PATTERN_RUN_COMPLETION_INTENT, WEBUI_V2_PATTERN_RUN_COMPLETION_THREAD_READ,
     WEBUI_V2_PATTERN_RUN_COMPLETIONS_UNREAD, WEBUI_V2_PATTERN_SEARCH_SKILLS,
-    WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE, WEBUI_V2_PATTERN_SESSION_WEBSOCKET,
-    WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET, WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
-    WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED, WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE,
-    WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION, WEBUI_V2_PATTERN_SETTINGS_TOOLS,
-    WEBUI_V2_PATTERN_SETUP_EXTENSION, WEBUI_V2_PATTERN_SKILL_DETAIL,
-    WEBUI_V2_PATTERN_START_CODEX_LOGIN, WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
-    WEBUI_V2_PATTERN_STAT_FS_PATH, WEBUI_V2_PATTERN_STAT_PROJECT_FILE,
-    WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_SUGGESTION_DETAIL,
-    WEBUI_V2_PATTERN_SUGGESTION_START, WEBUI_V2_PATTERN_SUGGESTIONS_GENERATE,
-    WEBUI_V2_PATTERN_SUGGESTIONS_LIST, WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
-    WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK, WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES,
-    WEBUI_V2_PATTERN_TRACE_CREDITS, WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE,
-    WEBUI_V2_PATTERN_USER_MODEL_CATALOG, WEBUI_V2_PATTERN_USER_MODEL_POLICY,
-    WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
+    WEBUI_V2_PATTERN_SESSION_CHANNEL_MESSAGE, WEBUI_V2_PATTERN_SESSION_EVENTS,
+    WEBUI_V2_PATTERN_SET_ACTIVE_LLM, WEBUI_V2_PATTERN_SET_AUTO_ACTIVATE_LEARNED,
+    WEBUI_V2_PATTERN_SET_SKILL_AUTO_ACTIVATE, WEBUI_V2_PATTERN_SETTINGS_TOOL_PERMISSION,
+    WEBUI_V2_PATTERN_SETTINGS_TOOLS, WEBUI_V2_PATTERN_SETUP_EXTENSION,
+    WEBUI_V2_PATTERN_SKILL_DETAIL, WEBUI_V2_PATTERN_START_CODEX_LOGIN,
+    WEBUI_V2_PATTERN_START_NEARAI_LOGIN, WEBUI_V2_PATTERN_STAT_FS_PATH,
+    WEBUI_V2_PATTERN_STAT_PROJECT_FILE, WEBUI_V2_PATTERN_STREAM_EVENTS,
+    WEBUI_V2_PATTERN_SUGGESTION_DETAIL, WEBUI_V2_PATTERN_SUGGESTION_START,
+    WEBUI_V2_PATTERN_SUGGESTIONS_GENERATE, WEBUI_V2_PATTERN_SUGGESTIONS_LIST,
+    WEBUI_V2_PATTERN_TEST_LLM_CONNECTION, WEBUI_V2_PATTERN_TRACE_ACCOUNT_LOGIN_LINK,
+    WEBUI_V2_PATTERN_TRACE_ACCOUNT_TRACES, WEBUI_V2_PATTERN_TRACE_CREDITS,
+    WEBUI_V2_PATTERN_TRACE_HOLD_AUTHORIZE, WEBUI_V2_PATTERN_USER_MODEL_CATALOG,
+    WEBUI_V2_PATTERN_USER_MODEL_POLICY, WEBUI_V2_PATTERN_USER_MODEL_PREFERENCE,
 };
 use crate::webui_v2::handlers;
 use crate::webui_v2::sse_capacity::SseCapacity;
-use ironclaw_product_contracts::session_transport::SessionSocketTicketStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebUiV2RouteOptions {
@@ -118,7 +116,6 @@ pub struct WebUiV2State {
     regression_artifact_export_enabled: bool,
     admin_thread_scrape_enabled: bool,
     session_channel_extension_id: Option<String>,
-    session_socket_tickets: Option<Arc<dyn SessionSocketTicketStore>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -139,32 +136,7 @@ impl WebUiV2State {
             regression_artifact_export_enabled: false,
             admin_thread_scrape_enabled: false,
             session_channel_extension_id: None,
-            session_socket_tickets: None,
         }
-    }
-
-    /// Wire the deployment's single-use session-socket ticket store. The
-    /// session WebSocket capability is advertised (and its routes usable)
-    /// only when a store suited to the deployment shape is present: a
-    /// multi-replica deployment must wire a shared CAS-backed store so mint
-    /// and consume may land on different replicas and replay still fails
-    /// closed; without one, clients keep using compatibility SSE.
-    pub fn with_session_socket_tickets(
-        mut self,
-        store: Option<Arc<dyn SessionSocketTicketStore>>,
-    ) -> Self {
-        self.session_socket_tickets = store;
-        self
-    }
-
-    pub fn session_socket_tickets(&self) -> Option<&Arc<dyn SessionSocketTicketStore>> {
-        self.session_socket_tickets.as_ref()
-    }
-
-    /// Whether the session-event WebSocket transport is available for this
-    /// deployment (fail-closed on missing ticket storage).
-    pub fn session_events_enabled(&self) -> bool {
-        self.session_socket_tickets.is_some()
     }
 
     /// The deployment's authenticated-session channel, advertised to the SPA
@@ -381,12 +353,8 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         )
         .route(WEBUI_V2_PATTERN_STREAM_EVENTS, get(handlers::stream_events))
         .route(
-            WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET,
-            post(handlers::session_websocket_ticket),
-        )
-        .route(
-            WEBUI_V2_PATTERN_SESSION_WEBSOCKET,
-            get(handlers::session_websocket),
+            WEBUI_V2_PATTERN_SESSION_EVENTS,
+            post(handlers::session_events),
         )
         .route(
             WEBUI_V2_PATTERN_RUN_COMPLETION_INTENT,

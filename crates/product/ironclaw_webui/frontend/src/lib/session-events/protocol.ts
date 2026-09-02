@@ -1,8 +1,8 @@
-// Wire vocabulary for the webui.session_event.v1 session socket.
+// Wire vocabulary for the webui.session_event.v1 session event stream.
 //
-// The socket is an event transport, not a command bus: the complete client
-// vocabulary is subscribe / unsubscribe / ping. Server frames all carry the
-// schema tag so unknown vocabularies can be ignored by older clients.
+// The stream is an event transport, not a command bus: the client sends the
+// subscription set once, in the request body, and nothing afterwards. Server
+// frames all carry the schema tag so unknown vocabularies can be ignored.
 
 export const SESSION_EVENT_SCHEMA = "webui.session_event.v1";
 
@@ -12,6 +12,12 @@ export const SESSION_EVENT_SCHEMA = "webui.session_event.v1";
 export type SessionSelector =
   | { kind: "thread"; thread_id: string }
   | { kind: "run_completions" };
+
+export type SessionSubscriptionRequest = {
+  subscription_id: string;
+  selector: SessionSelector;
+  after_cursor: string | null;
+};
 
 export type SessionServerFrame = {
   schema?: string;
@@ -25,28 +31,13 @@ export type SessionServerFrame = {
   retryable?: boolean;
   last_cursor?: string | null;
   reason?: string;
-  violation?: string;
 };
 
-export function subscribeFrame(
-  subscriptionId: string,
-  selector: SessionSelector,
-  afterCursor: string | null,
+/** The JSON body of `POST /api/webchat/v2/session/events`. */
+export function sessionEventsRequestBody(
+  subscriptions: SessionSubscriptionRequest[],
 ): string {
-  return JSON.stringify({
-    type: "subscribe",
-    subscription_id: subscriptionId,
-    selector,
-    after_cursor: afterCursor,
-  });
-}
-
-export function unsubscribeFrame(subscriptionId: string): string {
-  return JSON.stringify({ type: "unsubscribe", subscription_id: subscriptionId });
-}
-
-export function pingFrame(): string {
-  return JSON.stringify({ type: "ping" });
+  return JSON.stringify({ subscriptions });
 }
 
 export function parseServerFrame(raw: unknown): SessionServerFrame | null {

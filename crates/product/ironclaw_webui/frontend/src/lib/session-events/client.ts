@@ -1,45 +1,49 @@
-// The app-root session event client: one physical WebSocket per
-// authenticated page, multiplexing independent typed logical subscriptions.
+// The app-root session event client: one header-authenticated `fetch`
+// stream per page (`POST /api/webchat/v2/session/events`, answered as
+// `text/event-stream`), multiplexing independent typed logical subscriptions.
 //
 // Ownership rules (2026-08-13 session-transport design §7.3/§7.5):
-// - Commands never travel here; the socket is read-only event transport.
-// - Each logical subscription keeps its OWN resume cursor; reconnect
-//   resubscribes every selector from its own last delivered cursor. There is
-//   no session-wide cursor.
-// - The socket stays connected while the page is hidden — background
-//   delivery is the point of the session transport (the SSE path disconnects
-//   hidden tabs; this one must not).
-// - A `subscription_error` fails only that subscription: the owner is told
-//   to rebase and may resubscribe; other subscriptions never reset.
-// - Stale generations are ignored: after a replacement subscribe, frames
-//   stamped with an older generation for the same subscription id drop.
-// - When ticket minting or the upgrade fails repeatedly, the client degrades
-//   for the rest of the page's life and consumers fall back to the
-//   compatibility SSE transport (rollout §16).
+// - Commands never travel here; the stream is read-only event transport.
+// - Each logical subscription keeps its OWN resume cursor; every (re)connect
+//   names every selector with its last delivered cursor. There is no
+//   session-wide cursor.
+// - The subscription set is fixed per connection: subscribing or
+//   unsubscribing reconnects (debounced) with the new set, which is the same
+//   resume path the client runs on lifetime expiry and on every drop.
+// - The stream stays connected while the page is hidden — background
+//   delivery is the point of the session transport.
+// - A `subscription_error` fails only that subscription: retryable ones are
+//   resubscribed on the next connect cycle; non-retryable ones are dropped.
+// - Stale generations are ignored: frames stamped with a generation older
+//   than the one the current connection admitted never deliver.
+// - There is no fallback transport. A stream that cannot connect keeps
+//   retrying with capped backoff and reports `reconnecting`; durable cursors
+//   guarantee nothing is lost while disconnected.
 //
-// This module is dynamically imported by its hooks so the ~4 KB it costs
-// stays out of the eager /chat closure (bundle budget).
+// This module is dynamically imported by its hooks so its bytes stay out of
+// the eager /chat closure (bundle budget).
 
-import { mintSessionSocketTicket } from "../api";
+import { sessionEventsStreamRequest } from "../api";
 import {
   type SessionSelector,
   type SessionServerFrame,
   parseServerFrame,
-  pingFrame,
-  subscribeFrame,
-  unsubscribeFrame,
+  sessionEventsRequestBody,
 } from "./protocol";
 
 const RETRY_BASE_MS = 1_000;
 const RETRY_MAX_MS = 30_000;
 const RETRY_JITTER_RATIO = 0.2;
-const PING_INTERVAL_MS = 15_000;
+// The server sends a keep-alive comment every 15 s; three missed intervals
+// means the connection is dead even though the socket has not closed.
 const LIVENESS_DEADLINE_MS = 45_000;
-// Consecutive mint/upgrade failures with zero frames received before the
-// client degrades to the SSE fallback for the rest of the page's life.
-const MAX_CONSECUTIVE_CONNECT_FAILURES = 3;
-// Delay before resubscribing a selector the server failed retryably, so a
-// persistent condition cannot become a subscribe/error spin loop.
+const LIVENESS_CHECK_INTERVAL_MS = 15_000;
+// Subscription-set changes within this window coalesce into one reconnect
+// (route transitions subscribe the new thread and unsubscribe the old one in
+// the same tick).
+const RESYNC_DEBOUNCE_MS = 25;
+// Delay before reconnecting to resubscribe a selector the server failed
+// retryably, so a persistent condition cannot become a connect/error spin.
 const SUBSCRIPTION_RETRY_DELAY_MS = 2_000;
 
 export type SessionSubscriptionEvent = {
@@ -56,19 +60,15 @@ export type SessionSubscriptionError = {
 
 export type SessionSubscriptionHandlers = {
   onEvent: (event: SessionSubscriptionEvent) => void;
-  // Terminal for this subscription attempt. The client keeps the
-  // subscription registered and resubscribes (from lastCursor when the
-  // server supplied one) on the next connect cycle; the owner may rebase
-  // local state when `retryable` demands it.
+  // Terminal for this subscription attempt. When `retryable`, the client
+  // keeps the subscription registered and resubscribes (from lastCursor when
+  // the server supplied one) on the next connect cycle; the owner may rebase
+  // local state. When not retryable the subscription is dropped.
   onError?: (error: SessionSubscriptionError) => void;
   onStatus?: (status: SessionTransportStatus) => void;
 };
 
-export type SessionTransportStatus =
-  | "connecting"
-  | "open"
-  | "reconnecting"
-  | "degraded";
+export type SessionTransportStatus = "connecting" | "open" | "reconnecting";
 
 type Registration = {
   subscriptionId: string;
@@ -78,29 +78,55 @@ type Registration = {
   handlers: SessionSubscriptionHandlers;
 };
 
-type MintResponse = { ticket?: string; socket_path?: string };
+export type StreamResponse = {
+  status: number;
+  body: ReadableStream<Uint8Array> | null;
+};
+
+export type StreamOpener = (input: {
+  url: string;
+  headers: Record<string, string>;
+  body: string;
+  signal: AbortSignal;
+}) => Promise<StreamResponse>;
+
+const defaultStreamOpener: StreamOpener = async ({ url, headers, body, signal }) => {
+  const response = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      ...headers,
+      Accept: "text/event-stream",
+      "Content-Type": "application/json",
+    },
+    body,
+    signal,
+  });
+  return { status: response.status, body: response.body };
+};
 
 let nextSubscriptionSuffix = 0;
 
 export class SessionEventClient {
   private registrations = new Map<string, Registration>();
-  private socket: WebSocket | null = null;
+  private controller: AbortController | null = null;
+  private streamGeneration = 0;
   private status: SessionTransportStatus = "reconnecting";
   private retryAttempt = 0;
-  private consecutiveConnectFailures = 0;
-  private everReceivedFrame = false;
-  private degraded = false;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
-  private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private lastFrameAt = 0;
+  private resyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private livenessTimer: ReturnType<typeof setInterval> | null = null;
+  private lastBytesAt = 0;
   private connecting = false;
   private disposed = false;
 
   constructor(
-    private readonly openSocket: (url: string) => WebSocket = (url) =>
-      new WebSocket(url),
-    private readonly mintTicket: () => Promise<MintResponse> = () =>
-      mintSessionSocketTicket(),
+    private readonly openStream: StreamOpener = defaultStreamOpener,
+    private readonly request: () => {
+      url: string;
+      headers: () => Record<string, string>;
+    } = sessionEventsStreamRequest,
+    private readonly resyncDebounceMs: number = RESYNC_DEBOUNCE_MS,
     private readonly subscriptionRetryDelayMs: number = SUBSCRIPTION_RETRY_DELAY_MS,
   ) {
     if (typeof window !== "undefined") {
@@ -108,12 +134,8 @@ export class SessionEventClient {
     }
   }
 
-  isDegraded(): boolean {
-    return this.degraded;
-  }
-
   currentStatus(): SessionTransportStatus {
-    return this.degraded ? "degraded" : this.status;
+    return this.status;
   }
 
   subscribe(
@@ -123,30 +145,19 @@ export class SessionEventClient {
   ): { unsubscribe: () => void } {
     nextSubscriptionSuffix += 1;
     const subscriptionId = `${options.idPrefix ?? "sub"}-${nextSubscriptionSuffix}`;
-    const registration: Registration = {
+    this.registrations.set(subscriptionId, {
       subscriptionId,
       selector,
       cursor: options.fromCursor ?? null,
       generation: null,
       handlers,
-    };
-    this.registrations.set(subscriptionId, registration);
+    });
     handlers.onStatus?.(this.currentStatus());
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(
-        subscribeFrame(subscriptionId, selector, registration.cursor),
-      );
-    } else {
-      this.ensureConnected();
-    }
+    this.scheduleResync(this.resyncDebounceMs);
     return {
       unsubscribe: () => {
-        this.registrations.delete(subscriptionId);
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-          this.socket.send(unsubscribeFrame(subscriptionId));
-        }
-        if (this.registrations.size === 0) {
-          this.teardownSocket();
+        if (this.registrations.delete(subscriptionId)) {
+          this.scheduleResync(this.resyncDebounceMs);
         }
       },
     };
@@ -157,189 +168,82 @@ export class SessionEventClient {
     if (typeof window !== "undefined") {
       window.removeEventListener("online", this.handleOnline);
     }
-    this.teardownSocket();
+    this.clearTimers();
+    this.teardownStream();
     this.registrations.clear();
   }
 
   private handleOnline = () => {
-    if (!this.degraded && this.registrations.size > 0 && !this.socket) {
+    if (this.registrations.size > 0 && !this.controller) {
       this.retryAttempt = 0;
-      this.ensureConnected();
+      this.scheduleResync(0);
     }
   };
 
   private setStatus(status: SessionTransportStatus) {
     this.status = status;
-    const effective = this.currentStatus();
     for (const registration of this.registrations.values()) {
-      registration.handlers.onStatus?.(effective);
+      registration.handlers.onStatus?.(status);
     }
   }
 
-  private markDegraded() {
-    if (this.degraded) return;
-    this.degraded = true;
-    this.teardownSocket();
-    this.setStatus("degraded");
-    // Page-lifetime decision, so leave a trace for support consoles: a
-    // browser that never gets a socket is otherwise indistinguishable from
-    // one that was never offered it. Never the ticket value.
-    console.warn(
-      "IronClaw session socket degraded to compatibility SSE after repeated connect failures",
-    );
-  }
-
-  private teardownSocket() {
+  private clearTimers() {
     if (this.connectTimer) {
       clearTimeout(this.connectTimer);
       this.connectTimer = null;
     }
-    if (this.pingTimer) {
-      clearInterval(this.pingTimer);
-      this.pingTimer = null;
+    if (this.resyncTimer) {
+      clearTimeout(this.resyncTimer);
+      this.resyncTimer = null;
     }
-    const socket = this.socket;
-    this.socket = null;
-    if (socket) {
+    this.stopLivenessWatch();
+  }
+
+  private stopLivenessWatch() {
+    if (this.livenessTimer) {
+      clearInterval(this.livenessTimer);
+      this.livenessTimer = null;
+    }
+  }
+
+  /** Abort the current stream without scheduling anything. */
+  private teardownStream() {
+    this.streamGeneration += 1;
+    this.stopLivenessWatch();
+    const controller = this.controller;
+    this.controller = null;
+    this.connecting = false;
+    if (controller) {
       try {
-        socket.close();
+        controller.abort();
       } catch (_) {
-        // Best-effort close on teardown.
+        // Best-effort abort on teardown.
       }
     }
   }
 
-  private ensureConnected() {
-    if (
-      this.disposed ||
-      this.degraded ||
-      this.connecting ||
-      this.connectTimer ||
-      (this.socket && this.socket.readyState <= WebSocket.OPEN) ||
-      this.registrations.size === 0
-    ) {
-      return;
-    }
-    void this.connect();
-  }
-
-  private async connect() {
-    this.connecting = true;
-    this.setStatus(this.retryAttempt === 0 ? "connecting" : "reconnecting");
-    let ticket: string;
-    let socketPath: string;
-    try {
-      const response = await this.mintTicket();
-      if (!response?.ticket) throw new Error("mint returned no ticket");
-      ticket = response.ticket;
-      socketPath = response.socket_path ?? "/api/webchat/v2/session/websocket";
-    } catch (_) {
-      this.connecting = false;
-      this.recordConnectFailure();
-      return;
-    }
-    if (this.disposed || this.degraded || this.registrations.size === 0) {
-      // Torn down (e.g. sign-out) while the mint was in flight: never open a
-      // socket with a ticket minted for a session the page has abandoned.
-      // The unconsumed ticket expires server-side.
-      this.connecting = false;
-      return;
-    }
-    let socket: WebSocket;
-    try {
-      const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const url = new URL(socketPath, window.location.origin);
-      url.protocol = scheme;
-      url.searchParams.set("ticket", ticket);
-      socket = this.openSocket(url.toString());
-    } catch (_) {
-      this.connecting = false;
-      this.recordConnectFailure();
-      return;
-    }
-    this.socket = socket;
-    socket.onopen = () => {
-      this.connecting = false;
-      this.lastFrameAt = Date.now();
-      for (const registration of this.registrations.values()) {
-        socket.send(
-          subscribeFrame(
-            registration.subscriptionId,
-            registration.selector,
-            registration.cursor,
-          ),
-        );
+  /**
+   * Coalesce subscription-set changes, then reconnect with the full set. A
+   * deliberate resync resets the backoff: it is not a failure.
+   */
+  private scheduleResync(delayMs: number) {
+    if (this.disposed) return;
+    if (this.resyncTimer) clearTimeout(this.resyncTimer);
+    this.resyncTimer = setTimeout(() => {
+      this.resyncTimer = null;
+      if (this.connectTimer) {
+        clearTimeout(this.connectTimer);
+        this.connectTimer = null;
       }
-      this.setStatus("open");
-      this.startPinging(socket);
-    };
-    socket.onmessage = (message) => {
-      this.lastFrameAt = Date.now();
-      const frame = parseServerFrame(message.data);
-      if (!frame) return;
-      // Any application frame proves the transport works; reset the
-      // degradation counters.
-      this.everReceivedFrame = true;
-      this.consecutiveConnectFailures = 0;
       this.retryAttempt = 0;
-      this.handleFrame(frame);
-    };
-    socket.onclose = () => {
-      if (this.socket === socket) {
-        this.socket = null;
-        if (this.pingTimer) {
-          clearInterval(this.pingTimer);
-          this.pingTimer = null;
-        }
-        this.connecting = false;
-        if (!this.everReceivedFrame) {
-          this.recordConnectFailure();
-        } else if (this.registrations.size > 0) {
-          this.scheduleReconnect();
-        }
-      }
-    };
-    socket.onerror = () => {
-      // onclose follows; the close handler owns retry accounting.
-    };
-  }
-
-  private startPinging(socket: WebSocket) {
-    if (this.pingTimer) clearInterval(this.pingTimer);
-    this.pingTimer = setInterval(() => {
-      if (socket.readyState !== WebSocket.OPEN) return;
-      if (Date.now() - this.lastFrameAt > LIVENESS_DEADLINE_MS) {
-        // The server answered nothing for three ping intervals: treat the
-        // transport as dead and reconnect with each cursor intact.
-        try {
-          socket.close();
-        } catch (_) {
-          // close failures fall through to onclose.
-        }
-        return;
-      }
-      try {
-        socket.send(pingFrame());
-      } catch (_) {
-        // Send failure surfaces through onclose.
-      }
-    }, PING_INTERVAL_MS);
-  }
-
-  private recordConnectFailure() {
-    this.consecutiveConnectFailures += 1;
-    if (
-      !this.everReceivedFrame &&
-      this.consecutiveConnectFailures >= MAX_CONSECUTIVE_CONNECT_FAILURES
-    ) {
-      this.markDegraded();
-      return;
-    }
-    this.scheduleReconnect();
+      this.teardownStream();
+      if (this.registrations.size === 0) return;
+      void this.connect();
+    }, delayMs);
   }
 
   private scheduleReconnect() {
-    if (this.disposed || this.degraded || this.connectTimer) return;
+    if (this.disposed || this.connectTimer || this.resyncTimer) return;
     if (this.registrations.size === 0) return;
     this.setStatus("reconnecting");
     const exponential = Math.min(
@@ -351,8 +255,149 @@ export class SessionEventClient {
     const delay = Math.max(0, Math.round(exponential + jitter));
     this.connectTimer = setTimeout(() => {
       this.connectTimer = null;
-      this.ensureConnected();
+      this.teardownStream();
+      if (this.registrations.size === 0) return;
+      void this.connect();
     }, delay);
+  }
+
+  private requestBody(): string {
+    return sessionEventsRequestBody(
+      Array.from(this.registrations.values()).map((registration) => ({
+        subscription_id: registration.subscriptionId,
+        selector: registration.selector,
+        after_cursor: registration.cursor,
+      })),
+    );
+  }
+
+  private async connect() {
+    if (this.disposed || this.connecting || this.registrations.size === 0) return;
+    this.connecting = true;
+    this.setStatus(this.retryAttempt === 0 ? "connecting" : "reconnecting");
+    const generation = this.streamGeneration;
+    const controller = new AbortController();
+    this.controller = controller;
+    // Every subscription on this connection is admitted afresh: forget the
+    // generations the previous connection stamped.
+    for (const registration of this.registrations.values()) {
+      registration.generation = null;
+    }
+    let response: StreamResponse;
+    try {
+      const { url, headers } = this.request();
+      response = await this.openStream({
+        url,
+        headers: headers(),
+        body: this.requestBody(),
+        signal: controller.signal,
+      });
+    } catch (_) {
+      if (this.streamGeneration !== generation) return;
+      this.connecting = false;
+      this.controller = null;
+      this.scheduleReconnect();
+      return;
+    }
+    if (this.streamGeneration !== generation) return;
+    if (response.status !== 200 || !response.body) {
+      this.connecting = false;
+      this.controller = null;
+      this.scheduleReconnect();
+      return;
+    }
+    this.connecting = false;
+    this.retryAttempt = 0;
+    this.lastBytesAt = Date.now();
+    this.setStatus("open");
+    this.startLivenessWatch(controller);
+    let endedCleanly = false;
+    try {
+      endedCleanly = await this.readStream(response.body, generation);
+    } catch (_) {
+      // Network error mid-stream; handled like a close below.
+    }
+    if (this.streamGeneration !== generation) return;
+    // The server ended the stream (lifetime expiry, every subscription
+    // finished, or a transport drop): resume every selector from its cursor.
+    this.controller = null;
+    this.stopLivenessWatch();
+    if (endedCleanly) {
+      this.scheduleResync(0);
+    } else {
+      this.scheduleReconnect();
+    }
+  }
+
+  private startLivenessWatch(controller: AbortController) {
+    this.stopLivenessWatch();
+    this.livenessTimer = setInterval(() => {
+      if (this.controller !== controller) return;
+      if (Date.now() - this.lastBytesAt > LIVENESS_DEADLINE_MS) {
+        // Nothing arrived for three keep-alive intervals: treat the
+        // transport as dead and reconnect with each cursor intact.
+        this.stopLivenessWatch();
+        try {
+          controller.abort();
+        } catch (_) {
+          // The read loop observes the abort.
+        }
+      }
+    }, LIVENESS_CHECK_INTERVAL_MS);
+  }
+
+  /**
+   * Read SSE events off the body until it ends. Returns `true` when the
+   * server ended the stream after a `reconnect_hint` (a clean rotation),
+   * `false` on any other end. Any bytes — comments included — prove liveness.
+   */
+  private async readStream(
+    body: ReadableStream<Uint8Array>,
+    generation: number,
+  ): Promise<boolean> {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    let dataLines: string[] = [];
+    let rotated = false;
+    const dispatch = () => {
+      if (dataLines.length === 0) return;
+      const frame = parseServerFrame(dataLines.join("\n"));
+      dataLines = [];
+      if (!frame) return;
+      if (frame.type === "reconnect_hint") rotated = true;
+      this.handleFrame(frame);
+    };
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (this.streamGeneration !== generation) {
+        try {
+          reader.cancel();
+        } catch (_) {
+          // Superseded stream; nothing to release.
+        }
+        return false;
+      }
+      if (done) break;
+      this.lastBytesAt = Date.now();
+      buffered += decoder.decode(value, { stream: true });
+      let newline = buffered.indexOf("\n");
+      while (newline !== -1) {
+        let line = buffered.slice(0, newline);
+        buffered = buffered.slice(newline + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        if (line === "") {
+          dispatch();
+        } else if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).replace(/^ /, ""));
+        }
+        // `event:`/`id:`/`retry:` fields and `:` comments carry nothing the
+        // frame body does not already say; comments are liveness only.
+        newline = buffered.indexOf("\n");
+      }
+    }
+    dispatch();
+    return rotated;
   }
 
   private handleFrame(frame: SessionServerFrame) {
@@ -399,42 +444,24 @@ export class SessionEventClient {
           error: String(frame.error ?? "unavailable"),
           kind: String(frame.kind ?? "service_unavailable"),
           retryable,
-          lastCursor:
-            typeof frame.last_cursor === "string" ? frame.last_cursor : null,
+          lastCursor: typeof frame.last_cursor === "string" ? frame.last_cursor : null,
         });
         if (!retryable) {
           // The server says this selector cannot be admitted (revoked or
-          // foreign): stop resubscribing. The owner decides whether to
+          // foreign): stop resubscribing it. The owner decides whether to
           // rebase and register a fresh subscription.
           this.registrations.delete(registration.subscriptionId);
-          if (this.registrations.size === 0) this.teardownSocket();
           return;
         }
-        // Retryable: re-admit after a short delay so a persistently failing
-        // selector cannot spin subscribe/subscription_error at frame rate.
-        const subscriptionId = registration.subscriptionId;
-        setTimeout(() => {
-          const current = this.registrations.get(subscriptionId);
-          const socket = this.socket;
-          if (!current || !socket || socket.readyState !== WebSocket.OPEN) {
-            return;
-          }
-          socket.send(
-            subscribeFrame(subscriptionId, current.selector, current.cursor),
-          );
-        }, this.subscriptionRetryDelayMs);
+        // Retryable: the subscription set is fixed per connection, so
+        // resubscribing means reconnecting — after a short delay so a
+        // persistently failing selector cannot spin.
+        this.scheduleResync(this.subscriptionRetryDelayMs);
         return;
       }
-      case "reconnect_hint": {
-        // Normal lifetime expiry: mint a fresh ticket (re-evaluating the
-        // bearer) and resume every selector from its own cursor.
-        this.teardownSocket();
-        this.retryAttempt = 0;
-        this.ensureConnected();
-        return;
-      }
-      case "pong":
-      case "unsubscribed":
+      case "reconnect_hint":
+        // Normal lifetime expiry: the read loop ends and reconnects with
+        // every selector's own cursor.
         return;
       default:
         // Unknown vocabulary from a newer server: ignore.

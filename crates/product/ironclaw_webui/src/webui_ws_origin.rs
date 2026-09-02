@@ -7,10 +7,11 @@
 //! connection and sends `Origin` directly on the upgrade request.
 //! Same-origin enforcement on WS therefore has to run inline.
 //!
-//! Today the v2 surface has exactly one WS descriptor
-//! (`session_websocket`); the middleware ignores any path the
-//! descriptor table doesn't claim. A future descriptor adding more WS
-//! routes is picked up automatically.
+//! Today the v2 surface declares no WebSocket route (the session event
+//! stream is `text/event-stream` over an ordinary bearer POST), so the
+//! middleware matches nothing; a future descriptor declaring a WS route is
+//! picked up automatically, and the layer stays in the stack so that route
+//! cannot ship without same-origin enforcement.
 
 use std::sync::Arc;
 
@@ -326,9 +327,17 @@ mod tests {
     fn build_state_collects_only_ws_descriptors() {
         let descriptors = crate::webui_v2::webui_v2_routes();
         let state = build_websocket_origin_state(&descriptors, &[], None);
+        // The session event stream is `text/event-stream` over an ordinary
+        // bearer POST, so the v2 surface declares no WebSocket route today;
+        // the layer stays armed for any future descriptor that does.
         assert!(
-            !state.routes.is_empty(),
-            "the v2 descriptor set must declare at least one WS route",
+            state.routes.is_empty(),
+            "no v2 descriptor declares a WebSocket route: {:?}",
+            state
+                .routes
+                .iter()
+                .map(|route| route.policy)
+                .collect::<Vec<_>>(),
         );
         for route in state.routes.iter() {
             assert!(

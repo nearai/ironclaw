@@ -1,119 +1,89 @@
-//! The bounded session WebSocket control protocol (`webui.session_event.v1`).
+//! The session event stream vocabulary (`webui.session_event.v1`).
 //!
-//! The session socket is an event transport, not a command bus: the complete
-//! client vocabulary is `subscribe`, `unsubscribe`, and `ping`. Anything else
-//! — operation IDs, turn submissions, gate resolutions, unknown frame types,
-//! oversized frames — is a protocol violation that closes the connection.
-//! Every product mutation stays on authenticated HTTP.
+//! `POST /api/webchat/v2/session/events` opens one `text/event-stream` per
+//! authenticated page carrying every logical subscription the request body
+//! names, each with its own resume cursor. The stream is an event transport,
+//! not a command bus: nothing travels client→server after the request body,
+//! every product mutation stays on authenticated HTTP, and changing the
+//! subscription set means reconnecting with each selector's last cursor.
 
-use ironclaw_product_contracts::surface::{ProductStreamSelector, ProductSurfaceError};
+use std::collections::BTreeSet;
+
+use ironclaw_product_contracts::surface::{
+    ProductStreamSelector, ProductSurfaceError, ProductSurfaceValidationCode,
+};
 use serde::{Deserialize, Serialize};
 
 /// Version tag stamped on every server frame.
 pub(crate) const SESSION_EVENT_SCHEMA: &str = "webui.session_event.v1";
 
-/// Hard bound on one client control frame.
-pub(crate) const MAX_CLIENT_FRAME_BYTES: usize = 8 * 1024;
-
 /// Hard bound on a client-chosen subscription correlation key.
 pub(crate) const MAX_SUBSCRIPTION_ID_BYTES: usize = 64;
 
-/// Hard bound on concurrently active logical subscriptions per socket.
+/// Hard bound on logical subscriptions per stream.
 pub(crate) const MAX_ACTIVE_SUBSCRIPTIONS: usize = 16;
 
-/// Per-socket admission budget for `subscribe` frames: every subscribe
-/// re-runs authorization plus a projection replay on the backend, so an
-/// authenticated socket may not turn a 100-byte frame into unbounded work.
-/// The legitimate client sends a handful per boot plus one per thread
-/// navigation; exceeding this is a protocol violation that closes the socket.
-pub(crate) const MAX_SUBSCRIBES_PER_WINDOW: u32 = 32;
-
-/// The sliding window `MAX_SUBSCRIBES_PER_WINDOW` is counted over.
-pub(crate) const SUBSCRIBE_BUDGET_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Bounded queue depth of undelivered event batches per logical subscription.
+/// Per-subscription queue depth (event batches) between a driver task and
+/// the stream writer: a slow client backpressures its own subscriptions
+/// instead of growing memory.
 pub(crate) const SUBSCRIPTION_QUEUE_BATCHES: usize = 16;
 
-/// Bound on a resume cursor supplied in a subscribe frame. Matches the
-/// product-side `PROJECTION_CURSOR_MAX_BYTES` plus JSON quoting headroom.
+/// Hard bound on one resume cursor token.
 pub(crate) const MAX_SUBSCRIBE_CURSOR_BYTES: usize = 2048;
 
-/// Client -> server control frames. This vocabulary is closed; a frame that
-/// does not parse into it is a protocol violation.
+/// The request body of the session event stream: the complete subscription
+/// set for this connection.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum SessionClientFrame {
-    Subscribe {
-        subscription_id: String,
-        selector: ProductStreamSelector,
-        #[serde(default)]
-        after_cursor: Option<String>,
-    },
-    Unsubscribe {
-        subscription_id: String,
-    },
-    Ping,
+#[serde(deny_unknown_fields)]
+pub struct SessionEventsRequest {
+    pub subscriptions: Vec<SessionSubscriptionRequest>,
 }
 
-/// Why a client frame was rejected. Rendered into the terminal protocol
-/// error frame; carries no client-controlled bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SessionProtocolViolation {
-    FrameTooLarge,
-    MalformedFrame,
-    SubscriptionIdTooLong,
-    CursorTooLong,
-    TooManySubscriptions,
-    TooManySubscribeFrames,
-    BinaryFrameUnsupported,
+/// One logical subscription: a client-chosen correlation id, the typed
+/// selector the surface authorizes, and the cursor to resume strictly after.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSubscriptionRequest {
+    pub subscription_id: String,
+    pub selector: ProductStreamSelector,
+    #[serde(default)]
+    pub after_cursor: Option<String>,
 }
 
-/// Parse and bound one client text frame.
-pub(crate) fn parse_client_frame(
-    text: &str,
-) -> Result<SessionClientFrame, SessionProtocolViolation> {
-    if text.len() > MAX_CLIENT_FRAME_BYTES {
-        return Err(SessionProtocolViolation::FrameTooLarge);
-    }
-    let frame: SessionClientFrame = serde_json::from_str(text).map_err(|error| {
-        // Cause retained server-side (never the frame text — client
-        // input); the client only learns the sanitized violation.
-        tracing::debug!(
-            target: "ironclaw_webui_v2::session_websocket",
-            error = %error,
-            "malformed session frame",
-        );
-        SessionProtocolViolation::MalformedFrame
-    })?;
-    match &frame {
-        SessionClientFrame::Subscribe {
-            subscription_id,
-            after_cursor,
-            ..
-        } => {
-            if subscription_id.is_empty() || subscription_id.len() > MAX_SUBSCRIPTION_ID_BYTES {
-                return Err(SessionProtocolViolation::SubscriptionIdTooLong);
+impl SessionEventsRequest {
+    /// Bound the request before any subscription task exists: one to
+    /// [`MAX_ACTIVE_SUBSCRIPTIONS`] subscriptions with distinct, bounded ids
+    /// and bounded cursors. Selector authorization happens per subscription
+    /// on the product surface, never here.
+    pub(crate) fn validate(&self) -> Result<(), ProductSurfaceError> {
+        if self.subscriptions.is_empty() || self.subscriptions.len() > MAX_ACTIVE_SUBSCRIPTIONS {
+            return Err(invalid("subscriptions"));
+        }
+        let mut seen = BTreeSet::new();
+        for subscription in &self.subscriptions {
+            let id = subscription.subscription_id.as_str();
+            if id.is_empty() || id.len() > MAX_SUBSCRIPTION_ID_BYTES || !seen.insert(id) {
+                return Err(invalid("subscription_id"));
             }
-            if after_cursor
+            if subscription
+                .after_cursor
                 .as_ref()
                 .is_some_and(|cursor| cursor.len() > MAX_SUBSCRIBE_CURSOR_BYTES)
             {
-                return Err(SessionProtocolViolation::CursorTooLong);
+                return Err(invalid("after_cursor"));
             }
         }
-        SessionClientFrame::Unsubscribe { subscription_id } => {
-            if subscription_id.is_empty() || subscription_id.len() > MAX_SUBSCRIPTION_ID_BYTES {
-                return Err(SessionProtocolViolation::SubscriptionIdTooLong);
-            }
-        }
-        SessionClientFrame::Ping => {}
+        Ok(())
     }
-    Ok(frame)
 }
 
-/// Server -> client frames. Every frame carries the schema tag so the client
-/// can ignore vocabularies it does not understand.
+fn invalid(field: &'static str) -> ProductSurfaceError {
+    ProductSurfaceError::validation(field, ProductSurfaceValidationCode::InvalidValue)
+}
+
+/// Server → client frames. Every frame carries the schema tag so a client
+/// can ignore vocabularies it does not understand; each travels as one SSE
+/// event whose `event:` name is the frame type.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum SessionServerFrame {
@@ -142,21 +112,9 @@ pub(crate) enum SessionServerFrame {
         #[serde(skip_serializing_if = "Option::is_none")]
         last_cursor: Option<String>,
     },
-    Unsubscribed {
-        schema: &'static str,
-        subscription_id: String,
-        generation: u64,
-    },
-    Pong {
-        schema: &'static str,
-    },
     ReconnectHint {
         schema: &'static str,
         reason: &'static str,
-    },
-    ProtocolError {
-        schema: &'static str,
-        violation: SessionProtocolViolation,
     },
 }
 
@@ -206,20 +164,6 @@ impl SessionServerFrame {
         }
     }
 
-    pub(crate) fn unsubscribed(subscription_id: String, generation: u64) -> Self {
-        Self::Unsubscribed {
-            schema: SESSION_EVENT_SCHEMA,
-            subscription_id,
-            generation,
-        }
-    }
-
-    pub(crate) fn pong() -> Self {
-        Self::Pong {
-            schema: SESSION_EVENT_SCHEMA,
-        }
-    }
-
     pub(crate) fn lifetime_reconnect_hint() -> Self {
         Self::ReconnectHint {
             schema: SESSION_EVENT_SCHEMA,
@@ -227,10 +171,13 @@ impl SessionServerFrame {
         }
     }
 
-    pub(crate) fn protocol_error(violation: SessionProtocolViolation) -> Self {
-        Self::ProtocolError {
-            schema: SESSION_EVENT_SCHEMA,
-            violation,
+    /// The SSE `event:` name this frame travels under (its `type` tag).
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Subscribed { .. } => "subscribed",
+            Self::Event { .. } => "event",
+            Self::SubscriptionError { .. } => "subscription_error",
+            Self::ReconnectHint { .. } => "reconnect_hint",
         }
     }
 }
@@ -239,95 +186,122 @@ impl SessionServerFrame {
 mod tests {
     use super::*;
 
-    #[test]
-    fn subscribe_frames_parse_with_typed_selectors() {
-        let frame = parse_client_frame(
-            r#"{"type":"subscribe","subscription_id":"chat-active","selector":{"kind":"thread","thread_id":"thread-1"},"after_cursor":null}"#,
-        )
-        .expect("subscribe parses");
-        assert_eq!(
-            frame,
-            SessionClientFrame::Subscribe {
-                subscription_id: "chat-active".to_string(),
-                selector: ProductStreamSelector::Thread {
-                    thread_id: "thread-1".to_string(),
-                },
-                after_cursor: None,
-            }
-        );
-        assert_eq!(
-            parse_client_frame(r#"{"type":"ping"}"#).expect("ping parses"),
-            SessionClientFrame::Ping,
-        );
+    fn request(subscriptions: Vec<(&str, Option<String>)>) -> SessionEventsRequest {
+        SessionEventsRequest {
+            subscriptions: subscriptions
+                .into_iter()
+                .map(|(id, after_cursor)| SessionSubscriptionRequest {
+                    subscription_id: id.to_string(),
+                    selector: ProductStreamSelector::Thread {
+                        thread_id: "thread-1".to_string(),
+                    },
+                    after_cursor,
+                })
+                .collect(),
+        }
     }
 
     #[test]
-    fn mutation_shaped_frames_are_protocol_violations() {
-        // Operation IDs, turn submissions, and gate resolutions never gain a
-        // WebSocket representation: anything outside the closed control
-        // vocabulary is malformed by construction.
+    fn request_bodies_parse_with_typed_selectors_and_reject_unknown_fields() {
+        let parsed: SessionEventsRequest = serde_json::from_str(
+            r#"{"subscriptions":[{"subscription_id":"chat","selector":{"kind":"thread","thread_id":"t"},"after_cursor":null},{"subscription_id":"rc","selector":{"kind":"run_completions"}}]}"#,
+        )
+        .expect("body parses");
+        assert_eq!(parsed.subscriptions.len(), 2);
+        assert_eq!(
+            parsed.subscriptions[1].selector,
+            ProductStreamSelector::RunCompletions
+        );
+        // Operation ids, turn submissions, and gate resolutions never gain a
+        // stream representation: anything outside the body shape is rejected.
         for hostile in [
-            r#"{"type":"invoke","operation_id":"webui.submit_turn.v1","input":{}}"#,
+            r#"{"subscriptions":[],"operation_id":"webui.submit_turn.v1"}"#,
+            r#"{"subscriptions":[{"subscription_id":"a","selector":{"kind":"thread","thread_id":"t"},"input":{}}]}"#,
             r#"{"type":"submit_turn","thread_id":"t","text":"hi"}"#,
-            r#"{"type":"resolve_gate","gate_ref":"g"}"#,
-            r#"{"type":"subscribe","subscription_id":"a","selector":{"kind":"thread","thread_id":"t"},"operation_id":"webui.submit_turn.v1"}"#,
-            r#"{"type":"query","view_id":"webui.threads.v1"}"#,
-            "not json",
         ] {
-            assert_eq!(
-                parse_client_frame(hostile),
-                Err(SessionProtocolViolation::MalformedFrame),
-                "hostile frame must be rejected: {hostile}",
+            assert!(
+                serde_json::from_str::<SessionEventsRequest>(hostile).is_err(),
+                "hostile body must be rejected: {hostile}",
             );
         }
     }
 
     #[test]
-    fn client_frame_bounds_are_enforced() {
+    fn request_bounds_are_enforced() {
+        assert!(
+            request(vec![]).validate().is_err(),
+            "at least one subscription"
+        );
+        let too_many: Vec<(String, Option<String>)> = (0..=MAX_ACTIVE_SUBSCRIPTIONS)
+            .map(|index| (format!("sub-{index}"), None))
+            .collect();
+        let too_many = SessionEventsRequest {
+            subscriptions: too_many
+                .into_iter()
+                .map(|(id, after_cursor)| SessionSubscriptionRequest {
+                    subscription_id: id,
+                    selector: ProductStreamSelector::RunCompletions,
+                    after_cursor,
+                })
+                .collect(),
+        };
+        assert!(
+            too_many.validate().is_err(),
+            "at most {MAX_ACTIVE_SUBSCRIPTIONS}"
+        );
+        assert!(
+            request(vec![("a", None), ("a", None)]).validate().is_err(),
+            "distinct ids"
+        );
+        assert!(
+            request(vec![("", None)]).validate().is_err(),
+            "non-empty id"
+        );
         let oversized_id = "a".repeat(MAX_SUBSCRIPTION_ID_BYTES + 1);
-        let frame = format!(
-            r#"{{"type":"subscribe","subscription_id":"{oversized_id}","selector":{{"kind":"thread","thread_id":"t"}}}}"#
+        assert!(
+            request(vec![(oversized_id.as_str(), None)])
+                .validate()
+                .is_err()
         );
-        assert_eq!(
-            parse_client_frame(&frame),
-            Err(SessionProtocolViolation::SubscriptionIdTooLong),
-        );
-
         let oversized_cursor = "c".repeat(MAX_SUBSCRIBE_CURSOR_BYTES + 1);
-        let frame = format!(
-            r#"{{"type":"subscribe","subscription_id":"chat","selector":{{"kind":"thread","thread_id":"t"}},"after_cursor":"{oversized_cursor}"}}"#
+        assert!(
+            request(vec![("a", Some(oversized_cursor))])
+                .validate()
+                .is_err()
         );
-        assert_eq!(
-            parse_client_frame(&frame),
-            Err(SessionProtocolViolation::CursorTooLong),
-        );
-
-        let padding = " ".repeat(MAX_CLIENT_FRAME_BYTES);
-        let frame = format!(r#"{{"type":"ping"}}{padding}"#);
-        assert_eq!(
-            parse_client_frame(&frame),
-            Err(SessionProtocolViolation::FrameTooLarge),
-        );
-
-        assert_eq!(
-            parse_client_frame(r#"{"type":"unsubscribe","subscription_id":""}"#),
-            Err(SessionProtocolViolation::SubscriptionIdTooLong),
+        assert!(
+            request(vec![("a", Some("\"cursor\"".to_string())), ("b", None)])
+                .validate()
+                .is_ok()
         );
     }
 
     #[test]
-    fn server_frames_carry_the_versioned_schema_tag() {
-        let frame = SessionServerFrame::subscribed("chat".to_string(), 3, Some("\"c\"".into()));
-        let value = serde_json::to_value(&frame).expect("frame serializes");
-        assert_eq!(value["schema"], SESSION_EVENT_SCHEMA);
-        assert_eq!(value["type"], "subscribed");
-        assert_eq!(value["generation"], 3);
-
-        let pong = serde_json::to_value(SessionServerFrame::pong()).expect("pong serializes");
-        assert_eq!(pong["schema"], SESSION_EVENT_SCHEMA);
-
-        let hint = serde_json::to_value(SessionServerFrame::lifetime_reconnect_hint())
-            .expect("hint serializes");
-        assert_eq!(hint["reason"], "lifetime_expired");
+    fn server_frames_carry_the_schema_and_travel_under_their_type() {
+        let frame = SessionServerFrame::event(
+            "chat".to_string(),
+            3,
+            Some("\"cursor\"".to_string()),
+            serde_json::json!({"type": "message"}),
+        );
+        assert_eq!(frame.name(), "event");
+        let json: serde_json::Value = serde_json::to_value(&frame).expect("frame serializes");
+        assert_eq!(json["schema"], SESSION_EVENT_SCHEMA);
+        assert_eq!(json["type"], "event");
+        assert_eq!(json["generation"], 3);
+        let hint = SessionServerFrame::lifetime_reconnect_hint();
+        assert_eq!(hint.name(), "reconnect_hint");
+        let error = SessionServerFrame::subscription_error(
+            "chat".to_string(),
+            1,
+            &ProductSurfaceError::unavailable(true),
+            None,
+        );
+        let json: serde_json::Value = serde_json::to_value(&error).expect("error serializes");
+        assert_eq!(json["retryable"], true);
+        assert!(
+            json.get("detail").is_none(),
+            "only the redacted taxonomy travels"
+        );
     }
 }

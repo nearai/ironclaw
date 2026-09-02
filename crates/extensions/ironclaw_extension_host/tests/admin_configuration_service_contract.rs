@@ -661,14 +661,6 @@ impl SecretStorePort for WriteThenFailSecretStore {
         self.inner.consume(scope, lease_id).await
     }
 
-    async fn delete_lease(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<bool, SecretStoreError> {
-        self.inner.delete_lease(scope, lease_id).await
-    }
-
     async fn revoke(
         &self,
         scope: &ResourceScope,

@@ -42,8 +42,7 @@ pub const WEBUI_V2_ROUTE_GET_RUN_ARTIFACT: &str = "webui.v2.get_run_artifact";
 pub const WEBUI_V2_ROUTE_GET_THREAD_ARTIFACT: &str = "webui.v2.get_thread_artifact";
 pub const WEBUI_V2_ROUTE_GET_ATTACHMENT: &str = "webui.v2.get_attachment";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
-pub const WEBUI_V2_ROUTE_SESSION_WEBSOCKET_TICKET: &str = "webui.v2.session_websocket_ticket";
-pub const WEBUI_V2_ROUTE_SESSION_WEBSOCKET: &str = "webui.v2.session_websocket";
+pub const WEBUI_V2_ROUTE_SESSION_EVENTS: &str = "webui.v2.session_events";
 pub const WEBUI_V2_ROUTE_RUN_COMPLETION_INTENT: &str = "webui.v2.run_completion_intent";
 pub const WEBUI_V2_ROUTE_RUN_COMPLETION_ACKNOWLEDGE: &str = "webui.v2.run_completion_acknowledge";
 pub const WEBUI_V2_ROUTE_RUN_COMPLETION_THREAD_READ: &str = "webui.v2.run_completion_thread_read";
@@ -182,9 +181,7 @@ pub const WEBUI_V2_PATTERN_LOGS: &str = "/api/webchat/v2/logs";
 pub const WEBUI_V2_PATTERN_GET_ATTACHMENT: &str =
     "/api/webchat/v2/threads/{thread_id}/messages/{message_id}/attachments/{attachment_id}";
 pub const WEBUI_V2_PATTERN_STREAM_EVENTS: &str = "/api/webchat/v2/threads/{thread_id}/events";
-pub const WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET: &str =
-    "/api/webchat/v2/session/websocket-ticket";
-pub const WEBUI_V2_PATTERN_SESSION_WEBSOCKET: &str = "/api/webchat/v2/session/websocket";
+pub const WEBUI_V2_PATTERN_SESSION_EVENTS: &str = "/api/webchat/v2/session/events";
 pub const WEBUI_V2_PATTERN_RUN_COMPLETION_INTENT: &str = "/api/webchat/v2/run-completions/intent";
 pub const WEBUI_V2_PATTERN_RUN_COMPLETION_ACKNOWLEDGE: &str =
     "/api/webchat/v2/run-completions/acknowledge";
@@ -356,8 +353,7 @@ pub fn webui_v2_routes_with_artifact_flags(
         logs_descriptor(),
         get_attachment_descriptor(),
         stream_events_descriptor(),
-        session_websocket_ticket_descriptor(),
-        session_websocket_descriptor(),
+        session_events_descriptor(),
         run_completion_intent_descriptor(),
         run_completion_acknowledge_descriptor(),
         run_completion_thread_read_descriptor(),
@@ -1125,27 +1121,17 @@ fn archive_notification_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn session_websocket_ticket_descriptor() -> IngressRouteDescriptor {
+fn session_events_descriptor() -> IngressRouteDescriptor {
     descriptor(
-        WEBUI_V2_ROUTE_SESSION_WEBSOCKET_TICKET,
+        WEBUI_V2_ROUTE_SESSION_EVENTS,
         NetworkMethod::Post,
-        WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET,
-        // Transport-auth mint, not a product command: the bearer-backed POST
-        // mints a bounded single-use nonce and never reaches ProductSurface.
-        // The 12/min bound doubles as the per-caller ticket admission rate.
-        ticket_mint_policy(rate_limit_per_caller(12, 60)),
-    )
-}
-
-fn session_websocket_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_SESSION_WEBSOCKET,
-        NetworkMethod::Get,
-        WEBUI_V2_PATTERN_SESSION_WEBSOCKET,
-        // The upgrade authenticates with the single-use ticket the caller
-        // minted over bearer HTTP; the long-lived bearer never appears in
-        // the WebSocket URL. Same-origin enforcement runs before upgrade.
-        ticketed_websocket_policy(stream_rate_limit()),
+        WEBUI_V2_PATTERN_SESSION_EVENTS,
+        // The page's one event stream: a bearer-authenticated POST whose
+        // body names the subscription set (up to 16 selectors with their
+        // resume cursors, so cursors never ride a URL) and whose response is
+        // `text/event-stream`. Read-only: it never reaches
+        // `ProductSurface::invoke`.
+        session_stream_policy(body_limit_kib(64), stream_rate_limit()),
     )
 }
 
@@ -2274,42 +2260,26 @@ fn read_policy(
     .expect("webui v2 read policy must validate") // safety: streaming is either None or Sse (both permitted with bearer + AuthenticatedCaller); other parts are crate-local constants
 }
 
-/// The transport-auth mint shape: a bearer-authenticated, body-less POST
-/// that mints a single-use socket ticket and never reaches ProductSurface.
-fn ticket_mint_policy(rate_limit: RateLimitPolicy) -> IngressPolicy {
+/// The session event stream shape: bearer-authenticated POST with a bounded
+/// body (the subscription set), answering `text/event-stream`, projection
+/// only, sharing the per-caller stream budget with the compatibility route.
+fn session_stream_policy(
+    body_limit: BodyLimitPolicy,
+    rate_limit: RateLimitPolicy,
+) -> IngressPolicy {
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::LocalGateway,
         auth: bearer_required(),
         scope_source: IngressScopeSource::AuthenticatedCaller,
-        body_limit: BodyLimitPolicy::NoBody,
+        body_limit,
         rate_limit,
         cors: CorsPolicy::SameOriginOnly,
         websocket_origin: WebSocketOriginPolicy::NotApplicable,
-        streaming: StreamingMode::None,
-        audit: AuditTraceClass::UserAction,
-        effect_path: AllowedEffectPath::NoEffect,
-    })
-    .expect("webui v2 ticket mint policy must validate") // safety: all parts are crate-local constants; the LocalGateway + bearer + AuthenticatedCaller + NoBody + None-streaming combination is a permitted shape, pinned by the descriptor contract test
-}
-
-/// The ticket-authenticated WebSocket upgrade shape: single-use ticket auth,
-/// same-origin required, projection-only, sharing the SSE stream budget.
-fn ticketed_websocket_policy(rate_limit: RateLimitPolicy) -> IngressPolicy {
-    IngressPolicy::new(IngressPolicyParts {
-        listener_class: ListenerClass::LocalGateway,
-        auth: IngressAuthPolicy::Required {
-            schemes: vec![IngressAuthScheme::SingleUseTicket],
-        },
-        scope_source: IngressScopeSource::AuthenticatedCaller,
-        body_limit: BodyLimitPolicy::NoBody,
-        rate_limit,
-        cors: CorsPolicy::SameOriginOnly,
-        websocket_origin: WebSocketOriginPolicy::SameOriginRequired,
-        streaming: StreamingMode::WebSocket,
+        streaming: StreamingMode::Sse,
         audit: AuditTraceClass::StreamingSubscription,
         effect_path: AllowedEffectPath::ProjectionOnly,
     })
-    .expect("webui v2 ticketed websocket policy must validate") // safety: all parts are crate-local constants; the LocalGateway + single-use-ticket + AuthenticatedCaller + WebSocket-streaming + same-origin-required combination is a permitted shape, pinned by the descriptor contract test
+    .expect("webui v2 session stream policy must validate") // safety: all parts are crate-local constants; the LocalGateway + bearer + AuthenticatedCaller + bounded body + Sse-streaming combination is a permitted shape, pinned by the descriptor contract test
 }
 
 fn bearer_required() -> IngressAuthPolicy {
@@ -2339,14 +2309,16 @@ fn thread_artifact_rate_limit() -> RateLimitPolicy {
 }
 
 fn stream_rate_limit() -> RateLimitPolicy {
-    // Shared budget for the compatibility SSE (`stream_events`) and session
-    // WebSocket (`session_websocket`) routes. SSE sessions are long-lived; the
+    // Shared budget for the session event stream (`session_events`) and the
+    // compatibility per-thread SSE (`stream_events`) routes. SSE sessions are long-lived; the
     // per-tenant/user concurrency cap (3 streams, enforced in
     // `WebUiV2State::SseCapacity`) does the real bounding. The
     // request-rate window here is just for burst protection against
     // reconnect storms.
     //
-    // Set to 30/60s. The SPA's one-owner reconnect policy opens at most
+    // Set to 60/60s: the session stream reconnects on every subscription-set
+    // change (thread navigation), so a click-happy user must never trip it.
+    // Previously 30/60s. The SPA's one-owner reconnect policy opens at most
     // seven streams per minute for one continuously failing tab (1, 2, 4,
     // 8, 16, then 30-second bounded backoff). Three legitimate tabs therefore
     // stay below this budget with headroom for reload and network transitions.
@@ -2355,7 +2327,7 @@ fn stream_rate_limit() -> RateLimitPolicy {
     // captured from browser history or proxy logs. The concurrency cap remains
     // the primary bound on healthy long-lived streams; this request-rate window
     // bounds churn from broken or hostile clients.
-    rate_limit_per_caller(30, 60)
+    rate_limit_per_caller(60, 60)
 }
 
 fn rate_limit_per_caller(max: u32, window_secs: u32) -> RateLimitPolicy {

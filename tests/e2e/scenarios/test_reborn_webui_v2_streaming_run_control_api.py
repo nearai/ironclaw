@@ -570,74 +570,77 @@ async def test_reborn_v2_sse_reconnect_resumes_without_gap_or_duplicate_served(
         assert _latest_projection_items(replayed_cursor_events) == expected_items
 
 
-async def _mint_session_socket_ticket(client, reborn_v2_server):
-    minted = await client.post(
-        f"{reborn_v2_server}/api/webchat/v2/session/websocket-ticket",
-        timeout=15,
-    )
-    assert minted.status_code == 200, minted.text
-    body = minted.json()
-    assert body["ticket"], body
-    return body["ticket"], body.get("socket_path") or "/api/webchat/v2/session/websocket"
+async def _read_session_frame(response, deadline_s: float = 45.0):
+    """Read the next `data:` frame off a session event stream response."""
+    data_lines = []
+    async with asyncio.timeout(deadline_s):
+        while True:
+            raw_line = await response.content.readline()
+            if not raw_line:
+                raise AssertionError("session event stream closed early")
+            line = raw_line.decode("utf-8").rstrip("\r\n")
+            if line == "":
+                if data_lines:
+                    frame = json.loads("\n".join(data_lines))
+                    data_lines = []
+                    return frame
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip(" "))
 
 
-async def test_reborn_v2_session_websocket_origin_projection_and_shared_capacity_served(
+async def test_reborn_v2_session_event_stream_projection_and_shared_capacity_served(
     reborn_v2_server,
 ):
-    """The ticketed session WebSocket: a foreign origin is rejected before the
-    ticket is spent, a same-origin upgrade with a minted single-use ticket
-    admits a thread subscription, the socket shares the per-caller event
-    budget with SSE, and a submitted turn's projection arrives as a typed
-    session event carrying its resume cursor."""
+    """The page's one event stream: a bearer-authenticated POST whose body
+    names the subscription set answers `text/event-stream`, admits a thread
+    subscription, shares the per-caller event budget with the compatibility
+    per-thread SSE route, and carries a submitted turn's projection as a typed
+    session event with its resume cursor. The bearer travels in a header;
+    there is no transport-specific credential."""
     headers = reborn_bearer_headers()
     async with httpx.AsyncClient(headers=headers) as client:
         thread_id = await create_thread(client, reborn_v2_server)
-        rejected_ticket, socket_path = await _mint_session_socket_ticket(
-            client, reborn_v2_server
-        )
-        admitted_ticket, _ = await _mint_session_socket_ticket(client, reborn_v2_server)
 
-    ws_base = reborn_v2_server.replace("http://", "ws://", 1).replace(
-        "https://", "wss://", 1
-    )
+    stream_url = f"{reborn_v2_server}/api/webchat/v2/session/events"
     events_url = f"{reborn_v2_server}/api/webchat/v2/threads/{thread_id}/events"
-    timeout = aiohttp.ClientTimeout(total=60, sock_read=45)
+    body = {
+        "subscriptions": [
+            {
+                "subscription_id": "chat",
+                "selector": {"kind": "thread", "thread_id": thread_id},
+                "after_cursor": None,
+            }
+        ]
+    }
+    timeout = aiohttp.ClientTimeout(total=90, sock_read=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        # The bearer never rides the socket URL: the upgrade authenticates
-        # with the single-use ticket alone. Origin enforcement runs first.
-        with pytest.raises(aiohttp.WSServerHandshakeError) as rejected:
-            await session.ws_connect(
-                f"{ws_base}{socket_path}?ticket={rejected_ticket}",
-                origin="https://attacker.invalid",
-            )
-        assert rejected.value.status == 403
+        anonymous = await session.post(
+            stream_url,
+            json=body,
+            headers={"Accept": "text/event-stream"},
+        )
+        try:
+            assert anonymous.status == 401, "the stream authenticates with the bearer only"
+        finally:
+            anonymous.close()
 
-        websocket = None
+        stream = None
         streams = []
         try:
-            websocket = await session.ws_connect(
-                f"{ws_base}{socket_path}?ticket={admitted_ticket}",
-                origin=reborn_v2_server,
+            stream = await session.post(
+                stream_url,
+                json=body,
+                headers={**headers, "Accept": "text/event-stream"},
             )
-            await websocket.send_json(
-                {
-                    "type": "subscribe",
-                    "subscription_id": "chat",
-                    "selector": {"kind": "thread", "thread_id": thread_id},
-                }
-            )
-            async with asyncio.timeout(30):
-                while True:
-                    message = await websocket.receive()
-                    assert message.type == aiohttp.WSMsgType.TEXT, message
-                    frame = json.loads(message.data)
-                    if frame.get("type") == "subscribed":
-                        assert frame["schema"] == "webui.session_event.v1"
-                        assert frame["subscription_id"] == "chat"
-                        break
-                    assert frame.get("type") != "subscription_error", frame
+            assert stream.status == 200, await stream.text()
+            assert stream.headers["Content-Type"].startswith("text/event-stream")
+            admitted = await _read_session_frame(stream)
+            assert admitted["schema"] == "webui.session_event.v1"
+            assert admitted["type"] == "subscribed", admitted
+            assert admitted["subscription_id"] == "chat"
 
-            # The socket holds one of the caller's three event slots.
+            # The stream holds one of the caller's three event slots.
             for _ in range(2):
                 response = await session.get(
                     events_url,
@@ -669,25 +672,24 @@ async def test_reborn_v2_session_websocket_origin_projection_and_shared_capacity
                     client,
                     reborn_v2_server,
                     thread_id,
-                    "served session WebSocket projection: what is 2+2?",
+                    "served session event stream projection: what is 2+2?",
                 )
 
             async with asyncio.timeout(45):
                 while True:
-                    message = await websocket.receive()
-                    assert message.type == aiohttp.WSMsgType.TEXT, message
-                    frame = json.loads(message.data)
+                    frame = await _read_session_frame(stream)
                     if frame.get("type") != "event":
+                        assert frame.get("type") != "subscription_error", frame
                         continue
                     assert frame["subscription_id"] == "chat"
                     if _contains_field(frame["event"], "run_id", submitted["run_id"]):
                         assert frame.get("cursor"), frame
                         break
         finally:
-            for stream in streams:
+            for extra in streams:
+                extra.close()
+            if stream is not None:
                 stream.close()
-            if websocket is not None:
-                await websocket.close()
 
 
 async def test_reborn_v2_cancel_and_gate_control_routes_served(reborn_v2_server):

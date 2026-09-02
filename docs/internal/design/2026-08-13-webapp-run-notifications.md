@@ -1351,6 +1351,25 @@ arbitration:
 | One session SSE carrying every event | Server-to-client semantics fit events | Dynamic thread subscriptions require reconnect/query mutation or over-delivery; independent stream failures become awkward; rejected |
 | Read-only session WebSocket with typed logical subscriptions | One connection per page, dynamic selectors, independent cursors, shared thread/notification transport | Requires a bounded control protocol and staged migration; selected |
 
+**Implementation note (2026-09-02, nearai/ironclaw#8010).** The shipped
+transport is the second row after all: one session SSE stream
+(`POST /api/webchat/v2/session/events`) whose request body names the complete
+subscription set with per-selector cursors and whose response is
+`text/event-stream` carrying the same `webui.session_event.v1` frames. The two
+costs listed against it did not hold up: the subscription set is fixed per
+connection and a change reconnects with each selector's own cursor (the resume
+path the client already runs on lifetime expiry), and independent failures are
+per-subscription `subscription_error` frames on the shared stream exactly as on
+the socket. Choosing SSE removes the single-use ticket subsystem (the bearer
+travels in the `Authorization` header of a `fetch`-opened stream), removes the
+client-side fallback to per-thread SSE (there is one transport; a stream that
+cannot connect reports `reconnecting` and keeps retrying with capped backoff),
+and works wherever HTTP works. §16's "fall back to SSE" rollback lever is
+therefore moot; the per-thread route survives only as an API path for clients
+not yet ported. Nothing polls on the client's behalf: the shared driver
+requires a live continuation and fails a subscription the surface cannot keep
+live.
+
 The selected socket is not the existing per-thread WebSocket implementation.
 That route is unused by the SPA, duplicates the SSE loop, authenticates with a
 long-lived bearer in the URL, and sends the wrong raw envelope. Phase 0 replaces

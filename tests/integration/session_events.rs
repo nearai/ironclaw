@@ -1,15 +1,8 @@
-//! Whole-path evidence for the session event transport (2026-08-13 design,
-//! Phase 0): a REAL turn through the production workflow, streamed over a
-//! REAL WebSocket connection to the session route mounted from the real
-//! `webui_v2` router, ending with the exact durable finalized assistant
-//! reply the HTTP timeline serves. Also proves two logical subscriptions on
-//! one socket deliver their own threads independently.
-//!
-//! The single fake is the scripted model at the vendor-SDK seam
-//! (`tests/integration/CLAUDE.md`); the caller extension is injected the way
-//! the bearer middleware would after consuming a single-use socket ticket
-//! (the ticket protocol itself is pinned at the webui crate tier in
-//! `auth_route_contract.rs`).
+//! The page's session event stream over the real stack: a bearer-authenticated
+//! `POST /api/webchat/v2/session/events` whose body names the subscription set
+//! answers `text/event-stream`, admits each thread subscription, and streams
+//! the exact durable finalized reply the HTTP timeline serves. Two logical
+//! subscriptions on one stream deliver their own threads independently.
 
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
@@ -21,7 +14,6 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{SinkExt, StreamExt};
 use ironclaw_assistant::RebornServices;
 use ironclaw_event_log::InMemoryDurableEventLog;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource};
@@ -30,14 +22,13 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::reply::RebornScriptedReply;
 use reborn_support::webui_mount::{get_json, mount_webui_v2_router, webui_caller_for};
 use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-const FINAL_REPLY: &str = "the precise durable answer for the session socket";
+const FINAL_REPLY: &str = "the precise durable answer for the session stream";
 
 fn session_services(h: &RebornIntegrationHarness) -> Arc<RebornServices> {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let reply_target_binding_ref =
-        ReplyTargetBindingRef::new("session-socket-test").expect("valid reply target binding ref");
+        ReplyTargetBindingRef::new("session-stream-test").expect("valid reply target binding ref");
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = h.turn_event_projection_for_test();
     let event_stream =
         ironclaw_composition::test_support::build_product_event_stream_with_thread_service_for_test(
@@ -64,68 +55,99 @@ async fn serve_router(router: axum::Router) -> (std::net::SocketAddr, tokio::tas
     (addr, handle)
 }
 
-type SessionSocket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+/// One open session stream: the response body as a line-oriented SSE reader.
+struct SessionStream {
+    response: reqwest::Response,
+    buffered: Vec<u8>,
+    data_lines: Vec<String>,
+}
 
-async fn connect_session_socket(addr: std::net::SocketAddr) -> SessionSocket {
-    let url = format!("ws://{addr}/api/webchat/v2/session/websocket");
-    let (socket, response) = tokio::time::timeout(
+async fn open_session_stream(
+    addr: std::net::SocketAddr,
+    subscriptions: Vec<(&str, &str)>,
+) -> SessionStream {
+    let body = serde_json::json!({
+        "subscriptions": subscriptions
+            .into_iter()
+            .map(|(id, thread_id)| serde_json::json!({
+                "subscription_id": id,
+                "selector": {"kind": "thread", "thread_id": thread_id},
+                "after_cursor": null,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let response = tokio::time::timeout(
         Duration::from_secs(15),
-        tokio_tungstenite::connect_async(url),
+        reqwest::Client::new()
+            .post(format!("http://{addr}/api/webchat/v2/session/events"))
+            .header("accept", "text/event-stream")
+            .json(&body)
+            .send(),
     )
     .await
-    .expect("session socket connects within 15s")
-    .expect("session socket upgrades");
-    assert_eq!(response.status().as_u16(), 101);
-    socket
+    .expect("session stream opens within 15s")
+    .expect("session stream request");
+    assert_eq!(response.status().as_u16(), 200);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")),
+        "the session stream answers as text/event-stream",
+    );
+    SessionStream {
+        response,
+        buffered: Vec::new(),
+        data_lines: Vec::new(),
+    }
 }
 
-async fn subscribe(socket: &mut SessionSocket, subscription_id: &str, thread_id: &str) {
-    let frame = serde_json::json!({
-        "type": "subscribe",
-        "subscription_id": subscription_id,
-        "selector": {"kind": "thread", "thread_id": thread_id},
-        "after_cursor": null,
-    });
-    socket
-        .send(WsMessage::Text(frame.to_string().into()))
-        .await
-        .expect("subscribe frame sends");
-}
-
-async fn next_frame(socket: &mut SessionSocket, deadline: std::time::Instant) -> Value {
-    loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        match tokio::time::timeout(remaining, socket.next()).await {
-            Ok(Some(Ok(WsMessage::Text(text)))) => {
-                return serde_json::from_str(&text).expect("session frame parses");
+impl SessionStream {
+    /// The next session frame (`data:` payload of one SSE event).
+    async fn next_frame(&mut self, deadline: std::time::Instant) -> Value {
+        loop {
+            while let Some(newline) = self.buffered.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = self.buffered.drain(..=newline).collect();
+                let line = String::from_utf8_lossy(&line)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string();
+                if line.is_empty() {
+                    if !self.data_lines.is_empty() {
+                        let payload = self.data_lines.join("\n");
+                        self.data_lines.clear();
+                        return serde_json::from_str(&payload).expect("session frame parses");
+                    }
+                    continue;
+                }
+                if let Some(data) = line.strip_prefix("data:") {
+                    self.data_lines.push(data.trim_start().to_string());
+                }
             }
-            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => panic!("session socket closed early"),
-            Ok(Some(Ok(_))) => continue,
-            Ok(Some(Err(error))) => panic!("session socket error: {error}"),
-            Err(_) => panic!("no session frame before deadline"),
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match tokio::time::timeout(remaining, self.response.chunk()).await {
+                Ok(Ok(Some(chunk))) => self.buffered.extend_from_slice(&chunk),
+                Ok(Ok(None)) => panic!("session stream closed early"),
+                Ok(Err(error)) => panic!("session stream error: {error}"),
+                Err(_) => panic!("no session frame before deadline"),
+            }
         }
     }
 }
 
-/// Collect `event` frames for `subscription_id` until one carries the
-/// finalized transcript row, returning `(finalized_body, all_texts)` where
-/// `all_texts` is every text body observed for the run in delivery order.
 async fn collect_until_finalized(
-    socket: &mut SessionSocket,
+    stream: &mut SessionStream,
     subscription_id: &str,
     deadline: std::time::Instant,
 ) -> (String, Vec<String>) {
     let mut texts = Vec::new();
     loop {
-        let frame = next_frame(socket, deadline).await;
+        let frame = stream.next_frame(deadline).await;
         assert_eq!(frame["schema"], "webui.session_event.v1");
         if frame["type"] != "event" || frame["subscription_id"] != subscription_id {
             continue;
         }
         let event = &frame["event"];
-        // The browser event body never carries extension-delivery routing
-        // metadata — that envelope stops at the product boundary.
         for forbidden in [
             "adapter_id",
             "installation_id",
@@ -153,11 +175,8 @@ async fn collect_until_finalized(
     }
 }
 
-/// The core Phase 0 proof: a turn submitted through the production workflow
-/// streams over one session-socket subscription and ends with the exact
-/// finalized assistant reply that the durable HTTP timeline serves.
 #[tokio::test]
-async fn session_socket_streams_the_exact_durable_final_reply() {
+async fn session_stream_streams_the_exact_durable_final_reply() {
     let h = RebornIntegrationHarness::test_default()
         .script([RebornScriptedReply::text(FINAL_REPLY)])
         .build()
@@ -169,24 +188,17 @@ async fn session_socket_streams_the_exact_durable_final_reply() {
     let router = mount_webui_v2_router(services, caller);
     let (addr, serve_handle) = serve_router(router.clone()).await;
 
-    // The thread materializes on first admission; complete the turn through
-    // the production workflow, then subscribe. The session subscription
-    // replays the durable projection from the origin — the reconnect path
-    // every browser exercises — and must end with the exact finalized reply.
-    h.submit_turn("answer over the session socket")
+    h.submit_turn("answer over the session stream")
         .await
         .expect("turn completes");
 
-    let mut socket = connect_session_socket(addr).await;
-    subscribe(&mut socket, "chat-active", &thread_id).await;
-    // Deadline caps WAITING only — passing runs finish in well under a
-    // second locally; saturated CI partitions need the headroom.
+    let mut stream = open_session_stream(addr, vec![("chat-active", &thread_id)]).await;
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let admitted = next_frame(&mut socket, deadline).await;
+    let admitted = stream.next_frame(deadline).await;
     assert_eq!(admitted["type"], "subscribed", "admission: {admitted}");
     assert_eq!(admitted["subscription_id"], "chat-active");
 
-    let (finalized, texts) = collect_until_finalized(&mut socket, "chat-active", deadline).await;
+    let (finalized, texts) = collect_until_finalized(&mut stream, "chat-active", deadline).await;
     assert_eq!(
         finalized, FINAL_REPLY,
         "the finalized stream row must carry the exact assistant reply",
@@ -197,8 +209,6 @@ async fn session_socket_streams_the_exact_durable_final_reply() {
          (cumulative, never reordered fragments): {texts:?}",
     );
 
-    // The durable transcript is the source of truth: the HTTP timeline's
-    // finalized assistant message must match the streamed reply exactly.
     let (status, body) = get_json(
         router,
         &format!("/api/webchat/v2/threads/{thread_id}/timeline"),
@@ -214,36 +224,31 @@ async fn session_socket_streams_the_exact_durable_final_reply() {
     assert_eq!(
         durable["content"].as_str(),
         Some(FINAL_REPLY),
-        "session socket and durable transcript must agree byte-for-byte",
+        "session stream and durable transcript must agree byte-for-byte",
     );
 
-    let _ = socket.close(None).await;
+    drop(stream);
     serve_handle.abort();
 }
 
-/// Two logical subscriptions on one physical socket deliver their own
-/// threads independently: each receives its own finalized reply, and
-/// neither ever receives a frame tagged for the other.
 #[tokio::test]
-async fn one_session_socket_carries_two_threads_independently() {
+async fn one_session_stream_carries_two_threads_independently() {
     let group = RebornIntegrationGroup::builtin_tools()
         .await
         .expect("group builds");
     let thread_a = group
-        .thread("conv-session-socket-a")
+        .thread("conv-session-stream-a")
         .script([RebornScriptedReply::text("alpha thread final reply")])
         .build()
         .await
         .expect("thread a builds");
     let thread_b = group
-        .thread("conv-session-socket-b")
+        .thread("conv-session-stream-b")
         .script([RebornScriptedReply::text("beta thread final reply")])
         .build()
         .await
         .expect("thread b builds");
 
-    // One event stream over the shared runtime serves both threads; each
-    // subscription's scope comes from its own selector authorization.
     let services = session_services(&thread_a);
     let caller = webui_caller_for(&thread_a.binding);
     let router = mount_webui_v2_router(services, caller);
@@ -258,27 +263,16 @@ async fn one_session_socket_carries_two_threads_independently() {
         .await
         .expect("thread b completes");
 
-    let mut socket = connect_session_socket(addr).await;
     let id_a = thread_a.binding.thread_id.as_str().to_string();
     let id_b = thread_b.binding.thread_id.as_str().to_string();
-    subscribe(&mut socket, "sub-a", &id_a).await;
-    subscribe(&mut socket, "sub-b", &id_b).await;
+    let mut stream = open_session_stream(addr, vec![("sub-a", &id_a), ("sub-b", &id_b)]).await;
 
-    // Deadline caps WAITING only — passing runs finish in well under a
-    // second locally; saturated CI partitions need the headroom.
-    //
-    // One order-independent loop: frames of DIFFERENT subscriptions carry no
-    // cross-ordering guarantee, so subscription B's admission ack may arrive
-    // before, between, or after subscription A's replayed events. Consuming
-    // admission acks in a separate first phase silently discarded whichever
-    // replay events interleaved with them, hanging the drain on a finalized
-    // reply that had already been delivered.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     let mut final_a: Option<String> = None;
     let mut final_b: Option<String> = None;
     let mut admitted = 0;
     while final_a.is_none() || final_b.is_none() {
-        let frame = next_frame(&mut socket, deadline).await;
+        let frame = stream.next_frame(deadline).await;
         assert_ne!(
             frame["type"], "subscription_error",
             "both selectors must authorize: {frame}"
@@ -332,6 +326,6 @@ async fn one_session_socket_carries_two_threads_independently() {
     assert_eq!(final_a.as_deref(), Some("alpha thread final reply"));
     assert_eq!(final_b.as_deref(), Some("beta thread final reply"));
 
-    let _ = socket.close(None).await;
+    drop(stream);
     serve_handle.abort();
 }

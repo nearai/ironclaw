@@ -44,6 +44,15 @@ All proposal section references (§N) are to
 `docs/internal/design/2026-08-13-webapp-run-notifications.md`. All file:line
 references were verified against this branch (`90a75faa0`).
 
+
+> **Status (2026-09-02, nearai/ironclaw#8010):** the session WebSocket and its
+> single-use ticket subsystem described below were replaced before merge by one
+> session SSE stream (`POST /api/webchat/v2/session/events`, body = the
+> subscription set, response = `text/event-stream` with the same frame
+> vocabulary), and the SPA's compatibility-SSE fallback was removed. The
+> `session_transport` port, the ticket stores, and the socket protocol rows
+> are historical. See the design doc §12.5 implementation note.
+
 ## Global constraints (from the proposal + repo rules)
 
 - Every product mutation stays on authenticated HTTP; the WebSocket accepts

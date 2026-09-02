@@ -139,9 +139,9 @@ candidate module.
 | `projects` | Project CRUD and project membership | Project *files* — those are `workspace-fs` | `ListProjectsQuery`, `list_projects`, `create_project`, `get_project`, `update_project`, `delete_project`, `list_project_members`, `add_project_member`, `update_project_member`, `remove_project_member`, `read_project_member` |
 | `attachments` | Attachment download and the filename sanitizing that download depends on | A filesystem path rule — that is `workspace-fs` | `MAX_DOWNLOAD_FILENAME_BYTES`, `sanitized_download_filename`, `get_attachment` |
 | `streaming` | The compatibility per-thread SSE transport: capacity and concurrency rejection, cursor tokens, and the SSE error/keep-alive framing (poll cadence and the browser codec both transports share live in `src/webui_v2/session_events/{driver,codec}.rs`) | A product decision — a stream carries what the surface already produced | `LAST_EVENT_ID_HEADER`, `stream_events`, `sse_capacity_rejected`, `sse_concurrency_exhausted`, `StreamEventsQuery`, `stream_connection_id`, `SseErrorPayload`, `sse_event_from_stream`, `sse_error_event`, `sse_keep_alive_event`, `build_sse_stream`, `parse_cursor_token` |
-| `session-events` | The ticketed app-wide session WebSocket: ticket minting, the read-only multiplexing socket loop, its per-subscription driver tasks, and fair queue draining | A product decision or mutation — the socket carries only what the surface already produced, and no session frame reaches `ProductSurface::invoke` | `handlers/session_events.rs::SessionSocketTicketResponse`, `handlers/session_events.rs::session_websocket_ticket`, `handlers/session_events.rs::unix_now_ms`, `handlers/session_events.rs::session_websocket`, `handlers/session_events.rs::SubscriptionEmit`, `handlers/session_events.rs::SubscriptionEntry`, `handlers/session_events.rs::run_subscription`, `handlers/session_events.rs::forward_stream_event`, `handlers/session_events.rs::poll_next_emit`, `handlers/session_events.rs::session_socket_loop`, `handlers/session_events.rs::close_session_socket`, `handlers/session_events.rs::cancel_all`, `handlers/session_events.rs::send_session_frame` |
+| `session-events` | The page's app-wide session event stream: the bearer-authenticated `POST` that opens it, its per-subscription driver tasks, fair queue draining, and SSE framing of the `webui.session_event.v1` frames | A product decision or mutation — the stream carries only what the surface already produced, and no request body reaches `ProductSurface::invoke` | `handlers/session_events.rs::session_events`, `handlers/session_events.rs::SubscriptionEmit`, `handlers/session_events.rs::SubscriptionEntry`, `handlers/session_events.rs::run_subscription`, `handlers/session_events.rs::forward_stream_event`, `handlers/session_events.rs::poll_next_emit`, `handlers/session_events.rs::frame_event`, `handlers/session_events.rs::session_event_stream` |
 | `runs` | Run control: cancel, retry, and gate resolution | Anything that reads a run — that is `threads` or `streaming` | `cancel_run`, `CancelRunPath`, `resolve_gate`, `ResolveGatePath`, `retry_run`, `RetryRunPath` |
-| `run-completions` | Run-completion notification operations: intent offers, grant acknowledgement, thread-read evidence, and the unread snapshot — all ordinary authenticated `ProductSurface` calls | A stream frame — live notice/grant/clear delivery is `session-events`/`streaming` transport riding the surface's `RunCompletions` selector | `run_completion_intent`, `run_completion_acknowledge`, `run_completion_thread_read`, `run_completions_unread` |
+| `run-completions` | Run-completion notification operations: intent offers, grant acknowledgement, thread-read evidence, and the unread snapshot — all ordinary authenticated `ProductSurface` calls | A stream frame — live notice/grant/clear delivery is `session-events` transport riding the surface's `RunCompletions` selector | `run_completion_intent`, `run_completion_acknowledge`, `run_completion_thread_read`, `run_completions_unread` |
 | `commands` | The product command surface: listing and executing | A command *constant* — those are `ironclaw_assistant`'s frozen inventory | `list_commands`, `ExecuteCommandBody`, `execute_command` |
 | `automations` | Automation listing and lifecycle (run/pause/resume/rename/delete) | Trigger evaluation — that is the triggers domain | `list_automations`, `run_automation`, `pause_automation`, `resume_automation`, `rename_automation`, `delete_automation`, `ListAutomationsQuery` |
 | `suggestions` | Suggestion snapshot reads and generation/start/dismiss actions | Suggestion orchestration and durable state — those belong behind `ProductSurface` | `SUGGESTIONS_MAX_RETRY_AFTER_SECONDS`, `list_suggestions`, `generate_suggestions`, `start_suggestion`, `dismiss_suggestion` |
@@ -200,8 +200,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.get_thread_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** (compatibility adapter) | `ProjectionOnly` |
-| `webui.v2.session_websocket_ticket` | POST | `/api/webchat/v2/session/websocket-ticket` | — | `NoEffect` (transport-auth mint) |
-| `webui.v2.session_websocket` | GET | `/api/webchat/v2/session/websocket` | **WebSocket** (ticket-authenticated, read-only, multiplexing) | `ProjectionOnly` |
+| `webui.v2.session_events` | POST | `/api/webchat/v2/session/events` (body: the subscription set) | **SSE** (the page's one multiplexing event stream; read-only) | `ProjectionOnly` |
 | `webui.v2.run_completion_intent` / `run_completion_acknowledge` / `run_completion_thread_read` | POST | `/api/webchat/v2/run-completions/{intent,acknowledge,thread-read}` | — | `ProductSurface` |
 | `webui.v2.run_completions_unread` | GET | `/api/webchat/v2/run-completions/unread` | — | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
@@ -263,32 +262,42 @@ last-admin protection); `create_user` returns the one-time API bearer exactly
 once in `api_token`. `webui.v2.settings.tools` is a normal authenticated-caller
 route (tenant/user-scoped tool-approval settings), not an operator route.
 
-### Streaming model (compatibility SSE + session WebSocket)
+### Streaming model (session event stream + compatibility SSE)
 
-- `stream_events` (the compatibility per-thread SSE) and `session_websocket`
-  (the ticket-authenticated, read-only, multiplexing session socket) share
-  **one** `ProductStreamDriver` and **one** browser codec
-  (`src/webui_v2/session_events/`): each typed `ProductStreamEventEnvelope`
-  is rendered into the redacted `WebChatV2EventFrame` schema (never raw
-  adapter routing/delivery metadata) with the projection cursor as the SSE
-  `id` / session-frame `cursor`. SSE resumes via `Last-Event-ID` (preferred
-  over `?after_cursor=`); every session-socket subscription resumes from its
-  own `after_cursor` — there is no session-wide cursor, and the `rc:`
+- `session_events` (the page's one multiplexing event stream) and
+  `stream_events` (the compatibility per-thread SSE, retained for API clients
+  until its tests are ported) share **one** `ProductStreamDriver` and **one**
+  browser codec (`src/webui_v2/session_events/`): each typed
+  `ProductStreamEventEnvelope` is rendered into the redacted
+  `WebChatV2EventFrame` schema (never raw adapter routing/delivery metadata)
+  with the projection cursor as the SSE `id` / session-frame `cursor`. The
+  compatibility route resumes via `Last-Event-ID` (preferred over
+  `?after_cursor=`); every session-stream subscription resumes from its own
+  `after_cursor` — there is no session-wide cursor, and the `rc:`
   run-completion cursor namespace can never resume a thread selector.
-- The session socket is an event transport, not a command bus: its client
-  vocabulary is `subscribe` / `unsubscribe` / `ping` only, it never dispatches
+- The session stream is an event transport, not a command bus. The client
+  sends its complete subscription set once, in the `POST` body (one to 16
+  subscriptions with distinct bounded ids and bounded cursors, validated
+  before any subscription task exists), and nothing afterwards; the response
+  is `text/event-stream` carrying `subscribed` / `event` /
+  `subscription_error` / `reconnect_hint` frames (`webui.session_event.v1`),
+  each as one SSE event named by its type. It never dispatches
   `ProductSurface::invoke` or an operation id, and every product mutation
   (including the run-completion intent/acknowledge/thread-read operations)
-  stays on authenticated HTTP. Upgrades authenticate with a single-use,
-  15-second ticket minted over bearer HTTP (`session_websocket_ticket`) and
-  bound to the exact caller; the long-lived bearer never appears in a
-  WebSocket URL, and same-origin is enforced before upgrade. Inbound frames
-  are bounded at 8 KiB at both the transport (`max_message_size`) and the
-  protocol parser; at most 16 logical subscriptions per socket.
+  stays on authenticated HTTP. Changing the subscription set means
+  reconnecting with each selector's own cursor — the same resume path the
+  client runs on lifetime expiry. The bearer travels in the `Authorization`
+  header (the SPA opens the stream with `fetch`); no transport-specific
+  credential exists.
+- Nothing polls on the client's behalf: the driver requires a live
+  continuation from the surface and fails the subscription (retryable) when
+  none is offered, so the client resubscribes with backoff. The compatibility
+  route alone keeps a legacy idle poll for drain-only surfaces, retired with
+  it.
 - Both transports share **one** `SseCapacity` budget keyed by `(tenant, user)`
   (default 3 concurrent; override via `WebUiV2State::with_sse_concurrency_limit`)
-  — a caller cannot bypass the cap by mixing SSE and the session socket.
-  Exhaustion returns `429` with `retryable: true`.
+  — a caller cannot bypass the cap by mixing the two routes. Exhaustion
+  returns `429` with `retryable: true`.
 - The SPA consumes SSE through `event-source-plus`, which owns event framing,
   `Last-Event-ID`, fetch, and cancellation over `fetch`/`ReadableStream`.
   IronClaw owns one reconnect coordinator across transport failures, stream
@@ -343,12 +352,14 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   starts at the projection origin so the server returns durable state plus the
   compacted current live state; it does not persist process-local live cursors
   across SPA navigation.
-- Every stream is closed after a max lifetime (5 min) and every `socket.send` /
-  subscription/drain await is `timeout`-bounded, so a back-pressuring client or
-  a stalled facade cannot pin a slot past the budget. Slots are RAII
-  (`SseSlot`), released on disconnect / expiry / error. Regressions locked by
-  `session_websocket_shares_capacity_with_sse_streams`,
-  `session_websocket_releases_slot_on_peer_close`, and
+- Every stream is closed after a max lifetime (5 min, announced by a
+  `reconnect_hint` frame) and every subscription/drain await is
+  `timeout`-bounded, so a back-pressuring client or a stalled facade cannot
+  pin a slot past the budget. Slots are RAII (`SseSlot`), released on
+  disconnect / expiry / error, and a dropped stream aborts its subscription
+  drivers. Regressions locked by
+  `session_events_shares_capacity_with_sse_streams`,
+  `session_events_releases_slot_when_the_client_drops_the_stream`, and
   `stream_events_releases_slot_when_service_drain_stalls_past_max_lifetime`.
 - `capability_activity` / `capability_display_preview` frames carry only
   bounded, secret-redacted input/output *summaries* (host paths rejected, URLs

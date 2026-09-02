@@ -735,12 +735,19 @@ export function eventStreamRequest({ threadId, connectionId } = {}) {
 
 // --- Session event transport ---
 
-// Mint a short-lived, single-use socket ticket over bearer HTTP. The
-// session WebSocket then authenticates with `?ticket=<nonce>` so the
-// long-lived bearer never appears in a WebSocket URL, browser history,
-// or proxy access log.
-export async function mintSessionSocketTicket() {
-  return apiFetch(`${V2_BASE}/session/websocket-ticket`, { method: "POST" });
+// The page's one event stream: a header-authenticated `fetch` POST whose
+// body names the subscription set and whose response is `text/event-stream`.
+// The bearer travels in a header like every other route — never in a URL,
+// browser history, or proxy access log. `headers` is a function so every
+// reconnect picks up the current credential.
+export function sessionEventsStreamRequest() {
+  return {
+    url: `${V2_BASE}/session/events`,
+    headers: () => {
+      const token = readStoredToken();
+      return token ? { Authorization: `Bearer ${token}` } : {};
+    },
+  };
 }
 
 // --- Run-completion notifications (authenticated HTTP mutations; the

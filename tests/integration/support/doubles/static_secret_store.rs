@@ -203,19 +203,6 @@ impl SecretStorePort for StaticSecretStore {
             })
     }
 
-    async fn delete_lease(
-        &self,
-        _scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<bool, SecretStoreError> {
-        Ok(self
-            .leases
-            .lock()
-            .expect("leases lock")
-            .remove(&lease_id)
-            .is_some())
-    }
-
     async fn revoke(
         &self,
         scope: &ResourceScope,

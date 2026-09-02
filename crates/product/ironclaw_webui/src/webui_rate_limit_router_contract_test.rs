@@ -1,6 +1,6 @@
 //! Caller-level contract tests for PR #6592 review comments about
 //! `enforce_rate_limit` ↔ `SseCapacity` refund behavior driven through the
-//! real, fully-wired v2 router (real `stream_events` / `session_websocket`
+//! real, fully-wired v2 router (real `stream_events` / `session_events`
 //! handlers, real `SseCapacity`) rather than a synthetic always-429
 //! handler.
 //!
@@ -30,11 +30,17 @@ use tower::ServiceExt;
 
 /// Minimal `ProductSurface` fake shared by the tests in this file. Only
 /// `stream_events` needs a real body: the SSE/WS capacity slot is reserved
-/// synchronously at the top of the `stream_events` / `session_websocket`
+/// synchronously at the top of the `stream_events` / `session_events`
 /// handlers before the surface is ever touched, so the other operations are
 /// unreachable for these tests and panic loudly if that ever changes.
 #[derive(Default)]
-struct FakeServices;
+struct FakeServices {
+    /// Senders of the live subscriptions handed out, kept so the streams stay
+    /// open for as long as the test holds the response.
+    held_subscriptions: Mutex<
+        Vec<tokio::sync::mpsc::Sender<Result<ProductSurfaceStreamResponse, ProductSurfaceError>>>,
+    >,
+}
 
 #[async_trait]
 impl ProductSurface for FakeServices {
@@ -59,13 +65,18 @@ impl ProductSurface for FakeServices {
         _caller: ProductSurfaceCaller,
         _request: ProductSurfaceStreamRequest,
     ) -> Result<ProductSurfaceStreamResponse, ProductSurfaceError> {
-        // Returns instantly with an empty page — no backing projection
-        // store is needed because these tests never drain the SSE/WS body,
-        // only the handshake status.
+        // An empty first page plus a live continuation that never ends:
+        // no backing projection store is needed because these tests never
+        // drain a body, but the session stream must stay open (holding its
+        // capacity slot) until the client drops it.
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        self.held_subscriptions.lock().expect("lock").push(sender);
         Ok(ProductSurfaceStreamResponse {
             events: Vec::new(),
             next_cursor: None,
-            subscription: None,
+            subscription: Some(
+                ironclaw_product_contracts::surface::ProductSurfaceEventSubscription::new(receiver),
+            ),
         })
     }
 }
@@ -87,7 +98,7 @@ fn test_router(sse_capacity_cap: usize, routes: Vec<RouteLimit>) -> axum::Router
         next_generation: Arc::new(AtomicU64::new(0)),
     };
 
-    let services: Arc<dyn ProductSurface> = Arc::new(FakeServices);
+    let services: Arc<dyn ProductSurface> = Arc::new(FakeServices::default());
     webui_v2_router(WebUiV2State::new(services, sse_capacity_cap)).route_layer(
         middleware::from_fn_with_state(rate_limit_state, enforce_rate_limit),
     )
@@ -106,11 +117,11 @@ fn stream_events_route(max_requests: u32) -> RouteLimit {
     }
 }
 
-fn session_websocket_route(max_requests: u32) -> RouteLimit {
+fn session_events_route(max_requests: u32) -> RouteLimit {
     RouteLimit {
-        route_id: "webui_v2.session_websocket".into(),
-        method: Method::GET,
-        segments: parse_pattern("/api/webchat/v2/session/websocket"),
+        route_id: "webui_v2.session_events".into(),
+        method: Method::POST,
+        segments: parse_pattern("/api/webchat/v2/session/events"),
         policy: ResolvedPolicy::Limited {
             scope: RateLimitScope::PerCaller,
             max_requests,
@@ -300,28 +311,13 @@ async fn sse_capacity_429_burst_past_refund_limit_drains_budget_to_middleware_42
     drop(held);
 }
 
-/// Finding C3 (PR #6592 review), carried onto the session socket:
-/// `session_websocket` also marks capacity 429s refundable (mirroring
-/// `stream_events`), but a bare `tower::oneshot` request cannot reach a WS
-/// handler because axum's `WebSocketUpgrade` extractor requires a real
-/// `hyper::upgrade::OnUpgrade` extension, which only a real connection
-/// provides. This mirrors the raw TCP + real WS handshake pattern in
-/// `webui_v2_handlers_contract::session_websocket_shares_capacity_with_sse_streams`,
-/// adding the real `enforce_rate_limit` middleware in front and asserting
-/// the same budget-untouched refund property the SSE test above asserts,
-/// but through a real WebSocket upgrade over a real socket.
+/// The session event stream shares the compatibility route's refund
+/// behavior: a capacity 429 answered by the real handler through the real,
+/// fully-wired route must not consume the caller's request-rate budget, so
+/// the client that reconnects once the held stream drops is admitted.
 #[tokio::test]
-async fn session_websocket_429_through_real_socket_is_refunded() {
-    // max_requests = 2: the initial successful WS upgrade charges 1 (1
-    // left). If the refundable capacity 429s fired below drained that
-    // last unit, the final reconnect attempt would get the middleware's
-    // own 429 instead of completing the upgrade.
-    let app = test_router(1, vec![session_websocket_route(2)])
-        // Caller identity injected the same way as the other raw-TCP WS
-        // test in `webui_v2_handlers_contract.rs`: a router-wide
-        // `Extension` layer standing in for the bearer-auth middleware,
-        // which is out of scope for this rate-limit ↔ SseCapacity
-        // regression.
+async fn session_events_429_through_real_stream_is_refunded() {
+    let app = test_router(1, vec![session_events_route(2)])
         .layer(axum::Extension(caller("tenant-alpha", "alice")));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -331,75 +327,84 @@ async fn session_websocket_429_through_real_socket_is_refunded() {
     let serve_handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    let ws_url = format!("ws://{addr}/api/webchat/v2/session/websocket");
-
-    // First upgrade succeeds and reserves the caller's only SseCapacity
-    // slot (shared between the SSE and WS transports). Keep the socket
-    // open so the slot stays reserved for the rest of the test.
-    let (held_ws, held_response) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio_tungstenite::connect_async(ws_url.clone()),
-    )
-    .await
-    .expect("initial ws connect within 5s")
-    .expect("initial ws upgrade must succeed");
-    assert_eq!(held_response.status().as_u16(), 101);
-
-    // Fire more capacity-rejected upgrade attempts than the rate-limit
-    // budget (2) allows, all within REJECTION_REFUND_LIMIT (5) so every
-    // one must be refundable — over the real socket, the 429 comes back
-    // as the HTTP response to the failed upgrade handshake.
-    for attempt in 0..5 {
-        let rejected = tokio::time::timeout(
+    let url = format!("http://{addr}/api/webchat/v2/session/events");
+    let body = r#"{"subscriptions":[{"subscription_id":"chat","selector":{"kind":"thread","thread_id":"thread-1"},"after_cursor":null}]}"#;
+    let client = reqwest::Client::new();
+    let open = |client: reqwest::Client, url: String| async move {
+        tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            tokio_tungstenite::connect_async(ws_url.clone()),
+            client
+                .post(url)
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .body(body)
+                .send(),
         )
         .await
-        .expect("rejected ws connect attempt within 5s");
-        match rejected {
-            Ok((_ws, response)) => panic!(
-                "attempt {attempt} must be rejected by the SseCapacity cap; instead the \
-                 server completed the upgrade with status {}",
-                response.status().as_u16(),
-            ),
-            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
-                assert_eq!(
-                    response.status().as_u16(),
-                    429,
-                    "attempt {attempt} must be a 429 over the socket"
-                );
-            }
-            Err(other) => panic!("attempt {attempt} failed with unexpected error: {other:?}"),
-        }
+        .expect("stream request within 5s")
+        .expect("stream request")
+    };
+
+    // Hold the first stream on a raw socket so dropping it sends a FIN the
+    // server can observe; a pooled HTTP client keeps the connection around.
+    let mut held = tokio::net::TcpStream::connect(addr).await.expect("tcp");
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let request = format!(
+            "POST /api/webchat/v2/session/events HTTP/1.1\r\nHost: localhost\r\n\
+             Content-Type: application/json\r\nAccept: text/event-stream\r\n\
+             Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+            body.len()
+        );
+        held.write_all(request.as_bytes())
+            .await
+            .expect("write held request");
+        let mut header_buf = [0u8; 512];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            held.read(&mut header_buf),
+        )
+        .await
+        .expect("held stream header read within 5s")
+        .expect("held stream header read");
+        let header_prefix = std::str::from_utf8(&header_buf[..n]).expect("utf8 headers");
+        assert!(
+            header_prefix.starts_with("HTTP/1.1 200"),
+            "the first stream is admitted; got: {header_prefix:?}",
+        );
     }
 
-    // Release the held slot and wait for the server to observe the
-    // socket close and drop the `SseSlot` guard.
-    drop(held_ws);
+    for attempt in 0..5 {
+        let rejected = open(client.clone(), url.clone()).await;
+        assert_eq!(
+            rejected.status().as_u16(),
+            429,
+            "attempt {attempt} must be rejected by the SseCapacity cap"
+        );
+    }
 
-    // A fresh upgrade must succeed. If the five refundable capacity 429s
-    // above had actually drained the (max_requests = 2) rate-limit
-    // budget, `enforce_rate_limit` would reject this upgrade itself
-    // (before `session_websocket` — and therefore `SseCapacity` — ever
-    // ran) instead of completing it.
-    let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    drop(held);
+
+    // A silent peer close is observed by the server at the latest on its
+    // next keep-alive write (`STREAM_KEEPALIVE_INTERVAL`), which is when the
+    // stream generator drops and the slot is released.
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(25), async {
         loop {
-            match tokio_tungstenite::connect_async(ws_url.clone()).await {
-                Ok((ws, response)) => return Ok::<_, ()>((ws, response)),
-                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            let response = open(client.clone(), url.clone()).await;
+            if response.status().as_u16() == 200 {
+                return response;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     })
     .await
-    .expect("recovered ws upgrade must complete within 5s after the slot is released")
-    .expect("recovered ws upgrade");
-    let (mut recovered_ws, recovered_response) = recovered;
+    .expect("recovered stream must be admitted once the server observes the closed peer");
     assert_eq!(
-        recovered_response.status().as_u16(),
-        101,
-        "refundable SseCapacity 429s through the real WS route must not have \
+        recovered.status().as_u16(),
+        200,
+        "refundable SseCapacity 429s through the real stream route must not have \
          consumed the caller's rate-limit budget"
     );
-    let _ = recovered_ws.close(None).await;
+    drop(recovered);
     serve_handle.abort();
 }

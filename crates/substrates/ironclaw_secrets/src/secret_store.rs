@@ -759,19 +759,6 @@ where
         .and_then(|result| result)
     }
 
-    async fn delete_lease(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<bool, SecretStoreError> {
-        let path = lease_path(scope, lease_id)?;
-        match self.filesystem.delete(scope, &path).await {
-            Ok(()) => Ok(true),
-            Err(error) if is_not_found(&error) => Ok(false),
-            Err(error) => Err(fs_to_secret_store_error(error)),
-        }
-    }
-
     async fn revoke(
         &self,
         scope: &ResourceScope,
@@ -2187,43 +2174,6 @@ mod tests {
         let error = store.lease_once(&scope, &handle).await.unwrap_err();
         assert!(error.is_unknown_secret());
         assert!(store.leases_for_scope(&scope).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn filesystem_secret_store_delete_lease_removes_the_row_and_reports_absent_leases() {
-        let fs = Arc::new(InMemoryBackend::new());
-        let store = SecretStore::new(default_scoped_fs(fs), test_crypto());
-        let scope = sample_scope("tenant-a", "user-a");
-        let handle = SecretHandle::new("socket-ticket").unwrap();
-        store
-            .put(
-                scope.clone(),
-                handle.clone(),
-                SecretMaterial::from("ticket-body"),
-                None,
-            )
-            .await
-            .unwrap();
-        let lease = store.lease_once(&scope, &handle).await.unwrap();
-        assert_eq!(store.leases_for_scope(&scope).await.unwrap().len(), 1);
-
-        assert!(store.delete_lease(&scope, lease.id).await.unwrap());
-        assert!(
-            store.leases_for_scope(&scope).await.unwrap().is_empty(),
-            "the lease row is gone, not merely marked terminal"
-        );
-        assert!(matches!(
-            store.consume(&scope, lease.id).await.unwrap_err(),
-            SecretStoreError::UnknownLease { .. }
-        ));
-        assert!(
-            !store.delete_lease(&scope, lease.id).await.unwrap(),
-            "deleting an absent lease reports false rather than failing"
-        );
-        assert!(
-            store.metadata(&scope, &handle).await.unwrap().is_some(),
-            "the secret itself is untouched"
-        );
     }
 
     #[tokio::test]

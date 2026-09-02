@@ -9,7 +9,6 @@ import {
   storeToken,
 } from "../lib/api";
 import { ANON_SCOPE, authScope, setAuthScope } from "../lib/auth-scope";
-import { setSessionEventsAdvertised } from "../lib/session-events/transport-flag";
 import { clearAllPins } from "../lib/pin-store";
 import { clearChatCommandsCache } from "../pages/chat/hooks/useChatCommands";
 import { clearHistoryCache } from "../pages/chat/hooks/useHistory";
@@ -218,10 +217,6 @@ export function useAuthSession() {
   // would not be restored. This write is idempotent and derives purely from
   // `session`, so running it every render is safe.
   setAuthScope(session);
-  // Record the deployment's session-event transport capability where route
-  // hooks can consult it without threading props through the layout tree.
-  // Idempotent and render-safe, like setAuthScope above.
-  setSessionEventsAdvertised(Boolean(session?.features?.session_events));
 
   // Purge the previous identity's per-session client state whenever the
   // authenticated identity is invalidated or replaced. This covers every

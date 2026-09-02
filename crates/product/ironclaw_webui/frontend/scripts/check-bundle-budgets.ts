@@ -158,9 +158,16 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // lives in the dependency-free `lib/run-completions/sequence.ts` so the store
 // can use it without pulling `protocol.ts` into the eager graph.
 // Measured on the rebased tree (main's inbox bell + device-link + OOBE
-// weight underneath): 224.8 KB gzip. 226.0 KB retains about 1.2 KB of
+// weight underneath): 224.8 KB gzip; 226.0 KB retained about 1.2 KB of
 // explicit headroom.
-const CHAT_GZIP_BUDGET = 226_000;
+// The session event stream (2026-09-02) then replaced both the per-thread
+// SSE hook (`useSSE` and its EventSourcePlus reconnect coordinator) and the
+// session WebSocket client with one lazily imported fetch-stream client:
+// the eager /chat closure lost the hook and the transport-choice flag and
+// measured 217.9 KB gzip. 219.0 KB retains about 1.1 KB of explicit
+// headroom, locking the removal in the same way the composition budget
+// re-ratchets at every wave close.
+const CHAT_GZIP_BUDGET = 219_000;
 const CHUNK_RAW_BUDGET = 500_000;
 
 export function resolveBundleAsset(distRoot: string, file: string): string {

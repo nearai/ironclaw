@@ -301,17 +301,19 @@ observed_date = "2026-08-08"
 # Re-seeded 42935 -> 43568 on 2026-08-31 for the session-transport +
 # run-completion notifications branch (rebased onto main), then lowered to
 # 43455 on 2026-09-02 once the run-completion journal-commit observer moved
-# to ironclaw_assistant beside the other product journal observers. The
+# to ironclaw_assistant beside the other product journal observers, then to
+# 43161 the same day when the session WebSocket's single-use ticket adapter
+# left composition with the socket (the session stream authenticates with the
+# ordinary bearer header). The
 # remaining delta is service-graph assembly and the deployment adapters
-# composition's charter reserves for it: the storage-shape-selected shared
-# session-socket ticket store over the one-shot secret-lease protocol, the
+# composition's charter reserves for it: the
 # notice store/stream-hub/coordinator construction + spawn/shutdown wiring,
 # the web-app enrollment probe over the host-owned delivery registrations,
 # and the push-facade selection with fail-closed defaults. Notification
 # behavior itself lives in ironclaw_assistant::run_completions. Measured on
 # this tree with `bash scripts/ci/check-composition-budget.sh --print`, not
 # padded; the mirrored COMPOSITION_ABSOLUTE_SRC_LOC moves with it.
-loc_ceiling = 43455
+loc_ceiling = 43161
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -322,7 +324,7 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 43455
+loc_observed = 43161
 loc_observed_date = "2026-09-02"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
@@ -404,15 +406,15 @@ loc_observed_date = "2026-09-02"
 # verifies lossless cancellation behavior. The merged tree reports 845;
 # 830 + 15 tolerance = 845, preserving zero hidden headroom.
 # 830 -> 841 on 2026-08-31 for the session-transport + run-completion
-# notifications branch: eleven governed carrier/assembly sites over genuine
-# multi-implementation seams — `SessionSocketTicketStore` (in-memory webui
-# adapter for single-process shapes + the secret-lease adapter for shared
-# storage shapes), `RunCompletionNotices` (filesystem store + test doubles),
+# notifications branch: governed carrier/assembly sites over genuine
+# multi-implementation seams — `RunCompletionNotices` (filesystem store + test doubles),
 # the coordinator's `CompletionPushFallback`/`LocalOsIntentPolicy` policy
 # pair (fail-closed Phase-1 defaults + the outbound-backed facade), the
 # `WebAppEnrollmentProbe` over the host-owned registration service, and the
 # threaded `NotificationInboxStorePort` read-bridge handle. The merged tree
-# reports 856; 841 + 15 tolerance = 856, preserving zero hidden headroom.
-arc_dyn_ceiling = 841
+# reported 856; 841 + 15 tolerance = 856, preserving zero hidden headroom.
+# Lowered to 837 on 2026-09-02 when the session-socket ticket store adapter
+# (four carrier sites) left with the socket: the tree reports 852.
+arc_dyn_ceiling = 837
 arc_dyn_tolerance = 15
-arc_dyn_observed = 856
+arc_dyn_observed = 852

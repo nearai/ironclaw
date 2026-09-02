@@ -28,7 +28,6 @@ mod cli_token_login;
 mod oidc;
 mod product_auth;
 mod session;
-mod session_socket_tickets;
 mod signed_session_login;
 // Folded in from the former `ironclaw_webui_v2` crate: the WebChat v2 HTTP
 // route surface + static SPA bundle. Public so this crate's own middleware,
@@ -78,7 +77,6 @@ pub use oidc::{
     OidcAuthenticatorError,
 };
 pub use session::{SessionAuthenticator, SessionRecord, SessionStoreError};
-pub use session_socket_tickets::InMemorySessionSocketTicketStore;
 // Host-owned signed-token login surface (production-suitable, non-dev):
 // the standalone `serve` binary supplies env config and calls the
 // builder; the auth/session model lives here, not in the command crate.

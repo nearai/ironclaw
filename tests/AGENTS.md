@@ -230,7 +230,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 |---|---|
 | A plain message gets a persisted reply through the whole real stack | `greeting.rs` |
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
-| A completed turn streams over one real session-WebSocket subscription and ends with the exact durable finalized reply the HTTP timeline serves; two logical subscriptions on one socket deliver their own threads independently | `session_events.rs` |
+| A completed turn streams over the page's real session event stream (bearer POST, `text/event-stream`) and ends with the exact durable finalized reply the HTTP timeline serves; two logical subscriptions on one stream deliver their own threads independently | `session_events.rs` |
 | A completed user turn, observed on the real process journal through the production run-completion observer, becomes exactly one durable unread run-completion notice for its owner; a second turn extends the owner's monotonic sequence | `run_completion_notifications.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |

@@ -20,9 +20,7 @@ pub use run_artifact::{
     admin_get_thread_scrape_artifact, admin_get_thread_scrape_run_artifact,
     admin_list_thread_scrape_threads, get_run_artifact, get_thread_artifact,
 };
-pub use session_events::{
-    SessionSocketTicketResponse, session_websocket, session_websocket_ticket,
-};
+pub use session_events::session_events;
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -251,10 +249,6 @@ pub struct WebUiV2Features {
     /// operator settings payload shape. Settings mutations should update local
     /// UI state directly or re-fetch `/session`; this field is only a snapshot.
     pub global_auto_approve: bool,
-    /// Whether this deployment serves the ticketed session-event WebSocket.
-    /// Fail-closed on missing ticket storage: when false, browsers keep
-    /// using the per-thread compatibility SSE transport.
-    pub session_events: bool,
 }
 
 fn product_surface_input<T>(input: serde_json::Value) -> Result<T, ProductSurfaceError>
@@ -285,7 +279,6 @@ pub async fn get_session(
             regression_artifact_export: state.regression_artifact_export_enabled(),
             admin_thread_scrape: state.admin_thread_scrape_enabled(),
             global_auto_approve,
-            session_events: state.session_events_enabled(),
         },
         attachments: attachment_capabilities(),
         session_channel_extension_id: state.session_channel_extension_id().map(str::to_string),
@@ -1438,8 +1431,8 @@ pub async fn stream_events(
     Ok(response)
 }
 
-/// Build the 429 response for SSE openings (both [`stream_events`] and
-/// [`session_events::session_websocket`]) that exceed the per-caller concurrency cap.
+/// Build the 429 response for stream openings (both [`stream_events`] and
+/// [`session_events::session_events`]) that exceed the per-caller concurrency cap.
 ///
 /// `refundable` — decided by `SseCapacity::try_acquire_ordered`'s per-caller
 /// rejection streak — marks the response so it doesn't also drain
@@ -1580,7 +1573,9 @@ fn build_sse_stream(
         let mut slot_guard = slot;
         let surface =
             ironclaw_product_contracts::surface::BoundProductSurface::new(services, caller);
-        let mut driver = ProductStreamDriver::new(
+        // The compatibility route keeps the legacy idle poll for drain-only
+        // surfaces until it is retired; the session stream is live-only.
+        let mut driver = ProductStreamDriver::new_with_legacy_idle_polling(
             surface,
             ironclaw_product_contracts::surface::ProductStreamSelector::Thread { thread_id },
             initial_cursor.and_then(parse_cursor_token),

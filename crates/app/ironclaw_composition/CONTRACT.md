@@ -342,12 +342,12 @@ and the auth/product-auth mounts below), not in this prose.
   base-uri 'self'`.
 - **Connection limit (SSE + WS)** — bounded by `ironclaw_webui`'s own
   `SseCapacity` (3 streams per `(tenant, user)`, 5-minute max stream
-  lifetime). The ticketed session WebSocket
-  (`/api/webchat/v2/session/websocket`, handler `session_websocket`) draws
-  from the same shared `SseCapacity` pool as SSE (pinned by
-  `session_websocket_shares_capacity_with_sse_streams` and
-  `session_websocket_releases_slot_on_peer_close` in `ironclaw_webui`'s
-  `webui_v2_handlers_contract.rs`).
+  lifetime). The session event stream
+  (`POST /api/webchat/v2/session/events`, handler `session_events`) draws
+  from the same shared `SseCapacity` pool as the compatibility SSE route
+  (pinned by `session_events_shares_capacity_with_sse_streams` and
+  `session_events_releases_slot_when_the_client_drops_the_stream` in
+  `ironclaw_webui`'s `webui_v2_handlers_contract.rs`).
 - **Caller construction** — `ProductSurfaceCaller` is built from
   `config.tenant_id` (trusted host installation) plus the
   authenticator's verified `UserId`. The browser body cannot influence
