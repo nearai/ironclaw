@@ -22,6 +22,7 @@ export type ConventionViolationKind =
   | "html-tagged-template"
   | "invalid-module-extension"
   | "prohibited-ts-ignore"
+  | "stale-ts-nocheck-baseline"
   | "unbaselined-ts-nocheck";
 
 export type ConventionViolation = {
@@ -90,6 +91,7 @@ function checkTypeScriptSuppressions(
   sourceFile: ts.SourceFile,
   sourceText: string,
   legacyTsNocheckFiles: ReadonlySet<string>,
+  seenLegacyTsNocheckFiles?: Set<string>,
 ): ConventionViolation[] {
   const violations: ConventionViolation[] = [];
   const scanner = ts.createScanner(
@@ -117,6 +119,7 @@ function checkTypeScriptSuppressions(
         violations.push({ file: filePath, kind: "prohibited-ts-ignore", line });
       } else if (remainingLegacyNocheck > 0) {
         remainingLegacyNocheck -= 1;
+        seenLegacyTsNocheckFiles?.add(filePath);
       } else {
         violations.push({ file: filePath, kind: "unbaselined-ts-nocheck", line });
       }
@@ -126,10 +129,11 @@ function checkTypeScriptSuppressions(
   return violations;
 }
 
-export function checkSourceFile(
+function checkSourceFileWithSeenBaseline(
   filePath: string,
   sourceText: string,
-  legacyTsNocheckFiles: ReadonlySet<string> = new Set(),
+  legacyTsNocheckFiles: ReadonlySet<string>,
+  seenLegacyTsNocheckFiles?: Set<string>,
 ): ConventionViolation[] {
   const extension = extname(filePath).toLowerCase();
   if (!JAVASCRIPT_FAMILY_EXTENSIONS.has(extension)) return [];
@@ -147,7 +151,13 @@ export function checkSourceFile(
     scriptKindForExtension(extension),
   );
   violations.push(
-    ...checkTypeScriptSuppressions(filePath, sourceFile, sourceText, legacyTsNocheckFiles),
+    ...checkTypeScriptSuppressions(
+      filePath,
+      sourceFile,
+      sourceText,
+      legacyTsNocheckFiles,
+      seenLegacyTsNocheckFiles,
+    ),
   );
 
   function visit(node: ts.Node): void {
@@ -181,6 +191,18 @@ export function checkSourceFile(
   return violations.sort(compareViolations);
 }
 
+export function checkSourceFile(
+  filePath: string,
+  sourceText: string,
+  legacyTsNocheckFiles: ReadonlySet<string> = new Set(),
+): ConventionViolation[] {
+  return checkSourceFileWithSeenBaseline(
+    filePath,
+    sourceText,
+    legacyTsNocheckFiles,
+  );
+}
+
 function sourceFilesUnder(root: string): string[] {
   const files: string[] = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
@@ -199,10 +221,21 @@ export function checkSourceTree(
   legacyTsNocheckFiles: ReadonlySet<string> = new Set(),
 ): ConventionViolation[] {
   const root = resolve(sourceRoot);
+  const seenLegacyTsNocheckFiles = new Set<string>();
   const violations = sourceFilesUnder(root).flatMap((absolutePath) => {
     const file = relative(root, absolutePath).split(sep).join("/");
-    return checkSourceFile(file, readFileSync(absolutePath, "utf8"), legacyTsNocheckFiles);
+    return checkSourceFileWithSeenBaseline(
+      file,
+      readFileSync(absolutePath, "utf8"),
+      legacyTsNocheckFiles,
+      seenLegacyTsNocheckFiles,
+    );
   });
+  for (const file of legacyTsNocheckFiles) {
+    if (!seenLegacyTsNocheckFiles.has(file)) {
+      violations.push({ file, kind: "stale-ts-nocheck-baseline", line: 1 });
+    }
+  }
   return violations.sort(compareViolations);
 }
 
@@ -212,6 +245,8 @@ const VIOLATION_MESSAGES: Record<ConventionViolationKind, string> = {
   "invalid-module-extension": "authored modules must use .ts or .tsx",
   "prohibited-ts-ignore":
     "@ts-ignore is prohibited; fix the type error or use a justified @ts-expect-error",
+  "stale-ts-nocheck-baseline":
+    "legacy suppression baseline entry has no matching @ts-nocheck directive",
   "unbaselined-ts-nocheck": "@ts-nocheck is not in the legacy suppression baseline",
 };
 

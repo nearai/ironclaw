@@ -149,3 +149,22 @@ test("recursively scans source trees and reports stable relative paths", () => {
     "nested/legacy.js:1: relative module imports must be extensionless",
   );
 });
+
+test("rejects stale nocheck baseline entries", () => {
+  const root = mkdtempSync(join(tmpdir(), "ironclaw-source-conventions-"));
+  temporaryRoots.push(root);
+  writeFileSync(join(root, "cleaned-up.ts"), "export {};\n");
+
+  const violations = checkSourceTree(
+    root,
+    new Set(["cleaned-up.ts", "deleted.ts"]),
+  );
+
+  assert.deepEqual(
+    violations.map(({ file, kind, line }) => ({ file, kind, line })),
+    [
+      { file: "cleaned-up.ts", kind: "stale-ts-nocheck-baseline", line: 1 },
+      { file: "deleted.ts", kind: "stale-ts-nocheck-baseline", line: 1 },
+    ],
+  );
+});
