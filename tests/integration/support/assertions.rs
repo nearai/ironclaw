@@ -574,6 +574,21 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
+    /// How many messages the model actually received on its `index`-th call;
+    /// `0` when no such call was captured.
+    ///
+    /// This is the observable the model-derived context budget governs
+    /// (`visible_transcript_tokens()` bounds both compaction and outbound
+    /// request sizing), so a run whose model advertises a smaller window
+    /// must be sent fewer messages.
+    pub fn captured_request_message_count(&self, index: usize) -> usize {
+        self.scripted_llm
+            .captured_requests()
+            .get(index)
+            .map(Vec::len)
+            .unwrap_or(0)
+    }
+
     /// Assert every captured model request carried a byte-identical system
     /// prompt — the cache-prefix stability invariant (#6985): loop-control
     /// nudges, the runtime clock, and other per-call context must ride the

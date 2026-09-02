@@ -333,6 +333,10 @@ name = "reborn_integration_budget"
 path = "tests/integration/budget.rs"
 
 [[test]]
+name = "reborn_integration_context_budget"
+path = "tests/integration/context_budget.rs"
+
+[[test]]
 name = "reborn_integration_cancel"
 path = "tests/integration/cancel.rs"
 
