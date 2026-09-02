@@ -90,7 +90,9 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 | Symbol | Role |
 |---|---|
-| `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
+| `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown (`bind_webui_v2` then `serve_bound_webui_v2`) |
+| `bind_webui_v2(addr)` | Bind only; returns a `BoundWebuiListener` whose `local_addr()` is the real port, and whose backlog holds connections until served |
+| `serve_bound_webui_v2(bound, router, shutdown)` | Run `axum::serve` on an already-bound listener with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
 | `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI; accepted tokens map to operator WebUI capabilities |
 | `SignedTokenSessionStore` | HMAC-signed bearer mint/lookup with a bounded process-local logout denylist |

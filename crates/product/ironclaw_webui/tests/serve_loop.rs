@@ -13,7 +13,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::{Router, extract::ConnectInfo, routing::get};
-use ironclaw_webui::{RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2};
+use ironclaw_webui::{
+    RebornWebuiServeOptions, bind_webui_v2, deferred_webui_v2_startup_router, serve_bound_webui_v2,
+    serve_webui_v2,
+};
 use tokio::sync::oneshot;
 
 async fn build_test_router() -> Router {
@@ -222,4 +225,48 @@ async fn deferred_startup_router_serves_health_then_delegates_when_ready() {
         .expect("serve loop must exit within 2s of shutdown signal")
         .expect("serve loop join handle must not panic")
         .expect("serve loop must return Ok after shutdown");
+}
+
+/// The bind is a separate step so a host can announce the listener before
+/// the router exists: a connection made after `bind_webui_v2` and before
+/// `serve_bound_webui_v2` waits in the accept backlog and is served once the
+/// loop runs, instead of being refused.
+#[tokio::test]
+async fn a_bound_listener_accepts_a_connection_made_before_the_serve_loop_runs() {
+    let bound = bind_webui_v2(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("bind on an ephemeral port");
+    let addr = bound.local_addr();
+    assert_ne!(
+        addr.port(),
+        0,
+        "the bound address carries the port the OS chose"
+    );
+
+    // Connect BEFORE anything serves: the kernel completes the handshake
+    // against the bound listener, so the connect does not fail.
+    let early = tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr))
+        .await
+        .expect("connect must not hang")
+        .expect("a bound listener accepts a connection before it is served");
+    drop(early);
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let router = build_test_router().await;
+    let serve_handle =
+        tokio::spawn(async move { serve_bound_webui_v2(bound, router, shutdown_rx).await });
+    let body = test_client()
+        .get(format!("http://{addr}/ping"))
+        .send()
+        .await
+        .expect("request once serving")
+        .text()
+        .await
+        .expect("body");
+    assert_eq!(body, "pong");
+    shutdown_tx.send(()).expect("serve loop still running");
+    serve_handle
+        .await
+        .expect("serve task joins")
+        .expect("serve loop exits cleanly on shutdown");
 }
