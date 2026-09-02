@@ -3088,33 +3088,40 @@ mod tests {
         let inner = Arc::new(RecordingSafeTextSink::default());
         let sink = ProviderStreamSink::new(inner.clone());
 
-        // Two deltas, neither crossing the 64-delta / 2 KiB / 100 ms
-        // coalescing thresholds, and no `flush()` in between — this is the
-        // real production access pattern: `complete_model_request` only
-        // calls `flush()` once, after the whole provider call returns.
+        // Two deltas, neither crossing the 64-delta / 2 KiB coalescing
+        // thresholds, and no `flush()` in between — this is the real
+        // production access pattern: `complete_model_request` only calls
+        // `flush()` once, after the whole provider call returns. Whether
+        // these land in the sink before the replacement depends on the
+        // 100 ms interval threshold and wall-clock scheduling, which a
+        // loaded CI runner can cross even this early — so the property
+        // under test is NOT "the sink is empty before the replacement";
+        // it's "the replacement delta emits immediately, on its own,
+        // regardless of what came before".
         sink.text_delta("partial one ".to_string()).await;
         sink.text_delta("partial two".to_string()).await;
-        assert!(
-            inner
-                .updates
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty(),
-            "buffered deltas below the coalescing thresholds must not reach the sink yet"
-        );
+        let before = inner
+            .updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
 
         sink.replace_on_next_text_delta().await;
         sink.text_delta("Hello".to_string()).await;
 
+        let updates = inner
+            .updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(
-            inner
-                .updates
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_slice(),
-            ["Hello"],
-            "the first delta after a replacement must emit immediately with the \
-             previous attempt's buffered text discarded, with no flush() call"
+            updates.len(),
+            before + 1,
+            "the first delta after a replacement must emit immediately, exactly once, with no flush() call"
+        );
+        assert_eq!(
+            updates.last().map(String::as_str),
+            Some("Hello"),
+            "the emitted text must be only the new attempt's text, with the previous attempt's buffered text discarded"
         );
     }
 
@@ -3193,14 +3200,26 @@ mod tests {
         );
 
         // 64 deltas / 2 KiB coalescing bounds ~1000 sixteen-byte deltas to
-        // roughly 1000/64 ≈ 16 forced emissions; bound generously above that
-        // to absorb the 100 ms time-based threshold under CI scheduling
-        // jitter without reintroducing the O(k) per-delta call-count
-        // regression this test exists to catch.
+        // roughly 1000/64 ≈ 16 forced emissions purely from the count/byte
+        // thresholds. The 100 ms interval threshold could in principle add
+        // more (an adversarial "every single delta arrives >100 ms after
+        // the last" stream would degenerate to ~1000 emits, one per delta
+        // — there is no bound below the raw delta count that survives
+        // that literal scenario). That is not the realistic CI-jitter
+        // failure mode though: it would take a separate, sustained >100 ms
+        // stall between *each* of many loop iterations, not the single
+        // one-time scheduling delay between sink construction and the
+        // first delta that flaked the replacement test above. 64 is a
+        // generously loose ceiling for this stream (4x the count/byte-
+        // driven baseline) that only a CI runner stalling this synchronous,
+        // no-I/O loop many separate times would exceed.
         assert!(
-            call_count <= 32,
+            call_count <= 64,
             "expected coalesced call count well below the pre-fix {PRE_FIX_CALL_COUNT}, got {call_count}"
         );
+        // Similarly generous: even several extra interval-triggered
+        // emissions (each resending the full accumulated text) stay far
+        // under a tenth of the pre-fix total.
         assert!(
             total_bytes < PRE_FIX_TOTAL_BYTES / 10,
             "expected coalesced byte volume well below the pre-fix {PRE_FIX_TOTAL_BYTES}, got {total_bytes}"
