@@ -134,6 +134,7 @@ impl OpenAiCodexProvider {
         tools: Option<&[ToolDefinition]>,
         tool_choice: Option<&str>,
         response_format: Option<&crate::provider::CompletionResponseFormat>,
+        metadata: &std::collections::HashMap<String, String>,
     ) -> serde_json::Value {
         // Separate system messages into `instructions`
         let instructions: String = messages
@@ -189,6 +190,13 @@ impl OpenAiCodexProvider {
                 }),
             };
             body["parallel_tool_calls"] = serde_json::Value::Bool(true);
+        }
+
+        // Stable per-conversation routing key for OpenAI's prompt cache. Only
+        // the thread id qualifies: a per-run key would fragment the cache
+        // across a conversation's turns instead of reusing it.
+        if let Some(thread_id) = metadata.get(crate::provider::PROMPT_CACHE_KEY_METADATA) {
+            body["prompt_cache_key"] = serde_json::Value::String(thread_id.clone());
         }
 
         body
@@ -288,7 +296,13 @@ impl OpenAiCodexProvider {
         )?;
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(&messages, None, None, request.response_format.as_ref());
+        let body = self.build_request_body(
+            &messages,
+            None,
+            None,
+            request.response_format.as_ref(),
+            &request.metadata,
+        );
         let parsed = self.send_request_with_sink(body, sink).await?;
 
         Ok(CompletionResponse {
@@ -326,6 +340,7 @@ impl OpenAiCodexProvider {
             Some(&request.tools),
             request.tool_choice.as_deref(),
             request.response_format.as_ref(),
+            &request.metadata,
         );
         let mut parsed = self.send_request_with_sink(body, sink).await?;
 
@@ -1551,7 +1566,13 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             ChatMessage::user("Hello"),
         ];
 
-        let body = provider.build_request_body(&messages, None, None, None);
+        let body = provider.build_request_body(
+            &messages,
+            None,
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
 
         assert_eq!(body["model"], "gpt-5.3-codex");
         assert_eq!(body["store"], false);
@@ -1563,6 +1584,31 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
         assert_eq!(input[0]["role"], "user");
         // No tools
         assert!(body.get("tools").is_none());
+        // No thread_id in metadata -> no prompt_cache_key on the wire.
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_includes_prompt_cache_key_from_thread_id_metadata() {
+        let jwt = make_test_jwt("acct_test");
+        let provider = OpenAiCodexProvider::new(
+            "gpt-5.3-codex",
+            "https://chatgpt.com/backend-api/codex",
+            &jwt,
+            300,
+        )
+        .unwrap();
+
+        let messages = vec![ChatMessage::user("Hello")];
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-abc-123".to_string(),
+        );
+
+        let body = provider.build_request_body(&messages, None, None, None, &metadata);
+
+        assert_eq!(body["prompt_cache_key"], "thread-abc-123");
     }
 
     #[test]
@@ -1583,7 +1629,13 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             parameters: serde_json::json!({"type": "object"}),
         }];
 
-        let body = provider.build_request_body(&messages, Some(&tools), None, None);
+        let body = provider.build_request_body(
+            &messages,
+            Some(&tools),
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
 
         assert!(body.get("tools").is_some());
         let tools_arr = body["tools"].as_array().unwrap();
@@ -1614,6 +1666,7 @@ data: {"type":"response.output_item.done","item":{"type":"function_call","id":"f
             None,
             None,
             Some(&format),
+            &std::collections::HashMap::new(),
         );
 
         assert_eq!(
@@ -1790,7 +1843,13 @@ data: {"type":"response.completed","response":{"status":"completed","usage":{"in
         )
         .unwrap();
 
-        let body = provider.build_request_body(&messages, None, None, None);
+        let body = provider.build_request_body(
+            &messages,
+            None,
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
         let input = body["input"].as_array().unwrap();
 
         // Should have 3 non-system items: user, assistant, rewritten-user

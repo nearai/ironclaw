@@ -365,6 +365,7 @@ impl CodexChatGptProvider {
         tools: &[ToolDefinition],
         tool_choice: Option<&str>,
         response_format: Option<&crate::provider::CompletionResponseFormat>,
+        metadata: &std::collections::HashMap<String, String>,
     ) -> Value {
         // Extract system instructions
         let instructions: String = messages
@@ -417,6 +418,13 @@ impl CodexChatGptProvider {
                     "name": sanitize_tool_name(specific),
                 }),
             };
+        }
+
+        // Stable per-conversation routing key for OpenAI's prompt cache. Only
+        // the thread id qualifies: a per-run key would fragment the cache
+        // across a conversation's turns instead of reusing it.
+        if let Some(thread_id) = metadata.get(crate::provider::PROMPT_CACHE_KEY_METADATA) {
+            body["prompt_cache_key"] = Value::String(thread_id.clone());
         }
 
         body
@@ -1187,6 +1195,7 @@ impl CodexChatGptProvider {
             &[],
             None,
             request.response_format.as_ref(),
+            &request.metadata,
         );
         let result = self.send_request_with_sink(body, sink).await?;
 
@@ -1220,6 +1229,7 @@ impl CodexChatGptProvider {
             &request.tools,
             request.tool_choice.as_deref(),
             request.response_format.as_ref(),
+            &request.metadata,
         );
         let result = self.send_request_with_sink(body, sink).await?;
 
@@ -1607,12 +1617,36 @@ mod tests {
             ChatMessage::system("You are helpful."),
             ChatMessage::user("hello"),
         ];
-        let body = provider.build_request_body("gpt-4o", &messages, &[], None, None);
+        let body = provider.build_request_body(
+            "gpt-4o",
+            &messages,
+            &[],
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(body["instructions"], "You are helpful.");
         // input should only contain the user message, not the system message
         assert_eq!(body["input"].as_array().unwrap().len(), 1);
         // store must be false for ChatGPT backend
         assert_eq!(body["store"], false);
+        // No thread_id in metadata -> no prompt_cache_key on the wire.
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn test_build_request_includes_prompt_cache_key_from_thread_id_metadata() {
+        let provider = CodexChatGptProvider::new("https://example.com", "key", "gpt-4o");
+        let messages = vec![ChatMessage::user("hello")];
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-xyz-456".to_string(),
+        );
+
+        let body = provider.build_request_body("gpt-4o", &messages, &[], None, None, &metadata);
+
+        assert_eq!(body["prompt_cache_key"], "thread-xyz-456");
     }
 
     #[test]
@@ -1629,6 +1663,7 @@ mod tests {
             &[],
             None,
             Some(&format),
+            &std::collections::HashMap::new(),
         );
         assert_eq!(
             body["text"]["format"],
@@ -1650,7 +1685,14 @@ mod tests {
             description: "Echo input".to_string(),
             parameters: json!({"type": "object"}),
         }];
-        let body = provider.build_request_body("gpt-4o", &messages, &tools, None, None);
+        let body = provider.build_request_body(
+            "gpt-4o",
+            &messages,
+            &tools,
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(body["tools"][0]["name"], "builtin_echo");
     }
 
@@ -1663,7 +1705,14 @@ mod tests {
             description: "Apply a patch".to_string(),
             parameters: json!({"$ref": "schemas/builtin/apply-patch.input.v1.json"}),
         }];
-        let body = provider.build_request_body("gpt-4o", &messages, &tools, None, None);
+        let body = provider.build_request_body(
+            "gpt-4o",
+            &messages,
+            &tools,
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(body["tools"][0]["parameters"]["type"], "object");
         assert!(body["tools"][0]["parameters"].get("properties").is_some());
     }

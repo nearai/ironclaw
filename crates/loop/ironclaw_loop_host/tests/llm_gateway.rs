@@ -128,6 +128,11 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     let request = model_request(interactive_model());
     let expected_run_id = request.run_id.to_string();
     let expected_turn_id = request.turn_id.to_string();
+    let expected_thread_id = request
+        .thread_id
+        .as_ref()
+        .expect("test fixture always sets thread_id")
+        .to_string();
 
     let response = gateway.stream_model(request).await.unwrap();
 
@@ -159,6 +164,12 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     assert_eq!(
         requests[0].metadata.get("turn_id").map(String::as_str),
         Some(expected_turn_id.as_str())
+    );
+    assert_eq!(
+        requests[0].metadata.get("thread_id").map(String::as_str),
+        Some(expected_thread_id.as_str()),
+        "gateway must carry the resolved thread id through as request metadata \
+         so OpenAI Responses-API providers can set a stable prompt_cache_key"
     );
     assert_eq!(requests[0].messages.len(), 2);
     assert_eq!(requests[0].messages[0].content, "system instructions");
@@ -4827,6 +4838,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
         resolved_model_route: None,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        thread_id: Some(ThreadId::new("thread-gateway-test").unwrap()),
         tool_choice: None,
         response_format: None,
     }

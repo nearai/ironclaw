@@ -449,6 +449,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.clone();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -458,7 +459,13 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id.as_ref(),
+        );
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
         let result = complete_model_request(
@@ -500,6 +507,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.clone();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -509,7 +517,13 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id.as_ref(),
+        );
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
         let result = complete_model_request(
@@ -551,6 +565,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.clone();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -560,7 +575,13 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id.as_ref(),
+        );
 
         let provider_turn_scope = format!(
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
@@ -607,6 +628,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.clone();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -616,7 +638,13 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id.as_ref(),
+        );
 
         let provider_turn_scope = format!(
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
@@ -787,6 +815,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.clone();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -797,7 +826,13 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id.as_ref(),
+        );
         add_route_metadata(&mut completion, &snapshot);
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -831,6 +866,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.clone();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -841,7 +877,13 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id.as_ref(),
+        );
         add_route_metadata(&mut completion, &snapshot);
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -875,6 +917,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.clone();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -885,7 +928,13 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id.as_ref(),
+        );
         add_route_metadata(&mut completion, &snapshot);
 
         let provider_turn_scope = format!(
@@ -924,6 +973,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.clone();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -934,7 +984,13 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id.as_ref(),
+        );
         add_route_metadata(&mut completion, &snapshot);
 
         let provider_turn_scope = format!(
@@ -982,6 +1038,7 @@ fn add_request_metadata(
     model_profile_id: &ModelProfileId,
     run_id: TurnRunId,
     turn_id: TurnId,
+    thread_id: Option<&ironclaw_host_api::ids::ThreadId>,
 ) {
     completion.metadata.insert(
         "model_profile_id".to_string(),
@@ -993,6 +1050,18 @@ fn add_request_metadata(
     completion
         .metadata
         .insert("run_id".to_string(), run_id.to_string());
+    // Carried forward into `ToolCompletionRequest` by
+    // `ToolCompletionRequest::from_completion_request`, so this single
+    // insertion covers both the plain-completion and tool-completion paths.
+    // Absent (legacy replay wire shapes with no `thread_id`) rather than
+    // falling back to `run_id` — a per-run key would fragment the OpenAI
+    // prompt cache across a conversation's turns instead of reusing it.
+    if let Some(thread_id) = thread_id {
+        completion.metadata.insert(
+            ironclaw_llm::PROMPT_CACHE_KEY_METADATA.to_string(),
+            thread_id.to_string(),
+        );
+    }
 }
 
 fn with_model_diagnostic_evidence(

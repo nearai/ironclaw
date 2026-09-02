@@ -2025,6 +2025,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         fallback_index: 0,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        thread_id: None,
         tool_choice: None,
         response_format: None,
     }
