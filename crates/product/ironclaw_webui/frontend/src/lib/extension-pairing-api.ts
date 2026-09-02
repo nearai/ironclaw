@@ -6,6 +6,7 @@ import { channelSetupError } from "./channel-setup-api";
 // descriptor declares the `web_generated_code` connect strategy. Presentation
 // routes directly from the manifest strategy; these calls never probe support.
 export function extensionPairingPath(extensionId: string, action: string): string {
+  if (!extensionId) throw new Error("extensionId is required");
   return `/api/webchat/v2/extensions/${encodeURIComponent(extensionId)}/pairing/${action}`;
 }
 
@@ -20,27 +21,70 @@ export interface ExtensionPairingStatus {
   pending: ExtensionPairingCode | null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function decodePairingCode(
+  value: unknown,
+  responseName = "pairing code",
+): ExtensionPairingCode {
+  if (
+    !isRecord(value) ||
+    typeof value.code !== "string" ||
+    value.code.length === 0 ||
+    typeof value.expires_at !== "string" ||
+    value.expires_at.length === 0 ||
+    (value.deep_link !== undefined &&
+      value.deep_link !== null &&
+      typeof value.deep_link !== "string")
+  ) {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  const deepLinkValue = value.deep_link;
+  const deepLink =
+    typeof deepLinkValue === "string" ? deepLinkValue : undefined;
+  return {
+    code: value.code,
+    ...(deepLink === undefined ? {} : { deep_link: deepLink }),
+    expires_at: value.expires_at,
+  };
+}
+
+function decodePairingStatus(value: unknown): ExtensionPairingStatus {
+  if (!isRecord(value) || typeof value.connected !== "boolean") {
+    throw new TypeError("invalid pairing status response");
+  }
+  return {
+    connected: value.connected,
+    pending:
+      value.pending === undefined || value.pending === null
+        ? null
+        : decodePairingCode(value.pending, "pairing status"),
+  };
+}
+
 // -> { code, deep_link?, expires_at }; mints (or rotates) the caller's code.
-export function mintExtensionPairingCode(
+export async function mintExtensionPairingCode(
   extensionId: string,
 ): Promise<ExtensionPairingCode> {
-  return apiFetch(extensionPairingPath(extensionId, "mint"), {
+  const response = await apiFetch(extensionPairingPath(extensionId, "mint"), {
     method: "POST",
-  }) as Promise<ExtensionPairingCode>;
+  });
+  return decodePairingCode(response);
 }
 
 // -> { connected, pending: { code, deep_link?, expires_at } | null }
-export function getExtensionPairingStatus(
+export async function getExtensionPairingStatus(
   extensionId: string,
 ): Promise<ExtensionPairingStatus> {
-  return apiFetch(
-    extensionPairingPath(extensionId, "status"),
-  ) as Promise<ExtensionPairingStatus>;
+  const response = await apiFetch(extensionPairingPath(extensionId, "status"));
+  return decodePairingStatus(response);
 }
 
 // -> 204; unpairs the caller's account on this channel.
-export function unpairExtension(extensionId: string) {
-  return apiFetch(extensionPairingPath(extensionId, "unpair"), { method: "POST" });
+export async function unpairExtension(extensionId: string): Promise<void> {
+  await apiFetch(extensionPairingPath(extensionId, "unpair"), { method: "POST" });
 }
 
 export const extensionPairingError = channelSetupError;

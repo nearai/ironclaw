@@ -22,12 +22,14 @@ import {
   renameAutomation,
   resumeAutomation,
   runAutomation,
-  getNotificationSetupStatus,
   setNotificationChannels,
   setupExtension,
-  enableNotificationSetup,
-  disableNotificationSetup,
 } from "./api";
+import {
+  disableNotificationSetup,
+  enableNotificationSetup,
+  getNotificationSetupStatus,
+} from "./notification-setup-api";
 
 const originalFetch = globalThis.fetch;
 const restoreBrowserGlobals: Array<() => void> = [];
@@ -613,7 +615,12 @@ test("enableNotificationSetup posts the channel-opaque payload to the enable rou
   installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ enabled: true }), {
+    return new Response(JSON.stringify({
+      extension_id: "some-channel",
+      requires_setup: true,
+      enabled: true,
+      detail: { registrations: [] },
+    }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
@@ -651,7 +658,12 @@ test("disableNotificationSetup posts the channel-opaque payload to the disable r
   installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
-    return new Response(JSON.stringify({ enabled: false }), {
+    return new Response(JSON.stringify({
+      extension_id: "some-channel",
+      requires_setup: true,
+      enabled: false,
+      detail: { registrations: [] },
+    }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });

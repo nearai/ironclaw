@@ -8,10 +8,15 @@ vi.mock("./api", () => ({
   getSessionChannelExtensionId: vi.fn(() => "session-channel"),
 }));
 
+vi.mock("./notification-setup-api", () => ({
+  enableNotificationSetup: vi.fn(async () => ({ enabled: true })),
+  disableNotificationSetup: vi.fn(async () => ({ enabled: false })),
+}));
+
 import {
   disableNotificationSetup,
   enableNotificationSetup,
-} from "./api";
+} from "./notification-setup-api";
 import {
   endpointDigestHex,
   enrollThisBrowser,
@@ -53,6 +58,17 @@ afterEach(() => {
 
 function sha256Hex(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function setupResponse(endpointDigests) {
+  return {
+    extension_id: "session-channel",
+    requires_setup: true,
+    enabled: endpointDigests.length > 0,
+    detail: {
+      registrations: endpointDigests.map((endpoint_digest) => ({ endpoint_digest })),
+    },
+  };
 }
 
 function browserEnvironment({
@@ -201,11 +217,15 @@ test("getDevicePushState correlates the subscription with the account's endpoint
 });
 
 test("enrollThisBrowser subscribes with the VAPID key and registers with the backend", async () => {
+  const endpoint = "https://fcm.googleapis.com/fcm/send/new";
   const { subscribeCalls } = browserEnvironment({
     permission: "default",
     subscription: null,
-    subscribeResult: fakeSubscription("https://fcm.googleapis.com/fcm/send/new"),
+    subscribeResult: fakeSubscription(endpoint),
   });
+  enableNotificationSetupMock.mockResolvedValueOnce(
+    setupResponse([sha256Hex(endpoint)]),
+  );
 
   const state = await enrollThisBrowser({ vapidPublicKey: "AQAB" });
 
@@ -256,6 +276,22 @@ test("enrollThisBrowser never unsubscribes a pre-existing subscription on backen
   assert.equal(existing.unsubscribe.mock.calls.length, 0);
 });
 
+test("enrollThisBrowser rejects a 2xx response without matching backend evidence", async () => {
+  const created = fakeSubscription("https://fcm.googleapis.com/fcm/send/unconfirmed");
+  browserEnvironment({
+    permission: "granted",
+    subscription: null,
+    subscribeResult: created,
+  });
+  enableNotificationSetupMock.mockResolvedValueOnce(setupResponse([]));
+
+  await assert.rejects(
+    enrollThisBrowser({ vapidPublicKey: "AQAB" }),
+    /backend did not confirm push enrollment/,
+  );
+  assert.equal(created.unsubscribe.mock.calls.length, 1);
+});
+
 test("enrollThisBrowser reports a denied permission without subscribing", async () => {
   const { subscribeCalls } = browserEnvironment({ permission: "denied" });
   const state = await enrollThisBrowser({ vapidPublicKey: "AQAB" });
@@ -265,18 +301,41 @@ test("enrollThisBrowser reports a denied permission without subscribing", async 
   await assert.rejects(enrollThisBrowser({}), /vapidPublicKey is required/);
 });
 
-test("unenrollThisBrowser unsubscribes locally even when the backend removal fails", async () => {
+test("unenrollThisBrowser preserves the local subscription when backend removal fails", async () => {
   const subscription = fakeSubscription("https://fcm.googleapis.com/fcm/send/old");
   browserEnvironment({ permission: "granted", subscription });
   disableNotificationSetupMock.mockRejectedValueOnce(new Error("backend offline"));
 
-  const state = await unenrollThisBrowser();
+  await assert.rejects(unenrollThisBrowser(), /backend offline/);
 
-  assert.deepEqual(state, { state: "not-enrolled" });
-  assert.equal(subscription.unsubscribe.mock.calls.length, 1);
+  assert.equal(subscription.unsubscribe.mock.calls.length, 0);
   assert.equal(disableNotificationSetupMock.mock.calls.length, 1);
   assert.deepEqual(disableNotificationSetupMock.mock.calls[0][0], {
     extensionId: "session-channel",
     payload: { endpoint: "https://fcm.googleapis.com/fcm/send/old" },
   });
+});
+
+test("unenrollThisBrowser requires evidence that the endpoint was removed", async () => {
+  const endpoint = "https://fcm.googleapis.com/fcm/send/old";
+  const subscription = fakeSubscription(endpoint);
+  browserEnvironment({ permission: "granted", subscription });
+  disableNotificationSetupMock.mockResolvedValueOnce(
+    setupResponse([sha256Hex(endpoint)]),
+  );
+
+  await assert.rejects(
+    unenrollThisBrowser(),
+    /backend did not confirm push removal/,
+  );
+  assert.equal(subscription.unsubscribe.mock.calls.length, 0);
+});
+
+test("unenrollThisBrowser unsubscribes after backend removal is confirmed", async () => {
+  const subscription = fakeSubscription("https://fcm.googleapis.com/fcm/send/old");
+  browserEnvironment({ permission: "granted", subscription });
+  disableNotificationSetupMock.mockResolvedValueOnce(setupResponse([]));
+
+  assert.deepEqual(await unenrollThisBrowser(), { state: "not-enrolled" });
+  assert.equal(subscription.unsubscribe.mock.calls.length, 1);
 });

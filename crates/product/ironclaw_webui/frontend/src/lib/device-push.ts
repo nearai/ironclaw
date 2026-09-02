@@ -11,11 +11,12 @@
 // All entry points are defensive: missing browser APIs degrade to an
 // "unsupported" state and never throw into app boot or the settings panel.
 
+import { getSessionChannelExtensionId } from "./api";
 import {
   disableNotificationSetup,
   enableNotificationSetup,
-  getSessionChannelExtensionId,
-} from "./api";
+  type NotificationSetupStatusResponse,
+} from "./notification-setup-api";
 
 // `registerServiceWorker` lives in the dependency-free `./register-sw` module
 // so app boot (`main.tsx`) does not pull this enrollment lib — and its api +
@@ -151,6 +152,45 @@ function subscriptionKeys(
   return { p256dh: keys.p256dh, auth: keys.auth };
 }
 
+function notificationRegistrationDigests(
+  response: NotificationSetupStatusResponse,
+  extensionId: string,
+): string[] {
+  if (
+    response.extension_id !== extensionId ||
+    response.requires_setup !== true ||
+    typeof response.detail !== "object" ||
+    response.detail === null ||
+    !("registrations" in response.detail) ||
+    !Array.isArray(response.detail.registrations)
+  ) {
+    throw new Error("backend returned invalid push enrollment evidence");
+  }
+  const digests = response.detail.registrations.map((registration) => {
+    if (
+      typeof registration !== "object" ||
+      registration === null ||
+      !("endpoint_digest" in registration) ||
+      typeof registration.endpoint_digest !== "string"
+    ) {
+      throw new Error("backend returned invalid push enrollment evidence");
+    }
+    return registration.endpoint_digest.toLowerCase();
+  });
+  if (response.enabled !== (digests.length > 0)) {
+    throw new Error("backend returned inconsistent push enrollment evidence");
+  }
+  return digests;
+}
+
+async function localEndpointDigest(endpoint: string): Promise<string> {
+  const digest = await endpointDigestHex(endpoint);
+  if (!digest) {
+    throw new Error("unable to verify push enrollment evidence");
+  }
+  return digest;
+}
+
 /** Ask for permission, subscribe this browser, and register the
  * subscription with the backend. Returns the resulting browser state.
  *
@@ -183,14 +223,23 @@ export async function enrollThisBrowser({
     createdSubscription = true;
   }
   try {
-    await enableNotificationSetup({
-      extensionId: getSessionChannelExtensionId(),
+    const extensionId = getSessionChannelExtensionId();
+    const response = await enableNotificationSetup({
+      extensionId,
       payload: {
         endpoint: subscription.endpoint,
         keys: subscriptionKeys(subscription),
         user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
       },
     });
+    const endpointDigest = await localEndpointDigest(subscription.endpoint);
+    if (
+      !notificationRegistrationDigests(response, extensionId).includes(
+        endpointDigest,
+      )
+    ) {
+      throw new Error("backend did not confirm push enrollment");
+    }
   } catch (error) {
     // Evidence rule: the browser must never report "enrolled" without a
     // server record. Roll back a subscription THIS call created; a
@@ -221,16 +270,22 @@ export async function unenrollThisBrowser(): Promise<DevicePushState> {
   const subscription = await registration.pushManager.getSubscription();
   if (!subscription) return { state: "not-enrolled" };
   const endpoint = subscription.endpoint;
-  await subscription.unsubscribe();
-  // Backend removal is best-effort: the dead subscription is also pruned
-  // server-side on the next 404/410 push response.
-  try {
-    await disableNotificationSetup({
-      extensionId: getSessionChannelExtensionId(),
-      payload: { endpoint },
-    });
-  } catch (error) {
-    console.warn("device push backend unsubscribe failed", error);
+  const extensionId = getSessionChannelExtensionId();
+  const response = await disableNotificationSetup({
+    extensionId,
+    payload: { endpoint },
+  });
+  const endpointDigest = await localEndpointDigest(endpoint);
+  if (
+    notificationRegistrationDigests(response, extensionId).includes(
+      endpointDigest,
+    )
+  ) {
+    throw new Error("backend did not confirm push removal");
+  }
+  const unsubscribed = await subscription.unsubscribe();
+  if (unsubscribed === false) {
+    throw new Error("browser did not confirm push subscription removal");
   }
   return { state: "not-enrolled" };
 }

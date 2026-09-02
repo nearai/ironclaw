@@ -379,7 +379,20 @@ function contentUrl(mount, relativePath) {
 // List the mounts the viewer can browse, as `{ mount, label }`.
 export async function listFsMounts() {
   const response = await apiFetch(`${FS_BASE}/mounts`);
-  return response?.mounts || [];
+  if (
+    !Array.isArray(response.mounts) ||
+    !response.mounts.every(
+      (mount) =>
+        typeof mount === "object" &&
+        mount !== null &&
+        !Array.isArray(mount) &&
+        "mount" in mount &&
+        typeof mount.mount === "string",
+    )
+  ) {
+    throw new TypeError("invalid filesystem mounts response");
+  }
+  return response.mounts as Array<{ mount: string; label?: string }>;
 }
 
 // List a directory. An empty qualified path lists the mounts themselves; every
@@ -402,8 +415,14 @@ export async function listWorkspace(
       threadId,
       path: projectPathFromQualified(qualifiedPath),
     });
+    if (!Array.isArray(response.entries)) {
+      throw new TypeError("invalid project file list response");
+    }
     return {
-      entries: (response?.entries || []).flatMap((entry) => {
+      entries: response.entries.flatMap((entry) => {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+          throw new TypeError("invalid project file list response");
+        }
         const path = qualifiedProjectPath(entry.path);
         return path
           ? [{ name: entry.name, path, is_dir: entry.kind === "directory" }]

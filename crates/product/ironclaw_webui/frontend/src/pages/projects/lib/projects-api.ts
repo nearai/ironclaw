@@ -20,6 +20,27 @@ import {
 // authoritative fields in the list response.
 const PROJECTS_OVERVIEW_LIMIT = 500;
 
+function recordArrayField(response, field, responseName) {
+  const value = response?.[field];
+  if (
+    !Array.isArray(value) ||
+    !value.every(
+      (entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry),
+    )
+  ) {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value;
+}
+
+function numberField(response, field, responseName) {
+  const value = response?.[field];
+  if (typeof value !== "number") {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value;
+}
+
 // Map a wire `RebornProjectInfo` to the shape the Projects page components
 // expect. `goals` is read from the extensible `metadata` bag.
 function toPageProject(project) {
@@ -61,13 +82,15 @@ function toPageThread(thread) {
 
 export async function fetchProjectsOverview() {
   const response = await apiListProjects({ limit: PROJECTS_OVERVIEW_LIMIT });
-  const projects = (response?.projects || []).map(toPageProject);
+  const projects = recordArrayField(response, "projects", "project list").map(
+    toPageProject,
+  );
   return {
     projects,
     lifecycleCounts: {
-      total: response?.total_projects ?? 0,
-      active: response?.active_projects ?? 0,
-      archived: response?.archived_projects ?? 0,
+      total: numberField(response, "total_projects", "project list"),
+      active: numberField(response, "active_projects", "project list"),
+      archived: numberField(response, "archived_projects", "project list"),
     },
   };
 }
@@ -113,7 +136,9 @@ export async function fetchProjectThreads(projectId) {
   if (!projectId) return { threads: [] };
   const response = await apiListThreads({ projectId, limit: 200 });
   return {
-    threads: (response?.threads || []).map(toPageThread).filter(Boolean),
+    threads: recordArrayField(response, "threads", "project threads")
+      .map(toPageThread)
+      .filter(Boolean),
     next_cursor: response?.next_cursor || null,
   };
 }

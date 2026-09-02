@@ -1,10 +1,39 @@
 import { apiFetch } from "./api";
 import { channelSetupError } from "./channel-setup-api";
-import type {
+import {
+  DEVICE_LINK_DISPLAY_KINDS,
+  DEVICE_LINK_INPUT_KINDS,
+  DEVICE_LINK_MODES,
+  DEVICE_LINK_STEPS,
+  type DeviceLinkDisplayKind,
   DeviceLinkInputKind,
   DeviceLinkMode,
+  type DeviceLinkStep,
   DeviceLinkPromptWire,
 } from "./device-link-frame";
+
+const AUTH_FLOW_STATUSES: readonly AuthFlowStatus[] = [
+  "pending",
+  "awaiting_user",
+  "awaiting_vendor",
+  "callback_received",
+  "completing",
+  "completed",
+  "failed",
+  "expired",
+  "canceled",
+];
+
+const DEVICE_LINK_STEP_VALUES: readonly DeviceLinkStep[] = Object.values(
+  DEVICE_LINK_STEPS,
+);
+const DEVICE_LINK_INPUT_KIND_VALUES: readonly DeviceLinkInputKind[] =
+  Object.values(DEVICE_LINK_INPUT_KINDS);
+const DEVICE_LINK_MODE_VALUES: readonly DeviceLinkMode[] = Object.values(
+  DEVICE_LINK_MODES,
+);
+const DEVICE_LINK_DISPLAY_KIND_VALUES: readonly DeviceLinkDisplayKind[] =
+  Object.values(DEVICE_LINK_DISPLAY_KINDS);
 
 export type AuthFlowStatus =
   | "pending"
@@ -22,6 +51,92 @@ export interface DeviceLinkFlowResponse {
   status: AuthFlowStatus;
   invocation_id?: string;
   device_link?: DeviceLinkPromptWire | null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOptional(
+  value: unknown,
+  predicate: (candidate: unknown) => boolean,
+): boolean {
+  return value === undefined || value === null || predicate(value);
+}
+
+function isAuthFlowStatus(value: unknown): value is AuthFlowStatus {
+  return (
+    typeof value === "string" &&
+    AUTH_FLOW_STATUSES.includes(value as AuthFlowStatus)
+  );
+}
+
+function isEnumValue<T extends string>(
+  value: unknown,
+  values: readonly T[],
+): value is T {
+  return typeof value === "string" && values.includes(value as T);
+}
+
+function isDeviceLinkPromptWire(value: unknown): value is DeviceLinkPromptWire {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.provider === "string" &&
+    typeof value.display_name === "string" &&
+    isEnumValue(value.step, DEVICE_LINK_STEP_VALUES) &&
+    typeof value.instructions === "string" &&
+    typeof value.expires_at === "string" &&
+    typeof value.revision === "number" &&
+    Number.isFinite(value.revision) &&
+    typeof value.poll_interval_ms === "number" &&
+    Number.isFinite(value.poll_interval_ms) &&
+    isOptional(value.qr_payload, (candidate) => typeof candidate === "string") &&
+    isOptional(value.code, (candidate) => typeof candidate === "string") &&
+    isOptional(value.vendor_user_ref, (candidate) => typeof candidate === "string") &&
+    isOptional(value.secret_label, (candidate) => typeof candidate === "string") &&
+    isOptional(value.retry_after_ms, (candidate) => typeof candidate === "number") &&
+    isOptional(value.error_code, (candidate) => typeof candidate === "string") &&
+    isOptional(value.flow_id, (candidate) => typeof candidate === "string") &&
+    isOptional(value.input_kind, (candidate) =>
+      isEnumValue(candidate, DEVICE_LINK_INPUT_KIND_VALUES)) &&
+    isOptional(value.mode, (candidate) =>
+      isEnumValue(candidate, DEVICE_LINK_MODE_VALUES)) &&
+    isOptional(value.alternate_available, (candidate) => typeof candidate === "boolean") &&
+    isOptional(value.default_mode_label, (candidate) => typeof candidate === "string") &&
+    isOptional(value.alternate_mode_label, (candidate) => typeof candidate === "string") &&
+    isOptional(value.display_kind, (candidate) =>
+      isEnumValue(candidate, DEVICE_LINK_DISPLAY_KIND_VALUES)) &&
+    isOptional(value.extension_id, (candidate) => typeof candidate === "string") &&
+    isOptional(value.restartable, (candidate) => typeof candidate === "boolean")
+  );
+}
+
+function decodeDeviceLinkFlowResponse(
+  value: unknown,
+): DeviceLinkFlowResponse {
+  if (
+    !isRecord(value) ||
+    typeof value.flow_id !== "string" ||
+    value.flow_id.length === 0 ||
+    !isAuthFlowStatus(value.status) ||
+    !isOptional(value.invocation_id, (candidate) => typeof candidate === "string") ||
+    !isOptional(value.device_link, isDeviceLinkPromptWire)
+  ) {
+    throw new TypeError("invalid device-link flow response");
+  }
+  const deviceLink = isDeviceLinkPromptWire(value.device_link)
+    ? value.device_link
+    : value.device_link === null
+      ? null
+      : undefined;
+  return {
+    flow_id: value.flow_id,
+    status: value.status,
+    ...(typeof value.invocation_id === "string"
+      ? { invocation_id: value.invocation_id }
+      : {}),
+    ...(deviceLink === undefined ? {} : { device_link: deviceLink }),
+  };
 }
 
 interface DeviceLinkScope {
@@ -70,8 +185,9 @@ interface DeviceLinkScope {
 //     abandoned link leaves an orphan authorization on the user's account
 //     (PROPOSAL §4.3). Nothing existing does that.
 // The generic flow-status route (shared with OAuth — same record type).
-export function deviceLinkStatusPath(flowId: unknown) {
-  return `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(String(flowId))}/status`;
+export function deviceLinkStatusPath(flowId: string) {
+  if (!flowId) throw new Error("flowId is required");
+  return `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/status`;
 }
 
 // Drop optional identifiers the caller does not have.
@@ -110,7 +226,7 @@ const CANCEL_PATH = `${DEVICE_LINK_BASE}/cancel`;
 // re-opened settings pane) resume the live link instead of burning the payload
 // the user is mid-scan on. A stale or lapsed id falls through to a fresh link
 // server-side rather than failing.
-export function startDeviceLink({
+export async function startDeviceLink({
   provider,
   extensionName,
   mode,
@@ -131,7 +247,7 @@ export function startDeviceLink({
   resumeFlowId?: string;
   signal?: AbortSignal;
 }): Promise<DeviceLinkFlowResponse> {
-  return apiFetch(START_PATH, {
+  return decodeDeviceLinkFlowResponse(await apiFetch(START_PATH, {
     method: "POST",
     signal,
     body: JSON.stringify({
@@ -146,7 +262,7 @@ export function startDeviceLink({
         resume_flow_id: resumeFlowId,
       }),
     }),
-  }) as Promise<DeviceLinkFlowResponse>;
+  }));
 }
 
 // -> { flow_id, status, device_link }
@@ -155,24 +271,24 @@ export function startDeviceLink({
 // accepted. Safe to call while the card is awaiting user input — the adapter's
 // poll is contractually a pure read on that side, and the host serializes it
 // against a submission in flight.
-export function pollDeviceLink({
+export async function pollDeviceLink({
   flowId,
   invocationId,
   signal,
 }: DeviceLinkScope): Promise<DeviceLinkFlowResponse> {
-  return apiFetch(POLL_PATH, {
+  return decodeDeviceLinkFlowResponse(await apiFetch(POLL_PATH, {
     method: "POST",
     signal,
     body: JSON.stringify({
       flow_id: flowId,
       ...withoutBlankIds({ invocation_id: invocationId }),
     }),
-  }) as Promise<DeviceLinkFlowResponse>;
+  }));
 }
 
 // -> { flow_id, status, device_link }; a pure READ of the durable flow, for a
 // card that is re-rendering and wants to hydrate without advancing anything.
-export function readDeviceLinkFlow({
+export async function readDeviceLinkFlow({
   flowId,
   invocationId,
   signal,
@@ -180,9 +296,9 @@ export function readDeviceLinkFlow({
   const query = invocationId
     ? `?invocation_id=${encodeURIComponent(invocationId)}`
     : "";
-  return apiFetch(`${deviceLinkStatusPath(flowId)}${query}`, {
+  return decodeDeviceLinkFlowResponse(await apiFetch(`${deviceLinkStatusPath(flowId)}${query}`, {
     signal,
-  }) as Promise<DeviceLinkFlowResponse>;
+  }));
 }
 
 // -> { flow_id, status, device_link }
@@ -190,7 +306,7 @@ export function readDeviceLinkFlow({
 // `revision` is the frame the value was typed against. The engine's
 // compare-and-swap rejects a submission from a superseded frame, which is what
 // stops a stale card from overwriting newer state — never drop it.
-export function submitDeviceLinkInput({
+export async function submitDeviceLinkInput({
   flowId,
   revision,
   kind,
@@ -202,7 +318,7 @@ export function submitDeviceLinkInput({
   kind: DeviceLinkInputKind;
   value: string;
 }): Promise<DeviceLinkFlowResponse> {
-  return apiFetch(INPUT_PATH, {
+  return decodeDeviceLinkFlowResponse(await apiFetch(INPUT_PATH, {
     method: "POST",
     signal,
     body: JSON.stringify({
@@ -212,24 +328,24 @@ export function submitDeviceLinkInput({
       value,
       ...withoutBlankIds({ invocation_id: invocationId }),
     }),
-  }) as Promise<DeviceLinkFlowResponse>;
+  }));
 }
 
 // -> { flow_id, status }; abandons the flow so the vendor side is logged out
 // rather than left as an orphan authorization (PROPOSAL §4.3).
-export function cancelDeviceLink({
+export async function cancelDeviceLink({
   flowId,
   invocationId,
   signal,
 }: DeviceLinkScope): Promise<DeviceLinkFlowResponse> {
-  return apiFetch(CANCEL_PATH, {
+  return decodeDeviceLinkFlowResponse(await apiFetch(CANCEL_PATH, {
     method: "POST",
     signal,
     body: JSON.stringify({
       flow_id: flowId,
       ...withoutBlankIds({ invocation_id: invocationId }),
     }),
-  }) as Promise<DeviceLinkFlowResponse>;
+  }));
 }
 
 export const deviceLinkError = channelSetupError;

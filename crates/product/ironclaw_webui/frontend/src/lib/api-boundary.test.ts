@@ -1,0 +1,89 @@
+import assert from "node:assert/strict";
+import { afterEach, test } from "vitest";
+
+import {
+  apiFetch,
+  cancelRun,
+  eventStreamRequest,
+  executeChatCommand,
+  fetchTimeline,
+  openEventSocket,
+  resolveGate,
+} from "./api";
+import { getNotificationSetupStatus } from "./notification-setup-api";
+
+const originalFetch = globalThis.fetch;
+const originalSessionStorage = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "sessionStorage",
+);
+
+function setSessionStorage(): void {
+  Object.defineProperty(globalThis, "sessionStorage", {
+    configurable: true,
+    value: { getItem: () => "", removeItem: () => {}, setItem: () => {} },
+  });
+}
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  if (originalSessionStorage) {
+    Object.defineProperty(globalThis, "sessionStorage", originalSessionStorage);
+  } else {
+    Reflect.deleteProperty(globalThis, "sessionStorage");
+  }
+});
+
+test("thread and run routes reject missing path identifiers before URL construction", async () => {
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not be called");
+  };
+
+  assert.throws(() => eventStreamRequest(), /threadId is required/);
+  assert.throws(() => openEventSocket(), /threadId is required/);
+  await assert.rejects(fetchTimeline(), /threadId is required/);
+  await assert.rejects(
+    executeChatCommand({ text: "/help" }),
+    /threadId is required/,
+  );
+  await assert.rejects(cancelRun(), /threadId is required/);
+  await assert.rejects(
+    resolveGate({ threadId: "thread-1", runId: "run-1" }),
+    /gateRef is required/,
+  );
+  assert.equal(fetchCalled, false);
+});
+
+test("apiFetch rejects non-object JSON instead of leaking an any response", async () => {
+  setSessionStorage();
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(["unexpected"]), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  await assert.rejects(
+    apiFetch("/api/webchat/v2/session"),
+    TypeError,
+  );
+});
+
+test("notification setup rejects malformed successful responses", async () => {
+  setSessionStorage();
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        extension_id: "web-push",
+        requires_setup: false,
+        enabled: "yes",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  await assert.rejects(
+    getNotificationSetupStatus({ extensionId: "web-push" }),
+    /invalid notification setup response/,
+  );
+});

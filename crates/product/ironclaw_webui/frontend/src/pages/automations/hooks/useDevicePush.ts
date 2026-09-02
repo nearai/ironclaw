@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React from "react";
-import { getNotificationSetupStatus } from "../../../lib/api";
+import { getNotificationSetupStatus } from "../../../lib/notification-setup-api";
 import {
   enrollThisBrowser,
   getDevicePushState,

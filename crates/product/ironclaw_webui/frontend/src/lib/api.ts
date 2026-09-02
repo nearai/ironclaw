@@ -16,8 +16,15 @@
 const TOKEN_KEY = "ironclaw_token";
 const V2_BASE = "/api/webchat/v2";
 
-function encodePathSegment(value: unknown): string {
-  return encodeURIComponent(String(value));
+export type ApiRecord = Record<string, unknown>;
+
+function missingRequired(name: string): Promise<never> {
+  return Promise.reject(new Error(`${name} is required`));
+}
+
+function requiredPath(value: string | null | undefined, name = "threadId") {
+  if (!value) throw new Error(`${name} is required`);
+  return encodeURIComponent(value);
 }
 
 type ApiErrorPayload = {
@@ -152,7 +159,10 @@ export function describeApiError({
   return statusText || "Request failed";
 }
 
-export async function apiFetch(path: string | URL, options: RequestInit = {}) {
+export async function apiFetch(
+  path: string | URL,
+  options: RequestInit = {},
+): Promise<ApiRecord> {
   const token = readStoredToken();
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json");
@@ -183,10 +193,12 @@ export async function apiFetch(path: string | URL, options: RequestInit = {}) {
     );
   }
 
-  const contentType = response.headers.get("content-type") || "";
-  return contentType.includes("application/json")
-    ? response.json()
-    : response.text();
+  if (response.status === 204) return {};
+  const payload: unknown = await response.json();
+  if ((payload as { constructor?: unknown })?.constructor !== Object) {
+    throw new TypeError("invalid API response");
+  }
+  return payload as ApiRecord;
 }
 
 // --- Threads ---
@@ -197,6 +209,10 @@ export async function apiFetch(path: string | URL, options: RequestInit = {}) {
 // channel name. Absent until the session loads — sends fail closed with a
 // clear error rather than guessing a channel.
 let sessionChannelExtensionId = "";
+
+export interface SessionResponse extends ApiRecord {
+  session_channel_extension_id?: string | null;
+}
 
 export function setSessionChannelExtensionId(extensionId: string | null | undefined) {
   sessionChannelExtensionId = extensionId || "";
@@ -210,8 +226,8 @@ export function getSessionChannelExtensionId() {
   return sessionChannelExtensionId;
 }
 
-export async function fetchSession() {
-  const session = await apiFetch(`${V2_BASE}/session`);
+export async function fetchSession(): Promise<SessionResponse> {
+  const session = await apiFetch(`${V2_BASE}/session`) as SessionResponse;
   setSessionChannelExtensionId(session?.session_channel_extension_id);
   return session;
 }
@@ -222,11 +238,24 @@ export interface CreateThreadOptions {
   projectId?: string;
 }
 
-export function createThread({
+export interface ThreadRecord extends ApiRecord {
+  thread_id: string;
+}
+
+export interface ThreadListResponse extends ApiRecord {
+  threads: ThreadRecord[];
+  next_cursor?: string | null;
+}
+
+export interface CreateThreadResponse extends ApiRecord {
+  thread: ThreadRecord;
+}
+
+export async function createThread({
   clientActionId: clientId,
   requestedThreadId,
   projectId,
-}: CreateThreadOptions = {}) {
+}: CreateThreadOptions = {}): Promise<CreateThreadResponse> {
   const body: {
     client_action_id: string;
     requested_thread_id?: string;
@@ -239,7 +268,7 @@ export function createThread({
   return apiFetch(`${V2_BASE}/threads`, {
     method: "POST",
     body: JSON.stringify(body),
-  });
+  }) as Promise<CreateThreadResponse>;
 }
 
 export interface ListThreadsOptions {
@@ -250,19 +279,19 @@ export interface ListThreadsOptions {
   signal?: AbortSignal;
 }
 
-export function listThreads({
+export async function listThreads({
   limit,
   cursor,
   projectId,
   candidateThreadId,
   signal,
-}: ListThreadsOptions = {}) {
+}: ListThreadsOptions = {}): Promise<ThreadListResponse> {
   const url = new URL(`${V2_BASE}/threads`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
   if (projectId) url.searchParams.set("project_id", projectId);
   if (candidateThreadId) url.searchParams.set("candidate_thread_id", candidateThreadId);
-  return apiFetch(url.pathname + url.search, { signal });
+  return apiFetch(url.pathname + url.search, { signal }) as Promise<ThreadListResponse>;
 }
 
 type ThreadOptions = { threadId?: string };
@@ -271,7 +300,7 @@ type ProjectOptions = { projectId?: string };
 
 export function deleteThread({ threadId }: ThreadOptions = {}) {
   if (!threadId) {
-    return Promise.reject(new Error("threadId is required"));
+    return missingRequired("threadId");
   }
   return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}`, {
     method: "DELETE",
@@ -286,19 +315,25 @@ interface PaginatedRequestOptions {
   signal?: AbortSignal;
 }
 
-export function listNotifications({
+export interface NotificationListResponse extends ApiRecord {
+  notifications: ApiRecord[];
+  next_cursor?: string | null;
+  unread_count: number;
+}
+
+export async function listNotifications({
   limit,
   cursor,
   signal,
-}: PaginatedRequestOptions = {}) {
+}: PaginatedRequestOptions = {}): Promise<NotificationListResponse> {
   const url = new URL(`${V2_BASE}/notifications`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
-  return apiFetch(url.pathname + url.search, { signal });
+  return apiFetch(url.pathname + url.search, { signal }) as Promise<NotificationListResponse>;
 }
 
 export function markNotificationRead(notificationId: string) {
-  if (!notificationId) return Promise.reject(new Error("notificationId is required"));
+  if (!notificationId) return missingRequired("notificationId");
   return apiFetch(
     `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/read`,
     { method: "POST" },
@@ -310,7 +345,7 @@ export function markAllNotificationsRead() {
 }
 
 export function archiveNotification(notificationId: string) {
-  if (!notificationId) return Promise.reject(new Error("notificationId is required"));
+  if (!notificationId) return missingRequired("notificationId");
   return apiFetch(
     `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/archive`,
     { method: "POST" },
@@ -330,7 +365,7 @@ interface ProjectFileOptions extends ThreadOptions {
 }
 
 export function listProjectFiles({ threadId, path }: ProjectFileOptions = {}) {
-  if (!threadId) return Promise.reject(new Error("threadId is required"));
+  if (!threadId) return missingRequired("threadId");
   const url = new URL(projectFilesBase(threadId), window.location.origin);
   if (path) url.searchParams.set("path", path);
   return apiFetch(url.pathname + url.search);
@@ -381,7 +416,7 @@ export function listAutomations({
 
 export function pauseAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/pause`, {
     method: "POST",
@@ -390,7 +425,7 @@ export function pauseAutomation({ automationId }: AutomationOptions = {}) {
 
 export function runAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/run`, {
     method: "POST",
@@ -399,7 +434,7 @@ export function runAutomation({ automationId }: AutomationOptions = {}) {
 
 export function resumeAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}/resume`, {
     method: "POST",
@@ -411,10 +446,10 @@ export function renameAutomation({
   name,
 }: AutomationOptions & { name?: string } = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   if (!name) {
-    return Promise.reject(new Error("name is required"));
+    return missingRequired("name");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}`, {
     method: "POST",
@@ -424,7 +459,7 @@ export function renameAutomation({
 
 export function deleteAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
-    return Promise.reject(new Error("automationId is required"));
+    return missingRequired("automationId");
   }
   return apiFetch(`${V2_BASE}/automations/${encodeURIComponent(automationId)}`, {
     method: "DELETE",
@@ -461,7 +496,7 @@ export function createProject({
   color,
   metadata,
 }: ProjectMutationOptions = {}) {
-  if (!name) return Promise.reject(new Error("name is required"));
+  if (!name) return missingRequired("name");
   const body: Omit<ProjectMutationOptions, "projectId" | "state"> = { name };
   if (description != null) body.description = description;
   if (icon != null) body.icon = icon;
@@ -471,7 +506,7 @@ export function createProject({
 }
 
 export function getProject({ projectId }: ProjectOptions = {}) {
-  if (!projectId) return Promise.reject(new Error("projectId is required"));
+  if (!projectId) return missingRequired("projectId");
   return apiFetch(projectPath(projectId));
 }
 
@@ -484,7 +519,7 @@ export function updateProject({
   metadata,
   state,
 }: ProjectMutationOptions = {}) {
-  if (!projectId) return Promise.reject(new Error("projectId is required"));
+  if (!projectId) return missingRequired("projectId");
   const body: Omit<ProjectMutationOptions, "projectId"> = {};
   if (name != null) body.name = name;
   if (description != null) body.description = description;
@@ -496,12 +531,12 @@ export function updateProject({
 }
 
 export function deleteProject({ projectId }: ProjectOptions = {}) {
-  if (!projectId) return Promise.reject(new Error("projectId is required"));
+  if (!projectId) return missingRequired("projectId");
   return apiFetch(projectPath(projectId), { method: "DELETE" });
 }
 
 export function listProjectMembers({ projectId }: ProjectOptions = {}) {
-  if (!projectId) return Promise.reject(new Error("projectId is required"));
+  if (!projectId) return missingRequired("projectId");
   return apiFetch(`${projectPath(projectId)}/members`);
 }
 
@@ -518,7 +553,7 @@ export function addProjectMember({
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
-  if (!role) return Promise.reject(new Error("role is required"));
+  if (!role) return missingRequired("role");
   return apiFetch(`${projectPath(projectId)}/members`, {
     method: "POST",
     body: JSON.stringify({ user_id: userId, role }),
@@ -533,7 +568,7 @@ export function updateProjectMemberRole({
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
-  if (!role) return Promise.reject(new Error("role is required"));
+  if (!role) return missingRequired("role");
   return apiFetch(`${projectPath(projectId)}/members/${encodeURIComponent(userId)}`, {
     method: "POST",
     body: JSON.stringify({ role }),
@@ -581,60 +616,6 @@ export function setNotificationChannels({
     method: "POST",
     body: JSON.stringify({ target_ids: targetIds }),
   });
-}
-
-// --- Notification setup (generic per-channel enrollment) ---
-//
-// One status/enable/disable surface for every channel, keyed by extension id.
-// The `payload` bodies and the status `detail` are channel-opaque documents
-// only the channel's own client interprets — nothing here names a channel.
-
-interface NotificationSetupOptions {
-  extensionId?: string;
-  payload?: unknown;
-}
-
-export function getNotificationSetupStatus({
-  extensionId,
-}: NotificationSetupOptions = {}) {
-  if (!extensionId) {
-    return Promise.reject(new Error("extensionId is required"));
-  }
-  return apiFetch(
-    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications`,
-  );
-}
-
-export function enableNotificationSetup({
-  extensionId,
-  payload,
-}: NotificationSetupOptions = {}) {
-  if (!extensionId) {
-    return Promise.reject(new Error("extensionId is required"));
-  }
-  return apiFetch(
-    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications/enable`,
-    {
-      method: "POST",
-      body: JSON.stringify({ payload }),
-    },
-  );
-}
-
-export function disableNotificationSetup({
-  extensionId,
-  payload,
-}: NotificationSetupOptions = {}) {
-  if (!extensionId) {
-    return Promise.reject(new Error("extensionId is required"));
-  }
-  return apiFetch(
-    `${V2_BASE}/channels/${encodeURIComponent(extensionId)}/notifications/disable`,
-    {
-      method: "POST",
-      body: JSON.stringify({ payload }),
-    },
-  );
 }
 
 // --- Operator logs ---
@@ -768,15 +749,17 @@ export function sendMessage({
 // --- Product commands ---
 
 export function listChatCommands() {
-  return apiFetch(`${V2_BASE}/commands`);
+  return apiFetch(`${V2_BASE}/commands`) as Promise<
+    ApiRecord & { commands: ApiRecord[] }
+  >;
 }
 
-export function executeChatCommand({
+export async function executeChatCommand({
   threadId,
   text,
 }: { threadId?: string | null; text: string }) {
   return apiFetch(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId ?? "")}/commands`,
+    `${V2_BASE}/threads/${requiredPath(threadId)}/commands`,
     {
       method: "POST",
       body: JSON.stringify({ text }),
@@ -786,13 +769,13 @@ export function executeChatCommand({
 
 // --- Timeline ---
 
-export function fetchTimeline({
+export async function fetchTimeline({
   threadId,
   limit,
   cursor,
 }: ThreadOptions & Omit<PaginatedRequestOptions, "signal"> = {}) {
   const url = new URL(
-    `${V2_BASE}/threads/${encodePathSegment(threadId)}/timeline`,
+    `${V2_BASE}/threads/${requiredPath(threadId)}/timeline`,
     window.location.origin,
   );
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -815,7 +798,7 @@ export function fetchRunArtifact({ threadId, runId }: RunOptions = {}) {
 
 export function fetchThreadArtifact({ threadId }: ThreadOptions = {}) {
   if (!threadId) {
-    return Promise.reject(new Error("threadId is required"));
+    return missingRequired("threadId");
   }
   return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}/artifact`);
 }
@@ -914,7 +897,7 @@ export function eventStreamRequest({
   connectionId,
 }: ThreadOptions & { connectionId?: string } = {}) {
   const url = new URL(
-    `${V2_BASE}/threads/${encodePathSegment(threadId)}/events`,
+    `${V2_BASE}/threads/${requiredPath(threadId)}/events`,
     window.location.origin,
   );
   if (connectionId) url.searchParams.set("connection_id", connectionId);
@@ -936,9 +919,10 @@ export function eventStreamRequest({
 // `?token=` URL parameter (the WS handshake API in browsers has no
 // way to set a custom request header).
 export function openEventSocket({ threadId }: ThreadOptions = {}) {
+  const encodedThreadId = requiredPath(threadId);
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = new URL(
-    `${V2_BASE}/threads/${encodePathSegment(threadId)}/ws`,
+    `${V2_BASE}/threads/${encodedThreadId}/ws`,
     window.location.origin,
   );
   url.protocol = scheme;
@@ -949,7 +933,7 @@ export function openEventSocket({ threadId }: ThreadOptions = {}) {
 
 // --- Run cancellation ---
 
-export function cancelRun({
+export async function cancelRun({
   threadId,
   runId,
   reason,
@@ -960,7 +944,7 @@ export function cancelRun({
   };
   if (reason) body.reason = reason;
   return apiFetch(
-    `${V2_BASE}/threads/${encodePathSegment(threadId)}/runs/${encodePathSegment(runId)}/cancel`,
+    `${V2_BASE}/threads/${requiredPath(threadId)}/runs/${requiredPath(runId, "runId")}/cancel`,
     {
       method: "POST",
       body: JSON.stringify(body),
@@ -973,7 +957,7 @@ export function cancelRun({
 // `resolution` is one of "approved" | "declined" | "credential_provided".
 // `always` is only meaningful when `resolution === "approved"`.
 // `credentialRef` is only meaningful when `resolution === "credential_provided"`.
-export function resolveGate({
+export async function resolveGate({
   threadId,
   runId,
   gateRef,
@@ -1002,7 +986,7 @@ export function resolveGate({
   if (always != null) body.always = always;
   if (credentialRef) body.credential_ref = credentialRef;
   return apiFetch(
-    `${V2_BASE}/threads/${encodePathSegment(threadId)}/runs/${encodePathSegment(runId)}/gates/${encodePathSegment(gateRef)}/resolve`,
+    `${V2_BASE}/threads/${requiredPath(threadId)}/runs/${requiredPath(runId, "runId")}/gates/${requiredPath(gateRef, "gateRef")}/resolve`,
     {
       method: "POST",
       signal,

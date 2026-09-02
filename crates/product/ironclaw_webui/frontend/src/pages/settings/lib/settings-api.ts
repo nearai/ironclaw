@@ -1,4 +1,4 @@
-import { apiFetch, clientActionId } from "../../../lib/api";
+import { apiFetch, clientActionId, type ApiRecord } from "../../../lib/api";
 
 const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
@@ -12,6 +12,57 @@ const TOOL_PERMISSION_UPDATE_STATES = new Set([
   "ask_each_time",
   "disabled",
 ]);
+
+function recordField(
+  response: ApiRecord,
+  field: string,
+  responseName: string,
+): ApiRecord {
+  const value = response[field];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value as ApiRecord;
+}
+
+function recordArrayField(
+  response: ApiRecord,
+  field: string,
+  responseName: string,
+): ApiRecord[] {
+  const value = response[field];
+  if (
+    !Array.isArray(value) ||
+    !value.every(
+      (entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry),
+    )
+  ) {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value as ApiRecord[];
+}
+
+function unknownArrayField(
+  response: ApiRecord,
+  field: string,
+  responseName: string,
+): unknown[] {
+  const value = response[field];
+  if (!Array.isArray(value)) {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value;
+}
+
+function optionalUnknownArrayField(
+  response: ApiRecord,
+  field: string,
+  responseName: string,
+): unknown[] {
+  return response[field] === undefined
+    ? []
+    : unknownArrayField(response, field, responseName);
+}
 
 function normalizeToolState(state) {
   if (state === "ask") return "ask_each_time";
@@ -84,8 +135,8 @@ export async function fetchSettingsExport() {
   const data = await apiFetch(SETTINGS_TOOLS_BASE);
   return {
     settings: settingsFromOperatorConfig(data),
-    diagnostics: data.diagnostics || [],
-    precedence: data.precedence || [],
+    diagnostics: optionalUnknownArrayField(data, "diagnostics", "tool settings"),
+    precedence: optionalUnknownArrayField(data, "precedence", "tool settings"),
   };
 }
 export async function fetchSetting(key) {
@@ -95,7 +146,7 @@ export async function fetchSetting(key) {
     return data.settings[AUTO_APPROVE_KEY] ?? true;
   }
   const data = await apiFetch(`${OPERATOR_CONFIG_BASE}/${encodeURIComponent(key)}`);
-  return data.entry?.value ?? null;
+  return recordField(data, "entry", "operator config").value ?? null;
 }
 
 type SettingEntry = {
@@ -234,8 +285,61 @@ export async function importSettings(
 // source of truth: a unified provider list (built-in + operator-defined) plus
 // the active selection. API-key values are write-only; the snapshot only ever
 // reports `api_key_set`.
-export function fetchLlmProviders() {
-  return apiFetch("/api/webchat/v2/llm/providers");
+export interface UserModelPolicyResponse extends ApiRecord {
+  provider_id?: string;
+  allowed_models: string[];
+  model_entries: ApiRecord[];
+}
+
+export interface LlmProvidersResponse extends ApiRecord {
+  providers: ApiRecord[];
+  active: ApiRecord | null;
+  user_model_policy: UserModelPolicyResponse | null;
+}
+
+function decodeUserModelPolicy(value: unknown): UserModelPolicyResponse | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("invalid LLM providers response");
+  }
+  const policy = value as ApiRecord;
+  if (
+    policy.provider_id !== undefined &&
+    typeof policy.provider_id !== "string"
+  ) {
+    throw new TypeError("invalid LLM providers response");
+  }
+  const allowedModels = unknownArrayField(
+    policy,
+    "allowed_models",
+    "LLM providers",
+  );
+  if (!allowedModels.every((model) => typeof model === "string")) {
+    throw new TypeError("invalid LLM providers response");
+  }
+  return {
+    ...policy,
+    allowed_models: allowedModels,
+    model_entries: recordArrayField(
+      policy,
+      "model_entries",
+      "LLM providers",
+    ),
+  } as UserModelPolicyResponse;
+}
+
+export async function fetchLlmProviders(): Promise<LlmProvidersResponse> {
+  const response = await apiFetch("/api/webchat/v2/llm/providers");
+  const active =
+    response.active === undefined || response.active === null
+      ? null
+      : recordField(response, "active", "LLM providers");
+  return {
+    ...response,
+    providers: recordArrayField(response, "providers", "LLM providers"),
+    active,
+    user_model_policy: decodeUserModelPolicy(response.user_model_policy),
+  };
 }
 export function fetchUserModelCatalog() {
   return apiFetch("/api/webchat/v2/llm/models");
@@ -319,8 +423,10 @@ export function startCodexLogin() {
 export async function fetchTools() {
   const data = await apiFetch(SETTINGS_TOOLS_BASE);
   return {
-    tools: (data.entries || []).map(toolFromConfigEntry).filter(Boolean),
-    diagnostics: data.diagnostics || [],
+    tools: recordArrayField(data, "entries", "tool settings")
+      .map(toolFromConfigEntry)
+      .filter(Boolean),
+    diagnostics: optionalUnknownArrayField(data, "diagnostics", "tool settings"),
   };
 }
 export async function updateToolPermission(name, state) {
@@ -333,17 +439,26 @@ export async function updateToolPermission(name, state) {
       body: JSON.stringify({ state: normalized }),
       signal: controller.signal,
     });
-    const tool = persistedToolFromConfigEntry(data?.entry, name, normalized);
-    return { success: true, tool, entry: data.entry };
+    const tool = persistedToolFromConfigEntry(data.entry, name, normalized);
+    const entry = recordField(data, "entry", "tool permission update");
+    return { success: true, tool, entry };
   } finally {
     clearTimeout(timeoutId);
   }
 }
-export function fetchExtensions() {
-  return apiFetch("/api/webchat/v2/extensions");
+export async function fetchExtensions() {
+  const response = await apiFetch("/api/webchat/v2/extensions");
+  return {
+    ...response,
+    extensions: recordArrayField(response, "extensions", "extensions"),
+  };
 }
-export function fetchExtensionRegistry() {
-  return apiFetch("/api/webchat/v2/extensions/registry");
+export async function fetchExtensionRegistry() {
+  const response = await apiFetch("/api/webchat/v2/extensions/registry");
+  return {
+    ...response,
+    entries: recordArrayField(response, "entries", "extension registry"),
+  };
 }
 export function fetchSkills() {
   return apiFetch("/api/webchat/v2/skills");
@@ -390,13 +505,121 @@ export function setAutoActivateLearned(enabled) {
 // Trace Commons credits — read-only, scoped server-side to the
 // authenticated caller. The response is the contributor-local view as
 // of the last credit sync; the authoritative ledger is server-side.
-export function fetchTraceCredits() {
-  return apiFetch("/api/webchat/v2/traces/credit");
+export interface TraceCreditsResponse extends ApiRecord {
+  enrolled: boolean;
+  submissions_total: number;
+  submissions_submitted: number;
+  submissions_accepted: number;
+  manual_review_hold_count: number;
+  recent_explanations: string[];
+  holds: TraceHoldResponse[];
+}
+
+interface TraceHoldResponse extends ApiRecord {
+  submission_id: string;
+  reason: string;
+}
+
+interface AccountTraceResponse extends ApiRecord {
+  submission_id: string;
+  status: string;
+}
+
+function decodeTraceHolds(value: unknown): TraceHoldResponse[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError("invalid trace credits response");
+  }
+  return value.map((entry) => {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      Array.isArray(entry) ||
+      !("submission_id" in entry) ||
+      typeof entry.submission_id !== "string" ||
+      !("reason" in entry) ||
+      typeof entry.reason !== "string"
+    ) {
+      throw new TypeError("invalid trace credits response");
+    }
+    return entry as TraceHoldResponse;
+  });
+}
+
+function numberField(
+  response: ApiRecord,
+  field: string,
+  responseName: string,
+): number {
+  const value = response[field];
+  if (typeof value !== "number") {
+    throw new TypeError(`invalid ${responseName} response`);
+  }
+  return value;
+}
+
+export async function fetchTraceCredits(): Promise<TraceCreditsResponse> {
+  const response = await apiFetch("/api/webchat/v2/traces/credit");
+  if (typeof response.enrolled !== "boolean") {
+    throw new TypeError("invalid trace credits response");
+  }
+  const recentExplanations = optionalUnknownArrayField(
+    response,
+    "recent_explanations",
+    "trace credits",
+  );
+  if (!recentExplanations.every((line) => typeof line === "string")) {
+    throw new TypeError("invalid trace credits response");
+  }
+  return {
+    ...response,
+    enrolled: response.enrolled,
+    submissions_total: numberField(
+      response,
+      "submissions_total",
+      "trace credits",
+    ),
+    submissions_submitted: numberField(
+      response,
+      "submissions_submitted",
+      "trace credits",
+    ),
+    submissions_accepted: numberField(
+      response,
+      "submissions_accepted",
+      "trace credits",
+    ),
+    manual_review_hold_count: numberField(
+      response,
+      "manual_review_hold_count",
+      "trace credits",
+    ),
+    recent_explanations: recentExplanations,
+    holds: decodeTraceHolds(response.holds ?? []),
+  };
 }
 // Submitted Trace Commons traces for the authenticated caller (read-only,
 // server-scoped). Mirrors fetchTraceCredits.
-export function fetchAccountTraces() {
-  return apiFetch("/api/webchat/v2/traces/account");
+export async function fetchAccountTraces() {
+  const response = await apiFetch("/api/webchat/v2/traces/account");
+  if (typeof response.enrolled !== "boolean") {
+    throw new TypeError("invalid account traces response");
+  }
+  const traces = recordArrayField(response, "traces", "account traces").map(
+    (trace): AccountTraceResponse => {
+      if (
+        typeof trace.submission_id !== "string" ||
+        typeof trace.status !== "string"
+      ) {
+        throw new TypeError("invalid account traces response");
+      }
+      return trace as AccountTraceResponse;
+    },
+  );
+  return {
+    ...response,
+    enrolled: response.enrolled,
+    traces,
+  };
 }
 // Mint a one-time Trace Commons browser login link for the authenticated
 // caller. The returned URL is a single-use account credential delivered only
