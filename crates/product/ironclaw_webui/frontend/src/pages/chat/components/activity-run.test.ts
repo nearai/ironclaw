@@ -19,7 +19,7 @@ function activityRunSourceForTest() {
     }
     lines.push(line.replace("export function ActivityRun", "function ActivityRun"));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ActivityRun };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ActivityRun, ActivityItem };`;
 }
 
 test("ActivityRun keeps running tool activity collapsed by default", () => {
@@ -180,3 +180,45 @@ function containsScalar(node, expected) {
   if (!node || typeof node !== "object" || !Array.isArray(node.values)) return false;
   return node.values.some((value) => containsScalar(value, expected));
 }
+
+test("ActivityRun renders a narration phase as a settled note inside the run", () => {
+  const rendered = [];
+  const context = {
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    Icon(props) {
+      rendered.push(`icon:${props.name}`);
+    },
+    MarkdownRenderer(props) {
+      rendered.push(`markdown:${props.content}:streaming=${props.streaming}`);
+    },
+    React: {
+      useMemo: (factory) => factory(),
+      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    },
+    summarizeActivity: () => ({ label: "Activity", hasError: false }),
+    useT: () => (key) => key,
+    ToolActivity() {},
+    messageBelongsToActiveRun: () => false,
+  };
+
+  vm.runInNewContext(activityRunSourceForTest(), context);
+  const item = context.globalThis.__testExports.ActivityItem({
+    item: {
+      id: "text-text:run-1:1",
+      role: "assistant",
+      content: "Let me look.",
+      isFinalReply: false,
+      isNarration: true,
+      turnRunId: "run-1",
+    },
+    activeRunId: "run-1",
+  });
+
+  assert.ok(item, "a narration phase is an activity item, never dropped");
+  assert.equal(
+    hasComponentNamed(item, "NoteItem"),
+    true,
+    "narration renders as a note like reasoning does",
+  );
+});

@@ -543,8 +543,10 @@ impl Reconciler<'_> {
     }
 
     /// The answer was rewritten under the stream (the prefix Slack shows no
-    /// longer matches the document). Close the stale stream and forget the
-    /// presentation; the caller opens a fresh one with the full text.
+    /// longer matches the document — a call the loop went on past had its
+    /// paragraph streamed, or the canonical text differs). Close the stale
+    /// stream, retract its message, and forget the presentation; the caller
+    /// opens a fresh one with what the document shows now.
     async fn re_present(
         &mut self,
         route: &SlackReplyRoute,
@@ -575,8 +577,39 @@ impl Reconciler<'_> {
                 ));
             }
         }
+        self.retract_message(stream).await?;
         self.checkpoint.forget_presentation();
         Ok(())
+    }
+
+    /// `chat.delete` the stale stream's message so the fresh presentation
+    /// never stands beside text the document no longer shows. A message
+    /// already gone is the retraction this wanted, which also makes a lost
+    /// answer plainly retryable rather than ambiguous: the retry finds the
+    /// message deleted or deletes it. A Slack refusal (a workspace that
+    /// forbids the delete) leaves the stale message and is logged, because
+    /// the fresh stream still carries the answer and failing the reply over
+    /// it would be worse.
+    async fn retract_message(&mut self, stream: &SlackStreamState) -> Result<(), ReplySinkOutcome> {
+        let body = json!({ "channel": stream.channel, "ts": stream.ts });
+        match self.api.post(SlackWebApiMethod::ChatDelete, body).await {
+            Ok(_) => Ok(()),
+            Err(SlackApiFailure::Rejected { error, .. }) if error == "message_not_found" => Ok(()),
+            Err(SlackApiFailure::Rejected { error, .. }) => {
+                tracing::debug!(
+                    channel = %stream.channel,
+                    ts = %stream.ts,
+                    error = %error,
+                    "slack refused to retract the stale stream's message; leaving it"
+                );
+                Ok(())
+            }
+            Err(SlackApiFailure::Ambiguous { reason }) => Err(ReplySinkOutcome::Retryable {
+                reason: ReplyOutcomeReason::new(reason),
+                retry_after: None,
+            }),
+            Err(failure) => Err(outcome_for_failure(SlackWebApiMethod::ChatDelete, failure)),
+        }
     }
 
     /// Reconcile the session status to what the document implies (attention
@@ -758,11 +791,11 @@ impl Reconciler<'_> {
             Err(AnswerRewritten) => {
                 // The canonical answer is not an extension of what was
                 // streamed (a genuine rewrite — the in-place terminal fold
-                // upstream absorbs the ordinary multi-phase case): close the
-                // stale stream as it stands and re-present the canonical
-                // text on ONE fresh native stream, opened and closed in this
-                // reconcile. Never as a conventional message beside the
-                // stream — that is the duplicate-answer shape.
+                // upstream absorbs the ordinary case): close the stale
+                // stream as it stands, retract its message, and re-present
+                // the canonical text on ONE fresh native stream, opened and
+                // closed in this reconcile. Never as a conventional message
+                // beside the stream — that is the duplicate-answer shape.
                 self.stop_stream(
                     route,
                     document,
@@ -771,6 +804,7 @@ impl Reconciler<'_> {
                     &SlackAppliedState::default(),
                 )
                 .await?;
+                self.retract_message(stream).await?;
                 self.checkpoint.forget_presentation();
                 return self.open_and_close_terminal_stream(route, document).await;
             }
@@ -1141,6 +1175,40 @@ mod tests {
         assert!(
             text_chunks(&plan).is_empty(),
             "no complete paragraph yet: nothing goes out"
+        );
+        assert_eq!(plan.applied.to_chars, 0);
+    }
+
+    #[test]
+    fn held_text_is_not_flushed_ahead_of_an_attention_block() {
+        // A gate is raised for a tool call the same model call produced, so
+        // text ahead of it is narration by construction: it stays held (and
+        // the document resets it once the loop goes on). Only the block
+        // itself goes out.
+        let mut document = ReplyDocument::default();
+        document.append_answer("Let me send the summary.");
+        document.require_attention(ironclaw_extension_contracts::reply::ReplyAttention {
+            kind: ironclaw_extension_contracts::reply::ReplyAttentionKind::Approval,
+            headline: title("Approve sending the summary"),
+            body: None,
+            action_url: None,
+            gate_ref: Some(title("gate:approval-1")),
+        });
+
+        let plan = plan_for(&document);
+
+        let chunks = text_chunks(&plan);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| !chunk.contains("Let me send the summary.")),
+            "held narration does not flush ahead of the block: {chunks:?}"
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.contains("Approve sending the summary")),
+            "the block itself goes out: {chunks:?}"
         );
         assert_eq!(plan.applied.to_chars, 0);
     }

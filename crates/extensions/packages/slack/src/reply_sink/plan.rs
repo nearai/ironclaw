@@ -86,13 +86,12 @@ pub(super) fn plan_chunks(
     }
     chunks.extend(task_chunks);
 
-    // Held text flushes when the answer is complete (terminal, or a canonical
-    // finalized text) and before an attention block, which belongs after
-    // whatever the run had already said.
-    let attention_is_new = document.attention.as_ref().is_some_and(|attention| {
-        checkpoint.attention_key.as_deref() != Some(attention_fingerprint(attention).as_str())
-    });
-    let publish = if document.is_terminal() || document.answer.finalized || attention_is_new {
+    // Held text flushes only when the answer is complete (terminal, or a
+    // canonical finalized text). Not ahead of an attention block: a gate is
+    // raised for a tool call the same model call produced, so text ahead of
+    // it is narration by construction — the document resets it once the
+    // loop goes on, and flushing it here would only force a retraction.
+    let publish = if document.is_terminal() || document.answer.finalized {
         delta
     } else {
         // `publishable_len` only ever returns a line end or a position past a

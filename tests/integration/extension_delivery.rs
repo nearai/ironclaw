@@ -243,6 +243,10 @@ struct PreambleToolReplyGateway {
     preamble: &'static str,
     answer: &'static str,
     calls: Mutex<usize>,
+    /// When set, the first call waits for a permit after streaming its
+    /// preamble and before registering the tool call, so a journey can let
+    /// the preamble reach the wire first.
+    hold_before_tool: Option<tokio::sync::Semaphore>,
 }
 
 impl PreambleToolReplyGateway {
@@ -251,6 +255,20 @@ impl PreambleToolReplyGateway {
             preamble,
             answer,
             calls: Mutex::new(0),
+            hold_before_tool: None,
+        }
+    }
+
+    fn holding_before_tool(preamble: &'static str, answer: &'static str) -> Self {
+        Self {
+            hold_before_tool: Some(tokio::sync::Semaphore::new(0)),
+            ..Self::new(preamble, answer)
+        }
+    }
+
+    fn release_tool(&self) {
+        if let Some(hold) = &self.hold_before_tool {
+            hold.add_permits(1);
         }
     }
 }
@@ -284,6 +302,13 @@ impl HostManagedModelGateway for PreambleToolReplyGateway {
             return Ok(HostManagedModelResponse::assistant_reply(self.answer));
         }
         sink.safe_text_update(self.preamble.to_string()).await;
+        if let Some(hold) = &self.hold_before_tool {
+            let permit = hold
+                .acquire()
+                .await
+                .expect("preamble gateway semaphore remains open");
+            permit.forget();
+        }
         let search = CapabilityId::new("builtin.extension_search").expect("capability id");
         let tool = capabilities
             .tool_definitions()
@@ -1657,15 +1682,61 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
 
 /// A Slack tool run whose model streams pre-tool commentary, executes a real
 /// capability, and then streams the answer — the multi-phase shape the live
-/// stack produces. The progressive reply concatenates both phases while the
-/// durable transcript finalizes only the final one, so this journey pins the
-/// exactly-once invariant end to end: one Agent stream carrying the
-/// commentary, a task card, and the answer; one close; and the terminal
-/// answer NEVER also posted as a conventional `chat.postMessage`.
+/// stack produces. The commentary is a model call the loop went on past:
+/// the projection resets the answer when the tool call proves it was
+/// narration, and a one-line narration never had a paragraph boundary, so
+/// it reaches Slack nowhere. This pins that and the exactly-once invariant
+/// end to end: one Agent stream carrying a task card and the answer; one
+/// close; the narration in no request; and the terminal answer NEVER also
+/// posted as a conventional `chat.postMessage`.
 #[tokio::test(flavor = "multi_thread")]
 async fn slack_tool_run_with_streamed_preamble_answers_exactly_once() {
-    const PREAMBLE: &str = "Let me search the catalog first.";
-    const ANSWER: &str = "The catalog holds a web-access extension.";
+    slack_tool_run_with_preamble(
+        "Let me search the catalog first.",
+        "The catalog holds a web-access extension.",
+        PreambleExpectation::HeldAndNeverSent,
+    )
+    .await;
+}
+
+/// Narration that had a complete paragraph before the tool call was already
+/// streamed when the tool call proved it narration. Through the production
+/// wiring (reducer → publication worker → sink → captured network), the
+/// sink closes that stream, retracts its message with `chat.delete`, and
+/// opens a fresh stream for the task card and the answer — exactly one
+/// stream is left standing and it carries no narration.
+#[tokio::test(flavor = "multi_thread")]
+async fn slack_tool_run_retracts_a_streamed_preamble_paragraph() {
+    slack_tool_run_with_preamble(
+        "Let me search the catalog first.\n\nStarting with the web results.",
+        "The catalog holds a web-access extension.",
+        PreambleExpectation::StreamedThenRetracted,
+    )
+    .await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreambleExpectation {
+    /// A one-line narration: held by the paragraph rule, never sent.
+    HeldAndNeverSent,
+    /// A narration paragraph: streamed, then retracted with `chat.delete`.
+    StreamedThenRetracted,
+}
+
+async fn slack_tool_run_with_preamble(
+    preamble: &'static str,
+    answer: &'static str,
+    expectation: PreambleExpectation,
+) {
+    // The narration's first sentence: the text that must reach no surviving
+    // request in either shape.
+    let narration = preamble.split('\n').next().expect("a preamble line");
+    let gateway = Arc::new(match expectation {
+        PreambleExpectation::HeldAndNeverSent => PreambleToolReplyGateway::new(preamble, answer),
+        PreambleExpectation::StreamedThenRetracted => {
+            PreambleToolReplyGateway::holding_before_tool(preamble, answer)
+        }
+    });
     let group = RebornIntegrationGroup::builder()
         .storage(StorageMode::LibSql)
         .extension_delivery()
@@ -1742,11 +1813,37 @@ async fn slack_tool_run_with_streamed_preamble_answers_exactly_once() {
         true,
     )
     .await;
-    inbound.register_scope_gateway_for_test(
-        vendor_scope.clone(),
-        Arc::new(PreambleToolReplyGateway::new(PREAMBLE, ANSWER)),
-    );
+    let scope_gateway: Arc<dyn HostManagedModelGateway> =
+        Arc::clone(&gateway) as Arc<dyn HostManagedModelGateway>;
+    inbound.register_scope_gateway_for_test(vendor_scope.clone(), scope_gateway);
 
+    // The ingress drain below waits for the whole turn, so the tool call is
+    // released from a task that watches the wire: once the narration
+    // paragraph has streamed, the gateway may register the tool call that
+    // proves it narration.
+    let releaser = (expectation == PreambleExpectation::StreamedThenRetracted).then(|| {
+        let recorder = inbound.capability_recorder.clone();
+        let gateway = Arc::clone(&gateway);
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            let streamed = loop {
+                let streamed = recorder
+                    .network_http_requests()
+                    .iter()
+                    .filter(|request| {
+                        request.url.ends_with("/api/chat.startStream")
+                            || request.url.ends_with("/api/chat.appendStream")
+                    })
+                    .any(|request| String::from_utf8_lossy(&request.body).contains(narration));
+                if streamed || tokio::time::Instant::now() >= deadline {
+                    break streamed;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            gateway.release_tool();
+            streamed
+        })
+    });
     let timestamp = now_unix().to_string();
     let signature = slack_signature(&timestamp, &body);
     let status = ingress
@@ -1770,6 +1867,14 @@ async fn slack_tool_run_with_streamed_preamble_answers_exactly_once() {
     let run_id = observer
         .accepted_run_id()
         .expect("the accepted Slack event must identify its submitted run");
+    if let Some(releaser) = releaser {
+        assert!(
+            releaser
+                .await
+                .expect("the releaser task runs to completion"),
+            "the narration paragraph must stream before the tool call is released"
+        );
+    }
     let coordinator = inbound.turn_coordinator_for_test();
     wait_for_run_status_in_scope(&coordinator, &vendor_scope, run_id, TurnStatus::Completed).await;
     let durable_reply = inbound
@@ -1787,7 +1892,7 @@ async fn slack_tool_run_with_streamed_preamble_answers_exactly_once() {
         durable_reply
             .content
             .as_deref()
-            .is_some_and(|content| content.contains(ANSWER)),
+            .is_some_and(|content| content.contains(answer)),
         "the durable transcript finalizes the answer: {durable_reply:?}"
     );
 
@@ -1816,61 +1921,142 @@ async fn slack_tool_run_with_streamed_preamble_answers_exactly_once() {
     // be on the wire when the exactly-once pins below read it.
     assert_delivered_attempt(services, &vendor_scope).await;
     let requests = inbound.captured_network_requests_for_test();
-    let stream_opens: Vec<serde_json::Value> = requests
-        .iter()
-        .filter(|request| request.url.ends_with("/api/chat.startStream"))
-        .map(|request| {
-            serde_json::from_slice(&request.body).expect("chat.startStream body is JSON")
-        })
-        .collect();
-    assert_eq!(
-        stream_opens.len(),
-        1,
-        "one logical reply opens exactly one Agent stream: {stream_opens:?}"
-    );
-    assert!(
-        stream_opens[0]["chunks"]
-            .as_array()
-            .is_some_and(|chunks| !chunks.is_empty()),
-        "the one stream opens carrying renderable content: {}",
-        stream_opens[0]
-    );
-    let streamed: String = requests
-        .iter()
-        .filter(|request| {
-            request.url.ends_with("/api/chat.startStream")
-                || request.url.ends_with("/api/chat.appendStream")
-                || request.url.ends_with("/api/chat.stopStream")
-        })
-        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        streamed.contains(PREAMBLE) && streamed.contains(ANSWER),
-        "the stream carries both streamed phases: {streamed}"
-    );
-    assert!(
-        streamed.contains("task_update"),
-        "the real capability call rides the stream as a task card: {streamed}"
-    );
-    assert_eq!(
+    let bodies = |suffix: &str| -> Vec<(serde_json::Value, String)> {
         requests
             .iter()
-            .filter(|request| request.url.ends_with("/api/chat.stopStream"))
-            .count(),
-        1,
-        "the stream is closed exactly once"
-    );
-    let conventional: Vec<String> = requests
-        .iter()
-        .filter(|request| request.url.ends_with("/api/chat.postMessage"))
-        .map(|request| String::from_utf8_lossy(&request.body).into_owned())
-        .filter(|body| body.contains(ANSWER) || body.contains(PREAMBLE))
-        .collect();
+            .filter(|request| request.url.ends_with(suffix))
+            .map(|request| {
+                let raw = String::from_utf8_lossy(&request.body).into_owned();
+                (
+                    serde_json::from_str(&raw).expect("slack request body is JSON"),
+                    raw,
+                )
+            })
+            .collect()
+    };
+    let stream_opens = bodies("/api/chat.startStream");
+    let appends = bodies("/api/chat.appendStream");
+    let stops = bodies("/api/chat.stopStream");
+    let deletes = bodies("/api/chat.delete");
+    let conventional = bodies("/api/chat.postMessage");
     assert!(
-        conventional.is_empty(),
-        "the terminal answer is never also posted as a conventional message: {conventional:?}"
+        conventional
+            .iter()
+            .all(|(_, raw)| !raw.contains(answer) && !raw.contains(narration)),
+        "the answer is never also posted as a conventional message: {conventional:?}"
     );
+    match expectation {
+        PreambleExpectation::HeldAndNeverSent => {
+            assert_eq!(
+                stream_opens.len(),
+                1,
+                "one logical reply opens exactly one Agent stream: {stream_opens:?}"
+            );
+            assert_eq!(
+                stops.len(),
+                1,
+                "the stream is closed exactly once: {stops:?}"
+            );
+            assert!(deletes.is_empty(), "nothing streamed, nothing to retract");
+            let streamed = stream_opens
+                .iter()
+                .chain(&appends)
+                .chain(&stops)
+                .map(|(_, raw)| raw.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                streamed.contains(answer) && streamed.contains("task_update"),
+                "the stream carries the task card and the answer: {streamed}"
+            );
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| !String::from_utf8_lossy(&request.body).contains(narration)),
+                "held narration reaches slack nowhere"
+            );
+        }
+        PreambleExpectation::StreamedThenRetracted => {
+            // The recorded Slack answers every `chat.startStream` with the
+            // same `ts`, so streams are told apart by wire order, which is
+            // unambiguous: close the stale stream, retract it, open the
+            // fresh one, close that at the terminal.
+            let ordered = requests
+                .iter()
+                .enumerate()
+                .map(|(index, request)| {
+                    (
+                        index,
+                        request.url.rsplit('/').next().unwrap_or_default(),
+                        String::from_utf8_lossy(&request.body).into_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let index_of = |method: &str, nth: usize| {
+                ordered
+                    .iter()
+                    .filter(|(_, seen, _)| *seen == method)
+                    .nth(nth)
+                    .map(|(index, _, _)| *index)
+                    .unwrap_or_else(|| panic!("expected {method} request #{nth}: {ordered:?}"))
+            };
+            assert_eq!(
+                stream_opens.len(),
+                2,
+                "the stale stream and the fresh one: {ordered:?}"
+            );
+            assert_eq!(
+                stops.len(),
+                2,
+                "one close for retraction, one at the terminal: {ordered:?}"
+            );
+            assert_eq!(deletes.len(), 1, "exactly one retraction: {ordered:?}");
+            let stale_open = index_of("chat.startStream", 0);
+            let stale_close = index_of("chat.stopStream", 0);
+            let retraction = index_of("chat.delete", 0);
+            let fresh_open = index_of("chat.startStream", 1);
+            let terminal_close = index_of("chat.stopStream", 1);
+            assert!(
+                stale_open < stale_close
+                    && stale_close < retraction
+                    && retraction < fresh_open
+                    && fresh_open < terminal_close,
+                "close the stale stream, retract it, open the fresh one, close it at the terminal: {ordered:?}"
+            );
+            assert_eq!(
+                stops[0].0["session_status"].as_str(),
+                Some("processing"),
+                "retracting keeps the session processing"
+            );
+            assert_eq!(
+                deletes[0].0["ts"], stops[0].0["ts"],
+                "the retracted message is the stream closed first"
+            );
+            for (index, _, body) in &ordered {
+                if body.contains(narration) {
+                    assert!(
+                        *index < retraction,
+                        "narration only ever reached the retracted stream: {ordered:?}"
+                    );
+                }
+                if body.contains(answer) {
+                    // The fresh stream may open already carrying the answer
+                    // when the reset and the terminal coalesce into one
+                    // reconcile; either way it is never on the stale stream.
+                    assert!(
+                        *index >= fresh_open,
+                        "the answer streams only on the fresh stream: {ordered:?}"
+                    );
+                }
+            }
+            assert!(
+                ordered[fresh_open].2.contains("task_update")
+                    && !ordered[fresh_open].2.contains(narration),
+                "the fresh stream opens with the task card and no narration: {}",
+                ordered[fresh_open].2
+            );
+        }
+    }
 }
 
 /// DEL-10: the bundled Telegram package — one manifest plus the adapter

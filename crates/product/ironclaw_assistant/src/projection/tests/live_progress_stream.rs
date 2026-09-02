@@ -252,7 +252,7 @@ async fn fresh_product_event_stream_compacts_buffered_assistant_text_to_latest_s
         })
         .await
         .unwrap();
-    let expected_id = format!("text:{run_id}");
+    let expected_id = format!("text:{run_id}:1");
     let text_bodies = events
         .iter()
         .filter_map(|event| match event.payload() {
@@ -284,11 +284,27 @@ async fn fresh_product_event_stream_compacts_buffered_assistant_text_to_latest_s
     assert!(!wire.contains(secret_like_token));
 }
 
+/// One live text item per model call. A call the loop went on past (a
+/// capability followed it) was narration: its item is republished once,
+/// flagged, AHEAD of the capability card that proved it, and the next call's
+/// text streams under the next phase id. The transcript row then finalizes
+/// the final call's text in place under that id.
 #[tokio::test]
-async fn model_text_phases_concatenate_under_one_live_id_and_the_transcript_row_wins() {
-    let fixture = live_projection_fixture("webui-text-phases");
+async fn a_finished_calls_text_is_republished_as_narration_ahead_of_the_capability_card() {
+    let fixture = live_projection_fixture("webui-narration");
     let scope = fixture.scope.clone();
     let run_id = TurnRunId::new();
+    let activity_id = CapabilityActivityId::new();
+    let mut subscription = fixture
+        .services
+        .product_event_stream()
+        .subscribe(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(fixture.user_id.clone()),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
     let milestone = |kind| LoopHostMilestone {
         scope: scope.clone(),
         actor: None,
@@ -297,22 +313,68 @@ async fn model_text_phases_concatenate_under_one_live_id_and_the_transcript_row_
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
         kind,
     };
+    let model_completed = || LoopHostMilestoneKind::ModelCompleted {
+        effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("test-model")
+            .unwrap(),
+    };
+    // This run's live items as they are published: text and narration as
+    // `kind@phase:body` (the phase parsed from the item id), tools as
+    // `tool:capability:status`. Other items are ignored.
+    let describe = |item: &ProductProjectionItem| match item {
+        ProductProjectionItem::Text {
+            id,
+            run_id: observed_run_id,
+            body,
+            narration,
+            ..
+        } if *observed_run_id == Some(run_id) => {
+            let phase = id
+                .strip_prefix(&format!("text:{run_id}:"))
+                .unwrap_or_else(|| panic!("live text ids are per phase: {id}"));
+            let kind = if *narration { "narration" } else { "text" };
+            Some(format!("{kind}@{phase}:{body}"))
+        }
+        ProductProjectionItem::CapabilityActivity(activity) => Some(format!(
+            "tool:{}:{:?}",
+            activity.capability_id, activity.status
+        )),
+        _ => None,
+    };
+    // Read live items until `expected` of them arrived (or a second of
+    // silence proves fewer did).
+    async fn read_items(
+        subscription: &mut ironclaw_product_contracts::projection::ProjectionStreamSubscription,
+        describe: impl Fn(&ProductProjectionItem) -> Option<String>,
+        expected: usize,
+    ) -> Vec<String> {
+        let mut seen = Vec::new();
+        while seen.len() < expected {
+            let Ok(next) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next()).await
+            else {
+                break;
+            };
+            let envelope = next
+                .expect("live projection subscription remains open")
+                .expect("live projection event remains valid");
+            if let ProductOutboundPayload::ProjectionUpdate { state } = envelope.payload() {
+                seen.extend(state.items.iter().filter_map(&describe));
+            }
+        }
+        seen
+    }
 
-    // `ModelTextDelta` carries the cumulative text of the current model
-    // call; a second call's text lands after the first call's.
     for kind in [
         LoopHostMilestoneKind::ModelStarted {
             requested_model_profile_id: None,
         },
         LoopHostMilestoneKind::ModelTextDelta {
-            safe_text: "I’ll research".to_string(),
-        },
-        LoopHostMilestoneKind::ModelTextDelta {
             safe_text: "I’ll research this first.".to_string(),
         },
-        LoopHostMilestoneKind::ModelCompleted {
-            effective_model_profile_id: ironclaw_loop_contracts::ModelProfileId::new("test-model")
-                .unwrap(),
+        model_completed(),
+        LoopHostMilestoneKind::CapabilityInvoked {
+            activity_id,
+            capability_id: CapabilityId::new("builtin.http").unwrap(),
         },
         LoopHostMilestoneKind::ModelStarted {
             requested_model_profile_id: None,
@@ -320,9 +382,10 @@ async fn model_text_phases_concatenate_under_one_live_id_and_the_transcript_row_
         LoopHostMilestoneKind::ModelTextDelta {
             safe_text: "Here is the final answer.".to_string(),
         },
+        model_completed(),
         LoopHostMilestoneKind::Completed {
             completion_kind: LoopCompletionKind::FinalReply,
-            exit_id: LoopExitId::new("exit:webui-text-phases").unwrap(),
+            exit_id: LoopExitId::new("exit:webui-narration").unwrap(),
         },
     ] {
         fixture
@@ -331,54 +394,20 @@ async fn model_text_phases_concatenate_under_one_live_id_and_the_transcript_row_
             .await
             .unwrap();
     }
-    let live_text = |events: &[ProductOutboundEnvelope]| {
-        events
-            .iter()
-            .flat_map(|event| match event.payload() {
-                ProductOutboundPayload::ProjectionUpdate { state } => state
-                    .items
-                    .iter()
-                    .filter_map(|item| match item {
-                        ProductProjectionItem::Text {
-                            id,
-                            run_id: observed_run_id,
-                            body,
-                            finalized,
-                        } if *observed_run_id == Some(run_id) => {
-                            Some((id.clone(), body.clone(), *finalized))
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            })
-            .collect::<Vec<_>>()
-    };
-    let events = fixture
-        .services
-        .product_event_stream()
-        .drain(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(fixture.user_id.clone()),
-            scope: scope.clone(),
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
     assert_eq!(
-        live_text(&events),
-        vec![(
-            format!("text:{run_id}"),
-            "I’ll research this first.\n\nHere is the final answer.".to_string(),
-            false,
-        )],
-        "one stable live text id per run carries every model call's text in order"
+        read_items(&mut subscription, describe, 4).await,
+        vec![
+            "text@1:I’ll research this first.".to_string(),
+            "narration@1:I’ll research this first.".to_string(),
+            "tool:builtin.http:Started".to_string(),
+            "text@2:Here is the final answer.".to_string(),
+        ],
+        "the first call streams as the provisional answer, the tool call republishes it as narration ahead of the card, and the final call streams under the next phase"
     );
 
-    // The durable terminal facts finalize the answer. The transcript row is
-    // the shown text's final phase, so finalization converges IN PLACE —
-    // replacing the shown text with its own tail is the rewrite shape that
-    // duplicated answers on every stream surface. A stray delta after the
-    // terminal changes nothing.
+    // The durable terminal facts finalize the final call's text in place —
+    // one republish of the same text under the same id — and a stray delta
+    // after the terminal changes nothing.
     fixture.sink.projection.apply_terminal_facts(
         &scope,
         run_id,
@@ -399,24 +428,10 @@ async fn model_text_phases_concatenate_under_one_live_id_and_the_transcript_row_
         }))
         .await
         .unwrap();
-    let events = fixture
-        .services
-        .product_event_stream()
-        .drain(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(fixture.user_id.clone()),
-            scope: scope.clone(),
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
     assert_eq!(
-        live_text(&events),
-        vec![(
-            format!("text:{run_id}"),
-            "I’ll research this first.\n\nHere is the final answer.".to_string(),
-            false,
-        )],
-        "finalization keeps the shown text (the canonical row is its final phase) and terminal documents ignore stray text"
+        read_items(&mut subscription, describe, 2).await,
+        vec!["text@2:Here is the final answer.".to_string()],
+        "finalization republishes the final phase once, in place; terminal documents ignore stray text"
     );
 }
 
@@ -467,6 +482,7 @@ async fn provider_cadence_text_updates_are_not_visibly_batched() {
         .unwrap();
 
     let mut text_bodies = Vec::new();
+    let mut narration_bodies = Vec::new();
     for _ in 0..8 {
         let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
             .await
@@ -481,12 +497,24 @@ async fn provider_cadence_text_updates_are_not_visibly_batched() {
                 ProductProjectionItem::Text {
                     run_id: observed_run_id,
                     body,
+                    narration,
                     ..
-                } if *observed_run_id == Some(run_id) => text_bodies.push(body.clone()),
+                } if *observed_run_id == Some(run_id) => {
+                    if *narration {
+                        narration_bodies.push(body.clone());
+                    } else {
+                        text_bodies.push(body.clone());
+                    }
+                }
                 ProductProjectionItem::CapabilityActivity(activity)
                     if activity.invocation_id == InvocationId::from_uuid(activity_id.as_uuid()) =>
                 {
                     assert_eq!(text_bodies, ["first", "second", "third"]);
+                    assert_eq!(
+                        narration_bodies,
+                        ["third"],
+                        "the tool call republishes the call's text as narration, once, ahead of the card"
+                    );
                     return;
                 }
                 _ => {}

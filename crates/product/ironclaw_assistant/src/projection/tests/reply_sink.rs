@@ -172,8 +172,8 @@ async fn projection_reply_sink_publishes_each_facet_as_the_live_items_the_browse
     assert!(
         items.iter().any(|item| matches!(
             item,
-            ProductProjectionItem::Text { id, run_id: Some(run), body, finalized: false }
-                if *run == fixture.run_id && body == "Here is " && id == &format!("text:{}", fixture.run_id)
+            ProductProjectionItem::Text { id, run_id: Some(run), body, finalized: false, .. }
+                if *run == fixture.run_id && body == "Here is " && id == &format!("text:{}:1", fixture.run_id)
         )),
         "the cumulative answer becomes the run's live text item: {items:?}"
     );

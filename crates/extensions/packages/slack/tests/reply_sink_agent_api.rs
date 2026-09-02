@@ -275,15 +275,17 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
         "nothing was read back on the happy path"
     );
 
-    // ControlCritical: attention before the paragraph ends → the held text
-    // goes out first (what the run said belongs before the block), then the
-    // block, then `suspended`.
+    // ControlCritical: a gate is raised for a tool call the same model call
+    // produced, so the text ahead of it ("Hi") was narration — the
+    // projection resets the answer before the block lands. The block goes
+    // out alone, then `suspended`; the narration reaches Slack nowhere.
     harness.document.activity_finished(
         item("act-0"),
         ReplyActivityState::Completed,
         Some(preview("Runbook opened")),
         None,
     );
+    assert!(harness.document.reset_answer());
     harness.document.require_attention(ReplyAttention {
         kind: ReplyAttentionKind::Approval,
         headline: text("Approve writing report.md"),
@@ -310,7 +312,6 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
             "chunks": [
                 { "type": "plan_update", "title": "Thinking paused" },
                 { "type": "task_update", "id": "act-0", "title": "Read runbook", "status": "complete" },
-                { "type": "markdown_text", "text": "Hi" },
                 {
                     "type": "markdown_text",
                     "text": "\n> **Approval needed:** Approve writing report.md\n> The run wants to write report.md in your workspace.\n"
@@ -394,7 +395,7 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     // carrying everything still held and `session_status: active`.
     harness
         .document
-        .finalize_answer(answer("HiHello world!"), Vec::new());
+        .finalize_answer(answer("Hello world!"), Vec::new());
     harness.document.complete();
     let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
     assert_applied(&report);
@@ -422,7 +423,7 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     );
     assert_eq!(
         stream.text,
-        "Hi\n> **Approval needed:** Approve writing report.md\n> The run wants to write report.md in your workspace.\nHello world!"
+        "\n> **Approval needed:** Approve writing report.md\n> The run wants to write report.md in your workspace.\nHello world!"
     );
     assert_eq!(
         stream.task_updates.len(),
@@ -443,7 +444,7 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     assert_eq!(checkpoint["terminal"], "applied");
     assert_eq!(checkpoint["session_status"], "active");
     assert_eq!(checkpoint["stream"]["ts"], ts);
-    assert_eq!(checkpoint["stream"]["appended_chars"], 14);
+    assert_eq!(checkpoint["stream"]["appended_chars"], 12);
     assert_eq!(checkpoint["generation"], 1);
     assert!(checkpoint["tasks"]["act-1"].is_string());
 }
@@ -1095,18 +1096,24 @@ async fn an_answer_rewritten_under_the_stream_is_re_presented_in_full() {
     );
     let calls = harness.fake.calls();
     assert_eq!(
-        calls[calls.len() - 2..],
-        ["chat.stopStream", "chat.startStream"],
-        "close the stale stream, open a fresh one"
+        calls[calls.len() - 3..],
+        ["chat.stopStream", "chat.delete", "chat.startStream"],
+        "close the stale stream, retract it, open a fresh one"
     );
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStopStream)[0],
         json!({ "channel": DM, "ts": first, "session_status": "processing" }),
         "re-presenting keeps the session processing"
     );
+    assert_eq!(
+        harness.fake.bodies(SlackWebApiMethod::ChatDelete),
+        [json!({ "channel": DM, "ts": first })],
+        "the stale stream's message is retracted, never left beside the fresh one"
+    );
+    assert_eq!(harness.fake.deleted(), [first]);
     let streams = harness.fake.streams();
-    assert_eq!(streams.len(), 2);
-    assert_eq!(streams[1].1.text, "Goodbye");
+    assert_eq!(streams.len(), 1, "only the fresh stream remains");
+    assert_eq!(streams[0].1.text, "Goodbye");
     // The fresh stream re-presents everything the stale one showed: here
     // the canonical text, complete, so it goes out whole even before the
     // terminal; with no task there is no header to repeat.
@@ -1115,7 +1122,140 @@ async fn an_answer_rewritten_under_the_stream_is_re_presented_in_full() {
         json!([{ "type": "markdown_text", "text": "Goodbye" }]),
         "the re-presented stream opens with the full canonical text"
     );
-    assert!(streams[1].1.plan_updates.is_empty());
+    assert!(streams[0].1.plan_updates.is_empty());
+}
+
+// ── Narration ────────────────────────────────────────────────────────────
+
+/// The common shape: a one-line "Let me look." before the tool call. No
+/// paragraph boundary, so the paragraph hold never sends it; when the tool
+/// call proves it was narration the document resets the answer, and the
+/// stream opens with the plan header and task card alone. The narration
+/// appears in no request.
+#[tokio::test]
+async fn a_held_narration_line_never_reaches_slack() {
+    let mut harness = Harness::dm();
+    harness.append("Let me look.");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    assert!(harness.fake.streams().is_empty(), "held text opens nothing");
+
+    assert!(harness.document.reset_answer());
+    harness
+        .document
+        .activity_started(item("act-0"), text("Search Slack"), None);
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+    let streams = harness.fake.streams();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].1.text, "");
+    assert_eq!(
+        streams[0].1.plan_updates,
+        [json!({ "type": "plan_update", "title": "Thinking" })]
+    );
+    assert!(harness.fake.deleted().is_empty(), "nothing to retract");
+
+    harness.append("Here is what I found.\n\n");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+    assert_eq!(
+        harness.fake.streams()[0].1.text,
+        "Here is what I found.\n\n"
+    );
+    let bodies = harness
+        .fake
+        .requests()
+        .iter()
+        .map(|request| {
+            String::from_utf8_lossy(request.body.as_deref().unwrap_or_default()).into_owned()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        bodies.iter().all(|body| !body.contains("Let me look.")),
+        "narration never reaches slack: {bodies:?}"
+    );
+}
+
+/// Narration that had a complete paragraph before the tool call was already
+/// streamed. The reset makes the shown prefix stale: the sink closes that
+/// stream, retracts its message with `chat.delete`, and opens a fresh stream
+/// carrying the plan header and task card, where the answer then streams.
+#[tokio::test]
+async fn a_streamed_narration_paragraph_is_retracted_when_the_answer_resets() {
+    let mut harness = Harness::dm();
+    harness.append("Let me look at two things first.\n\n");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    let stale = harness.stream_ts();
+    assert_eq!(
+        harness.fake.stream(&stale).expect("stale stream").text,
+        "Let me look at two things first.\n\n"
+    );
+
+    assert!(harness.document.reset_answer());
+    harness
+        .document
+        .activity_started(item("act-0"), text("Search Slack"), None);
+    let before = harness.fake.calls().len();
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+    assert_eq!(
+        harness.fake.calls()[before..],
+        ["chat.stopStream", "chat.delete", "chat.startStream"],
+        "close the stale stream, retract it, open a fresh one"
+    );
+    assert_eq!(harness.fake.deleted(), [stale.as_str()]);
+    let streams = harness.fake.streams();
+    assert_eq!(streams.len(), 1, "only the fresh stream remains");
+    let (fresh, stream) = &streams[0];
+    assert_ne!(fresh, &stale);
+    assert_eq!(stream.text, "", "the fresh stream carries no narration");
+    assert_eq!(
+        stream.task_updates,
+        [
+            json!({ "type": "task_update", "id": "act-0", "title": "Search Slack", "status": "in_progress" })
+        ]
+    );
+
+    harness.append("Here is what I found.\n\n");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+    assert_eq!(
+        harness.fake.calls().last().map(String::as_str),
+        Some("chat.appendStream")
+    );
+    assert_eq!(
+        harness.fake.stream(fresh).expect("fresh stream").text,
+        "Here is what I found.\n\n"
+    );
+}
+
+/// A retraction whose `chat.delete` never gets an answer is retried: the
+/// next reconcile finds the stale stream already closed, deletes it, and
+/// opens the fresh stream exactly once.
+#[tokio::test]
+async fn a_lost_retraction_answer_is_retried_without_a_second_fresh_stream() {
+    let mut harness = Harness::dm();
+    harness.append("Let me look at two things first.\n\n");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    let stale = harness.stream_ts();
+
+    assert!(harness.document.reset_answer());
+    harness
+        .document
+        .activity_started(item("act-0"), text("Search Slack"), None);
+    harness.fake.inject(Fault::TransportBeforeAccept {
+        method: SlackWebApiMethod::ChatDelete,
+    });
+    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Retryable { .. }),
+        "a transport failure on the retraction is retried, got {:?}",
+        report.outcome
+    );
+    let before = harness.fake.calls().len();
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+    assert_eq!(
+        harness.fake.calls()[before..],
+        ["chat.stopStream", "chat.delete", "chat.startStream"],
+        "the retry closes (already closed: tolerated), retracts, and opens once"
+    );
+    assert_eq!(harness.fake.deleted(), [stale]);
+    assert_eq!(harness.fake.streams().len(), 1);
 }
 
 // ── No conventional fallback ─────────────────────────────────────────────
@@ -1380,9 +1520,14 @@ async fn a_terminal_rewrite_re_presents_natively_without_a_conventional_post() {
         harness.fake.posted().is_empty(),
         "a terminal rewrite never posts the answer conventionally"
     );
+    assert_eq!(
+        harness.fake.deleted(),
+        [stale_ts.as_str()],
+        "the stale stream's message is retracted"
+    );
     let streams = harness.fake.streams();
-    assert_eq!(streams.len(), 2, "stale stream + one fresh terminal stream");
-    let fresh_ts = streams[1].0.clone();
+    assert_eq!(streams.len(), 1, "one fresh terminal stream remains");
+    let fresh_ts = streams[0].0.clone();
     assert_ne!(fresh_ts, stale_ts);
     let fresh = harness.fake.stream(&fresh_ts).expect("fresh stream");
     assert_eq!(

@@ -578,6 +578,85 @@ test("useChatEvents: final_reply replaces matching streamed projection bubble", 
   assert.equal(harness.isProcessing, false);
 });
 
+test("useChatEvents: a narration republish marks its phase and leaves the streaming answer alone", () => {
+  const harness = createUseChatEventsHarness();
+  const projection = (items) =>
+    harness.handleEvent({ type: "projection_update", frame: { state: { items } } });
+
+  projection([
+    { run_status: { run_id: "run-1", status: "running" } },
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look." } },
+  ]);
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [message.id, message.isStreaming, message.isNarration]),
+    [["text-text:run-1:1", true, false]],
+    "the first call's text streams as the provisional answer",
+  );
+
+  // The tool call proved the text was narration: the item is republished
+  // flagged under the id it streamed as.
+  projection([
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
+  ]);
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [message.id, message.content, message.isStreaming, message.isNarration]),
+    [["text-text:run-1:1", "Let me look.", false, true]],
+  );
+
+  projection([{ text: { id: "text:run-1:2", run_id: "run-1", body: "Here you go." } }]);
+  // A late republish of the narration must not settle the streaming answer.
+  projection([
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
+  ]);
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [message.id, message.isStreaming, message.isNarration]),
+    [
+      ["text-text:run-1:1", false, true],
+      ["text-text:run-1:2", true, false],
+    ],
+    "one message per phase; the narration is settled, the answer keeps streaming",
+  );
+});
+
+test("useChatEvents: final_reply keeps its run's narration and converges only the streaming answer", () => {
+  const harness = createUseChatEventsHarness();
+  const projection = (items) =>
+    harness.handleEvent({ type: "projection_update", frame: { state: { items } } });
+
+  projection([
+    { run_status: { run_id: "run-1", status: "running" } },
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look." } },
+  ]);
+  projection([
+    { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
+  ]);
+  projection([{ text: { id: "text:run-1:2", run_id: "run-1", body: "Here you" } }]);
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-1",
+        text: "Here you go.",
+        generated_at: "2026-09-02T13:00:00Z",
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => [
+      message.id,
+      message.content,
+      message.isFinalReply,
+      message.isNarration,
+    ]),
+    [
+      ["text-text:run-1:1", "Let me look.", false, true],
+      ["reply-run-1", "Here you go.", true, undefined],
+    ],
+    "the narration stays with the run's activity; the final reply replaces the streaming answer alone",
+  );
+});
+
 test("useChatEvents: final_reply collapses earlier assistant phases from the same run", () => {
   const harness = createUseChatEventsHarness();
 

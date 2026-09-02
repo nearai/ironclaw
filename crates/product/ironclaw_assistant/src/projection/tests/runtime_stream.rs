@@ -301,9 +301,10 @@ async fn initial_runtime_items_order_live_text_before_terminal_status() {
             cursor: cursor(11),
             thread_id,
             items: vec![ironclaw_event_streams::ThreadLiveProjectionItem::Text {
-                id: format!("text:{live_run}"),
+                id: format!("text:{live_run}:1"),
                 run_id: live_run,
                 body: "live text before terminal".to_string(),
+                narration: false,
             }],
         }),
     ));

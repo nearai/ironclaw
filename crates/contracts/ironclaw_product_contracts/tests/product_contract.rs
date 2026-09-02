@@ -34,6 +34,7 @@ fn projection_text_distinguishes_live_from_finalized_transcript_rows() {
             run_id: Some(run_id),
             body: "final".to_string(),
             finalized: true,
+            narration: false,
         }],
     )
     .expect("finalized text state");

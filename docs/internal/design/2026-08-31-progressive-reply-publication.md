@@ -140,16 +140,25 @@ approval/auth context      ─┘
   the host from the trigger class and conversation model at target
   registration.
 - Item identities: activity id = invocation uuid, attachment id = attachment
-  id, answer = one row per run; so every edge can upsert rather than
-  duplicate.
+  id, answer = one row per answer *phase* (one model call), so every edge
+  can upsert rather than duplicate.
+- The answer is the text of the current model call, nothing else. The
+  moment the loop does anything after a call other than end the run — a
+  capability invocation, a gate, another call — that call was not the run's
+  final assistant message: `reset_answer` moves its text into the
+  document's `narration` (under its phase) and the next phase starts empty.
+  This is the transcript's own rule (only the final assistant message is the
+  answer) applied progressively; the terminal fold then confirms in place
+  instead of merging. Narration is a facet of its own — never reasoning —
+  because it is what the assistant said, not how it thought; the WebUI
+  shows it inside the run's activity, a stream surface never shows it.
 - As built: `ReplyProjection::observe_milestone` folds; `ModelTextDelta`
   is the *cumulative* text of the current model call, so the projection
-  tracks finished-call text per run and calls `append_answer` for growth
-  and `rewrite_answer` for anything else (the document carries
-  `append_reasoning`/`close_reasoning` — the open reasoning segment a close
-  seals — a `work: ReplyStatusKind` hint on `set_status`, and
-  `ReplyActivityProvenance` on finished activities so the WebUI keeps
-  provider/runtime/output-size badges). A revision's reconcile point is
+  calls `append_answer` for growth and `rewrite_answer` for anything else
+  (the document carries `append_reasoning`/`close_reasoning` — the open
+  reasoning segment a close seals — a `work: ReplyStatusKind` hint on
+  `set_status`, and `ReplyActivityProvenance` on finished activities so the
+  WebUI keeps provider/runtime/output-size badges). A revision's reconcile point is
   classified from what actually changed (attention transitions and the
   finalized answer are control-critical). Terminal facts come only from
   `apply_terminal_facts` (durable transcript row + committed run status;
@@ -344,6 +353,17 @@ regardless of route; the coordinator is transport-blind.
 - The projection checkpoint fingerprints the answer text (a same-length
   rewrite republishes) and maps `ReplyStatusKind` and activity provenance
   back onto the live item fields the browser already renders.
+- One live text item per model call, keyed `text:{run}:{phase}` — the shape
+  the browser rendered before this design, and the one every streaming
+  protocol shares (a text part per step). A phase the loop went past is
+  republished once under its own id with `narration: true`, ahead of the
+  capability card that proved it and carrying the phase's final text even
+  when coalesced revisions skipped its tail. The browser folds flagged items
+  into the run's collapsible activity (ahead of the tool card), keeps the
+  unflagged trailing phase as the streaming bubble, converges the durable
+  final reply into that bubble by identity, and keeps narration through the
+  final reply the way it keeps reasoning and tool cards. The browser never
+  infers narration from message order, which frame replay makes unreliable.
 
 ## 9. Slack native Agent *(implemented in `crates/extensions/packages/slack`; live workspace untouched)*
 
@@ -366,9 +386,18 @@ regardless of route; the coordinator is transport-blind.
   `markdown_text` chunk as its own block, so progress text goes out by whole
   paragraph: a delta is published through its last blank line outside a code
   fence, a paragraph past `SLACK_TEXT_HOLD_MAX_CHARS` flushes at its last
-  sentence end, and the terminal, a finalized canonical answer, or a new
-  attention block flushes everything still held (what the run said belongs
-  before the block). The `plan_update` lifecycle label rides only with real
+  sentence end, and the terminal or a finalized canonical answer flushes
+  everything still held. Nothing flushes ahead of an attention block: a gate
+  is raised for a tool call the same model call produced, so text ahead of
+  it is narration by construction and the document resets it. That hold is
+  also why a one-line narration never reaches Slack at all. A narration
+  paragraph already streamed when the loop went on, or a canonical text that
+  is not an extension of the shown prefix, is a rewrite under the stream:
+  the sink closes the stale stream, retracts its message with `chat.delete`
+  (a message already gone is the retraction it wanted; a lost answer
+  retries), and opens a fresh stream carrying the plan header, task cards,
+  and whatever text the document shows now — so exactly one stream is ever
+  left standing and it never shows narration. The `plan_update` lifecycle label rides only with real
   `task_update` cards, because Slack renders a header without a task as an
   empty message: a tool-less answer has no header, its thinking state is the
   session status, and no synthetic task is ever invented to make one render
@@ -471,7 +500,7 @@ regardless of route; the coordinator is transport-blind.
 | Projection composes bounded, redacted documents; terminal from durable facts; phases; disclosure; capacity | `crates/product/ironclaw_assistant/src/projection/reply/tests.rs` | `cargo test -p ironclaw_assistant --lib -- projection::reply` |
 | Publication worker: stream vs message cadence, session target, disclosure, retry/ambiguous/permanent/unauthorized/stop, another-node resume with persisted checkpoint and generation change, held lease, heartbeat, retry checkpoint, microburst coalescing, attachments — plus the corrected order (desired revision durable before every provider call; provider-independent preparation before the claim; the sink timeout clamped to the lease TTL), the boot sweep resuming an open publication with no journal signal, and the journal acknowledgement awaited behind a stable observer id | `crates/product/ironclaw_assistant/src/delivery_coordinator/publication/tests.rs` (24) | `cargo test -p ironclaw_assistant --lib -- publication` |
 | Observer cutover: answer via the sink, notices/prompts via the delivery half, nothing-to-report, attachments, resolution-ack dedupe, working indicator retraction after settlement | `crates/product/ironclaw_assistant/tests/run_delivery_contract.rs` (79), `tests/outbound_delivery_contract.rs` (35) | `cargo test -p ironclaw_assistant` |
-| WebUI live items from the projection sink; cursor rebasing; text phases under one id; tool failure redaction | `crates/product/ironclaw_assistant/src/projection/tests/{reply_sink,live_progress_stream,runtime_stream}.rs` | `cargo test -p ironclaw_assistant --lib -- projection` |
+| WebUI live items from the projection sink; cursor rebasing; one text item per phase with narration flagged ahead of the capability card; tool failure redaction | `crates/product/ironclaw_assistant/src/projection/tests/{reply_sink,live_progress_stream,runtime_stream}.rs` | `cargo test -p ironclaw_assistant --lib -- projection` |
 | Telegram terminal-only sink; Slack Agent sink against a stateful fake Agent API (incl. the fail-closed ambiguous `chat.startStream` — never a second stream, never a conventional post beside a possible ghost — and the no-resend rule when read-back is unavailable for a text-carrying pending); canonical `app_manifest.json` / docs / egress lockstep | `crates/extensions/packages/telegram/src/tests/reply.rs`, `crates/extensions/packages/slack/tests/{reply_sink_agent_api,agent_app_manifest_lockstep}.rs` | `cargo test -p ironclaw_telegram_extension`, `cargo test -p ironclaw_slack_extension` |
 | Activation refuses a declared reply without a real sink; host bridge binds no fake sink | `crates/extensions/ironclaw_extension_host/src/{entrypoint,generic_host}.rs` tests | `cargo test -p ironclaw_extension_host` |
 | Channel-host Slack DM journeys ride the Agent wire end-to-end through the production assembly: gate/auth prompts as streamed attention with the message-path copy (approval instruction; auth headline + private-DM setup link; `Shared` strips the link), working state as session status (`processing`/`suspended`), final replies at the single stream close, exactly-once under gate-resolution ack races, and a bare threaded `approve` resolving via the observer's source-conversation route record with no delivered prompt message | `crates/extensions/ironclaw_extension_host/src/channel_host/e2e_tests.rs` (54, incl. `bare_approve_in_dm_resolves_gate_recorded_by_observer`); the scripted coordinator feeds the shared `ReplyProjection` the loop's milestones, standing in for `ReplyProjectionMilestoneSink` | `cargo test -p ironclaw_extension_host` |

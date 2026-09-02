@@ -198,14 +198,18 @@ pub(super) fn product_items_for_live_update(
         .items
         .iter()
         .filter_map(|item| match item {
-            ThreadLiveProjectionItem::Text { id, run_id, body } => {
-                Some(ProductProjectionItem::Text {
-                    id: id.clone(),
-                    run_id: Some(*run_id),
-                    body: body.clone(),
-                    finalized: false,
-                })
-            }
+            ThreadLiveProjectionItem::Text {
+                id,
+                run_id,
+                body,
+                narration,
+            } => Some(ProductProjectionItem::Text {
+                id: id.clone(),
+                run_id: Some(*run_id),
+                body: body.clone(),
+                finalized: false,
+                narration: *narration,
+            }),
             ThreadLiveProjectionItem::Thinking { id, run_id, body } => {
                 Some(ProductProjectionItem::Thinking {
                     id: id.clone(),
@@ -354,8 +358,12 @@ fn thinking_id(run_id: TurnRunId, segment_index: u64) -> String {
     format!("thinking:{run_id}:{segment_index}")
 }
 
-fn legacy_text_id(run_id: TurnRunId) -> String {
-    format!("text:{run_id}")
+/// Stable per-(run, answer-phase) item id: one live text item per model
+/// call, so a call the loop went on past keeps its own item (re-homed as
+/// narration) while the next call's text streams as a new one. The format
+/// the browser keyed on before replies were published progressively.
+fn text_phase_id(run_id: TurnRunId, phase: u64) -> String {
+    format!("text:{run_id}:{phase}")
 }
 
 fn work_summary_id(run_id: TurnRunId, sequence: u64) -> String {
@@ -402,6 +410,14 @@ struct ProjectionReplyCheckpoint {
     answer_fingerprint: u64,
     #[serde(default)]
     answer_finalized: bool,
+    /// The answer phase the three fields above describe; a new phase starts
+    /// its own text item from nothing.
+    #[serde(default)]
+    answer_phase: u64,
+    /// How many narration entries (calls the loop went on past) have been
+    /// republished under their phase id with the narration flag.
+    #[serde(default)]
+    narration_published: usize,
     /// How many CLOSED reasoning segments have been published with their
     /// final text (the open tail is tracked by fingerprint below, because
     /// `append_reasoning` grows it in place without changing the count).
@@ -531,6 +547,38 @@ impl LiveProjectionPublisher {
             checkpoint.open_reasoning_fingerprint = 0;
         }
 
+        // A call the loop went on past is narration: it republishes once,
+        // under the id it streamed as, flagged so the browser re-homes it
+        // into the run's activity — ahead of the activity that proved it
+        // narration and of the next phase's text. The republish carries the
+        // phase's final text even when coalesced revisions skipped its tail.
+        for entry in document
+            .narration
+            .iter()
+            .skip(checkpoint.narration_published)
+        {
+            let sequence = self.next_live_sequence();
+            self.publish_live_item(
+                owner,
+                scope,
+                sequence,
+                ThreadLiveProjectionItem::Text {
+                    id: text_phase_id(run_id, entry.phase),
+                    run_id,
+                    body: entry.text.as_str().to_string(),
+                    narration: true,
+                },
+            );
+        }
+        checkpoint.narration_published = document.narration.len();
+
+        // The current phase's text under its own id. A new phase starts
+        // from nothing; the earlier phase's item keeps the text it showed.
+        if document.answer.phase != checkpoint.answer_phase {
+            checkpoint.answer_len = 0;
+            checkpoint.answer_fingerprint = 0;
+            checkpoint.answer_finalized = false;
+        }
         let answer = document.answer.text.as_str();
         let answer_fingerprint = text_fingerprint(answer);
         if !answer.is_empty()
@@ -544,12 +592,14 @@ impl LiveProjectionPublisher {
                 scope,
                 sequence,
                 ThreadLiveProjectionItem::Text {
-                    id: legacy_text_id(run_id),
+                    id: text_phase_id(run_id, document.answer.phase),
                     run_id,
                     body: answer.to_string(),
+                    narration: false,
                 },
             );
         }
+        checkpoint.answer_phase = document.answer.phase;
         checkpoint.answer_len = answer.len();
         checkpoint.answer_fingerprint = answer_fingerprint;
         checkpoint.answer_finalized = document.answer.finalized;

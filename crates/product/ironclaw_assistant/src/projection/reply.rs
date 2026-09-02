@@ -148,10 +148,6 @@ struct RunReply {
     document: ReplyDocument,
     revision: u64,
     terminal_pending: bool,
-    /// The answer text of the model calls that already finished, in order.
-    /// `ModelTextDelta` carries the *cumulative* text of the current call,
-    /// so the document's answer is this prefix plus that text.
-    finished_phases_text: String,
 }
 
 impl RunReply {
@@ -161,39 +157,32 @@ impl RunReply {
             document: ReplyDocument::default(),
             revision: 0,
             terminal_pending: false,
-            finished_phases_text: String::new(),
         }
     }
 
-    /// Move the answer to `finished phases + current`: an append when the new
-    /// text extends what is shown, a rewrite otherwise (a model call that
-    /// restarted its text, or a rewrite under the stream).
-    fn fold_answer(&mut self, current_phase_text: &str, folded: &mut Folded) {
+    /// The answer is the current model call's cumulative text (that is what
+    /// `ModelTextDelta` carries): an append when the new text extends what
+    /// is shown, a rewrite otherwise (a call that restarted its text, or a
+    /// rewrite under the stream).
+    fn fold_answer(&mut self, call_text: &str, folded: &mut Folded) {
         let shown = self.document.answer.text.as_str();
-        let mut wanted = self.finished_phases_text.clone();
-        if !wanted.is_empty()
-            && !current_phase_text.is_empty()
-            && !wanted.ends_with(char::is_whitespace)
-        {
-            wanted.push_str("\n\n");
-        }
-        wanted.push_str(current_phase_text);
-        if wanted == shown {
+        if call_text == shown {
             return;
         }
-        if let Some(suffix) = wanted.strip_prefix(shown)
+        if let Some(suffix) = call_text.strip_prefix(shown)
             && !self.document.answer.truncated
         {
             folded.note(self.document.append_answer(suffix));
         } else {
-            folded.note(self.document.rewrite_answer(&wanted));
+            folded.note(self.document.rewrite_answer(call_text));
         }
     }
 
-    /// A model call ended (or another began): whatever the answer shows is
-    /// now finished text; the next call's cumulative text lands after it.
-    fn close_text_phase(&mut self) {
-        self.finished_phases_text = self.document.answer.text.as_str().to_string();
+    /// The current call failed: its fragment is neither answer nor narration.
+    fn discard_answer(&mut self, folded: &mut Folded) {
+        if !self.document.answer.text.as_str().is_empty() {
+            folded.note(self.document.rewrite_answer(""));
+        }
     }
 
     /// Anything that is not more reasoning ends the open reasoning segment:
@@ -532,6 +521,13 @@ fn fold_milestone(
     if !matches!(kind, LoopHostMilestoneKind::ModelReasoningDelta { .. }) {
         run.close_open_reasoning(folded);
     }
+    // The loop went on after the last model call: that call's text was
+    // narration, not the answer — the document moves it out of the answer
+    // (`reset_answer`) before the arm below records what the loop did next,
+    // so a capability row lands after the narration that announced it.
+    if loop_continued_past_the_model_call(kind) {
+        folded.note(run.document.reset_answer());
+    }
     match kind {
         LoopHostMilestoneKind::IterationStarted { iteration } => {
             if *iteration <= 1 {
@@ -551,7 +547,6 @@ fn fold_milestone(
                 run.document
                     .note_phase(ironclaw_extension_contracts::reply::ReplyPhase::Thinking),
             );
-            run.close_text_phase();
         }
         LoopHostMilestoneKind::ModelReasoningDelta { safe_delta } => {
             let text = sanitize_model_visible_text(safe_delta.as_str());
@@ -572,16 +567,13 @@ fn fold_milestone(
             }
             run.fold_answer(&stripped, folded);
         }
-        LoopHostMilestoneKind::ModelCompleted { .. } => run.close_text_phase(),
+        // A completed call stays the answer until the loop proves otherwise
+        // (see `loop_continued_past_the_model_call`) or the run ends.
+        LoopHostMilestoneKind::ModelCompleted { .. } => {}
         // The failed call's fragment is not finished text: drop it so a
-        // retried call (a fresh `ModelStarted`) starts from the phases that
-        // actually completed instead of freezing "Wor\n\nWorld" into the reply.
-        LoopHostMilestoneKind::ModelFailed { .. } => {
-            let finished = run.finished_phases_text.clone();
-            if run.document.answer.text.as_str() != finished {
-                folded.note(run.document.rewrite_answer(&finished));
-            }
-        }
+        // retried call (a fresh `ModelStarted`) starts from nothing instead
+        // of freezing "Wor" into the reply.
+        LoopHostMilestoneKind::ModelFailed { .. } => run.discard_answer(folded),
         LoopHostMilestoneKind::CapabilityInvoked {
             activity_id,
             capability_id,
@@ -704,6 +696,21 @@ fn fold_milestone(
     false
 }
 
+/// Milestones that prove the loop went on after a model call — so that call
+/// was not the run's final assistant message and its text was narration.
+/// A gate counts: it is raised for a tool call the same model call produced.
+fn loop_continued_past_the_model_call(kind: &LoopHostMilestoneKind) -> bool {
+    matches!(
+        kind,
+        LoopHostMilestoneKind::ModelStarted { .. }
+            | LoopHostMilestoneKind::CapabilityInvoked { .. }
+            | LoopHostMilestoneKind::CapabilityCompleted { .. }
+            | LoopHostMilestoneKind::CapabilityFailed { .. }
+            | LoopHostMilestoneKind::GateBlocked { .. }
+            | LoopHostMilestoneKind::Blocked { .. }
+    )
+}
+
 /// A finish for a row this document never saw start (the invoke milestone was
 /// lost, or only the terminal one reached us) still needs its title: the
 /// capability id, not the activity id.
@@ -761,16 +768,18 @@ fn fold_terminal_facts(run: &mut RunReply, facts: &TerminalReplyFacts, folded: &
                 .map(sanitize_model_visible_text)
                 .unwrap_or_default();
             // The transcript row finalizes only the run's FINAL assistant
-            // message. When the progressive answer already ends with it (the
-            // earlier model calls' streamed text precedes it), finalize IN
-            // PLACE: replacing the shown text with its own tail would break
-            // every stream presentation's prefix-extension invariant — a
-            // stream sink's terminal reconcile would see a rewrite and
-            // present the answer a second time beside the stream. A
-            // canonical text the shown text does not end with is a genuine
-            // rewrite and replaces it; so does any text once the progressive
-            // bound truncated, because the canonical row is the only
-            // complete copy.
+            // message — the same text the progressive answer holds, since
+            // every earlier call's text was demoted to thinking when the
+            // loop went on. Finalize IN PLACE whenever the shown text ends
+            // with the canonical one (a trailing-whitespace difference, or
+            // the empty canonical of a run with nothing to report):
+            // replacing it with its own tail would break every stream
+            // presentation's prefix-extension invariant — a stream sink's
+            // terminal reconcile would see a rewrite and present the answer
+            // a second time beside the stream. A canonical text the shown
+            // text does not end with is a genuine rewrite and replaces it;
+            // so does any text once the progressive bound truncated, because
+            // the canonical row is the only complete copy.
             let shown = run.document.answer.text.as_str();
             let text = if !run.document.answer.truncated && shown.ends_with(canonical.as_str()) {
                 shown.to_string()

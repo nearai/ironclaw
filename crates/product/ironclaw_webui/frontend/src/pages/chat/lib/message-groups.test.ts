@@ -558,3 +558,70 @@ test("groupMessages: activity run falls back to tool update timestamps", () => {
     ["tool-web", "tool-list", "tool-nearai"],
   );
 });
+
+test("groupMessages: narration phases render inside the activity run ahead of their tool card, the streaming answer stays a bubble", () => {
+  const grouped = groupMessages([
+    { id: "u1", role: "user", content: "find it", turnRunId: "run-1" },
+    {
+      id: "text-text:run-1:1",
+      role: "assistant",
+      content: "Let me look.",
+      isFinalReply: false,
+      isStreaming: false,
+      isNarration: true,
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-read",
+      role: "tool_activity",
+      toolName: "read",
+      turnRunId: "run-1",
+    },
+    {
+      id: "text-text:run-1:2",
+      role: "assistant",
+      content: "Here you go.",
+      isFinalReply: false,
+      isStreaming: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.deepEqual(
+    grouped.map((item) => (item.type === "activity-run" ? item.id : item.message.id)),
+    ["u1", "activity-run-text-text:run-1:1", "text-text:run-1:2"],
+  );
+  assert.deepEqual(
+    grouped[1].activity.map((item) => item.id),
+    ["text-text:run-1:1", "tool-read"],
+    "the narration sits ahead of the tool call that followed it",
+  );
+});
+
+test("groupMessages: a final reply keeps its run's narration inside the activity run", () => {
+  const grouped = groupMessages([
+    { id: "u1", role: "user", content: "find it", turnRunId: "run-1" },
+    {
+      id: "text-text:run-1:1",
+      role: "assistant",
+      content: "Let me look.",
+      isFinalReply: false,
+      isStreaming: false,
+      isNarration: true,
+      turnRunId: "run-1",
+    },
+    { id: "tool-read", role: "tool_activity", toolName: "read", turnRunId: "run-1" },
+    {
+      id: "reply-run-1",
+      role: "assistant",
+      content: "Here you go.",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.deepEqual(
+    grouped.map((item) => (item.type === "activity-run" ? item.id : item.message.id)),
+    ["u1", "activity-run-text-text:run-1:1", "reply-run-1"],
+  );
+});

@@ -127,6 +127,8 @@ struct State {
     /// Slack's shape for a message rendered only from blocks.
     read_back_omits_text: bool,
     streams: BTreeMap<String, FakeStream>,
+    /// `ts` of every message deleted through `chat.delete`, in order.
+    deleted: Vec<String>,
     sessions: Vec<SessionCall>,
     posted: Vec<PostedMessage>,
     uploads: BTreeMap<String, StagedUpload>,
@@ -196,6 +198,11 @@ impl FakeSlackAgentApi {
             .iter()
             .map(|(ts, stream)| (ts.clone(), stream.clone()))
             .collect()
+    }
+
+    /// Messages retracted through `chat.delete`, in order.
+    pub fn deleted(&self) -> Vec<String> {
+        self.state.lock().unwrap().deleted.clone()
     }
 
     pub fn stream(&self, ts: &str) -> Option<FakeStream> {
@@ -568,8 +575,17 @@ fn handle(
             }
             ok(json!({ "ok": true, "file": file }))
         }
-        SlackWebApiMethod::ChatDelete
-        | SlackWebApiMethod::ConversationsOpen
+        SlackWebApiMethod::ChatDelete => {
+            let Some(ts) = field("ts") else {
+                return Ok(slack_error("message_not_found"));
+            };
+            if state.streams.remove(&ts).is_none() {
+                return Ok(slack_error("message_not_found"));
+            }
+            state.deleted.push(ts);
+            ok(json!({ "ok": true }))
+        }
+        SlackWebApiMethod::ConversationsOpen
         | SlackWebApiMethod::ReactionsAdd
         | SlackWebApiMethod::ReactionsRemove => ok(json!({ "ok": true })),
     })

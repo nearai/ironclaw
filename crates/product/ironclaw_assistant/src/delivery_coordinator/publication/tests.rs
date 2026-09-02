@@ -1287,11 +1287,13 @@ async fn a_text_microburst_coalesces_and_the_latest_text_precedes_tool_activity(
         .iter()
         .find(|r| !r.revision.document.activities.is_empty())
         .unwrap();
+    let document = &with_tool.revision.document;
     assert_eq!(
-        with_tool.revision.document.answer.text.as_str(),
-        "partial answer 63",
-        "the reconcile that shows the tool already carries the latest text: desired state, never a stale interleaving"
+        document.narration.last().map(|entry| entry.text.as_str()),
+        Some("partial answer 63"),
+        "the reconcile that shows the tool already carries the latest text — as narration, since the tool call proved it was not the answer: desired state, never a stale interleaving"
     );
+    assert_eq!(document.answer.text.as_str(), "");
 }
 
 // ─── Terminal attachments: workspace bytes ride the terminal reconcile ─────

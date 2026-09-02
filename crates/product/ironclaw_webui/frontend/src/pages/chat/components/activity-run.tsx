@@ -19,7 +19,8 @@ type ActivityItemProps = {
   activeRunId: string | null;
 };
 
-type ReasoningItemProps = {
+type NoteItemProps = {
+  icon: "spark" | "chat";
   content?: string;
   streaming?: boolean;
 };
@@ -72,11 +73,18 @@ function ActivityItem({ item, activeRunId }: ActivityItemProps) {
     const isStreaming =
       messageBelongsToActiveRun(item, activeRunId);
     return (
-      <ReasoningItem
+      <NoteItem
+        icon="spark"
         content={item.content}
         streaming={isStreaming}
       />
     );
+  }
+
+  if (item.role === "assistant" && item.isNarration === true) {
+    // A model call the loop went on past: what the assistant said before
+    // the tool call that followed it. Settled text, never streaming.
+    return <NoteItem icon="chat" content={item.content} />;
   }
 
   if (item.role === "tool_activity" || hasToolCalls(item)) {
@@ -89,14 +97,14 @@ function ActivityItem({ item, activeRunId }: ActivityItemProps) {
   return null;
 }
 
-function ReasoningItem({ content, streaming = false }: ReasoningItemProps) {
+function NoteItem({ icon, content, streaming = false }: NoteItemProps) {
   if (!content) return null;
   return (
-    <div className="flex min-w-0 gap-3">
+    <div className="flex min-w-0 gap-3" data-testid={`activity-${icon === "spark" ? "reasoning" : "narration"}`}>
       <div
         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/10 bg-iron-800 text-iron-100"
       >
-        <Icon name="spark" className="h-4 w-4" />
+        <Icon name={icon} className="h-4 w-4" />
       </div>
       <div className="min-w-0 flex-1 border-l-2 border-white/10 pl-3 text-iron-300 v2-chat-readable-width">
         <MarkdownRenderer

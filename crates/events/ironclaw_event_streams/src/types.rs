@@ -176,6 +176,11 @@ pub enum ThreadLiveProjectionItem {
         id: String,
         run_id: TurnRunId,
         body: String,
+        /// True once the loop went on past the model call that produced this
+        /// text: it is narration inside the run's activity, not the answer.
+        /// Additive; absent for pre-existing producers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        narration: bool,
     },
     Thinking {
         id: String,

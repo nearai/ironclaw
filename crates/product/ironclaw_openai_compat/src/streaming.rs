@@ -148,16 +148,20 @@ fn chat_sse_stream(
                         let payload_view = payload_view(envelope.payload());
                         match payload_view.text {
                             PayloadText::None => {}
-                            PayloadText::Update(text) => match state.delta_for(text) {
-                                Ok(Some(delta)) => yield Ok(chat_text_delta_event(&public_id, created, &model, delta)),
-                                Ok(None) => {}
-                                Err(error) => {
-                                    yield Ok(openai_error_event(error));
-                                    return;
+                            PayloadText::Updates(updates) => {
+                                for update in updates {
+                                    match state.delta_for(update) {
+                                        Ok(Some(delta)) => yield Ok(chat_text_delta_event(&public_id, created, &model, delta)),
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            yield Ok(openai_error_event(error));
+                                            return;
+                                        }
+                                    }
                                 }
-                            },
+                            }
                             PayloadText::Final(text) => {
-                                match state.delta_for(text) {
+                                match state.delta_for(TextUpdate::final_reply(text)) {
                                     Ok(Some(delta)) => yield Ok(chat_text_delta_event(&public_id, created, &model, delta)),
                                     Ok(None) => {}
                                     Err(error) => {
@@ -245,24 +249,28 @@ fn response_sse_stream(
                         let payload_view = payload_view(envelope.payload());
                         match payload_view.text {
                             PayloadText::None => {}
-                            PayloadText::Update(text) => match state.delta_for(text) {
-                                Ok(Some(delta)) => {
-                                    yield Ok(response_text_delta_event(
-                                        &public_id,
-                                        &item_id,
-                                        sequence_number,
-                                        delta,
-                                    ));
-                                    sequence_number += 1;
+                            PayloadText::Updates(updates) => {
+                                for update in updates {
+                                    match state.delta_for(update) {
+                                        Ok(Some(delta)) => {
+                                            yield Ok(response_text_delta_event(
+                                                &public_id,
+                                                &item_id,
+                                                sequence_number,
+                                                delta,
+                                            ));
+                                            sequence_number += 1;
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            yield Ok(response_stream_error_event(error));
+                                            return;
+                                        }
+                                    }
                                 }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    yield Ok(response_stream_error_event(error));
-                                    return;
-                                }
-                            },
+                            }
                             PayloadText::Final(text) => {
-                                match state.delta_for(text) {
+                                match state.delta_for(TextUpdate::final_reply(text)) {
                                     Ok(Some(delta)) => {
                                         yield Ok(response_text_delta_event(
                                             &public_id,
@@ -279,7 +287,7 @@ fn response_sse_stream(
                                     }
                                 }
                                 if !state.is_empty() {
-                                    yield Ok(response_text_done_event(&item_id, sequence_number, state.text()));
+                                    yield Ok(response_text_done_event(&item_id, sequence_number, &state.text()));
                                     sequence_number += 1;
                                 }
                                 yield Ok(response_terminal_event(
@@ -289,7 +297,7 @@ fn response_sse_stream(
                                     created,
                                     model.clone(),
                                     OpenAiResponseStatus::Completed,
-                                    state.text(),
+                                    &state.text(),
                                 ));
                                 return;
                             }
@@ -298,7 +306,7 @@ fn response_sse_stream(
                             TerminalStatus::None => {}
                             TerminalStatus::Completed => {
                                 if !state.is_empty() {
-                                    yield Ok(response_text_done_event(&item_id, sequence_number, state.text()));
+                                    yield Ok(response_text_done_event(&item_id, sequence_number, &state.text()));
                                     sequence_number += 1;
                                 }
                                 yield Ok(response_terminal_event(
@@ -308,7 +316,7 @@ fn response_sse_stream(
                                     created,
                                     model.clone(),
                                     OpenAiResponseStatus::Completed,
-                                    state.text(),
+                                    &state.text(),
                                 ));
                                 return;
                             }
@@ -320,7 +328,7 @@ fn response_sse_stream(
                                     created,
                                     model.clone(),
                                     OpenAiResponseStatus::Failed,
-                                    state.text(),
+                                    &state.text(),
                                 ));
                                 return;
                             }
@@ -332,7 +340,7 @@ fn response_sse_stream(
                                     created,
                                     model.clone(),
                                     OpenAiResponseStatus::Cancelled,
-                                    state.text(),
+                                    &state.text(),
                                 ));
                                 return;
                             }
@@ -398,13 +406,64 @@ fn stream_timeout_error() -> OpenAiCompatHttpError {
     OpenAiCompatHttpError::from_kind(503, true, OpenAiCompatErrorKind::ServiceUnavailable, None)
 }
 
+/// One text update from the projection: the phase it belongs to (the live
+/// text item id — one per model call) and that phase's cumulative body. The
+/// durable transcript row (finalized) and the final-reply payload belong to
+/// whichever phase is current: they confirm it, never start one.
+struct TextUpdate<'a> {
+    phase: &'a str,
+    body: &'a str,
+    confirms_current_phase: bool,
+}
+
+impl<'a> TextUpdate<'a> {
+    fn final_reply(body: &'a str) -> Self {
+        Self {
+            phase: "",
+            body,
+            confirms_current_phase: true,
+        }
+    }
+}
+
+/// Between two answer phases (a model call the loop went on past, then the
+/// next call): the completion stays one message, so the phases read as
+/// paragraphs rather than as a rewrite the client cannot express.
+const PHASE_SEPARATOR: &str = "\n\n";
+
 #[derive(Default)]
 struct TextDeltaState {
+    /// The text of the phases already closed, each followed by the separator.
+    closed: String,
+    /// The phase `text` tracks, once any live text arrived.
+    phase: Option<String>,
+    /// Every phase seen: a closed phase republished (its narration flag
+    /// arriving) is already streamed and changes nothing.
+    seen: Vec<String>,
+    /// Text streamed for the current phase.
     text: String,
 }
 
 impl TextDeltaState {
-    fn delta_for(&mut self, next: &str) -> Result<Option<String>, OpenAiCompatHttpError> {
+    fn delta_for(
+        &mut self,
+        update: TextUpdate<'_>,
+    ) -> Result<Option<String>, OpenAiCompatHttpError> {
+        let mut separator = "";
+        if !update.confirms_current_phase && self.phase.as_deref() != Some(update.phase) {
+            if self.seen.iter().any(|seen| seen == update.phase) {
+                return Ok(None);
+            }
+            if !self.text.is_empty() {
+                self.closed.push_str(&self.text);
+                self.closed.push_str(PHASE_SEPARATOR);
+                separator = PHASE_SEPARATOR;
+            }
+            self.seen.push(update.phase.to_string());
+            self.phase = Some(update.phase.to_string());
+            self.text.clear();
+        }
+        let next = update.body;
         let consumed = self.text.len();
         if next.len() == consumed {
             if next.as_bytes() != self.text.as_bytes() {
@@ -430,11 +489,12 @@ impl TextDeltaState {
         }
         let delta = &next[consumed..];
         self.text.push_str(delta);
-        Ok(Some(delta.to_string()))
+        Ok(Some(format!("{separator}{delta}")))
     }
 
-    fn text(&self) -> &str {
-        &self.text
+    /// Everything streamed so far: the closed phases, then the current one.
+    fn text(&self) -> String {
+        format!("{}{}", self.closed, self.text)
     }
 
     fn is_empty(&self) -> bool {
@@ -452,7 +512,7 @@ enum TerminalStatus {
 
 enum PayloadText<'a> {
     None,
-    Update(&'a str),
+    Updates(Vec<TextUpdate<'a>>),
     Final(&'a str),
 }
 
@@ -482,31 +542,37 @@ fn payload_view(payload: &ProductOutboundPayload) -> PayloadView<'_> {
 }
 
 fn projection_state_view(state: &ProductProjectionState) -> PayloadView<'_> {
-    let mut text = PayloadText::None;
+    let mut updates = Vec::new();
     let mut terminal_status = TerminalStatus::None;
-    for item in state.items.iter().rev() {
+    for item in &state.items {
         match item {
-            ProductProjectionItem::Text { body, .. } if matches!(text, PayloadText::None) => {
-                text = PayloadText::Update(body.as_str());
-            }
-            ProductProjectionItem::RunStatus { status, .. }
-                if matches!(terminal_status, TerminalStatus::None) =>
-            {
+            ProductProjectionItem::Text {
+                id,
+                body,
+                finalized,
+                ..
+            } => updates.push(TextUpdate {
+                phase: id.as_str(),
+                body: body.as_str(),
+                confirms_current_phase: *finalized,
+            }),
+            ProductProjectionItem::RunStatus { status, .. } => {
                 terminal_status = match status.as_str() {
                     "completed" => TerminalStatus::Completed,
                     "failed" | "killed" => TerminalStatus::Failed,
                     "cancelled" => TerminalStatus::Cancelled,
-                    _ => TerminalStatus::None,
+                    _ => terminal_status,
                 };
             }
             _ => {}
         }
-        if !matches!(text, PayloadText::None) && !matches!(terminal_status, TerminalStatus::None) {
-            break;
-        }
     }
     PayloadView {
-        text,
+        text: if updates.is_empty() {
+            PayloadText::None
+        } else {
+            PayloadText::Updates(updates)
+        },
         terminal_status,
     }
 }

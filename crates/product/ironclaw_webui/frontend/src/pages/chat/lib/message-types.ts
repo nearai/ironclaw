@@ -43,6 +43,10 @@ export type ChatMessage = {
   error?: string;
   errorKey?: string;
   toolCalls?: unknown[];
+  /** Live assistant text the loop went on past (a tool call followed it):
+   *  progress narration that belongs with the run's activity, not the
+   *  answer. Set from the projection's `narration` flag. */
+  isNarration?: boolean;
   [key: string]: unknown;
 };
 
