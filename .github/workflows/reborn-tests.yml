@@ -230,10 +230,10 @@ jobs:
       LLM_USE_CODEX_AUTH: "false"
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
-      # RUST_* and CARGO_* keys are set on the test step, not here: rust-cache
-      # hashes every job-level CARGO*/RUST* variable into its cache key, and a
-      # per-lane stack size would split the one shared `reborn-hermetic`
-      # lineage into keys no other lane can restore.
+      # RUST_* keys are set on the test step, not here: rust-cache hashes
+      # every job-level CARGO*/RUST* variable into its cache key, and a
+      # per-lane stack size or bootstrap flag would split the one shared
+      # `reborn-hermetic` lineage into keys no other lane can restore.
     strategy:
       fail-fast: false
       max-parallel: ${{ github.event_name == 'pull_request' && 3 || 14 }}
@@ -441,6 +441,10 @@ jobs:
           # subtrees stay Box::pin'd at their seams — this is headroom, not a
           # substitute. Step-scoped so it stays out of the rust-cache key.
           RUST_MIN_STACK: "8388608"
+          # Branch-coverage compatibility envelope for the instrumented push
+          # run (scripts/ci/check-reborn-branch-coverage-flags.py counts it);
+          # step-scoped for the same reason as RUST_MIN_STACK.
+          RUSTC_BOOTSTRAP: "1"
         run: |
           echo "Running Reborn crate bucket: ${BUCKET_NAME}"
           printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[] | "- " + .'
@@ -736,7 +740,8 @@ jobs:
       OLLAMA_BASE_URL: ""
       OPENAI_API_KEY: ""
       CARGO_INCREMENTAL: "0"
-      # RUST_MIN_STACK is set on the batch step (see crate-tests for why).
+      # RUST_MIN_STACK and RUSTC_BOOTSTRAP are set on the batch step (see
+      # crate-tests for why).
     strategy:
       fail-fast: false
       matrix:
@@ -857,6 +862,10 @@ jobs:
           # the instrumented lane, not a substitute. Step-scoped so it stays
           # out of the rust-cache key.
           RUST_MIN_STACK: "8388608"
+          # Branch-coverage compatibility envelope for the instrumented push
+          # run (scripts/ci/check-reborn-branch-coverage-flags.py counts it);
+          # step-scoped for the same reason as RUST_MIN_STACK.
+          RUSTC_BOOTSTRAP: "1"
         run: |
           if [[ "${REBORN_COV_COLLECT}" == "true" ]]; then
             # A shared instrumented cache can contain profraw from another
