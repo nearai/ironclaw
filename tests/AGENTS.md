@@ -237,7 +237,8 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Context overflow checkpoints one compact-and-resume attempt; a second overflow fails without another compaction or model observation | `model_recovery.rs::context_overflow_compacts_once_and_resumes`, `model_recovery.rs::second_context_overflow_fails_after_one_compaction` |
 | A turn receives the expected tool results after each model iteration | `golden_payload.rs` |
 | A turn that reads two file ranges in parallel receives both results in the requested order | `golden_payload.rs` |
-| Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs` |
+| Approaching the run limit surfaces a recoverable warning, while repeated capability calls receive one advisory warning and may continue | `terminal_warning.rs::{iteration_limit_warning_reaches_model_with_tools_and_recovers,repeated_call_warning_reaches_model_and_recovers,repeated_calls_after_warning_remain_advisory}` |
+| A repeated call with identical output gets one recovery warning and then terminates after a second no-progress strike; alternating signatures with identical output also terminate, while a fixed call whose output changes completes without no-progress termination | `terminal_warning.rs::{repeated_identical_call_terminates_as_no_progress_after_second_strike,alternating_signatures_with_byte_identical_outputs_terminate_as_no_progress,same_call_with_changing_output_completes_instead_of_terminating}` |
 | Repeating the same inbound message does not start a second run | `idempotent_replay.rs` |
 | Spend accounting fires on a real turn | `budget.rs` |
 | Sub-agents spawn and awaiting them behaves at the edges | `subagent_await_edge.rs` |
@@ -247,6 +248,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | Re-driving background delivery after a scripted crash mid-append replays idempotently — exactly one transcript row and one queued attention outcome, never two | `subagent_await_edge.rs::background_delivery_replay_is_idempotent` |
 | A background result parked by the autonomous-wake streak cap (`AttentionDeferredStreakCap`) stays unclosed and immune to autonomous re-drive until a human-provenance run start sweeps, drains, and closes it | `subagent_await_edge.rs::streak_capped_result_waits_for_human` |
 | A caller hands the engine a prepared prompt and gets its outcome back: a schema-validated JSON result (invalid attempts are retried and the corrected payload is durably recorded) or a plain answer; seeded tool history is honored by the run; resubmitting the same request is replay-safe; the private work thread belongs to the calling user (stored under their owner scope, foreign-owner run-state reads rejected) yet never appears in conversation listings | `unbound_turns.rs` |
+| A prepared-context run in the default unbound family receives the same two-strike identical-call/identical-output no-progress termination as an ordinary interactive run | `unbound_turns.rs::unbound_default_run_terminates_as_no_progress_after_second_strike` |
 
 **Suggestions**
 | Behavior | Evidence |
@@ -509,6 +511,7 @@ entries.
 | The user can… | Evidence |
 |---|---|
 | Search across settings sections and clear the search | `test_reborn_webui_v2_legacy_settings_search.py` (6), `test_settings_search.py` (5) |
+| Fetch NEAR AI model capabilities, save only allowed model metadata, and retain exact Text/Image capability tags across Inference selectors and a page reload | `test_reborn_webui_v2_smoke.py::test_reborn_v2_model_capability_tags_persist_after_policy_reload` |
 | As an admin, publish the active provider's allowlist/default from Settings; then, as a non-admin member, choose a long-name allowed model, verify the selector stacks at narrow width and right-aligns at wide width without overflow, and have that preference reach future provider requests across chats without changing another member's workspace-default routing | `test_reborn_webui_v2_smoke.py::test_reborn_v2_settings_model_preference_reaches_provider` |
 | Add, test, activate, edit and delete a custom inference provider | `test_reborn_webui_v2_legacy_settings_search.py` |
 | Add/edit/delete skills, with read-only sources locked | `test_reborn_webui_v2_legacy_skills.py` (3), `test_reborn_webui_v2_skills_api.py` (3) |

@@ -43,7 +43,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `image_models.rs` | Image-generation model metadata table |
 | `vision_models.rs` | Vision-capable model registry for attachment routing |
 | `reasoning_models.rs` | Reasoning-capable model registry (Codex, R1, o-series, etc.) used for thinking-mode dispatch |
-| `models.rs` | Top-level model-name catalog and helpers |
+| `models.rs` | Provider-neutral discovered-model capabilities plus the top-level model-name catalog and helpers |
 | `testing/` | `StubLlm`, `StubErrorKind`, `fault_injection` — gated behind the `test-support` cargo feature for downstream test harnesses |
 
 ## Sub-owner map
@@ -221,6 +221,7 @@ pub trait LlmProvider: Send + Sync {
 
     // Optional (have defaults)
     async fn list_models(&self) -> Result<Vec<String>, LlmError> { Ok(vec![]) }
+    async fn list_model_catalog(&self) -> Result<Vec<DiscoveredModel>, LlmError> { /* IDs with optional directional modalities */ }
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> { /* name only */ }
     fn effective_model_name(&self, requested_model: Option<&str>) -> String { /* uses active */ }
     fn active_model_name(&self) -> String { self.model_name().to_string() }
@@ -231,6 +232,7 @@ pub trait LlmProvider: Send + Sync {
 
 Key notes:
 - `model_name()` returns the configured model name; `active_model_name()` returns the currently active model (may differ if `set_model()` was called — only `NearAiChatProvider` supports this).
+- `list_model_catalog()` is additive to `list_models()`: its default projects legacy model IDs with empty capability metadata. Provider decorators must delegate the detailed method so metadata survives the production chain. NEAR AI preserves recognized top-level or `architecture` input/output modalities from `/models`; unknown or absent modality values are ignored rather than failing discovery. Capabilities are display metadata only and never participate in routing or authorization.
 - `cost_per_token()` returns `(Decimal, Decimal)` using `rust_decimal`. Look up via `costs::model_cost()` in your constructor; fall back to `costs::default_cost()` for unknowns.
 - `RigAdapter` forwards per-request model overrides through rig-core's typed request model field. Do not put `model` in flattened `additional_params`, which would serialize a duplicate top-level JSON key.
 - `complete_with_tools()` is never cached (tool calls can have side effects) — `CachedProvider` always passes them through.

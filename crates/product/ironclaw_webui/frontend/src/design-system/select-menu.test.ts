@@ -264,6 +264,52 @@ test("SelectMenu renders a closed custom trigger with the selected label", () =>
   assert.doesNotMatch(collectTemplateText(rendered), /role="listbox"/);
 });
 
+test("SelectMenu renders a generic option adornment in the trigger and listbox", () => {
+  const harness = createHarness();
+  const props = {
+    options: [
+      { value: "default", label: "Vision model", adornment: "Image input tag" },
+    ],
+  };
+
+  let rendered = harness.render(props);
+  assert.ok(collectScalars(rendered).includes("Image input tag"));
+
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render(props);
+  assert.equal(
+    collectScalars(rendered).filter((value) => value === "Image input tag").length,
+    2
+  );
+});
+
+test("SelectMenu describes selected and open options with accessible metadata", () => {
+  const harness = createHarness();
+  const props = {
+    options: [
+      {
+        value: "default",
+        label: "Vision model",
+        adornment: "Image input tag",
+        accessibleDescription: "Text, Image input",
+      },
+    ],
+  };
+
+  let rendered = harness.render(props);
+  const selectedDescriptionId = firstValueAfter(rendered, "aria-describedby=");
+  assert.match(selectedDescriptionId, /^v2-select-menu-\d+-selected-description$/);
+  assert.ok(collectScalars(rendered).includes("Text, Image input"));
+
+  firstValueAfter(rendered, "onClick=")();
+  rendered = harness.render(props);
+  const descriptionIds = valuesAfter(rendered, "aria-describedby=");
+  assert.ok(
+    descriptionIds.some((value) => /-option-0-description$/.test(value)),
+    "the open option should expose the same capability description",
+  );
+});
+
 test("SelectMenu supports a compact reusable size", () => {
   const harness = createHarness();
   let rendered = harness.render({ size: "sm" });

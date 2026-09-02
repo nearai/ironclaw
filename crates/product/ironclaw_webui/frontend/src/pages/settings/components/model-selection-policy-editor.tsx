@@ -8,6 +8,16 @@ import { SelectMenu } from "../../../design-system/select-menu";
 import { ApiError } from "../../../lib/api";
 import { useT } from "../../../lib/i18n";
 import { setUserModelPolicy } from "../lib/settings-api";
+import {
+  mergeModelEntries,
+  modelEntriesForIds,
+  modelEntryFor,
+  normalizeModelCatalog,
+} from "../lib/model-capabilities";
+import {
+  ModelCapabilityBadges,
+  modelCapabilityDescription,
+} from "./model-capability-badges";
 
 const MAX_POLICY_MODELS = 128;
 const MAX_MODEL_ID_BYTES = 256;
@@ -56,64 +66,62 @@ export function ModelSelectionPolicyEditor({ providerState }) {
     policy?.provider_id,
     policy?.workspace_default,
     policy?.allowed_models || [],
+    policy?.model_entries || [],
     activeModel,
   ]);
   const [allowedModels, setAllowedModels] = React.useState([]);
   const [workspaceDefault, setWorkspaceDefault] = React.useState("");
   const [discoveredModels, setDiscoveredModels] = React.useState([]);
+  const [discoveredEntries, setDiscoveredEntries] = React.useState([]);
   const [manualModel, setManualModel] = React.useState("");
   const [status, setStatus] = React.useState(null);
+  const fetchGenerationRef = React.useRef(0);
+  const saveGenerationRef = React.useRef(0);
+  const activeProviderIdRef = React.useRef(providerState.activeProviderId);
+  activeProviderIdRef.current = providerState.activeProviderId;
 
   React.useEffect(() => {
+    fetchGenerationRef.current += 1;
+    saveGenerationRef.current += 1;
     const policyMatchesActive =
       policy && policy.provider_id === providerState.activeProviderId;
     const initialAllowed = normalizedModels(
       policyMatchesActive ? policy.allowed_models : activeModel ? [activeModel] : []
     );
+    const policyCatalog = normalizeModelCatalog({
+      models: policyMatchesActive ? policy.allowed_models : [],
+      model_entries: policyMatchesActive ? policy.model_entries : [],
+    });
     setAllowedModels(initialAllowed);
     setWorkspaceDefault(
       policyMatchesActive ? policy.workspace_default : initialAllowed[0] || ""
     );
     setDiscoveredModels(normalizedModels([...initialAllowed, activeModel]));
+    setDiscoveredEntries(policyCatalog.modelEntries);
     setManualModel("");
     setStatus(null);
+    return () => {
+      fetchGenerationRef.current += 1;
+      saveGenerationRef.current += 1;
+    };
   }, [policySignature]);
 
-  const saveMutation = useMutation({
-    mutationFn: setUserModelPolicy,
-    onSuccess: (catalog, request) => {
-      queryClient.setQueryData(["user-model-catalog"], catalog);
-      queryClient.setQueryData(["llm-providers"], (snapshot) =>
-        snapshot
-          ? {
-              ...snapshot,
-              user_model_policy: {
-                provider_id: providerState.activeProviderId,
-                workspace_default:
-                  catalog.workspace_default ?? request.workspace_default,
-                allowed_models: catalog.models ?? request.allowed_models,
-              },
-            }
-          : snapshot
-      );
-      setAllowedModels(catalog.models ?? request.allowed_models);
-      setWorkspaceDefault(catalog.workspace_default ?? request.workspace_default);
-      setStatus({ tone: "success", text: t("llm.policyEnabled") });
-    },
-    onError: (error) => {
-      setStatus({
-        tone: "error",
-        text: requestErrorMessage(error, t("llm.policySaveFailed")),
-      });
-    },
-  });
+  const saveMutation = useMutation({ mutationFn: setUserModelPolicy });
 
   const candidates = normalizedModels([
     ...discoveredModels,
     ...allowedModels,
     activeModel,
   ]);
-  const defaultOptions = allowedModels.map((model) => ({ value: model, label: model }));
+  const defaultOptions = allowedModels.map((model) => {
+    const entry = modelEntryFor(discoveredEntries, model);
+    return {
+      value: model,
+      label: model,
+      accessibleDescription: modelCapabilityDescription(entry, t),
+      adornment: <ModelCapabilityBadges entry={entry} />,
+    };
+  });
 
   const addManualModel = () => {
     const model = manualModel.trim();
@@ -151,6 +159,11 @@ export function ModelSelectionPolicyEditor({ providerState }) {
 
   const fetchModels = async () => {
     if (!activeProvider) return;
+    const providerId = activeProvider.id;
+    const generation = ++fetchGenerationRef.current;
+    const requestIsCurrent = () =>
+      fetchGenerationRef.current === generation &&
+      activeProviderIdRef.current === providerId;
     setStatus(null);
     try {
       const result = await providerState.listModels({
@@ -159,19 +172,23 @@ export function ModelSelectionPolicyEditor({ providerState }) {
         base_url: activeProvider.base_url || undefined,
         model: activeModel || undefined,
       });
-      if (!result.ok || !Array.isArray(result.models) || result.models.length === 0) {
+      if (!requestIsCurrent()) return;
+      const catalog = normalizeModelCatalog(result);
+      if (!result.ok || catalog.models.length === 0) {
         setStatus({
           tone: "error",
           text: result.message || t("llm.modelsFetchFailed"),
         });
         return;
       }
-      setDiscoveredModels((current) => normalizedModels([...current, ...result.models]));
+      setDiscoveredModels((current) => normalizedModels([...current, ...catalog.models]));
+      setDiscoveredEntries((current) => mergeModelEntries(current, catalog.modelEntries));
       setStatus({
         tone: "success",
-        text: t("llm.modelsFetched", { count: result.models.length }),
+        text: t("llm.modelsFetched", { count: catalog.models.length }),
       });
     } catch (error) {
+      if (!requestIsCurrent()) return;
       setStatus({
         tone: "error",
         text: requestErrorMessage(error, t("llm.modelsLoadFailed")),
@@ -179,7 +196,8 @@ export function ModelSelectionPolicyEditor({ providerState }) {
     }
   };
 
-  const savePolicy = () => {
+  const savePolicy = async () => {
+    if (saveMutation.isPending) return;
     if (!providerState.activeProviderId) {
       setStatus({ tone: "error", text: t("llm.policyNoActiveProvider") });
       return;
@@ -188,10 +206,62 @@ export function ModelSelectionPolicyEditor({ providerState }) {
       setStatus({ tone: "error", text: t("llm.policySelectModels") });
       return;
     }
-    saveMutation.mutate({
+    const submitted = {
+      providerId: providerState.activeProviderId,
+      generation: saveGenerationRef.current,
+    };
+    const request = {
       workspace_default: workspaceDefault,
       allowed_models: allowedModels,
-    });
+      model_entries: modelEntriesForIds(discoveredEntries, allowedModels),
+    };
+    try {
+      const catalog = await saveMutation.mutateAsync(request);
+      if (
+        activeProviderIdRef.current !== submitted.providerId ||
+        saveGenerationRef.current !== submitted.generation
+      ) {
+        return;
+      }
+      const returnedCatalog = normalizeModelCatalog(catalog);
+      const effectiveEntries = mergeModelEntries(
+        request.model_entries,
+        returnedCatalog.modelEntries
+      );
+      queryClient.setQueryData(["user-model-catalog"], catalog);
+      queryClient.setQueryData(["llm-providers"], (snapshot) =>
+        snapshot
+          ? {
+              ...snapshot,
+              user_model_policy: {
+                provider_id: submitted.providerId,
+                workspace_default:
+                  catalog.workspace_default ?? request.workspace_default,
+                allowed_models: catalog.models ?? request.allowed_models,
+                model_entries: modelEntriesForIds(
+                  effectiveEntries,
+                  catalog.models ?? request.allowed_models
+                ),
+              },
+            }
+          : snapshot
+      );
+      setAllowedModels(catalog.models ?? request.allowed_models);
+      setWorkspaceDefault(catalog.workspace_default ?? request.workspace_default);
+      setDiscoveredEntries((current) => mergeModelEntries(current, effectiveEntries));
+      setStatus({ tone: "success", text: t("llm.policyEnabled") });
+    } catch (error) {
+      if (
+        activeProviderIdRef.current !== submitted.providerId ||
+        saveGenerationRef.current !== submitted.generation
+      ) {
+        return;
+      }
+      setStatus({
+        tone: "error",
+        text: requestErrorMessage(error, t("llm.policySaveFailed")),
+      });
+    }
   };
 
   const noActiveProvider = !providerState.activeProviderId || !activeProvider;
@@ -281,6 +351,10 @@ export function ModelSelectionPolicyEditor({ providerState }) {
                     onChange={(event) => toggleModel(model, event.currentTarget.checked)}
                   />
                   <span className="min-w-0 break-all font-mono text-xs">{model}</span>
+                  <ModelCapabilityBadges
+                    entry={modelEntryFor(discoveredEntries, model)}
+                    className="ml-auto justify-end"
+                  />
                 </label>
               ))}
             </div>

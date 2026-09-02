@@ -4,6 +4,15 @@ import { SelectMenu } from "../../../design-system/select-menu";
 import { ApiError } from "../../../lib/api";
 import { useT } from "../../../lib/i18n";
 import { useUserModelPreference } from "../hooks/useUserModelPreference";
+import {
+  modelCapabilities,
+  modelEntryFor,
+  normalizeModelCatalog,
+} from "../lib/model-capabilities";
+import {
+  ModelCapabilityBadges,
+  modelCapabilityDescription,
+} from "./model-capability-badges";
 
 export function UserModelPreferenceSelector() {
   const t = useT();
@@ -18,16 +27,38 @@ export function UserModelPreferenceSelector() {
     setModel,
   } = useUserModelPreference();
   const workspaceDefault = catalog.workspace_default || t("inference.none");
-  const availableModels = catalog.models || [];
+  const normalizedCatalog = normalizeModelCatalog(catalog);
+  const availableModels = normalizedCatalog.models;
+  const workspaceEntry = modelEntryFor(
+    normalizedCatalog.modelEntries,
+    catalog.workspace_default
+  );
+  const capabilityAdornment = (entry) =>
+    modelCapabilities(entry).length > 0
+      ? <ModelCapabilityBadges entry={entry} />
+      : undefined;
+  const optionWithCapabilities = (value, label, entry) => {
+    const adornment = capabilityAdornment(entry);
+    return {
+      value,
+      label,
+      accessibleDescription: modelCapabilityDescription(entry, t),
+      ...(adornment ? { adornment } : {}),
+    };
+  };
   const options = [
-    {
-      value: "",
-      label: t("llm.followWorkspaceDefault", { model: workspaceDefault }),
-    },
-    ...availableModels.map((availableModel) => ({
-      value: availableModel,
-      label: availableModel,
-    })),
+    optionWithCapabilities(
+      "",
+      t("llm.followWorkspaceDefault", { model: workspaceDefault }),
+      workspaceEntry
+    ),
+    ...availableModels.map((availableModel) =>
+      optionWithCapabilities(
+        availableModel,
+        availableModel,
+        modelEntryFor(normalizedCatalog.modelEntries, availableModel)
+      )
+    ),
   ];
   if (model && !availableModels.includes(model)) {
     options.push({

@@ -6,12 +6,11 @@ use tracing::debug;
 use crate::{family::LoopFamily, state::LoopExecutionState, strategies::TurnEndKind};
 
 use super::{
-    AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, COMPLETION_NUDGE_LIMIT,
-    CancelCheck, CapabilityInput, CheckpointStage, DefaultExecutorPipeline, DrainInput,
-    ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PromptInput, PromptStep,
-    ReplyAdmissionInput, ReplyAdmissionStep, StageContext, StopInput, StopKind,
-    StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
-    UserFacingInputDrainMode, latency, scheduled_trigger_run,
+    AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, CancelCheck,
+    CapabilityInput, CheckpointStage, DefaultExecutorPipeline, DrainInput, ExecutorStage,
+    ExitInput, InputStep, ModelInput, ModelStep, PromptInput, PromptStep, ReplyAdmissionInput,
+    ReplyAdmissionStep, StageContext, StopInput, StopObservationInput, StopObservationStep,
+    StopStep, TurnCompletedStep, UserFacingInputDrainMode, latency,
 };
 
 impl DefaultExecutorPipeline {
@@ -147,15 +146,6 @@ impl DefaultExecutorPipeline {
                         ModelStep::Exit(exit) => return Ok(exit),
                     };
 
-                    // Capture provider-reported usage before the `match`
-                    // consumes `model_response`.
-                    let response_usage = model_response.usage;
-                    // Accumulate the run's cumulative usage for EVERY model
-                    // response, before branching on its output. A capability
-                    // batch also carries `response_usage`; recording it only on
-                    // the assistant-reply branch would drop the token/cost for
-                    // every tool-using turn.
-                    state.accumulate_model_usage(response_usage);
                     let turn_iteration = state.iteration;
                     let completed = match model_response.output {
                         ParentLoopOutput::AssistantReply(reply) => {
@@ -266,7 +256,7 @@ impl DefaultExecutorPipeline {
                         }
                     }
 
-                    match latency::stage!(
+                    let stop_step = latency::stage!(
                         "stop_decide",
                         host.run_context(),
                         next_state.iteration,
@@ -277,47 +267,27 @@ impl DefaultExecutorPipeline {
                                 summary,
                             },
                         ),
-                    )? {
+                    )?;
+                    match self.stop.apply_fresh_completion_nudge(host, stop_step) {
                         StopStep::Stop {
-                            state: mut stop_state,
+                            state: stop_state,
                             kind,
                         } => {
-                            if completion_nudge_should_fire(host, &stop_state, &kind) {
-                                // Instead of terminating, re-enter the loop for one
-                                // more iteration with the full tool surface and a
-                                // completion-nudge directive, so the model can finish
-                                // the task (e.g. write a required output file) before
-                                // answering. Mirrors the drained-follow-up continue
-                                // rather than terminating.
-                                stop_state.completion_nudges_used += 1;
-                                stop_state.completion_nudge_pending = true;
-                                stop_state.last_reply_trailed_off = false;
-                                stop_state.last_reply_empty = false;
-                                stop_state.last_reply_ended_with_question = false;
-                                debug!(
-                                    iteration = stop_state.iteration,
-                                    ?kind,
-                                    completion_nudges_used = stop_state.completion_nudges_used,
-                                    "agent loop issuing tools-capable completion nudge instead of stopping"
-                                );
-                                state = stop_state;
-                            } else {
-                                let exit_iteration = stop_state.iteration;
-                                let exit = latency::stage!(
-                                    "exit",
-                                    host.run_context(),
-                                    exit_iteration,
-                                    self.exit.process(
-                                        ctx,
-                                        ExitInput {
-                                            state: stop_state,
-                                            kind,
-                                        },
-                                    ),
-                                )?;
-                                let _ = exit_iteration;
-                                return Ok(exit);
-                            }
+                            let exit_iteration = stop_state.iteration;
+                            let exit = latency::stage!(
+                                "exit",
+                                host.run_context(),
+                                exit_iteration,
+                                self.exit.process(
+                                    ctx,
+                                    ExitInput {
+                                        state: stop_state,
+                                        kind,
+                                    },
+                                ),
+                            )?;
+                            let _ = exit_iteration;
+                            return Ok(exit);
                         }
                         StopStep::Continue { state: next } => {
                             state = next;
@@ -488,41 +458,5 @@ impl DefaultExecutorPipeline {
                 }
             }
         }
-    }
-}
-
-/// Decide whether a stop should be converted into one more tools-capable
-/// completion-nudge iteration instead of terminating the run.
-///
-/// Gated by `SteeringPolicy.allow_driver_specific_nudges` (off in production
-/// unless the run profile opts in) and capped at [`COMPLETION_NUDGE_LIMIT`]
-/// nudges per run. A `NoProgressDetected` stop is already a failure terminal, so
-/// a tools-capable retry can only help; a `GracefulStop` is nudged only when the
-/// closing reply trailed off (the model announced a next step but never carried
-/// it out) — leaving genuinely complete replies untouched. Aborts are never
-/// nudged.
-fn completion_nudge_should_fire(
-    host: &(dyn AgentLoopDriverHost + Send + Sync),
-    state: &LoopExecutionState,
-    kind: &StopKind,
-) -> bool {
-    if !host
-        .run_context()
-        .resolved_run_profile
-        .steering_policy
-        .allow_driver_specific_nudges
-    {
-        return false;
-    }
-    if state.completion_nudges_used >= COMPLETION_NUDGE_LIMIT {
-        return false;
-    }
-    match kind {
-        StopKind::NoProgressDetected => false,
-        StopKind::GracefulStop => {
-            state.last_reply_trailed_off
-                || (scheduled_trigger_run(host) && state.last_reply_ended_with_question)
-        }
-        StopKind::Aborted(_) => false,
     }
 }

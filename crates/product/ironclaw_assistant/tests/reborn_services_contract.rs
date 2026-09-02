@@ -11316,6 +11316,7 @@ impl Default for SetupRecordingLlmConfigService {
                 selection_enabled: true,
                 workspace_default: Some("model-a".to_string()),
                 models: vec!["model-a".to_string(), "model-b".to_string()],
+                model_entries: Vec::new(),
             }),
             user_model_preferences: Mutex::new(HashMap::new()),
             user_model_preference_updates: Mutex::new(Vec::new()),
@@ -11523,6 +11524,7 @@ impl LlmConfigService for SetupRecordingLlmConfigService {
         Ok(LlmModelsResult {
             ok: true,
             models: vec!["model-a".to_string()],
+            model_entries: Vec::new(),
             message: String::new(),
         })
     }
@@ -17944,6 +17946,7 @@ async fn member_model_status_marks_a_stale_preference_unavailable() {
         selection_enabled: true,
         workspace_default: Some("model-a".to_string()),
         models: vec!["model-a".to_string()],
+        model_entries: Vec::new(),
     });
 
     let view =

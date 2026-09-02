@@ -58,6 +58,18 @@ async function renderEditor(state) {
   return { container, queryClient, root };
 }
 
+async function rerenderEditor(rendered, state) {
+  await act(async () => {
+    rendered.root.render(
+      <QueryClientProvider client={rendered.queryClient}>
+        <I18nProvider>
+          <ModelSelectionPolicyEditor providerState={state} />
+        </I18nProvider>
+      </QueryClientProvider>
+    );
+  });
+}
+
 function setInputValue(input, value) {
   const setter = Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
@@ -111,6 +123,7 @@ test("admin can enable selection from the active model and a manually added mode
     assert.deepEqual(requests.setPolicy.mock.calls[0]?.[0], {
       workspace_default: "mock-model",
       allowed_models: ["mock-model", "e2e-selected-model"],
+      model_entries: [],
     });
     assert.deepEqual(
       rendered.queryClient.getQueryData(["user-model-catalog"]),
@@ -121,6 +134,7 @@ test("admin can enable selection from the active model and a manually added mode
         provider_id: "openai_compatible",
         workspace_default: "canonical-model",
         allowed_models: ["canonical-model"],
+        model_entries: [],
       },
     });
     const canonicalModel = rendered.container.querySelector<HTMLInputElement>(
@@ -131,6 +145,224 @@ test("admin can enable selection from the active model and a manually added mode
       rendered.container.querySelector('[data-testid="settings-model-policy-status"]')
         ?.textContent ?? "",
       /Model selection enabled/
+    );
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+    requests.setPolicy.mockReset();
+  }
+});
+
+test("fetched capabilities render and only allowed entries are saved", async () => {
+  const fetched = {
+    ok: true,
+    models: ["mock-model", "vision-model", "unselected-model"],
+    model_entries: [
+      {
+        id: "mock-model",
+        input_modalities: ["text"],
+        output_modalities: ["text"],
+      },
+      {
+        id: "vision-model",
+        input_modalities: ["text", "image"],
+        output_modalities: ["text", "image"],
+      },
+      {
+        id: "unselected-model",
+        input_modalities: ["text"],
+        output_modalities: ["text"],
+      },
+    ],
+  };
+  requests.setPolicy.mockImplementation(async (request) => ({
+    selection_enabled: true,
+    workspace_default: request.workspace_default,
+    models: request.allowed_models,
+    model_entries: request.model_entries,
+  }));
+  const rendered = await renderEditor(providerState({ listModels: vi.fn().mockResolvedValue(fetched) }));
+  try {
+    const fetchModels = Array.from(
+      rendered.container.querySelectorAll<HTMLButtonElement>("button")
+    ).find((button) => button.textContent === "Fetch models");
+    assert.ok(fetchModels);
+    await act(async () => fetchModels.click());
+
+    const imageInput = rendered.container.querySelector('[data-capability="image-input"]');
+    const imageOutput = rendered.container.querySelector('[data-capability="image-output"]');
+    assert.equal(imageInput?.getAttribute("aria-label"), "Image input");
+    assert.equal(imageInput?.getAttribute("title"), "Image input");
+    assert.equal(imageOutput?.getAttribute("aria-label"), "Image output");
+    assert.equal(imageOutput?.getAttribute("title"), "Image output");
+    const vision = rendered.container.querySelector<HTMLInputElement>(
+      '[data-testid="settings-model-policy-model-vision-model"]'
+    );
+    assert.ok(vision);
+    await act(async () => vision.click());
+
+    const save = rendered.container.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-model-policy-save"]'
+    );
+    assert.ok(save);
+    await act(async () => save.click());
+
+    assert.deepEqual(requests.setPolicy.mock.calls[0]?.[0], {
+      workspace_default: "mock-model",
+      allowed_models: ["mock-model", "vision-model"],
+      model_entries: fetched.model_entries.slice(0, 2),
+    });
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+    requests.setPolicy.mockReset();
+  }
+});
+
+test("fetch ignores results from a provider that is no longer active", async () => {
+  let resolveFirstFetch;
+  const firstFetch = new Promise((resolve) => {
+    resolveFirstFetch = resolve;
+  });
+  const rendered = await renderEditor(
+    providerState({ listModels: vi.fn(() => firstFetch) })
+  );
+  try {
+    const fetchModels = Array.from(
+      rendered.container.querySelectorAll<HTMLButtonElement>("button")
+    ).find((button) => button.textContent === "Fetch models");
+    assert.ok(fetchModels);
+    await act(async () => fetchModels.click());
+
+    await rerenderEditor(rendered, {
+      activeProviderId: "anthropic",
+      selectedModel: "claude",
+      providers: [
+        {
+          id: "anthropic",
+          adapter: "anthropic",
+          default_model: "claude",
+          can_list_models: true,
+        },
+      ],
+      userModelPolicy: null,
+      listModels: vi.fn(),
+    });
+
+    await act(async () => {
+      resolveFirstFetch({
+        ok: true,
+        models: ["stale-vision-model"],
+        model_entries: [
+          {
+            id: "stale-vision-model",
+            input_modalities: ["text", "image"],
+            output_modalities: ["text"],
+          },
+        ],
+      });
+      await firstFetch;
+    });
+
+    assert.equal(
+      rendered.container.querySelector(
+        '[data-testid="settings-model-policy-model-stale-vision-model"]'
+      ),
+      null,
+      "a late response must not repopulate the next provider's catalog"
+    );
+    assert.ok(
+      rendered.container.querySelector(
+        '[data-testid="settings-model-policy-model-claude"]'
+      )
+    );
+  } finally {
+    act(() => rendered.root.unmount());
+    rendered.container.remove();
+  }
+});
+
+test("save ignores results from a provider that is no longer active", async () => {
+  let resolveFirstSave;
+  const firstSave = new Promise((resolve) => {
+    resolveFirstSave = resolve;
+  });
+  requests.setPolicy.mockImplementation(() => firstSave);
+  const rendered = await renderEditor(providerState());
+  try {
+    const save = rendered.container.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-model-policy-save"]'
+    );
+    assert.ok(save);
+    await act(async () => save.click());
+
+    await rerenderEditor(rendered, {
+      activeProviderId: "anthropic",
+      selectedModel: "claude",
+      providers: [
+        {
+          id: "anthropic",
+          adapter: "anthropic",
+          default_model: "claude",
+          can_list_models: true,
+        },
+      ],
+      userModelPolicy: null,
+      listModels: vi.fn(),
+    });
+    const anthropicCatalog = {
+      selection_enabled: true,
+      workspace_default: "claude",
+      models: ["claude"],
+      model_entries: [],
+    };
+    const anthropicSnapshot = {
+      user_model_policy: {
+        provider_id: "anthropic",
+        workspace_default: "claude",
+        allowed_models: ["claude"],
+        model_entries: [],
+      },
+    };
+    rendered.queryClient.setQueryData(["user-model-catalog"], anthropicCatalog);
+    rendered.queryClient.setQueryData(["llm-providers"], anthropicSnapshot);
+
+    await act(async () => {
+      resolveFirstSave({
+        selection_enabled: true,
+        workspace_default: "mock-model",
+        models: ["mock-model"],
+        model_entries: [
+          {
+            id: "mock-model",
+            input_modalities: ["text", "image"],
+            output_modalities: ["text"],
+          },
+        ],
+      });
+      await firstSave;
+    });
+
+    assert.deepEqual(
+      rendered.queryClient.getQueryData(["user-model-catalog"]),
+      anthropicCatalog
+    );
+    assert.deepEqual(
+      rendered.queryClient.getQueryData(["llm-providers"]),
+      anthropicSnapshot
+    );
+    assert.ok(
+      rendered.container.querySelector('[data-testid="settings-model-policy-model-claude"]')
+    );
+    assert.equal(
+      rendered.container.querySelector('[data-testid="settings-model-policy-model-mock-model"]'),
+      null
+    );
+    assert.equal(
+      rendered.container.querySelector(
+        '[data-testid="settings-model-policy-status"]'
+      )?.textContent,
+      "Model selection is not enabled yet."
     );
   } finally {
     act(() => rendered.root.unmount());

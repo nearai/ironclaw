@@ -279,10 +279,23 @@ jobs:
         id: bucket-settings
         env:
           BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
+          CARGO_PACKAGES: ${{ toJSON(matrix.bucket.cargo_packages || fromJSON('[]')) }}
+          EXACT_TARGETS: ${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}
         run: |
           needs_webui_node=false
           needs_postgres_image=false
+          needs_nextest=false
           sccache_dist_enabled=true
+
+          if jq -e -n \
+            --argjson packages "${BUCKET_PACKAGES}" \
+            --argjson cargo_packages "${CARGO_PACKAGES}" \
+            --argjson exact_targets "${EXACT_TARGETS}" '
+              ($exact_targets | length) == 0 and
+              (($packages - $cargo_packages) | length) > 0
+            ' >/dev/null; then
+            needs_nextest=true
+          fi
 
           while IFS= read -r package; do
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
@@ -309,6 +322,7 @@ jobs:
 
           echo "needs_webui_node=${needs_webui_node}" >> "${GITHUB_OUTPUT}"
           echo "needs_postgres_image=${needs_postgres_image}" >> "${GITHUB_OUTPUT}"
+          echo "needs_nextest=${needs_nextest}" >> "${GITHUB_OUTPUT}"
           echo "sccache_dist_enabled=${sccache_dist_enabled}" >> "${GITHUB_OUTPUT}"
 
       - name: Pre-pull Postgres test image
@@ -385,10 +399,19 @@ jobs:
         if: needs.changes.outputs.run_coverage == 'true'
         uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # cargo-llvm-cov
 
+      - name: Install cargo-nextest
+        if: >-
+          needs.changes.outputs.run_coverage != 'true' &&
+          steps.bucket-settings.outputs.needs_nextest == 'true'
+        uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+        with:
+          tool: cargo-nextest@0.9.143
+
       - name: Run crate tests
         env:
           BUCKET_NAME: ${{ matrix.bucket.name }}
           BUCKET_PACKAGES: ${{ toJSON(matrix.bucket.packages) }}
+          CARGO_PACKAGES: ${{ toJSON(matrix.bucket.cargo_packages || fromJSON('[]')) }}
           EXACT_TARGETS: ${{ toJSON(matrix.bucket.exact_targets || fromJSON('[]')) }}
           COLLECT_COVERAGE: ${{ needs.changes.outputs.run_coverage }}
         run: |
@@ -399,15 +422,39 @@ jobs:
           export IRONCLAW_HERMETIC_SUITE_SKIP_PREPARE=1
           package_args=()
           feature_args=()
+          nextest_packages=()
+          nextest_package_args=()
+          nextest_feature_args=()
+          cargo_package_args=()
+          cargo_feature_args=()
           incremental_env=()
+          if ! jq -e --argjson packages "${BUCKET_PACKAGES}" '
+            type == "array" and length == (unique | length) and
+            all(.[]; . as $package | $packages | index($package) != null)
+          ' <<< "${CARGO_PACKAGES}" >/dev/null; then
+            echo "cargo_packages must be a unique subset of bucket packages" >&2
+            exit 1
+          fi
           while IFS= read -r package; do
             package_args+=(-p "$package")
+            if jq -e --arg package "$package" 'index($package) != null' \
+              <<< "${CARGO_PACKAGES}" >/dev/null; then
+              cargo_package_args+=(-p "$package")
+              subset_feature_args_name=cargo_feature_args
+            else
+              nextest_packages+=("$package")
+              nextest_package_args+=(-p "$package")
+              subset_feature_args_name=nextest_feature_args
+            fi
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
             if [[ -n "${feature_flags}" ]]; then
               features="${feature_flags#--features }"
               IFS=, read -ra package_features <<< "${features}"
               for feature in "${package_features[@]}"; do
                 feature_args+=(--features "${package}/${feature}")
+                declare -n subset_feature_args="${subset_feature_args_name}"
+                subset_feature_args+=(--features "${package}/${feature}")
+                unset -n subset_feature_args
               done
             fi
             if [[ "$package" == "ironclaw_composition" ]]; then
@@ -427,6 +474,10 @@ jobs:
           else
             echo "::group::cargo test affected bucket ${BUCKET_NAME}"
             if [[ "$(jq 'length' <<< "${EXACT_TARGETS}")" -gt 0 ]]; then
+              if [[ "$(jq 'length' <<< "${CARGO_PACKAGES}")" -gt 0 ]]; then
+                echo "exact_targets and cargo_packages are mutually exclusive" >&2
+                exit 1
+              fi
               while IFS=$'\t' read -r package kind name; do
                 target_feature_args=()
                 feature_flags="$(scripts/ci/package-feature-flags.sh "${package}")"
@@ -443,10 +494,55 @@ jobs:
                   <<< "${EXACT_TARGETS}"
               )
             else
-              scripts/ci/run-hermetic-deterministic-suite.sh command \
-                timeout --signal=INT --kill-after=30s 28m \
-                "${incremental_env[@]}" cargo test "${package_args[@]}" \
-                  "${feature_args[@]}" --ignore-rust-version --all-targets -- --nocapture
+              if [[ "${#nextest_package_args[@]}" -gt 0 ]]; then
+                if [[ " ${nextest_packages[*]} " == *" ironclaw "* ||
+                      " ${nextest_packages[*]} " == *" ironclaw_composition "* ]]; then
+                nextest_group_report="$(
+                  scripts/ci/run-hermetic-deterministic-suite.sh command \
+                    timeout --signal=INT --kill-after=30s 28m \
+                    "${incremental_env[@]}" cargo nextest show-config \
+                      test-groups --profile ci \
+                      "${nextest_package_args[@]}" "${nextest_feature_args[@]}" \
+                      --all-targets --ignore-rust-version \
+                      --no-pager --color never
+                )"
+                group_test_specs=(
+                  'ironclaw|ironclaw-smoke-process-local|onboard_login_link_then_bearer_authorizes_a_protected_request'
+                  'ironclaw|ironclaw-cli-global-policy|commands::traces::tests::opt_in_writes_runtime_owner_policy'
+                  'ironclaw_composition|composition-runtime-process-local|f1_happy_path_records_actual_usd_on_receipt'
+                  'ironclaw_composition|composition-runtime-process-local|runtime_rejects_disabled_profile_before_local_substrate_lookup'
+                )
+                for group_test_spec in "${group_test_specs[@]}"; do
+                  IFS='|' read -r package group test_name <<< "${group_test_spec}"
+                  if [[ " ${nextest_packages[*]} " != *" ${package} "* ]]; then
+                    continue
+                  fi
+                  if ! awk -v header="group: ${group} (max threads = 1)" \
+                    -v test_name="${test_name}" '
+                      $0 == header { in_group = 1; found_group = 1; next }
+                      /^group: / { in_group = 0 }
+                      in_group && index($0, test_name) { found_test = 1 }
+                      END { exit !(found_group && found_test) }
+                    ' <<< "${nextest_group_report}"; then
+                    echo "nextest group ${group} did not contain ${test_name}" >&2
+                    exit 1
+                  fi
+                done
+                fi
+                scripts/ci/run-hermetic-deterministic-suite.sh command \
+                  timeout --signal=INT --kill-after=30s 28m \
+                  "${incremental_env[@]}" cargo nextest run --profile ci \
+                    "${nextest_package_args[@]}" "${nextest_feature_args[@]}" \
+                    --test-threads 4 --all-targets --ignore-rust-version \
+                    --no-tests pass
+              fi
+              if [[ "${#cargo_package_args[@]}" -gt 0 ]]; then
+                scripts/ci/run-hermetic-deterministic-suite.sh command \
+                  timeout --signal=INT --kill-after=30s 28m \
+                  "${incremental_env[@]}" cargo test "${cargo_package_args[@]}" \
+                    "${cargo_feature_args[@]}" --ignore-rust-version \
+                    --all-targets -- --nocapture
+              fi
             fi
             echo "::endgroup::"
           fi
@@ -702,7 +798,6 @@ jobs:
         env:
           REBORN_COV_BATCH_ID: ${{ matrix.batch.id }}
           REBORN_COV_LANES_JSON: ${{ toJSON(matrix.batch.lanes) }}
-          REBORN_COV_LANE_PARTITIONS: 4
           REBORN_COV_LANE_TEST_TIMEOUT: 45m
           REBORN_COV_COLLECT: ${{ needs.changes.outputs.run_coverage }}
         run: |

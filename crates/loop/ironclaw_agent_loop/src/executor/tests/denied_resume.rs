@@ -79,6 +79,10 @@ async fn capability_stage_denied_approval_resume_surfaces_gate_declined_failure_
         "pending_approval_resume must be cleared after surfacing the deny failure"
     );
     assert!(
+        final_state.recent_call_signatures.is_empty(),
+        "an approval-denied resume is short-circuited without host dispatch and must not enter the call-signature ring"
+    );
+    assert!(
         host.batch_invocations().is_empty(),
         "denied approval resume must not dispatch any capability batch invocations"
     );

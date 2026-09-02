@@ -1567,6 +1567,191 @@ async def _publish_model_selection_policy(
     )
 
 
+async def test_reborn_v2_model_capability_tags_persist_after_policy_reload(
+    reborn_v2_server,
+    reborn_v2_browser,
+):
+    """Fetched NEAR AI capability tags survive policy save and a page reload."""
+    text_model = "nearai/text-model"
+    vision_model = "nearai/vision-model"
+    unselected_model = "nearai/unselected-model"
+    discovered_entries = [
+        {
+            "id": text_model,
+            "input_modalities": ["text"],
+            "output_modalities": ["text"],
+        },
+        {
+            "id": vision_model,
+            "input_modalities": ["text", "image"],
+            "output_modalities": ["text", "image"],
+        },
+        {
+            "id": unselected_model,
+            "input_modalities": ["text"],
+            "output_modalities": ["text"],
+        },
+    ]
+    policy = {
+        "provider_id": "nearai",
+        "workspace_default": text_model,
+        "allowed_models": [text_model],
+        "model_entries": [discovered_entries[0]],
+    }
+    saved_requests = []
+
+    def user_catalog() -> dict:
+        return {
+            "selection_enabled": True,
+            "workspace_default": policy["workspace_default"],
+            "models": policy["allowed_models"],
+            "model_entries": policy["model_entries"],
+        }
+
+    async def fulfill_json(route, body: dict) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_llm_api(route) -> None:
+        request = route.request
+        path = urlparse(request.url).path
+        if path.endswith("/llm/providers") and request.method == "GET":
+            await fulfill_json(
+                route,
+                {
+                    "providers": [
+                        {
+                            "id": "nearai",
+                            "description": "NEAR AI",
+                            "adapter": "nearai",
+                            "default_model": text_model,
+                            "base_url": "https://api.near.ai/v1",
+                            "builtin": True,
+                            "active": True,
+                            "active_model": text_model,
+                            "api_key_required": False,
+                            "accepts_api_key": True,
+                            "api_key_set": True,
+                            "can_list_models": True,
+                        }
+                    ],
+                    "active": {"provider_id": "nearai", "model": text_model},
+                    "user_model_policy": policy,
+                },
+            )
+            return
+        if path.endswith("/llm/list-models") and request.method == "POST":
+            await fulfill_json(
+                route,
+                {
+                    "ok": True,
+                    "models": [text_model, vision_model, unselected_model],
+                    "model_entries": discovered_entries,
+                    "message": None,
+                },
+            )
+            return
+        if path.endswith("/llm/model-policy") and request.method == "PUT":
+            payload = request.post_data_json
+            saved_requests.append(payload)
+            policy.update(
+                {
+                    "workspace_default": payload["workspace_default"],
+                    "allowed_models": payload["allowed_models"],
+                    "model_entries": payload["model_entries"],
+                }
+            )
+            await fulfill_json(route, user_catalog())
+            return
+        if path.endswith("/llm/models") and request.method == "GET":
+            await fulfill_json(route, user_catalog())
+            return
+        if path.endswith("/llm/model-preference") and request.method == "GET":
+            await fulfill_json(route, {"model": None})
+            return
+        await route.continue_()
+
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 900}
+    )
+    try:
+        await context.route("**/api/webchat/v2/llm/**", handle_llm_api)
+        page = await context.new_page()
+        await page.goto(
+            f"{reborn_v2_server}/settings/inference?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        editor = page.locator(SEL_V2["settings_model_policy_editor"])
+        await expect(editor).to_be_visible(timeout=15000)
+
+        await editor.get_by_role("button", name="Fetch models").click()
+        vision_checkbox = page.locator(
+            "[data-testid='settings-model-policy-model-nearai-vision-model']"
+        )
+        await expect(vision_checkbox).to_be_visible()
+        vision_row = vision_checkbox.locator("xpath=..")
+        await expect(vision_row.locator("[data-capability='text']")).to_have_attribute(
+            "title", "Text"
+        )
+        await expect(
+            vision_row.locator("[data-capability='image-input']")
+        ).to_have_attribute("title", "Image input")
+        await expect(
+            vision_row.locator("[data-capability='image-output']")
+        ).to_have_attribute("title", "Image output")
+        await vision_checkbox.check()
+
+        await page.locator(SEL_V2["settings_model_policy_save"]).click()
+        await expect(page.locator(SEL_V2["settings_model_policy_status"])).to_contain_text(
+            "Model selection enabled", timeout=15000
+        )
+        assert len(saved_requests) == 1
+        assert saved_requests[0]["allowed_models"] == [text_model, vision_model]
+        assert [entry["id"] for entry in saved_requests[0]["model_entries"]] == [
+            text_model,
+            vision_model,
+        ]
+
+        await page.reload()
+        editor = page.locator(SEL_V2["settings_model_policy_editor"])
+        await expect(editor).to_be_visible(timeout=15000)
+        persisted_vision_row = page.locator(
+            "[data-testid='settings-model-policy-model-nearai-vision-model']"
+        ).locator("xpath=..")
+        await expect(
+            persisted_vision_row.locator("[data-capability='image-input']")
+        ).to_have_attribute("title", "Image input")
+        await expect(
+            persisted_vision_row.locator("[data-capability='image-output']")
+        ).to_have_attribute("title", "Image output")
+
+        selector = page.locator(SEL_V2["settings_model_selector"])
+        await expect(
+            selector.get_by_role("button").locator("[data-capability='text']")
+        ).to_have_attribute("title", "Text")
+        await selector.get_by_role("button").click()
+        vision_option = page.get_by_role("option").filter(has_text=vision_model)
+        await expect(
+            vision_option.locator("[data-capability='image-input']")
+        ).to_have_attribute("title", "Image input")
+        await expect(
+            vision_option.locator("[data-capability='image-output']")
+        ).to_have_attribute("title", "Image output")
+
+        await page.keyboard.press("Escape")
+        backend_summary = page.get_by_text("Backend", exact=True).locator("xpath=..")
+        active_summary = backend_summary.locator("xpath=following-sibling::div[1]")
+        await expect(active_summary).to_contain_text(text_model)
+        await expect(
+            active_summary.locator("[data-capability='text']")
+        ).to_have_attribute("title", "Text")
+        assert await page.locator(SEL_V2["model_capability_badges"]).count() >= 4
+    finally:
+        await context.close()
+
+
 async def _create_model_preference_member(
     operator,
     cleanup,

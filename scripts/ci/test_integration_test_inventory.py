@@ -1,6 +1,5 @@
 """Contract tests for the canonical integration-test inventory."""
 
-import os
 import subprocess
 import sys
 import tempfile
@@ -14,57 +13,27 @@ import integration_test_inventory as inventory  # noqa: E402
 
 
 class IntegrationTestInventoryTests(unittest.TestCase):
-    def run_group_runner(
+    def run_group_validator(
         self, root: Path, registrations: list[tuple[str, str]]
-    ) -> tuple[subprocess.CompletedProcess[str], str]:
+    ) -> subprocess.CompletedProcess[str]:
         manifest = "".join(
             f'[[test]]\nname = "{name}"\npath = "{path}"\n\n'
             for name, path in registrations
         )
         (root / "Cargo.toml").write_text(manifest, encoding="utf-8")
 
-        bin_dir = root / "bin"
-        bin_dir.mkdir()
-        command_log = root / "commands.log"
-        for command, body in (
-            (
-                "timeout",
-                """#!/usr/bin/env bash
-printf 'timeout:%s\\n' "$*" >>"${COMMAND_LOG}"
-while [[ "$1" == --* ]]; do shift; done
-shift
-"$@"
-""",
-            ),
-            (
-                "cargo",
-                """#!/usr/bin/env bash
-printf 'cargo:%s\\n' "$*" >>"${COMMAND_LOG}"
-""",
-            ),
-        ):
-            executable = bin_dir / command
-            executable.write_text(body, encoding="utf-8")
-            executable.chmod(0o755)
-
-        env = os.environ.copy()
-        env.update(
-            {
-                "COMMAND_LOG": str(command_log),
-                "PATH": f"{bin_dir}:{env['PATH']}",
-                "REBORN_GROUP_TEST_TIMEOUT": "9m",
-            }
-        )
-        completed = subprocess.run(
-            [str(ROOT / "scripts/ci/run-reborn-group-tests.sh")],
+        return subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/ci/lib/integration_test_inventory.py"),
+                "--validate-group-topology",
+                str(root),
+            ],
             cwd=root,
-            env=env,
             capture_output=True,
             text=True,
             check=False,
         )
-        log = command_log.read_text(encoding="utf-8") if command_log.exists() else ""
-        return completed, log
 
     def test_preserves_current_registration_projections(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -95,6 +64,25 @@ test = [
                     "tests/integration/group_shared/main.rs": "groups",
                     "tests/integration/second.rs": 1,
                 },
+            )
+            document = inventory.inventory_document(root)
+            self.assertEqual(
+                [test["name"] for test in document["tests"]],
+                [
+                    "reborn_group_shared",
+                    "reborn_integration_after",
+                    "reborn_integration_before",
+                ],
+                "execution inventory must preserve every unique Cargo target name",
+            )
+            self.assertEqual(
+                {test["name"]: test["lane"] for test in document["tests"]},
+                {
+                    "reborn_group_shared": "groups",
+                    "reborn_integration_after": 1,
+                    "reborn_integration_before": 1,
+                },
+                "targets sharing a source path must share that path's planner lane",
             )
 
             (root / "Cargo.toml").write_text(
@@ -184,13 +172,12 @@ test = [
                     group_file.parent.mkdir(parents=True)
                     group_file.touch()
 
-                completed, command_log = self.run_group_runner(root, registrations)
+                completed = self.run_group_validator(root, registrations)
 
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn(error, completed.stderr)
-                self.assertEqual(command_log, "")
 
-    def test_group_runner_preserves_valid_execution_contract(self) -> None:
+    def test_group_topology_accepts_sorted_registered_directories(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for suffix in ("zeta", "alpha"):
@@ -198,7 +185,7 @@ test = [
                 group.mkdir(parents=True)
                 (group / "main.rs").touch()
 
-            completed, command_log = self.run_group_runner(
+            completed = self.run_group_validator(
                 root,
                 [
                     ("reborn_group_zeta", "tests/integration/group_zeta/main.rs"),
@@ -207,21 +194,6 @@ test = [
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(
-                command_log.splitlines(),
-                [
-                    "timeout:--signal=INT --kill-after=30s 9m cargo test -p "
-                    "ironclaw_integration_tests --test reborn_group_alpha "
-                    "--ignore-rust-version -- --nocapture",
-                    "cargo:test -p ironclaw_integration_tests --test "
-                    "reborn_group_alpha --ignore-rust-version -- --nocapture",
-                    "timeout:--signal=INT --kill-after=30s 9m cargo test -p "
-                    "ironclaw_integration_tests --test reborn_group_zeta "
-                    "--ignore-rust-version -- --nocapture",
-                    "cargo:test -p ironclaw_integration_tests --test "
-                    "reborn_group_zeta --ignore-rust-version -- --nocapture",
-                ],
-            )
 
 
 if __name__ == "__main__":

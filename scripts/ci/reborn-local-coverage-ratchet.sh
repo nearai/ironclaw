@@ -97,7 +97,6 @@ for lane in 0 1 2 3 groups; do
     cargo llvm-cov clean --profraw-only
     run_cargo_cov_env env \
         REBORN_COV_LANES_JSON="[${lane_json}]" \
-        REBORN_COV_LANE_PARTITIONS=4 \
         REBORN_COV_LANE_TEST_TIMEOUT="${REBORN_COV_LANE_TEST_TIMEOUT:-45m}" \
         "${script_dir}/reborn-coverage-lane-run.sh" "${out_dir}/lanes/part-${lane}.lcov"
 done

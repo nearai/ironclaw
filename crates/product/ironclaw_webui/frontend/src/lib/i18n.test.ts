@@ -271,6 +271,21 @@ test("non-English locale packs localize model-selection settings", () => {
   }
 });
 
+test("locale packs include model capability labels", () => {
+  const keys = [
+    "llm.capabilityText",
+    "llm.capabilityImageInput",
+    "llm.capabilityImageOutput",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of keys) {
+      assert.equal(typeof pack[key], "string", `${locale} must define ${key}`);
+    }
+  }
+});
+
 test("ensurePack: unknown locale resolves null (no loader, not registered)", async () => {
   const { ensurePack } = loadI18n();
   assert.equal(await ensurePack("zz-unknown"), null);

@@ -469,7 +469,7 @@ Group tests live in subdirectories under `tests/integration/`:
 
 ```
 tests/integration/group_approvals/
-    main.rs                              # one #[tokio::test], drives scenarios in order
+    main.rs                              # one or more independent top-level tests
     scenario_gate_then_resolve.rs        # pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()>
     scenario_approve_always_persists.rs
 ```
@@ -482,6 +482,12 @@ Cargo discovers multi-file integration test binaries via `[[test]]` entries in
 name = "reborn_group_approvals"
 path = "tests/integration/group_approvals/main.rs"
 ```
+
+A group binary may contain multiple top-level tests. Each top-level test must
+construct its own `RebornIntegrationGroup`; sibling tests must not depend on
+process-global state or on another test running first. Scenarios driven by one
+group instance may intentionally share state and run sequentially. CI may run
+the independent top-level tests in separate processes and in parallel.
 
 ### `main.rs` boilerplate (required)
 

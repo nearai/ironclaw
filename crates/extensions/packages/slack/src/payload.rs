@@ -13,6 +13,7 @@ use ironclaw_extension_contracts::external::{
     ProductAttachmentKind,
 };
 use ironclaw_host_api::product_adapter::AdapterInstallationId;
+use ironclaw_product_contracts::inbound::classify_channel_inbound_text;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -118,6 +119,12 @@ pub enum SlackIgnoreReason {
     /// A channel message that neither mentions the bot nor replies in a
     /// thread — bystander chatter.
     AmbientChannelMessage,
+    /// A threaded `message` callback that names a Slack user other than the
+    /// configured bot. It is ambiguous at this boundary: the token may name
+    /// the real bot while configuration is stale, in which case Slack's
+    /// authoritative `app_mention` callback must own admission. Ignoring this
+    /// shape also leaves ordinary third-party mentions silent, as before.
+    UnresolvedThreadMention,
     /// Authored by an integration, including this bot's own echo.
     BotAuthored,
     /// An `app_mention` whose `subtype` is `document_mention`: a person did
@@ -397,7 +404,29 @@ fn mentions_bot(text: &str, bot_user_id: Option<&str>) -> bool {
     let Some(bot) = bot_user_id.filter(|id| !id.is_empty()) else {
         return false;
     };
-    text.contains(&format!("<@{bot}>")) || text.contains(&format!("<@{bot}|"))
+    contains_slack_user_mention(text, Some(bot))
+}
+
+/// Match a complete Slack `<@user>` or `<@user|label>` token.
+fn contains_slack_user_mention(text: &str, expected_user_id: Option<&str>) -> bool {
+    text.split_inclusive('>').any(|segment| {
+        let Some(before_close) = segment.strip_suffix('>') else {
+            return false;
+        };
+        // Taking the last opener also lets a malformed `<@...` candidate
+        // precede a complete token without hiding it. Each `>`-terminated
+        // segment is scanned once, so hostile input remains linear.
+        let Some((_, inside)) = before_close.rsplit_once("<@") else {
+            return false;
+        };
+        let mention_id = inside.split_once('|').map_or(inside, |(id, _)| id);
+        let valid_user_id = (mention_id.starts_with('U') || mention_id.starts_with('W'))
+            && mention_id.len() > 1
+            && mention_id
+                .chars()
+                .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit());
+        valid_user_id && expected_user_id.is_none_or(|expected| mention_id == expected)
+    })
 }
 
 /// The bot's own member id, from host-resolved, manifest-declared non-secret
@@ -497,9 +526,35 @@ fn normalize_user_message(
         });
     };
 
-    let event_id = build_message_event_id(installation_id, team_id, channel, ts)?;
-
     let raw_text = event.text.as_deref().unwrap_or_default();
+    // ponytail: Slack gives a `message` callback no target-user field, so a
+    // third-party mention is indistinguishable from the real bot under stale
+    // configuration. Both are non-turn-producing thread chatter here, except
+    // for text the canonical product classifier recognizes as a control or
+    // command: those preserve the legacy thread-control path without copying
+    // its grammar into this adapter. If Slack adds a typed target identity,
+    // narrow this ignore without changing event keys. Keep this after the
+    // canonical authorship/subtype/shape gates above so ignored events retain
+    // their most precise diagnostic reason.
+    let unresolved_thread_control = if matches!(kind, SlackMessageKind::ThreadReply)
+        && contains_slack_user_mention(raw_text, None)
+    {
+        let text_without_leading_mention = strip_leading_bot_mention(raw_text, None);
+        if classify_channel_inbound_text(
+            &text_without_leading_mention,
+            ProductTriggerReason::ReplyToBot,
+        )
+        .is_some()
+        {
+            Some(text_without_leading_mention)
+        } else {
+            return Ok(SlackInboundEvent::Ignore {
+                reason: SlackIgnoreReason::UnresolvedThreadMention,
+            });
+        }
+    } else {
+        None
+    };
     let (text, thread_ts, trigger) = match kind {
         SlackMessageKind::AppMention | SlackMessageKind::TextMention => (
             strip_leading_bot_mention(raw_text, bot_user_id),
@@ -512,11 +567,13 @@ fn normalize_user_message(
             ProductTriggerReason::DirectChat,
         ),
         SlackMessageKind::ThreadReply => (
-            strip_leading_bot_mention(raw_text, bot_user_id),
+            unresolved_thread_control
+                .unwrap_or_else(|| strip_leading_bot_mention(raw_text, bot_user_id)),
             event.thread_ts.as_deref(),
             ProductTriggerReason::ReplyToBot,
         ),
     };
+    let event_id = build_message_event_id(installation_id, team_id, channel, ts)?;
 
     let actor = build_actor_ref(user)?;
     let conversation = build_conversation_ref(team_id, channel, thread_ts, Some(ts))?;
@@ -563,12 +620,11 @@ fn require_well_formed_envelope(
 /// The dedup key for one Slack MESSAGE, not one Slack EVENT.
 ///
 /// Slack announces a single post as up to two events — `app_mention` and
-/// `message` — with DISTINCT `event_id`s, and both can now start a run. Keyed
-/// on `event_id` the durable admission gate cannot see they are the same
-/// message and would admit two runs, so one @mention would be answered twice.
+/// `message` — with DISTINCT `event_id`s, and both can start a run. Keyed on
+/// `event_id` the durable admission gate cannot see they are the same message
+/// and would admit two runs, so one @mention would be answered twice.
 /// `(team, channel, ts)` is the identity Slack itself gives the message, so
 /// the twins collapse to exactly one run whichever of them arrives first.
-/// (`openclaw` and `suna` key the same collapse on the same triple.)
 fn build_message_event_id(
     installation_id: &AdapterInstallationId,
     team_id: Option<&str>,

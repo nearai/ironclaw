@@ -1,4 +1,5 @@
 use crate::request::github_request;
+use crate::response::compact_repo_list;
 use crate::types::RepoListType;
 use crate::validation::*;
 
@@ -130,7 +131,7 @@ pub(crate) fn list_repos(
     if let Some(p) = page {
         path.push_str(&format!("&page={}", p));
     }
-    github_request("GET", &path, None)
+    github_request("GET", &path, None).and_then(compact_repo_list)
 }
 
 pub(crate) fn list_branches(

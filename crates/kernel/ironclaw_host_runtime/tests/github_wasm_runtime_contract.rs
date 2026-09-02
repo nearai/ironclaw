@@ -361,6 +361,230 @@ async fn host_runtime_services_compact_github_pull_list_preserves_page_shape() {
 }
 
 #[tokio::test]
+async fn host_runtime_services_compact_github_repo_list_preserves_page_shape() {
+    let capability_id = CapabilityId::new("github.list_repos").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let large_detail = "x".repeat(16 * 1024);
+    let provider_items = (0..30)
+        .map(|index| {
+            json!({
+                "id": 30_000 + index,
+                "node_id": format!("R_{index}"),
+                "name": format!("repo-{index}"),
+                "full_name": format!("nearai/repo-{index}"),
+                "private": false,
+                "fork": false,
+                "archived": false,
+                "visibility": "public",
+                "html_url": format!("https://github.com/nearai/repo-{index}"),
+                "description": format!("Repository {index}"),
+                "language": "Rust",
+                "default_branch": "main",
+                "stargazers_count": 100 + index,
+                "open_issues_count": index,
+                "updated_at": "2026-08-30T00:00:00Z",
+                "pushed_at": "2026-08-29T00:00:00Z",
+                "owner": {
+                    "login": "nearai",
+                    "avatar_url": "https://example.test/avatar",
+                    "organizations_url": large_detail
+                },
+                "license": {
+                    "spdx_id": "MIT",
+                    "url": large_detail
+                },
+                "permissions": {
+                    "admin": false,
+                    "maintain": false,
+                    "push": true,
+                    "pull": true
+                },
+                "archive_url": large_detail,
+                "issues_url": large_detail,
+                "pulls_url": large_detail,
+                "_links": {"self": {"href": large_detail}}
+            })
+        })
+        .collect::<Vec<_>>();
+    let provider_body = serde_json::to_string(&provider_items).expect("provider fixture JSON");
+    assert!(provider_body.len() > 2 * 1024 * 1024);
+    let network = RecordingNetworkHttpEgress::with_body(provider_body.into_bytes());
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "type": "all",
+                "page": 2,
+                "limit": 30
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            let items = completed.output.as_array().expect("list remains an array");
+            assert_eq!(items.len(), 30);
+            assert_eq!(items[0]["full_name"], "nearai/repo-0");
+            assert_eq!(items[0]["owner"], json!({"login": "nearai"}));
+            assert_eq!(items[0]["license"], json!({"spdx_id": "MIT"}));
+            assert_eq!(
+                items[0]["permissions"],
+                json!({"admin": false, "push": true, "pull": true})
+            );
+            assert!(items[0].get("archive_url").is_none());
+            assert!(items[0]["owner"].get("avatar_url").is_none());
+            assert!(
+                completed.output.to_string().len() < 30 * 1024,
+                "host-visible repository list output should remain compact"
+            );
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/user/repos?per_page=30&type=all&page=2"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_compact_github_repository_search_preserves_envelope() {
+    let capability_id = CapabilityId::new("github.search_repositories").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let large_detail = "x".repeat(16 * 1024);
+    let provider_items = (0..2)
+        .map(|index| {
+            json!({
+                "id": 40_000 + index,
+                "node_id": format!("R_search_{index}"),
+                "name": format!("search-repo-{index}"),
+                "full_name": format!("nearai/search-repo-{index}"),
+                "private": false,
+                "fork": false,
+                "archived": false,
+                "visibility": "public",
+                "html_url": format!("https://github.com/nearai/search-repo-{index}"),
+                "description": format!("Search repository {index}"),
+                "language": "Rust",
+                "default_branch": "main",
+                "stargazers_count": 500 + index,
+                "open_issues_count": index,
+                "updated_at": "2026-08-30T00:00:00Z",
+                "pushed_at": "2026-08-29T00:00:00Z",
+                "owner": {
+                    "login": "nearai",
+                    "avatar_url": "https://example.test/avatar",
+                    "organizations_url": large_detail
+                },
+                "license": {
+                    "spdx_id": "MIT",
+                    "url": large_detail
+                },
+                "permissions": {
+                    "admin": false,
+                    "maintain": false,
+                    "push": true,
+                    "pull": true
+                },
+                "archive_url": large_detail,
+                "issues_url": large_detail,
+                "pulls_url": large_detail,
+                "_links": {"self": {"href": large_detail}}
+            })
+        })
+        .collect::<Vec<_>>();
+    let provider_body = json!({
+        "total_count": 200,
+        "incomplete_results": false,
+        "items": provider_items
+    })
+    .to_string();
+    let network = RecordingNetworkHttpEgress::with_body(provider_body.into_bytes());
+    let secret_store = Arc::new(SecretStore::ephemeral());
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = github_wasm_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({
+                "query": "language:rust",
+                "page": 3,
+                "limit": 2,
+                "sort": "stars",
+                "order": "desc"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["total_count"], 200);
+            assert_eq!(completed.output["incomplete_results"], false);
+            let items = completed.output["items"]
+                .as_array()
+                .expect("search envelope keeps its items array");
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0]["full_name"], "nearai/search-repo-0");
+            assert_eq!(items[0]["owner"], json!({"login": "nearai"}));
+            assert_eq!(items[0]["license"], json!({"spdx_id": "MIT"}));
+            assert_eq!(
+                items[0]["permissions"],
+                json!({"admin": false, "push": true, "pull": true})
+            );
+            assert!(items[0].get("archive_url").is_none());
+            assert!(items[0]["owner"].get("avatar_url").is_none());
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/search/repositories?q=language%3Arust&per_page=2&page=3&sort=stars&order=desc"
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_restages_github_product_auth_for_multi_request_wasm_capability() {
     let capability_id = CapabilityId::new("github.create_branch").unwrap();
     let scope = sample_scope(InvocationId::new());

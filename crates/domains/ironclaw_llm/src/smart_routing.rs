@@ -1065,6 +1065,10 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.list_models().await
     }
 
+    async fn list_model_catalog(&self) -> Result<Vec<crate::models::DiscoveredModel>, LlmError> {
+        self.primary.list_model_catalog().await
+    }
+
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         self.primary.model_metadata().await
     }

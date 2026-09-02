@@ -182,6 +182,20 @@ async fn capability_stage_trims_batch_to_remaining_capability_budget() {
         }),
     };
     let calls = vec![make_call(1), make_call(2), make_call(3), make_call(4)];
+    let expected_launched_signatures = calls[..2]
+        .iter()
+        .map(|call| {
+            CapabilityCallSignature::from_call(
+                call.capability_id.clone(),
+                &call
+                    .provider_replay
+                    .as_ref()
+                    .expect("budget test calls have provider replay")
+                    .arguments,
+            )
+            .expect("launched call signature")
+        })
+        .collect::<Vec<_>>();
 
     let host = MockHost::new(Vec::new()).with_single_outcomes(vec![
         resolution::completed(
@@ -250,6 +264,15 @@ async fn capability_stage_trims_batch_to_remaining_capability_budget() {
             assert_eq!(
                 state.budget_ledger.capability_invocations_made(),
                 policy.max_capability_invocations
+            );
+            assert_eq!(
+                state
+                    .recent_call_signatures
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                expected_launched_signatures,
+                "only host-launched calls may enter the call-signature ring"
             );
 
             // 4 tool results total: 2 real completions plus 2 blocked

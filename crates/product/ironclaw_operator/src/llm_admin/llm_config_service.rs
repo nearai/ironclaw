@@ -24,14 +24,16 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ironclaw_config::{LlmSlotSelection, RebornBootConfig};
+use ironclaw_llm::models::{DiscoveredModel, ModelModality};
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 use ironclaw_llm::{
     NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
 };
 use ironclaw_product_contracts::operator_llm::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    ModelSelectionPolicy, ModelSelectionPolicyStore, ModelSelectionPolicyStoreError,
+    LlmConfigSnapshot, LlmModelCatalogEntry, LlmModelModality, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, MODEL_SELECTION_POLICY_MAX_BYTES, ModelSelectionPolicy,
+    ModelSelectionPolicyStore, ModelSelectionPolicyStoreError, ModelSelectionPolicyUpdateMode,
     NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
     SetActiveLlmRequest, SetUserModelPolicyRequest, SetUserModelPreferenceRequest,
     UpsertLlmProviderRequest, UserModelCatalog, UserModelPreference, UserModelPreferenceStore,
@@ -800,12 +802,18 @@ impl LlmConfigService for RebornLlmConfigService {
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, LlmConfigServiceError> {
         let provider = self.probe_provider(&request).await?;
-        match provider.list_models().await {
-            Ok(models) => Ok(LlmModelsResult {
-                ok: true,
-                models,
-                message: String::new(),
-            }),
+        match provider.list_model_catalog().await {
+            Ok(discovered) => {
+                let model_entries: Vec<_> =
+                    discovered.into_iter().map(product_model_entry).collect();
+                let models = model_entries.iter().map(|entry| entry.id.clone()).collect();
+                Ok(LlmModelsResult {
+                    ok: true,
+                    models,
+                    model_entries,
+                    message: String::new(),
+                })
+            }
             Err(error) => {
                 tracing::debug!(
                     provider_id = %request.provider_id,
@@ -816,6 +824,7 @@ impl LlmConfigService for RebornLlmConfigService {
                 Ok(LlmModelsResult {
                     ok: false,
                     models: Vec::new(),
+                    model_entries: Vec::new(),
                     message: "could not list models for this provider".to_string(),
                 })
             }
@@ -850,9 +859,14 @@ impl LlmConfigService for RebornLlmConfigService {
             .ok_or(LlmConfigServiceError::Unavailable)?;
         let snapshot = self.build_provider_snapshot().await?;
         let active = snapshot.active.ok_or(LlmConfigServiceError::Unavailable)?;
-        let policy = validated_model_policy(active.provider_id, request)?;
-        store
-            .write(&caller, &policy)
+        let update_mode = if request.model_entries.is_none() {
+            ModelSelectionPolicyUpdateMode::PreserveExistingModelEntries
+        } else {
+            ModelSelectionPolicyUpdateMode::Replace
+        };
+        let policy = validated_model_policy(active.provider_id, request, Vec::new())?;
+        let policy = store
+            .update(&caller, &policy, update_mode)
             .await
             .map_err(map_model_policy_store_error)?;
         Ok(catalog_from_policy(policy))
@@ -1515,10 +1529,16 @@ fn validate_provider_id(id: &str) -> Result<String, LlmConfigServiceError> {
 fn validated_model_policy(
     provider_id: String,
     request: SetUserModelPolicyRequest,
+    preserved_entries: Vec<LlmModelCatalogEntry>,
 ) -> Result<ModelSelectionPolicy, LlmConfigServiceError> {
-    if request.allowed_models.is_empty()
-        || request.allowed_models.len() > USER_MODEL_POLICY_MAX_MODELS
-    {
+    let SetUserModelPolicyRequest {
+        workspace_default,
+        allowed_models: requested_models,
+        model_entries: requested_entries,
+    } = request;
+    let preserving_entries = requested_entries.is_none();
+    let requested_entries = requested_entries.unwrap_or(preserved_entries);
+    if requested_models.is_empty() || requested_models.len() > USER_MODEL_POLICY_MAX_MODELS {
         return Err(invalid_policy_field(
             "allowed_models",
             "allowed_models must contain between 1 and 128 models",
@@ -1526,14 +1546,14 @@ fn validated_model_policy(
     }
 
     let mut seen = HashSet::new();
-    let mut allowed_models = Vec::with_capacity(request.allowed_models.len());
-    for model in request.allowed_models {
+    let mut allowed_models = Vec::with_capacity(requested_models.len());
+    for model in requested_models {
         let model = validated_model_id("allowed_models", &model)?;
         if seen.insert(model.clone()) {
             allowed_models.push(model);
         }
     }
-    let workspace_default = validated_model_id("workspace_default", &request.workspace_default)?;
+    let workspace_default = validated_model_id("workspace_default", &workspace_default)?;
     if !allowed_models
         .iter()
         .any(|model| model == &workspace_default)
@@ -1544,11 +1564,48 @@ fn validated_model_policy(
         ));
     }
 
-    Ok(ModelSelectionPolicy {
+    if requested_entries.len() > USER_MODEL_POLICY_MAX_MODELS {
+        return Err(invalid_policy_field(
+            "model_entries",
+            "model_entries must contain at most 128 models",
+        ));
+    }
+    let mut seen_entries = HashSet::new();
+    let mut model_entries = Vec::with_capacity(requested_entries.len());
+    for mut entry in requested_entries {
+        entry.id = validated_model_id("model_entries", &entry.id)?;
+        if !seen.contains(&entry.id) {
+            if preserving_entries {
+                continue;
+            }
+            return Err(invalid_policy_field(
+                "model_entries",
+                "model_entries may only describe allowed_models",
+            ));
+        }
+        dedup_modalities(&mut entry.input_modalities);
+        dedup_modalities(&mut entry.output_modalities);
+        if seen_entries.insert(entry.id.clone()) {
+            model_entries.push(entry);
+        }
+    }
+
+    let policy = ModelSelectionPolicy {
         provider_id,
         workspace_default,
         allowed_models,
-    })
+        model_entries,
+    };
+    let serialized_len = serde_json::to_vec(&policy)
+        .map_err(|_| invalid_policy_field("model_entries", "model policy is not serializable"))?
+        .len();
+    if serialized_len > MODEL_SELECTION_POLICY_MAX_BYTES {
+        return Err(invalid_policy_field(
+            "model_entries",
+            "model policy exceeds the 64 KiB storage limit",
+        ));
+    }
+    Ok(policy)
 }
 
 fn matching_active_model_policy(
@@ -1587,6 +1644,38 @@ fn catalog_from_policy(policy: ModelSelectionPolicy) -> UserModelCatalog {
         selection_enabled: true,
         workspace_default: Some(policy.workspace_default),
         models: policy.allowed_models,
+        model_entries: policy.model_entries,
+    }
+}
+
+fn dedup_modalities(modalities: &mut Vec<LlmModelModality>) {
+    let mut seen = HashSet::new();
+    modalities.retain(|modality| seen.insert(*modality));
+}
+
+fn product_model_entry(model: DiscoveredModel) -> LlmModelCatalogEntry {
+    LlmModelCatalogEntry {
+        id: model.id,
+        input_modalities: model
+            .input_modalities
+            .into_iter()
+            .map(product_model_modality)
+            .collect(),
+        output_modalities: model
+            .output_modalities
+            .into_iter()
+            .map(product_model_modality)
+            .collect(),
+    }
+}
+
+fn product_model_modality(modality: ModelModality) -> LlmModelModality {
+    match modality {
+        ModelModality::Text => LlmModelModality::Text,
+        ModelModality::Image => LlmModelModality::Image,
+        ModelModality::Audio => LlmModelModality::Audio,
+        ModelModality::Video => LlmModelModality::Video,
+        ModelModality::Embedding => LlmModelModality::Embedding,
     }
 }
 
@@ -1625,7 +1714,15 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
 mod tests {
     use super::*;
     use ironclaw_config::{RebornHome, RebornProfile};
-    use ironclaw_host_api::ids::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_filesystem::{
+        BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
+        InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    };
+    use ironclaw_host_api::{
+        ids::{AgentId, ProjectId, TenantId, UserId},
+        mount::{MountGrant, MountPermissions, MountView},
+        path::{MountAlias, VirtualPath},
+    };
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_product_contracts::operator_llm::{
         SetUserModelPreferenceRequest, UserModelPreference, UserModelPreferenceStore,
@@ -1719,6 +1816,74 @@ mod tests {
         preferences: std::sync::Mutex<HashMap<(String, String), UserModelPreference>>,
     }
 
+    struct FirstPolicyWriteBarrierBackend {
+        inner: Arc<InMemoryBackend>,
+        armed: std::sync::atomic::AtomicBool,
+        intercepted: std::sync::atomic::AtomicBool,
+        write_entered: tokio::sync::Notify,
+        release_write: tokio::sync::Notify,
+    }
+
+    impl FirstPolicyWriteBarrierBackend {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(InMemoryBackend::new()),
+                armed: std::sync::atomic::AtomicBool::new(false),
+                intercepted: std::sync::atomic::AtomicBool::new(false),
+                write_entered: tokio::sync::Notify::new(),
+                release_write: tokio::sync::Notify::new(),
+            }
+        }
+
+        fn arm(&self) {
+            self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        async fn wait_until_write_is_blocked(&self) {
+            self.write_entered.notified().await;
+        }
+
+        fn release(&self) {
+            self.release_write.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for FirstPolicyWriteBarrierBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            let should_block = self.armed.load(std::sync::atomic::Ordering::SeqCst)
+                && !self
+                    .intercepted
+                    .swap(true, std::sync::atomic::Ordering::SeqCst);
+            if should_block {
+                self.write_entered.notify_one();
+                self.release_write.notified().await;
+            }
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.inner.get(path).await
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+    }
+
     #[async_trait]
     impl UserModelPreferenceStore for InMemoryUserModelPreferenceStore {
         async fn read(
@@ -1766,16 +1931,30 @@ mod tests {
                 .cloned())
         }
 
-        async fn write(
+        async fn update(
             &self,
             caller: &ProductSurfaceCaller,
             policy: &ModelSelectionPolicy,
-        ) -> Result<(), ModelSelectionPolicyStoreError> {
-            self.policies
-                .lock()
-                .expect("policy lock")
-                .insert(caller.tenant_id.as_str().to_string(), policy.clone());
-            Ok(())
+            mode: ModelSelectionPolicyUpdateMode,
+        ) -> Result<ModelSelectionPolicy, ModelSelectionPolicyStoreError> {
+            let mut policies = self.policies.lock().expect("policy lock");
+            let mut next = policy.clone();
+            if mode == ModelSelectionPolicyUpdateMode::PreserveExistingModelEntries {
+                next.model_entries = policies
+                    .get(caller.tenant_id.as_str())
+                    .filter(|stored| stored.provider_id == next.provider_id)
+                    .map(|stored| {
+                        stored
+                            .model_entries
+                            .iter()
+                            .filter(|entry| next.allowed_models.contains(&entry.id))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            policies.insert(caller.tenant_id.as_str().to_string(), next.clone());
+            Ok(next)
         }
     }
 
@@ -1783,6 +1962,7 @@ mod tests {
         SetUserModelPolicyRequest {
             workspace_default: default.to_string(),
             allowed_models: models.iter().map(|model| (*model).to_string()).collect(),
+            model_entries: Some(Vec::new()),
         }
     }
 
@@ -1790,13 +1970,25 @@ mod tests {
         provider_id: &str,
         model: &str,
     ) -> (tempfile::TempDir, RebornLlmConfigService) {
+        service_with_active_provider_and_policy_store(
+            provider_id,
+            model,
+            Arc::new(InMemoryModelPolicyStore::default()),
+        )
+    }
+
+    fn service_with_active_provider_and_policy_store(
+        provider_id: &str,
+        model: &str,
+        model_policy_store: Arc<dyn ModelSelectionPolicyStore>,
+    ) -> (tempfile::TempDir, RebornLlmConfigService) {
         let temp = tempfile::tempdir().expect("tempdir");
         let boot = boot_for_home(&temp.path().join("reborn-home"));
         RebornProviderAdmin::new(boot.clone())
             .set_provider(provider_id, Some(model))
             .expect("persist active provider");
         let service = RebornLlmConfigService::new(boot, key_store())
-            .with_model_policy_store(Arc::new(InMemoryModelPolicyStore::default()))
+            .with_model_policy_store(model_policy_store)
             .with_user_model_preference_store(
                 Arc::new(InMemoryUserModelPreferenceStore::default()),
             );
@@ -1845,6 +2037,7 @@ mod tests {
                 selection_enabled: true,
                 workspace_default: Some("model-a".to_string()),
                 models: vec!["model-a".to_string(), "model-b".to_string()],
+                model_entries: Vec::new(),
             },
         );
         assert_eq!(
@@ -1866,6 +2059,258 @@ mod tests {
                 .resolve_user_model(caller(), Some("model-c".to_string()))
                 .await,
             Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn configured_policy_preserves_only_allowed_model_capabilities() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let request = SetUserModelPolicyRequest {
+            workspace_default: "model-a".to_string(),
+            allowed_models: vec!["model-a".to_string(), "model-b".to_string()],
+            model_entries: Some(vec![
+                LlmModelCatalogEntry {
+                    id: "model-a".to_string(),
+                    input_modalities: vec![
+                        LlmModelModality::Text,
+                        LlmModelModality::Image,
+                        LlmModelModality::Image,
+                    ],
+                    output_modalities: vec![LlmModelModality::Text],
+                },
+                LlmModelCatalogEntry {
+                    id: "model-a".to_string(),
+                    input_modalities: vec![LlmModelModality::Audio],
+                    output_modalities: Vec::new(),
+                },
+            ]),
+        };
+
+        let catalog = service
+            .set_user_model_policy(caller().with_operator_config(true), request)
+            .await
+            .expect("set policy with capabilities");
+
+        assert_eq!(catalog.model_entries.len(), 1);
+        assert_eq!(catalog.model_entries[0].id, "model-a");
+        assert_eq!(
+            catalog.model_entries[0].input_modalities,
+            [LlmModelModality::Text, LlmModelModality::Image]
+        );
+        assert!(catalog.models.contains(&"model-b".to_string()));
+
+        let invalid = SetUserModelPolicyRequest {
+            workspace_default: "model-a".to_string(),
+            allowed_models: vec!["model-a".to_string()],
+            model_entries: Some(vec![LlmModelCatalogEntry {
+                id: "model-c".to_string(),
+                input_modalities: vec![LlmModelModality::Text],
+                output_modalities: Vec::new(),
+            }]),
+        };
+        assert!(matches!(
+            service
+                .set_user_model_policy(caller().with_operator_config(true), invalid)
+                .await,
+            Err(LlmConfigServiceError::InvalidRequest { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn legacy_policy_update_preserves_capabilities_for_remaining_models() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let admin = caller().with_operator_config(true);
+        service
+            .set_user_model_policy(
+                admin.clone(),
+                SetUserModelPolicyRequest {
+                    workspace_default: "model-a".to_string(),
+                    allowed_models: vec!["model-a".to_string(), "model-b".to_string()],
+                    model_entries: Some(vec![
+                        LlmModelCatalogEntry {
+                            id: "model-a".to_string(),
+                            input_modalities: vec![LlmModelModality::Text],
+                            output_modalities: vec![LlmModelModality::Text],
+                        },
+                        LlmModelCatalogEntry {
+                            id: "model-b".to_string(),
+                            input_modalities: vec![LlmModelModality::Text, LlmModelModality::Image],
+                            output_modalities: vec![LlmModelModality::Text],
+                        },
+                    ]),
+                },
+            )
+            .await
+            .expect("seed policy with capabilities");
+
+        let legacy_request: SetUserModelPolicyRequest = serde_json::from_value(serde_json::json!({
+            "workspace_default": "model-b",
+            "allowed_models": ["model-b"]
+        }))
+        .expect("legacy request without model_entries");
+        let catalog = service
+            .set_user_model_policy(admin, legacy_request)
+            .await
+            .expect("legacy policy update");
+
+        assert_eq!(catalog.models, ["model-b"]);
+        assert_eq!(catalog.model_entries.len(), 1);
+        assert_eq!(catalog.model_entries[0].id, "model-b");
+        assert_eq!(
+            catalog.model_entries[0].input_modalities,
+            [LlmModelModality::Text, LlmModelModality::Image]
+        );
+
+        let cleared = service
+            .set_user_model_policy(
+                caller().with_operator_config(true),
+                SetUserModelPolicyRequest {
+                    workspace_default: "model-b".to_string(),
+                    allowed_models: vec!["model-b".to_string()],
+                    model_entries: Some(Vec::new()),
+                },
+            )
+            .await
+            .expect("explicitly clear capability metadata");
+        assert!(cleared.model_entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_legacy_update_preserves_the_latest_capability_metadata() {
+        let backend = Arc::new(FirstPolicyWriteBarrierBackend::new());
+        let filesystem = Arc::new(ScopedFilesystem::new(Arc::clone(&backend), |scope| {
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/tenant-shared")?,
+                VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id.as_str()))?,
+                MountPermissions::read_write(),
+            )])
+        }));
+        let store = Arc::new(crate::llm_admin::FilesystemModelSelectionPolicyStore::new(
+            filesystem,
+        ));
+        let (_temp, service) =
+            service_with_active_provider_and_policy_store("nearai", "provider-default", store);
+        let service = Arc::new(service);
+        let admin = caller().with_operator_config(true);
+
+        service
+            .set_user_model_policy(
+                admin.clone(),
+                SetUserModelPolicyRequest {
+                    workspace_default: "model-a".to_string(),
+                    allowed_models: vec!["model-a".to_string(), "model-b".to_string()],
+                    model_entries: Some(vec![LlmModelCatalogEntry {
+                        id: "model-a".to_string(),
+                        input_modalities: vec![LlmModelModality::Text],
+                        output_modalities: vec![LlmModelModality::Text],
+                    }]),
+                },
+            )
+            .await
+            .expect("seed policy");
+
+        backend.arm();
+        let legacy_service = Arc::clone(&service);
+        let legacy_admin = admin.clone();
+        let legacy_update = tokio::spawn(async move {
+            let request = serde_json::from_value(serde_json::json!({
+                "workspace_default": "model-a",
+                "allowed_models": ["model-a"]
+            }))
+            .expect("legacy request");
+            legacy_service
+                .set_user_model_policy(legacy_admin, request)
+                .await
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            backend.wait_until_write_is_blocked(),
+        )
+        .await
+        .expect("legacy write reaches the barrier");
+        service
+            .set_user_model_policy(
+                admin,
+                SetUserModelPolicyRequest {
+                    workspace_default: "model-a".to_string(),
+                    allowed_models: vec!["model-a".to_string()],
+                    model_entries: Some(vec![LlmModelCatalogEntry {
+                        id: "model-a".to_string(),
+                        input_modalities: vec![LlmModelModality::Text, LlmModelModality::Image],
+                        output_modalities: vec![LlmModelModality::Text],
+                    }]),
+                },
+            )
+            .await
+            .expect("write current capabilities");
+        backend.release();
+
+        tokio::time::timeout(Duration::from_secs(5), legacy_update)
+            .await
+            .expect("legacy update completes after the CAS retry")
+            .expect("legacy task")
+            .expect("legacy update retries");
+        let catalog = service
+            .user_model_catalog(caller())
+            .await
+            .expect("read final catalog");
+        assert_eq!(
+            catalog.model_entries[0].input_modalities,
+            [LlmModelModality::Text, LlmModelModality::Image]
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_model_policy_is_rejected_before_persistence() {
+        let (_temp, service) = service_with_active_provider("nearai", "provider-default");
+        let model_ids: Vec<_> = (0..USER_MODEL_POLICY_MAX_MODELS)
+            .map(|index| {
+                let prefix = format!("model-{index:03}-");
+                format!(
+                    "{prefix}{}",
+                    "x".repeat(USER_MODEL_ID_MAX_BYTES - prefix.len())
+                )
+            })
+            .collect();
+        let model_entries = model_ids
+            .iter()
+            .map(|id| LlmModelCatalogEntry {
+                id: id.clone(),
+                input_modalities: vec![
+                    LlmModelModality::Text,
+                    LlmModelModality::Image,
+                    LlmModelModality::Audio,
+                    LlmModelModality::Video,
+                    LlmModelModality::Embedding,
+                ],
+                output_modalities: vec![
+                    LlmModelModality::Text,
+                    LlmModelModality::Image,
+                    LlmModelModality::Audio,
+                    LlmModelModality::Video,
+                    LlmModelModality::Embedding,
+                ],
+            })
+            .collect();
+
+        let result = service
+            .set_user_model_policy(
+                caller().with_operator_config(true),
+                SetUserModelPolicyRequest {
+                    workspace_default: model_ids[0].clone(),
+                    allowed_models: model_ids,
+                    model_entries: Some(model_entries),
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmConfigServiceError::InvalidRequest {
+                field: Some(field),
+                ..
+            }) if field == "model_entries"
         ));
     }
 
@@ -2201,6 +2646,64 @@ mod tests {
             model: Some("acme-1".to_string()),
             api_key: api_key.map(SecretString::from),
         }
+    }
+
+    async fn spawn_model_catalog_server(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind model catalog server");
+        let address = listener.local_addr().expect("server address");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0_u8; 4096];
+            let _ = socket.read(&mut request).await.expect("read request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        format!("http://{address}/v1")
+    }
+
+    #[tokio::test]
+    async fn list_models_keeps_ids_and_capability_entries_consistent() {
+        let base_url = spawn_model_catalog_server(
+            r#"{"data":[{"id":"vision-model","input_modalities":["text","image"],"output_modalities":["text"]}]}"#,
+        )
+        .await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let service = RebornLlmConfigService::new(
+            boot_for_home(&temp.path().join("reborn-home")),
+            key_store(),
+        );
+        let request = LlmProbeRequest {
+            provider_id: "nearai".to_string(),
+            adapter: "nearai".to_string(),
+            base_url: Some(base_url),
+            model: Some("vision-model".to_string()),
+            api_key: Some(SecretString::from("test-key".to_string())),
+        };
+
+        let result = service
+            .list_models(caller(), request)
+            .await
+            .expect("list models");
+
+        assert!(result.ok);
+        assert_eq!(result.models, ["vision-model"]);
+        assert_eq!(result.model_entries.len(), 1);
+        assert_eq!(result.model_entries[0].id, result.models[0]);
+        assert_eq!(
+            result.model_entries[0].input_modalities,
+            [LlmModelModality::Text, LlmModelModality::Image]
+        );
     }
 
     /// An unknown adapter (validated locally, not via the network) must

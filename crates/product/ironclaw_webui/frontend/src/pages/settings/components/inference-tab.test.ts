@@ -44,6 +44,7 @@ function renderInferenceModule() {
     Skeleton: component("Skeleton"),
     ProviderManagement: component("ProviderManagement"),
     ModelSelectionPolicyEditor: component("ModelSelectionPolicyEditor"),
+    ModelCapabilityBadges: component("ModelCapabilityBadges"),
     UserModelPreferenceSelector: component("UserModelPreferenceSelector"),
     SettingsGroup: component("SettingsGroup"),
     SettingsSearchEmpty: component("SettingsSearchEmpty"),
@@ -51,10 +52,26 @@ function renderInferenceModule() {
     INFERENCE_FIELDS,
     filterSettingsSections,
     matchesSearch,
+    modelEntryFor: (entries, model) => entries.find((entry) => entry.id === model),
+    normalizeModelCatalog: (catalog) => ({
+      models: catalog.models || [],
+      modelEntries: catalog.model_entries || [],
+    }),
     useLlmProviders: () => ({
       activeProviderId: "openai",
       selectedModel: "gpt-4.1",
       providers: [{ id: "openai", default_model: "gpt-4.1" }],
+      userModelPolicy: {
+        provider_id: "openai",
+        allowed_models: ["gpt-4.1"],
+        model_entries: [
+          {
+            id: "gpt-4.1",
+            input_modalities: ["text", "image"],
+            output_modalities: ["text"],
+          },
+        ],
+      },
       hasActiveProvider: true,
     }),
     useT: () => (key) => key,
@@ -95,6 +112,11 @@ test("Inference tab omits unsupported operator-config fields", () => {
     findComponentNodes(rendered, context.ModelSelectionPolicyEditor).length,
     1,
     "admins need a UI to enable the tenant model allowlist"
+  );
+  assert.equal(
+    findComponentNodes(rendered, context.ModelCapabilityBadges).length,
+    1,
+    "active model summary should show persisted capabilities"
   );
 });
 

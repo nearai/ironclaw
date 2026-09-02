@@ -73,6 +73,16 @@ main retains exhaustive per-lane fan-out for instrumented coverage.
 Full-coverage crate buckets run one multi-package `cargo llvm-cov` invocation
 per bucket, preserving every package test and the bucket LCOV artifact while
 sharing dependency compilation across packages in the same job.
+Uninstrumented whole-package buckets run ordinary libtest targets with nextest;
+packages declaring `harness = false` or an unknown test-target kind retain
+Cargo's runner. The planner derives that split from Cargo metadata and each
+selected manifest after bucket coalescing, failing closed when classification
+is impossible. Exact changed targets keep their existing direct `cargo test`
+path, and Cargo-only or exact-target buckets skip installing nextest. Nextest
+groups serialize runtime binaries whose existing locks are process-local and
+CLI trace-policy tests that share an on-disk global policy; the workflow checks
+representative tests against nextest's compiled inventory before execution.
+Zero-test package selections preserve Cargo's successful no-op.
 
 `Tests (Reborn)` owns Rust crate, root, architecture, runtime, and coverage
 contracts. Code Style owns WebUI lint, Vitest, and the production build on all

@@ -5,25 +5,23 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 under_test="${repo_root}/scripts/ci/reborn-coverage-lane-run.sh"
 sandbox="$(mktemp -d)"
 trap 'rm -rf "${sandbox}"' EXIT
+status=0
 
-mkdir -p "${sandbox}/bin"
-
+mkdir -p "${sandbox}/bin" "${sandbox}/without-nextest-bin"
 cat >"${sandbox}/bin/cargo-nextest" <<'STUB'
 #!/usr/bin/env bash
 exit 0
 STUB
-
 cat >"${sandbox}/bin/cargo" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"${INTEGRATION_BATCH_LOG}"
-if [[ "$*" == nextest\ run* ]]; then
+printf 'cargo:%s\n' "$*" >>"${INTEGRATION_BATCH_LOG}"
+if [[ "${FAIL_NEXTEST:-false}" == "true" && "$*" == nextest\ run* ]]; then
   exit 17
 fi
-exit 0
 STUB
-
 cat >"${sandbox}/bin/timeout" <<'STUB'
 #!/usr/bin/env bash
+printf 'timeout:%s\n' "$*" >>"${INTEGRATION_BATCH_LOG}"
 while [[ "$1" == --* || "$1" == *[smhd] ]]; do
   case "$1" in
     --signal=*|--kill-after=*) shift ;;
@@ -32,175 +30,185 @@ while [[ "$1" == --* || "$1" == *[smhd] ]]; do
 done
 exec "$@"
 STUB
-
-chmod +x "${sandbox}/bin/cargo-nextest" "${sandbox}/bin/cargo" "${sandbox}/bin/timeout"
-
-mkdir -p "${sandbox}/without-nextest-bin"
+chmod +x "${sandbox}/bin/"*
 cp "${sandbox}/bin/cargo" "${sandbox}/bin/timeout" "${sandbox}/without-nextest-bin/"
-chmod +x "${sandbox}/without-nextest-bin/cargo" "${sandbox}/without-nextest-bin/timeout"
-
 missing_nextest_path="${sandbox}/without-nextest-bin:/usr/bin:/bin"
-if PATH="${missing_nextest_path}" command -v cargo-nextest >/dev/null 2>&1; then
-  echo "FAIL: missing-nextest probe PATH unexpectedly contains cargo-nextest" >&2
-  exit 1
+
+run_batch() {
+  local log="$1"
+  shift
+  (
+    cd "${repo_root}"
+    PATH="${sandbox}/bin:/usr/bin:/bin" \
+      INTEGRATION_BATCH_LOG="${log}" \
+      "$@"
+  )
+}
+
+mkdir -p "${sandbox}/aliases/lib"
+cp "${under_test}" "${sandbox}/aliases/reborn-coverage-lane-run.sh"
+cp "${repo_root}/scripts/ci/lib/integration_test_inventory.py" \
+  "${sandbox}/aliases/lib/integration_test_inventory.py"
+cat >"${sandbox}/aliases/Cargo.toml" <<'TOML'
+test = [
+  { name = "reborn_integration_before", path = "tests/integration/alias.rs" },
+  { name = "reborn_integration_after", path = "tests/integration/alias.rs" },
+]
+TOML
+aliases_log="${sandbox}/aliases.log"
+if ! (
+  cd "${sandbox}/aliases"
+  PATH="${sandbox}/bin:/usr/bin:/bin" \
+    INTEGRATION_BATCH_LOG="${aliases_log}" \
+    CI=true REBORN_COV_COLLECT=false REBORN_COV_LANES_JSON='[0]' \
+    bash "${sandbox}/aliases/reborn-coverage-lane-run.sh"
+); then
+  echo "FAIL: aliased integration targets did not execute" >&2
+  status=1
+elif ! grep -q -- '--test reborn_integration_before' "${aliases_log}" ||
+     ! grep -q -- '--test reborn_integration_after' "${aliases_log}"; then
+  echo "FAIL: execution inventory dropped a Cargo target sharing a source path" >&2
+  status=1
 fi
 
-status=0
-mkdir -p "${sandbox}/group-only/lib"
-cp "${under_test}" "${sandbox}/group-only/reborn-coverage-lane-run.sh"
-cat >"${sandbox}/group-only/lib/integration_test_inventory.py" <<'STUB'
+mkdir -p "${sandbox}/topology/lib"
+cp "${under_test}" "${sandbox}/topology/reborn-coverage-lane-run.sh"
+cat >"${sandbox}/topology/lib/integration_test_inventory.py" <<'STUB'
+#!/usr/bin/env python3
+import json
 import os
 import sys
 
-with open(os.environ["INTEGRATION_BATCH_LOG"], "a", encoding="utf-8") as log:
-    log.write("topology-check\n")
-if sys.argv[1:] != ["--validate-group-topology", os.getcwd()]:
-    sys.exit(24)
-if os.environ.get("FAIL_GROUP_TOPOLOGY") == "true":
-    sys.exit(23)
+if sys.argv[1] == "--json":
+    print(json.dumps({"partition_count": 4, "tests": [
+        {"name": "reborn_group_stub", "lane": "groups"}
+    ]}))
+    raise SystemExit(0)
+with open(os.environ["TOPOLOGY_LOG"], "w", encoding="utf-8") as log:
+    log.write("validated-before-cargo\n")
+raise SystemExit(23)
 STUB
-cat >"${sandbox}/group-only/reborn-coverage-int-tier-tests.sh" <<'STUB'
-#!/usr/bin/env bash
-if [[ "${VALID_GROUP_COVERAGE:-false}" == "true" ]]; then
-  printf '%s\n' --test reborn_group_valid
-  exit 0
-fi
-echo "FAIL: groups-only pass/fail batch rediscovered the coverage inventory" >&2
-exit 19
-STUB
-cat >"${sandbox}/group-only/run-reborn-group-tests.sh" <<'STUB'
-#!/usr/bin/env bash
-printf '%s\n' group-run >>"${INTEGRATION_BATCH_LOG}"
-STUB
-chmod +x "${sandbox}/group-only/"*.sh "${sandbox}/group-only/lib/"*.py
-
-if ! (
+topology_status=0
+TOPOLOGY_LOG="${sandbox}/topology.log" \
   PATH="${sandbox}/bin:/usr/bin:/bin" \
-    INTEGRATION_BATCH_LOG="${sandbox}/group-only.log" \
-    REBORN_COV_COLLECT=false \
-    REBORN_COV_LANES_JSON='["groups"]' \
-    REBORN_COV_LANE_PARTITIONS=4 \
-    bash "${sandbox}/group-only/reborn-coverage-lane-run.sh" "${sandbox}/unused-group.lcov"
-); then
-  echo "FAIL: groups-only pass/fail batch did not delegate directly to the canonical group runner" >&2
-  status=1
-elif [[ "$(cat "${sandbox}/group-only.log")" != $'topology-check\ngroup-run' ]]; then
-  echo "FAIL: groups-only pass/fail batch did not invoke the canonical group runner exactly once" >&2
+  INTEGRATION_BATCH_LOG="${sandbox}/topology-cargo.log" \
+  CI=true REBORN_COV_COLLECT=false REBORN_COV_LANES_JSON='["groups"]' \
+  bash "${sandbox}/topology/reborn-coverage-lane-run.sh" || topology_status=$?
+if [[ "${topology_status}" -ne 23 ]] ||
+   [[ "$(cat "${sandbox}/topology.log" 2>/dev/null || true)" != "validated-before-cargo" ]] ||
+   [[ -e "${sandbox}/topology-cargo.log" ]]; then
+  echo "FAIL: invalid group topology did not stop before Cargo" >&2
   status=1
 fi
 
-coverage_status=0
-FAIL_GROUP_TOPOLOGY=true \
-  PATH="${sandbox}/bin:/usr/bin:/bin" \
-  INTEGRATION_BATCH_LOG="${sandbox}/group-coverage.log" \
-  REBORN_COV_COLLECT=true \
-  REBORN_COV_LANES_JSON='["groups"]' \
-  REBORN_COV_LANE_PARTITIONS=4 \
-  bash "${sandbox}/group-only/reborn-coverage-lane-run.sh" \
-    "${sandbox}/unused-group-coverage.lcov" || coverage_status=$?
-if [[ "${coverage_status}" -ne 23 ]] ||
-   [[ "$(cat "${sandbox}/group-coverage.log" 2>/dev/null || true)" != "topology-check" ]]; then
-  echo "FAIL: coverage groups lane did not stop at topology validation" >&2
+mixed_log="${sandbox}/mixed.log"
+if FAIL_NEXTEST=true run_batch "${mixed_log}" env \
+  CI=true REBORN_COV_COLLECT=false REBORN_COV_LANES_JSON='[0,"groups"]' \
+  bash "${under_test}"; then
+  echo "FAIL: failed mixed nextest batch returned success" >&2
   status=1
 fi
-
-if ! VALID_GROUP_COVERAGE=true \
-  PATH="${sandbox}/bin:/usr/bin:/bin" \
-  INTEGRATION_BATCH_LOG="${sandbox}/valid-group-coverage.log" \
-  REBORN_COV_COLLECT=true \
-  REBORN_COV_LANES_JSON='["groups"]' \
-  REBORN_COV_LANE_PARTITIONS=4 \
-  bash "${sandbox}/group-only/reborn-coverage-lane-run.sh" \
-    "${sandbox}/valid-group-coverage.lcov"; then
-  echo "FAIL: valid coverage groups lane did not reach llvm-cov" >&2
-  status=1
-elif ! grep -q '^llvm-cov .*--test reborn_group_valid' "${sandbox}/valid-group-coverage.log"; then
-  echo "FAIL: valid coverage groups lane omitted its registered target" >&2
+if [[ "$(grep -c '^cargo:nextest run ' "${mixed_log}")" -ne 1 ]]; then
+  echo "FAIL: mixed selection did not issue exactly one nextest command" >&2
   status=1
 fi
-if (
-  cd "${repo_root}"
-  PATH="${sandbox}/bin:/usr/bin:/bin" \
-    CI=true \
-    INTEGRATION_BATCH_LOG="${sandbox}/commands.log" \
-    REBORN_COV_COLLECT=false \
-    REBORN_COV_LANES_JSON='[0,"groups"]' \
-    REBORN_COV_LANE_PARTITIONS=4 \
-    bash "${under_test}" "${sandbox}/unused.lcov"
-); then
-  echo "FAIL: a failed flat batch did not fail the combined runner" >&2
-  status=1
-fi
-
-if [[ "${status}" -eq 0 ]]; then
-  if [[ "$(grep -c '^nextest run ' "${sandbox}/commands.log")" -ne 1 ]]; then
-    echo "FAIL: selected flat lanes did not use one nextest invocation" >&2
+for required in '--profile ci' '--test-threads 4' '--test reborn_group_' '--test reborn_integration_'; do
+  if ! grep -q -- "${required}" "${mixed_log}"; then
+    echo "FAIL: mixed nextest command omitted ${required}" >&2
     status=1
   fi
-  if ! grep -q -- '--test reborn_group_' "${sandbox}/commands.log"; then
-    echo "FAIL: group suites did not run after the flat batch failed" >&2
-    status=1
-  fi
+done
+
+groups_log="${sandbox}/groups.log"
+if ! run_batch "${groups_log}" env \
+  CI=true REBORN_COV_COLLECT=false REBORN_COV_LANES_JSON='["groups"]' \
+  bash "${under_test}"; then
+  echo "FAIL: groups-only nextest selection failed" >&2
+  status=1
+elif [[ "$(grep -c '^cargo:nextest run ' "${groups_log}")" -ne 1 ]] ||
+     grep -q -- '--test reborn_integration_' "${groups_log}"; then
+  echo "FAIL: groups-only selection was not one exact nextest command" >&2
+  status=1
 fi
 
-ci_missing_output="${sandbox}/ci-missing-nextest.log"
+ci_missing_output="${sandbox}/ci-missing-nextest.out"
 if (
   cd "${repo_root}"
-  PATH="${missing_nextest_path}" \
-    CI=true \
-    INTEGRATION_BATCH_LOG="${sandbox}/ci-missing-nextest.commands" \
-    REBORN_COV_COLLECT=false \
-    REBORN_COV_LANES_JSON='[0]' \
-    REBORN_COV_LANE_PARTITIONS=4 \
-    bash "${under_test}" "${sandbox}/ci-missing-nextest.lcov"
+  PATH="${missing_nextest_path}" CI=true \
+    INTEGRATION_BATCH_LOG="${sandbox}/ci-missing.log" \
+    REBORN_COV_COLLECT=false REBORN_COV_LANES_JSON='[0]' \
+    bash "${under_test}"
 ) >"${ci_missing_output}" 2>&1; then
-  echo "FAIL: CI accepted a flat batch without cargo-nextest" >&2
+  echo "FAIL: CI accepted a batch without cargo-nextest" >&2
   status=1
-elif ! grep -qx 'cargo-nextest is required in CI but was not found on PATH' "${ci_missing_output}"; then
-  echo "FAIL: CI missing-nextest failure did not emit the required diagnostic" >&2
+elif ! grep -q 'cargo-nextest is required in CI' "${ci_missing_output}"; then
+  echo "FAIL: missing-nextest CI diagnostic was not actionable" >&2
   status=1
 fi
 
-local_fallback_log="${sandbox}/local-fallback.commands"
+fallback_log="${sandbox}/fallback.log"
 if ! (
   cd "${repo_root}"
-  env -u CI \
-    PATH="${missing_nextest_path}" \
-    INTEGRATION_BATCH_LOG="${local_fallback_log}" \
-    REBORN_COV_COLLECT=false \
-    REBORN_COV_LANES_JSON='[0]' \
-    REBORN_COV_LANE_PARTITIONS=4 \
-    bash "${under_test}" "${sandbox}/local-fallback.lcov"
+  env -u CI PATH="${missing_nextest_path}" \
+    INTEGRATION_BATCH_LOG="${fallback_log}" \
+    REBORN_COV_COLLECT=false REBORN_COV_LANES_JSON='[0,"groups"]' \
+    bash "${under_test}"
 ); then
-  echo "FAIL: local flat batch without cargo-nextest did not use cargo test" >&2
+  echo "FAIL: local no-nextest compatibility command failed" >&2
   status=1
-elif ! grep -q '^test -p ironclaw_integration_tests .* --no-fail-fast' "${local_fallback_log}"; then
-  echo "FAIL: local flat batch did not run cargo test with --no-fail-fast" >&2
-  status=1
-elif grep -q 'nextest' "${local_fallback_log}"; then
-  echo "FAIL: local flat batch without cargo-nextest logged nextest" >&2
+elif [[ "$(grep -c '^cargo:test ' "${fallback_log}")" -ne 1 ]] ||
+     ! grep -q -- '--no-fail-fast' "${fallback_log}" ||
+     ! grep -q '^timeout:--signal=INT --kill-after=30s 28m cargo test ' "${fallback_log}"; then
+  echo "FAIL: local group fallback was not one bounded no-fail-fast Cargo command" >&2
   status=1
 fi
 
-coverage_output="${sandbox}/coverage-output.log"
-if (
-  cd "${repo_root}"
-  PATH="${sandbox}/bin:/usr/bin:/bin" \
-    REBORN_COV_COLLECT=true \
-    REBORN_COV_LANES_JSON='[0,1]' \
-    REBORN_COV_LANE_PARTITIONS=4 \
-    bash "${under_test}" "${sandbox}/invalid.lcov"
-) >"${coverage_output}" 2>&1; then
-  echo "FAIL: coverage accepted a multi-lane batch" >&2
+noncoverage_log="${sandbox}/noncoverage-no-output.log"
+if ! run_batch "${noncoverage_log}" env \
+  REBORN_COV_COLLECT=false REBORN_COV_LANES_JSON='[0]' \
+  bash "${under_test}"; then
+  echo "FAIL: non-coverage runner required a dummy LCOV path" >&2
   status=1
-elif ! grep -q "coverage batches must contain exactly one lane" "${coverage_output}"; then
-  echo "FAIL: coverage rejected the batch without a useful diagnostic" >&2
+fi
+
+coverage_missing_output="${sandbox}/coverage-missing-output.out"
+if run_batch "${sandbox}/coverage-missing-output.log" env \
+  REBORN_COV_COLLECT=true REBORN_COV_LANES_JSON='[0]' \
+  bash "${under_test}" >"${coverage_missing_output}" 2>&1; then
+  echo "FAIL: coverage runner accepted a missing LCOV path" >&2
+  status=1
+elif ! grep -q 'coverage requires an output LCOV path' "${coverage_missing_output}"; then
+  echo "FAIL: missing coverage output diagnostic was not actionable" >&2
+  status=1
+fi
+
+coverage_log="${sandbox}/coverage.log"
+if ! run_batch "${coverage_log}" env \
+  REBORN_COV_COLLECT=true REBORN_COV_LANES_JSON='["groups"]' \
+  bash "${under_test}" "${sandbox}/groups.lcov"; then
+  echo "FAIL: coverage group lane failed" >&2
+  status=1
+elif [[ "$(grep -c '^cargo:llvm-cov ' "${coverage_log}")" -ne 1 ]] ||
+     ! grep -q -- '--test reborn_group_' "${coverage_log}"; then
+  echo "FAIL: coverage group lane changed its llvm-cov command shape" >&2
+  status=1
+fi
+
+invalid_output="${sandbox}/invalid.out"
+if run_batch "${sandbox}/invalid.log" env \
+  REBORN_COV_COLLECT=false REBORN_COV_LANES_JSON='[4]' \
+  bash "${under_test}" >"${invalid_output}" 2>&1; then
+  echo "FAIL: runner accepted a lane outside the inventory partition count" >&2
+  status=1
+elif ! grep -q 'unique lane indices' "${invalid_output}"; then
+  echo "FAIL: invalid-lane diagnostic was not actionable" >&2
   status=1
 fi
 
 if [[ "${status}" -ne 0 ]]; then
-  test ! -f "${sandbox}/commands.log" || cat "${sandbox}/commands.log" >&2
-  cat "${coverage_output}" >&2
+  for log in "${sandbox}"/*.log "${sandbox}"/*.out; do
+    [[ -f "${log}" ]] && { echo "==> ${log}" >&2; cat "${log}" >&2; }
+  done
   exit "${status}"
 fi
 
