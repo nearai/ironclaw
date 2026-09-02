@@ -582,14 +582,52 @@ async fn gateway_stream_model_with_progress_uses_provider_streaming_and_sanitize
         streaming_requests[0].model.as_deref(),
         Some("host-selected-model")
     );
-    assert_eq!(
-        sink.updates(),
-        vec!["Done.".to_string(), "Done. [redacted]".to_string()]
-    );
+    // Both raw provider deltas land well inside a single coalescing window
+    // (64 deltas / 2 KiB / 100 ms — see `ProviderStreamSink`), so the sink
+    // observes only the final flush once the provider's streaming call
+    // returns, carrying the fully accumulated, sanitized text.
+    assert_eq!(sink.updates(), vec!["Done. [redacted]".to_string()]);
     assert_eq!(
         response.safe_text_deltas,
         vec!["Done. [redacted]".to_string()]
     );
+}
+
+#[tokio::test]
+async fn gateway_stream_model_with_progress_coalesces_many_provider_deltas() {
+    // Integration-tier regression coverage for the ProviderStreamSink
+    // coalescing fix, driven through the real gateway/production wiring
+    // (LlmProviderModelGateway -> complete_model_request ->
+    // ProviderStreamSink), not just the sink in isolation. Before the fix
+    // this many raw deltas produced one `safe_text_update` call each; the
+    // fix must bound the call count while still delivering the exact final
+    // accumulated text once the provider's streaming call returns.
+    const DELTA_COUNT: usize = 500;
+    let deltas: Vec<String> = (0..DELTA_COUNT)
+        .map(|index| format!("{index:015} "))
+        .collect();
+    let full_text: String = deltas.concat();
+    let provider = Arc::new(StreamingRecordingLlmProvider::new(deltas, &full_text));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    gateway
+        .stream_model_with_progress(model_request(interactive_model()), sink.clone())
+        .await
+        .unwrap();
+
+    let updates = sink.updates();
+    assert!(
+        updates.len() <= 32,
+        "expected coalesced call count well below the pre-fix {DELTA_COUNT}, got {}",
+        updates.len()
+    );
+    assert_eq!(updates.last(), Some(&full_text));
 }
 
 #[tokio::test]
