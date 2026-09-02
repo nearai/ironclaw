@@ -3167,6 +3167,58 @@ test("useChatEvents: a locally stopped run that completes anyway retracts the st
   assert.equal(harness.activeRun, null);
 });
 
+test("useChatEvents: a final reply for a locally stopped run lifts the stop before any projection status", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "The answer" } },
+        ],
+      },
+    },
+  });
+  harness.stopRunLocally("run-1");
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    [`${RUN_STOPPED_ID_PREFIX}run-1`],
+  );
+
+  // The cancel lost the race and the finalized reply outran the projection
+  // status that would have lifted the stop. The reply is the backend's own
+  // evidence that the run completed: it renders and retracts the notice
+  // instead of being fenced away.
+  harness.handleEvent({
+    type: "final_reply",
+    frame: { reply: { turn_run_id: "run-1", text: "The answer is 42." } },
+  });
+
+  const assistant = harness.messages.filter((m) => m.role === "assistant");
+  assert.equal(assistant.length, 1, "the final reply is rendered");
+  assert.equal(assistant[0].content, "The answer is 42.");
+  assert.equal(assistant[0].isFinalReply, true);
+  assert.equal(
+    harness.messages.some((message) => isRunStoppedMessageId(message.id)),
+    false,
+    "a run that answered is not presented as stopped",
+  );
+  assert.equal(harness.isProcessing, false);
+
+  // The projection's terminal status then settles the run like any other.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "completed" } }],
+      },
+    },
+  });
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+});
+
 test("useChatEvents: finalized text converges only its own run's live bubble when two runs stream in one thread", () => {
   const harness = createUseChatEventsHarness();
 
@@ -3415,10 +3467,8 @@ test("useChatEvents: the local-stop fence drops every typed live frame for the s
       type: "gate",
       frame: { prompt: { turn_run_id: runId, gate_ref: "gate:approval" } },
     },
-    {
-      type: "final_reply",
-      frame: { reply: { turn_run_id: runId, text: "late answer" } },
-    },
+    // `final_reply` is the one typed frame the fence lets through: it is the
+    // backend's evidence that the cancel lost, covered by its own case above.
   ];
   for (const envelope of typedFrames) {
     harness.handleEvent(envelope);

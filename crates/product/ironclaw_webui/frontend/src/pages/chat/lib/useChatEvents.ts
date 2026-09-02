@@ -116,14 +116,13 @@ export function useChatEvents({
       );
       // A run the user stopped locally is fenced until its terminal
       // projection settles it: every live frame scoped to it is dropped here,
-      // once, instead of per handler.
-      if (
-        isLocallyStoppedRun(
-          locallyStoppedRunsRef,
-          runIdOfFrame(type, frame, activeRunRef, latestRunIdRef),
-        )
-      ) {
-        return;
+      // once, instead of per handler. The one exception is its final reply:
+      // that frame is the backend's own evidence that the cancel lost the
+      // race, so it lifts the stop (retracting the notice) and renders.
+      const frameRunId = runIdOfFrame(type, frame, activeRunRef, latestRunIdRef);
+      if (isLocallyStoppedRun(locallyStoppedRunsRef, frameRunId)) {
+        if (type !== "final_reply") return;
+        liftLocalStop(locallyStoppedRunsRef, setMessages, frameRunId);
       }
 
       switch (type) {
