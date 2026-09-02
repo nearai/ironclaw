@@ -161,7 +161,7 @@ fn chat_sse_stream(
                                 }
                             }
                             PayloadText::Final(text) => {
-                                match state.delta_for(TextUpdate::final_reply(text)) {
+                                match state.delta_for(TextUpdate::Confirm { body: text }) {
                                     Ok(Some(delta)) => yield Ok(chat_text_delta_event(&public_id, created, &model, delta)),
                                     Ok(None) => {}
                                     Err(error) => {
@@ -270,7 +270,7 @@ fn response_sse_stream(
                                 }
                             }
                             PayloadText::Final(text) => {
-                                match state.delta_for(TextUpdate::final_reply(text)) {
+                                match state.delta_for(TextUpdate::Confirm { body: text }) {
                                     Ok(Some(delta)) => {
                                         yield Ok(response_text_delta_event(
                                             &public_id,
@@ -287,7 +287,7 @@ fn response_sse_stream(
                                     }
                                 }
                                 if !state.is_empty() {
-                                    yield Ok(response_text_done_event(&item_id, sequence_number, &state.text()));
+                                    yield Ok(response_text_done_event(&item_id, sequence_number, state.text()));
                                     sequence_number += 1;
                                 }
                                 yield Ok(response_terminal_event(
@@ -297,7 +297,7 @@ fn response_sse_stream(
                                     created,
                                     model.clone(),
                                     OpenAiResponseStatus::Completed,
-                                    &state.text(),
+                                    state.text(),
                                 ));
                                 return;
                             }
@@ -306,7 +306,7 @@ fn response_sse_stream(
                             TerminalStatus::None => {}
                             TerminalStatus::Completed => {
                                 if !state.is_empty() {
-                                    yield Ok(response_text_done_event(&item_id, sequence_number, &state.text()));
+                                    yield Ok(response_text_done_event(&item_id, sequence_number, state.text()));
                                     sequence_number += 1;
                                 }
                                 yield Ok(response_terminal_event(
@@ -316,7 +316,7 @@ fn response_sse_stream(
                                     created,
                                     model.clone(),
                                     OpenAiResponseStatus::Completed,
-                                    &state.text(),
+                                    state.text(),
                                 ));
                                 return;
                             }
@@ -328,7 +328,7 @@ fn response_sse_stream(
                                     created,
                                     model.clone(),
                                     OpenAiResponseStatus::Failed,
-                                    &state.text(),
+                                    state.text(),
                                 ));
                                 return;
                             }
@@ -340,7 +340,7 @@ fn response_sse_stream(
                                     created,
                                     model.clone(),
                                     OpenAiResponseStatus::Cancelled,
-                                    &state.text(),
+                                    state.text(),
                                 ));
                                 return;
                             }
@@ -406,42 +406,35 @@ fn stream_timeout_error() -> OpenAiCompatHttpError {
     OpenAiCompatHttpError::from_kind(503, true, OpenAiCompatErrorKind::ServiceUnavailable, None)
 }
 
-/// One text update from the projection: the phase it belongs to (the live
-/// text item id — one per model call) and that phase's cumulative body. The
-/// durable transcript row (finalized) and the final-reply payload belong to
-/// whichever phase is current: they confirm it, never start one.
-struct TextUpdate<'a> {
-    phase: &'a str,
-    body: &'a str,
-    confirms_current_phase: bool,
+/// One text update from the projection.
+enum TextUpdate<'a> {
+    /// A call's cumulative body: one live text item per model call, keyed
+    /// by the item id.
+    Call { id: &'a str, body: &'a str },
+    /// A call the loop went on past, republished flagged. Already streamed
+    /// when it was the current call; its body is bounded by the document
+    /// (it may be shorter than what streamed) and never a rewrite.
+    Narration { id: &'a str, body: &'a str },
+    /// The durable transcript row or the final-reply payload: confirms the
+    /// current call, never starts one.
+    Confirm { body: &'a str },
 }
 
-impl<'a> TextUpdate<'a> {
-    fn final_reply(body: &'a str) -> Self {
-        Self {
-            phase: "",
-            body,
-            confirms_current_phase: true,
-        }
-    }
-}
-
-/// Between two answer phases (a model call the loop went on past, then the
-/// next call): the completion stays one message, so the phases read as
+/// Between two answer calls (a model call the loop went on past, then the
+/// next call): the completion stays one message, so the calls read as
 /// paragraphs rather than as a rewrite the client cannot express.
-const PHASE_SEPARATOR: &str = "\n\n";
+const CALL_SEPARATOR: &str = "\n\n";
 
 #[derive(Default)]
 struct TextDeltaState {
-    /// The text of the phases already closed, each followed by the separator.
-    closed: String,
-    /// The phase `text` tracks, once any live text arrived.
-    phase: Option<String>,
-    /// Every phase seen: a closed phase republished (its narration flag
-    /// arriving) is already streamed and changes nothing.
+    /// Everything streamed so far, separators included.
+    streamed: String,
+    /// Where the current call's text begins in `streamed`.
+    call_start: usize,
+    /// The call (live text item id) the text past `call_start` belongs to.
+    call: Option<String>,
+    /// Every call seen, so a republish of a closed one changes nothing.
     seen: Vec<String>,
-    /// Text streamed for the current phase.
-    text: String,
 }
 
 impl TextDeltaState {
@@ -449,37 +442,36 @@ impl TextDeltaState {
         &mut self,
         update: TextUpdate<'_>,
     ) -> Result<Option<String>, OpenAiCompatHttpError> {
+        let (id, body, lenient) = match update {
+            TextUpdate::Call { id, body } => (Some(id), body, false),
+            TextUpdate::Narration { id, body } => (Some(id), body, true),
+            TextUpdate::Confirm { body } => (None, body, false),
+        };
         let mut separator = "";
-        if !update.confirms_current_phase && self.phase.as_deref() != Some(update.phase) {
-            if self.seen.iter().any(|seen| seen == update.phase) {
+        if let Some(id) = id
+            && self.call.as_deref() != Some(id)
+        {
+            if self.seen.iter().any(|seen| seen == id) {
                 return Ok(None);
             }
-            if !self.text.is_empty() {
-                self.closed.push_str(&self.text);
-                self.closed.push_str(PHASE_SEPARATOR);
-                separator = PHASE_SEPARATOR;
+            if self.call_start < self.streamed.len() {
+                self.streamed.push_str(CALL_SEPARATOR);
+                separator = CALL_SEPARATOR;
             }
-            self.seen.push(update.phase.to_string());
-            self.phase = Some(update.phase.to_string());
-            self.text.clear();
+            self.seen.push(id.to_string());
+            self.call = Some(id.to_string());
+            self.call_start = self.streamed.len();
         }
-        let next = update.body;
-        let consumed = self.text.len();
-        if next.len() == consumed {
-            if next.as_bytes() != self.text.as_bytes() {
-                return Err(OpenAiCompatHttpError::from_kind(
-                    500,
-                    false,
-                    OpenAiCompatErrorKind::Internal,
-                    None,
-                ));
+        let current = &self.streamed[self.call_start..];
+        let consumed = current.len();
+        let extends = body.len() >= consumed
+            && body.is_char_boundary(consumed)
+            && body.as_bytes().starts_with(current.as_bytes());
+        if !extends {
+            if lenient {
+                // A bounded republish of text this stream already carried.
+                return Ok(None);
             }
-            return Ok(None);
-        }
-        if next.len() < consumed
-            || !next.is_char_boundary(consumed)
-            || !next.as_bytes().starts_with(self.text.as_bytes())
-        {
             return Err(OpenAiCompatHttpError::from_kind(
                 500,
                 false,
@@ -487,18 +479,21 @@ impl TextDeltaState {
                 None,
             ));
         }
-        let delta = &next[consumed..];
-        self.text.push_str(delta);
+        if body.len() == consumed {
+            return Ok(None);
+        }
+        let delta = &body[consumed..];
+        self.streamed.push_str(delta);
         Ok(Some(format!("{separator}{delta}")))
     }
 
-    /// Everything streamed so far: the closed phases, then the current one.
-    fn text(&self) -> String {
-        format!("{}{}", self.closed, self.text)
+    /// Everything streamed so far.
+    fn text(&self) -> &str {
+        &self.streamed
     }
 
     fn is_empty(&self) -> bool {
-        self.text.is_empty()
+        self.streamed.is_empty()
     }
 }
 
@@ -550,11 +545,22 @@ fn projection_state_view(state: &ProductProjectionState) -> PayloadView<'_> {
                 id,
                 body,
                 finalized,
+                narration,
                 ..
-            } => updates.push(TextUpdate {
-                phase: id.as_str(),
-                body: body.as_str(),
-                confirms_current_phase: *finalized,
+            } => updates.push(if *finalized {
+                TextUpdate::Confirm {
+                    body: body.as_str(),
+                }
+            } else if *narration {
+                TextUpdate::Narration {
+                    id: id.as_str(),
+                    body: body.as_str(),
+                }
+            } else {
+                TextUpdate::Call {
+                    id: id.as_str(),
+                    body: body.as_str(),
+                }
             }),
             ProductProjectionItem::RunStatus { status, .. } => {
                 terminal_status = match status.as_str() {

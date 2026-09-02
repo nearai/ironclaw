@@ -206,10 +206,9 @@ test("ActivityRun renders a narration phase as a settled note inside the run", (
   const item = context.globalThis.__testExports.ActivityItem({
     item: {
       id: "text-text:run-1:1",
-      role: "assistant",
+      role: "narration",
       content: "Let me look.",
       isFinalReply: false,
-      isNarration: true,
       turnRunId: "run-1",
     },
     activeRunId: "run-1",

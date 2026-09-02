@@ -769,8 +769,8 @@ fn fold_terminal_facts(run: &mut RunReply, facts: &TerminalReplyFacts, folded: &
                 .unwrap_or_default();
             // The transcript row finalizes only the run's FINAL assistant
             // message — the same text the progressive answer holds, since
-            // every earlier call's text was demoted to thinking when the
-            // loop went on. Finalize IN PLACE whenever the shown text ends
+            // every earlier call's text moved to narration (`reset_answer`)
+            // when the loop went on. Finalize IN PLACE whenever the shown text ends
             // with the canonical one (a trailing-whitespace difference, or
             // the empty canonical of a run with nothing to report):
             // replacing it with its own tail would break every stream

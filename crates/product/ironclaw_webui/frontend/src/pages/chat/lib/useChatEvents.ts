@@ -810,21 +810,21 @@ function applyProjectionItems({
               message?.role === "assistant" &&
               message.turnRunId === textRunId &&
               message.isFinalReply === false &&
-              message.isNarration !== true &&
               typeof message.id === "string" &&
               message.id.startsWith("text-"),
           );
         }
+        // Narration is its own role, like reasoning: every `assistant`
+        // predicate excludes it by construction.
         const next = {
           ...(existing >= 0 ? phaseAware[existing] : {}),
           id: messageId,
-          role: "assistant",
+          role: narration ? "narration" : "assistant",
           content: item.text.body || "",
           timestamp: phaseAware[existing]?.timestamp || new Date().toISOString(),
           turnRunId: phaseAware[existing]?.turnRunId || textRunId,
           isFinalReply: finalizedText,
           isStreaming: !finalizedText && !narration,
-          isNarration: narration,
         };
         if (existing >= 0) {
           const copy = [...phaseAware];

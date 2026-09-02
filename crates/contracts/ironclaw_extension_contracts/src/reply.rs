@@ -375,11 +375,13 @@ pub struct ReplyAnswer {
     /// Cumulative text of the current model call (progressive appends, then
     /// the canonical finalized transcript text once the run finalizes it).
     pub text: ReplyAnswerText,
-    /// Which model call's text this is. Every call the loop goes on past
-    /// ([`ReplyDocument::reset_answer`]) starts the next phase, so a surface
-    /// can key what it shows per phase instead of per run.
-    #[serde(default = "first_answer_phase")]
-    pub phase: u64,
+    /// Which model call's text this is, counting the calls that produced
+    /// text: a call the loop goes on past ([`ReplyDocument::reset_answer`])
+    /// starts the next one, a call that produced no text does not. A surface
+    /// keys what it shows per call instead of per run. Distinct from the
+    /// document's lifecycle [`ReplyDocument::phase`].
+    #[serde(default = "first_answer_call")]
+    pub call: u64,
     /// True once [`ReplyDocument::finalize_answer`] replaced the progressive
     /// text with the canonical transcript row. Progressive appends after that
     /// are ignored.
@@ -394,24 +396,24 @@ impl Default for ReplyAnswer {
     fn default() -> Self {
         Self {
             text: ReplyAnswerText(String::new()),
-            phase: first_answer_phase(),
+            call: first_answer_call(),
             finalized: false,
             truncated: false,
         }
     }
 }
 
-fn first_answer_phase() -> u64 {
+fn first_answer_call() -> u64 {
     1
 }
 
 /// The text of one model call the loop went on past — narration such as
-/// "Let me check the workspace.", never the answer — kept under the phase it
+/// "Let me check the workspace.", never the answer — kept under the call it
 /// streamed as, so a surface that showed it as the provisional answer can
 /// re-home it, and a surface that never shows narration can ignore it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyNarration {
-    pub phase: u64,
+    pub call: u64,
     pub text: ReplyAnswerText,
 }
 
@@ -537,7 +539,7 @@ pub struct ReplyDocument {
     pub status_kind: Option<ReplyStatusKind>,
     #[serde(default)]
     pub answer: ReplyAnswer,
-    /// Text of the model calls the loop went on past, in phase order
+    /// Text of the model calls the loop went on past, in call order
     /// ([`ReplyDocument::reset_answer`]). Progress, not the answer: a
     /// surface with an activity panel shows it there; a stream surface
     /// never shows it. Bounded like every facet of this display document
@@ -657,7 +659,7 @@ impl ReplyDocument {
     /// The loop went on past the model call that produced the answer — a
     /// capability ran, a gate blocked, another call started — so that text
     /// was narration, not the answer: it moves to [`Self::narration`] under
-    /// its phase and the next phase starts empty. This is the transcript's
+    /// its call and the next call's answer starts empty. This is the transcript's
     /// own rule (only the run's final assistant message is the answer)
     /// applied progressively. Ignored once finalized or terminal; a no-op
     /// while the answer is empty.
@@ -669,13 +671,13 @@ impl ReplyDocument {
         if self.narration.len() < REPLY_MAX_NARRATION_ENTRIES {
             let text = char_boundary_prefix(&self.answer.text.0, REPLY_NARRATION_ENTRY_MAX_BYTES);
             self.narration.push(ReplyNarration {
-                phase: self.answer.phase,
+                call: self.answer.call,
                 text: ReplyAnswerText(text.to_string()),
             });
         }
         self.answer.text = ReplyAnswerText(String::new());
         self.answer.truncated = false;
-        self.answer.phase = self.answer.phase.saturating_add(1);
+        self.answer.call = self.answer.call.saturating_add(1);
         true
     }
 

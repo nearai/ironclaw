@@ -84,12 +84,12 @@ fn fixture(label: &str) -> Fixture {
     }
 }
 
-/// The document's narration as `(phase, text)` pairs.
+/// The document's narration as `(call, text)` pairs.
 fn narration(document: &ironclaw_extension_contracts::reply::ReplyDocument) -> Vec<(u64, String)> {
     document
         .narration
         .iter()
-        .map(|entry| (entry.phase, entry.text.as_str().to_string()))
+        .map(|entry| (entry.call, entry.text.as_str().to_string()))
         .collect()
 }
 
@@ -173,7 +173,7 @@ fn a_failed_model_calls_partial_text_is_discarded_when_the_call_is_retried() {
         document.narration.is_empty(),
         "a failed call's fragment is dropped, not kept as narration"
     );
-    assert_eq!(document.answer.phase, 1, "a retry is not a new phase");
+    assert_eq!(document.answer.call, 1, "a retry is not a new call");
 }
 
 #[test]
@@ -801,7 +801,7 @@ fn a_revision_floor_seeds_numbering_for_a_run_rebuilt_on_another_process() {
 /// moment the loop does anything after a call other than end the run — here
 /// a capability invocation — that call's text was narration ("I’ll research
 /// this first."): it moves to the document's narration under its phase and
-/// the answer starts empty as the next phase. This is the transcript's own
+/// the answer starts empty for the next call. This is the transcript's own
 /// rule (only the final assistant message is the answer), applied
 /// progressively.
 #[test]
@@ -843,8 +843,8 @@ fn a_finished_calls_text_becomes_narration_once_a_capability_follows_it() {
         "the tool call proves the text was narration"
     );
     assert_eq!(
-        document.answer.phase, 2,
-        "the answer moved on to the next phase"
+        document.answer.call, 2,
+        "the answer moved on to the next call"
     );
     assert_eq!(
         narration(&document),
@@ -875,7 +875,7 @@ fn a_finished_calls_text_becomes_narration_once_a_capability_follows_it() {
     });
     let document = fixture.document();
     assert_eq!(document.answer.text.as_str(), "Actually, here it is.");
-    assert_eq!(document.answer.phase, 2);
+    assert_eq!(document.answer.call, 2);
     assert_eq!(document.narration.len(), 1);
 }
 
@@ -909,7 +909,7 @@ fn a_finished_calls_text_becomes_narration_once_another_call_follows_it() {
     });
     let document = fixture.document();
     assert_eq!(document.answer.text.as_str(), "Done.");
-    assert_eq!(document.answer.phase, 2);
+    assert_eq!(document.answer.call, 2);
 }
 
 /// Text ahead of a gate is narration by construction: the gate comes from a
@@ -949,7 +949,7 @@ fn text_ahead_of_a_gate_is_narration_not_answer() {
     let document = fixture.document();
     assert_eq!(document.answer.text.as_str(), "");
     assert_eq!(document.narration.len(), 1, "the reset is idempotent");
-    assert_eq!(document.answer.phase, 2);
+    assert_eq!(document.answer.call, 2);
 }
 
 /// Narration is bounded like every facet of this display document (the
@@ -964,15 +964,15 @@ fn narration_is_bounded_like_reasoning() {
     };
     let fixture = fixture("narration-bounds");
     let long = "é".repeat(REPLY_NARRATION_ENTRY_MAX_BYTES);
-    for phase in 1..=(REPLY_MAX_NARRATION_ENTRIES as u64 + 1) {
+    for call in 1..=(REPLY_MAX_NARRATION_ENTRIES as u64 + 1) {
         fixture.observe(LoopHostMilestoneKind::ModelStarted {
             requested_model_profile_id: None,
         });
         fixture.observe(LoopHostMilestoneKind::ModelTextDelta {
-            safe_text: if phase == 1 {
+            safe_text: if call == 1 {
                 long.clone()
             } else {
-                format!("phase {phase}")
+                format!("call {call}")
             },
         });
         fixture.observe(LoopHostMilestoneKind::CapabilityInvoked {
@@ -996,12 +996,12 @@ fn narration_is_bounded_like_reasoning() {
     );
     assert_eq!(
         document.narration.last().map(|entry| entry.text.as_str()),
-        Some("phase 32"),
+        Some("call 32"),
         "the entry past the bound is dropped"
     );
     assert_eq!(document.answer.text.as_str(), "");
     assert_eq!(
-        document.answer.phase,
+        document.answer.call,
         REPLY_MAX_NARRATION_ENTRIES as u64 + 2,
         "the answer still moves on past the bound"
     );
@@ -1072,7 +1072,7 @@ fn terminal_facts_matching_the_final_calls_text_finalize_in_place() {
         "The answer is 42.",
         "the progressive answer is the final call's text alone"
     );
-    assert_eq!(document.answer.phase, 2);
+    assert_eq!(document.answer.call, 2);
     assert_eq!(
         narration(&document),
         vec![(1, "Let me check the workspace.".to_string())]
@@ -1099,10 +1099,7 @@ fn terminal_facts_matching_the_final_calls_text_finalize_in_place() {
     assert!(document.answer.finalized);
     assert_eq!(document.outcome, Some(ReplyOutcome::Completed));
     assert_eq!(document.answer.text.as_str(), "The answer is 42.");
-    assert_eq!(
-        document.answer.phase, 2,
-        "finalization keeps the final phase"
-    );
+    assert_eq!(document.answer.call, 2, "finalization keeps the final call");
     assert_eq!(
         document.narration.len(),
         1,

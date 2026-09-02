@@ -2,9 +2,9 @@
    same-run activity arrives after assistant text, render that activity before
    the text so tools stay at the top of the run during streaming and after the
    final answer, including when a later user follow-up has already been
-   appended. Assistant text the projection flagged as narration (a model call
-   the loop went on past) is activity too: it renders inside the run, ahead
-   of the tool card that followed it, never as a bubble. */
+   appended. Narration (a model call the loop went on past, its own role
+   like reasoning) is activity too: it renders inside the run, ahead of the
+   tool card that followed it, never as a bubble. */
 export function groupMessages(messages) {
   const renderableMessages = messages.filter(
     (message) => !isEmptyIntermediateAssistantPhase(message),
@@ -141,7 +141,6 @@ function messageRenderKey(message) {
   const isActiveAssistantReply =
     message?.role === "assistant" &&
     message?.isFinalReply === false &&
-    message?.isNarration !== true &&
     message?.isStreaming === true;
   if (runId && (isFinalAssistantReply(message) || isActiveAssistantReply)) {
     return `assistant-reply-${runId}`;
@@ -168,13 +167,8 @@ function isStreamingAssistantText(msg) {
     msg?.role === "assistant" &&
     !hasToolCalls(msg) &&
     msg.isFinalReply === false &&
-    msg.isNarration !== true &&
     Boolean(turnRunIdForMessage(msg))
   );
-}
-
-function isNarration(msg) {
-  return msg?.role === "assistant" && msg.isNarration === true;
 }
 
 function isEmptyIntermediateAssistantPhase(msg) {
@@ -201,9 +195,9 @@ function isEmptyIntermediateAssistantPhase(msg) {
 function isActivity(msg) {
   return (
     msg.role === "thinking" ||
+    msg.role === "narration" ||
     msg.role === "tool_activity" ||
-    hasToolCalls(msg) ||
-    isNarration(msg)
+    hasToolCalls(msg)
   );
 }
 

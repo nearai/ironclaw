@@ -17,14 +17,14 @@ use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::reply::{
     REPLY_ANSWER_MAX_BYTES, REPLY_CONTEXT_MAX_BYTES, REPLY_DISPLAY_PREVIEW_MAX_BYTES,
     REPLY_DISPLAY_TEXT_MAX_BYTES, REPLY_MAX_ACTIVITIES, REPLY_MAX_PROVIDER_REFS,
-    REPLY_OUTCOME_REASON_MAX_BYTES, REPLY_REASONING_SEGMENT_MAX_BYTES,
-    REPLY_SINK_CHECKPOINT_MAX_BYTES, REPLY_THREAD_ANCHOR_MAX_BYTES, ReplyActivityState,
-    ReplyAnswerText, ReplyAttention, ReplyAttentionKind, ReplyAudience, ReplyContextBytes,
-    ReplyContractError, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument, ReplyItemId,
-    ReplyOutcome, ReplyOutcomeReason, ReplyPhase, ReplyProviderRef, ReplyProviderRefs,
-    ReplyReasoningText, ReplyReconcilePoint, ReplyReconcileRequest, ReplyRevision, ReplySink,
-    ReplySinkCheckpoint, ReplySinkEvidence, ReplySinkOutcome, ReplySinkReport, ReplyTarget,
-    ReplyThreadAnchor,
+    REPLY_NARRATION_ENTRY_MAX_BYTES, REPLY_OUTCOME_REASON_MAX_BYTES,
+    REPLY_REASONING_SEGMENT_MAX_BYTES, REPLY_SINK_CHECKPOINT_MAX_BYTES,
+    REPLY_THREAD_ANCHOR_MAX_BYTES, ReplyActivityState, ReplyAnswerText, ReplyAttention,
+    ReplyAttentionKind, ReplyAudience, ReplyContextBytes, ReplyContractError, ReplyDisplayPreview,
+    ReplyDisplayText, ReplyDocument, ReplyItemId, ReplyOutcome, ReplyOutcomeReason, ReplyPhase,
+    ReplyProviderRef, ReplyProviderRefs, ReplyReasoningText, ReplyReconcilePoint,
+    ReplyReconcileRequest, ReplyRevision, ReplySink, ReplySinkCheckpoint, ReplySinkEvidence,
+    ReplySinkOutcome, ReplySinkReport, ReplyTarget, ReplyThreadAnchor,
 };
 use ironclaw_extension_contracts::tool_adapter::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
@@ -232,6 +232,50 @@ fn mutators_fold_the_documented_facets() {
         Some("50 messages")
     );
     assert!(!document.is_terminal());
+}
+
+/// `reset_answer` moves the current call's text into narration under its
+/// call and starts the next call empty; it is a no-op on an empty answer and
+/// ignored once the answer is finalized or the document is terminal. A
+/// truncated answer resets clean: the entry is cut to the narration bound
+/// and `truncated` clears, so the next call appends again.
+#[test]
+fn reset_answer_moves_the_answer_to_narration_and_is_ignored_once_finalized_or_terminal() {
+    let mut document = ReplyDocument::default();
+    assert!(!document.reset_answer(), "an empty answer is a no-op");
+    assert_eq!(document.answer.call, 1);
+
+    document.append_answer(&"a".repeat(REPLY_ANSWER_MAX_BYTES + 1));
+    assert!(document.answer.truncated);
+    assert!(document.reset_answer());
+    assert_eq!(document.narration.len(), 1);
+    assert_eq!(document.narration[0].call, 1);
+    assert_eq!(
+        document.narration[0].text.as_str().len(),
+        REPLY_NARRATION_ENTRY_MAX_BYTES,
+        "the entry is cut to the narration bound"
+    );
+    assert_eq!(document.answer.call, 2);
+    assert!(document.answer.text.as_str().is_empty());
+    assert!(!document.answer.truncated, "the next call appends again");
+
+    document.append_answer("final");
+    document.finalize_answer(answer("final"), Vec::new());
+    assert!(
+        !document.reset_answer(),
+        "the finalized row is never demoted"
+    );
+    assert_eq!(document.narration.len(), 1);
+    assert_eq!(document.answer.call, 2);
+
+    let mut terminal = ReplyDocument::default();
+    terminal.append_answer("late");
+    terminal.complete();
+    assert!(
+        !terminal.reset_answer(),
+        "terminal documents ignore the reset"
+    );
+    assert!(terminal.narration.is_empty());
 }
 
 #[test]

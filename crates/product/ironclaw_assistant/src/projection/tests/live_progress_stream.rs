@@ -318,7 +318,7 @@ async fn a_finished_calls_text_is_republished_as_narration_ahead_of_the_capabili
             .unwrap(),
     };
     // This run's live items as they are published: text and narration as
-    // `kind@phase:body` (the phase parsed from the item id), tools as
+    // `kind@call:body` (the call parsed from the item id), tools as
     // `tool:capability:status`. Other items are ignored.
     let describe = |item: &ProductProjectionItem| match item {
         ProductProjectionItem::Text {
@@ -328,11 +328,11 @@ async fn a_finished_calls_text_is_republished_as_narration_ahead_of_the_capabili
             narration,
             ..
         } if *observed_run_id == Some(run_id) => {
-            let phase = id
+            let call = id
                 .strip_prefix(&format!("text:{run_id}:"))
-                .unwrap_or_else(|| panic!("live text ids are per phase: {id}"));
+                .unwrap_or_else(|| panic!("live text ids are per call: {id}"));
             let kind = if *narration { "narration" } else { "text" };
-            Some(format!("{kind}@{phase}:{body}"))
+            Some(format!("{kind}@{call}:{body}"))
         }
         ProductProjectionItem::CapabilityActivity(activity) => Some(format!(
             "tool:{}:{:?}",
@@ -431,7 +431,7 @@ async fn a_finished_calls_text_is_republished_as_narration_ahead_of_the_capabili
     assert_eq!(
         read_items(&mut subscription, describe, 2).await,
         vec!["text@2:Here is the final answer.".to_string()],
-        "finalization republishes the final phase once, in place; terminal documents ignore stray text"
+        "finalization republishes the final call once, in place; terminal documents ignore stray text"
     );
 }
 

@@ -564,11 +564,10 @@ test("groupMessages: narration phases render inside the activity run ahead of th
     { id: "u1", role: "user", content: "find it", turnRunId: "run-1" },
     {
       id: "text-text:run-1:1",
-      role: "assistant",
+      role: "narration",
       content: "Let me look.",
       isFinalReply: false,
       isStreaming: false,
-      isNarration: true,
       turnRunId: "run-1",
     },
     {
@@ -603,11 +602,10 @@ test("groupMessages: a final reply keeps its run's narration inside the activity
     { id: "u1", role: "user", content: "find it", turnRunId: "run-1" },
     {
       id: "text-text:run-1:1",
-      role: "assistant",
+      role: "narration",
       content: "Let me look.",
       isFinalReply: false,
       isStreaming: false,
-      isNarration: true,
       turnRunId: "run-1",
     },
     { id: "tool-read", role: "tool_activity", toolName: "read", turnRunId: "run-1" },

@@ -588,8 +588,8 @@ test("useChatEvents: a narration republish marks its phase and leaves the stream
     { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look." } },
   ]);
   assert.deepEqual(
-    Array.from(harness.messages, (message) => [message.id, message.isStreaming, message.isNarration]),
-    [["text-text:run-1:1", true, false]],
+    Array.from(harness.messages, (message) => [message.id, message.isStreaming, message.role]),
+    [["text-text:run-1:1", true, "assistant"]],
     "the first call's text streams as the provisional answer",
   );
 
@@ -599,8 +599,8 @@ test("useChatEvents: a narration republish marks its phase and leaves the stream
     { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
   ]);
   assert.deepEqual(
-    Array.from(harness.messages, (message) => [message.id, message.content, message.isStreaming, message.isNarration]),
-    [["text-text:run-1:1", "Let me look.", false, true]],
+    Array.from(harness.messages, (message) => [message.id, message.content, message.isStreaming, message.role]),
+    [["text-text:run-1:1", "Let me look.", false, "narration"]],
   );
 
   projection([{ text: { id: "text:run-1:2", run_id: "run-1", body: "Here you go." } }]);
@@ -609,10 +609,10 @@ test("useChatEvents: a narration republish marks its phase and leaves the stream
     { text: { id: "text:run-1:1", run_id: "run-1", body: "Let me look.", narration: true } },
   ]);
   assert.deepEqual(
-    Array.from(harness.messages, (message) => [message.id, message.isStreaming, message.isNarration]),
+    Array.from(harness.messages, (message) => [message.id, message.isStreaming, message.role]),
     [
-      ["text-text:run-1:1", false, true],
-      ["text-text:run-1:2", true, false],
+      ["text-text:run-1:1", false, "narration"],
+      ["text-text:run-1:2", true, "assistant"],
     ],
     "one message per phase; the narration is settled, the answer keeps streaming",
   );
@@ -647,11 +647,11 @@ test("useChatEvents: final_reply keeps its run's narration and converges only th
       message.id,
       message.content,
       message.isFinalReply,
-      message.isNarration,
+      message.role,
     ]),
     [
-      ["text-text:run-1:1", "Let me look.", false, true],
-      ["reply-run-1", "Here you go.", true, undefined],
+      ["text-text:run-1:1", "Let me look.", false, "narration"],
+      ["reply-run-1", "Here you go.", true, "assistant"],
     ],
     "the narration stays with the run's activity; the final reply replaces the streaming answer alone",
   );
@@ -685,10 +685,10 @@ test("useChatEvents: a narration republish that arrives after the final reply st
   ]);
 
   assert.deepEqual(
-    Array.from(harness.messages, (message) => [message.id, message.isFinalReply, message.isNarration]),
+    Array.from(harness.messages, (message) => [message.id, message.isFinalReply, message.role]),
     [
-      ["reply-run-1", true, undefined],
-      ["text-text:run-1:1", false, true],
+      ["reply-run-1", true, "assistant"],
+      ["text-text:run-1:1", false, "narration"],
     ],
     "the narration lands (the grouping places it inside the run's activity); the stale phase does not",
   );

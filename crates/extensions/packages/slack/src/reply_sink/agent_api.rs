@@ -224,8 +224,12 @@ pub(super) fn outcome_for_failure(
 ) -> ReplySinkOutcome {
     match failure {
         SlackApiFailure::Ambiguous { reason } => {
-            // Session status is idempotent: a lost answer is safe to retry.
-            if method == SlackWebApiMethod::AgentsSessionsSetStatus {
+            // Session status is idempotent, and so is deleting a message the
+            // sink tolerates finding gone: a lost answer is safe to retry.
+            if matches!(
+                method,
+                SlackWebApiMethod::AgentsSessionsSetStatus | SlackWebApiMethod::ChatDelete
+            ) {
                 ReplySinkOutcome::Retryable {
                     reason: ReplyOutcomeReason::new(reason),
                     retry_after: None,

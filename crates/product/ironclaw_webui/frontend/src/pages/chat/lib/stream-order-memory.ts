@@ -22,7 +22,11 @@ export function isFinalAssistantForRun(message, runId) {
 }
 
 export function isRunActivityMessage(message) {
-  return message?.role === "tool_activity" || message?.role === "thinking";
+  return (
+    message?.role === "tool_activity" ||
+    message?.role === "thinking" ||
+    message?.role === "narration"
+  );
 }
 
 export function carryFinalAssistantOrderFlags(fresh, current) {
@@ -56,15 +60,14 @@ export function replaceAssistantReplyForRun(messages, replyMessage, runId) {
       isFinalAssistantMessage(message) && message.turnRunId === runId,
   );
   if (replacementIndex < 0) {
-    // The streaming answer is the run's last live phase; narration phases
-    // (calls the loop went on past) are activity and never the answer.
+    // The streaming answer is the run's last live phase; narration (its
+    // own role) is activity and never the answer.
     for (let index = currentMessages.length - 1; index >= 0; index -= 1) {
       const message = currentMessages[index];
       if (
         message?.role === "assistant" &&
         message.turnRunId === runId &&
-        message.isFinalReply === false &&
-        message.isNarration !== true
+        message.isFinalReply === false
       ) {
         replacementIndex = index;
         break;
@@ -80,15 +83,15 @@ export function replaceAssistantReplyForRun(messages, replyMessage, runId) {
     currentMessages[replacementIndex],
     replyMessage,
   );
-  // Earlier unflagged phases collapse into the final reply; narration stays
-  // with the run's activity, the way reasoning and tool cards do.
+  // Earlier phases collapse into the final reply; narration is not an
+  // assistant message and stays with the run's activity, the way reasoning
+  // and tool cards do.
   return next.filter(
     (message, index) =>
       index === replacementIndex ||
       message?.role !== "assistant" ||
       message.turnRunId !== runId ||
-      message.isFinalReply !== false ||
-      message.isNarration === true,
+      message.isFinalReply !== false,
   );
 }
 

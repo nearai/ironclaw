@@ -20,7 +20,7 @@ type ActivityItemProps = {
 };
 
 type NoteItemProps = {
-  icon: "spark" | "chat";
+  kind: "reasoning" | "narration";
   content?: string;
   streaming?: boolean;
 };
@@ -74,17 +74,17 @@ function ActivityItem({ item, activeRunId }: ActivityItemProps) {
       messageBelongsToActiveRun(item, activeRunId);
     return (
       <NoteItem
-        icon="spark"
+        kind="reasoning"
         content={item.content}
         streaming={isStreaming}
       />
     );
   }
 
-  if (item.role === "assistant" && item.isNarration === true) {
+  if (item.role === "narration") {
     // A model call the loop went on past: what the assistant said before
     // the tool call that followed it. Settled text, never streaming.
-    return <NoteItem icon="chat" content={item.content} />;
+    return <NoteItem kind="narration" content={item.content} />;
   }
 
   if (item.role === "tool_activity" || hasToolCalls(item)) {
@@ -97,10 +97,12 @@ function ActivityItem({ item, activeRunId }: ActivityItemProps) {
   return null;
 }
 
-function NoteItem({ icon, content, streaming = false }: NoteItemProps) {
+function NoteItem({ kind, content, streaming = false }: NoteItemProps) {
   if (!content) return null;
+  const icon = kind === "reasoning" ? "spark" : "chat";
+  const testId = kind === "reasoning" ? "activity-reasoning" : "activity-narration";
   return (
-    <div className="flex min-w-0 gap-3" data-testid={`activity-${icon === "spark" ? "reasoning" : "narration"}`}>
+    <div className="flex min-w-0 gap-3" data-testid={testId}>
       <div
         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/10 bg-iron-800 text-iron-100"
       >

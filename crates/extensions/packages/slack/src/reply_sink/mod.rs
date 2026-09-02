@@ -213,6 +213,21 @@ impl Reconciler<'_> {
         let document = &self.request.revision.document;
         let text = document.answer.text.as_str();
         let carried_text = pending.to_chars > stream.appended_chars;
+        if carried_text {
+            // The document no longer holds the text the pending carried (the
+            // loop went on and reset the answer): whether or not the append
+            // landed, this stream is stale, and read-back has nothing to
+            // verify against. Re-present — close, retract, forget — so the
+            // next call never lands beneath narration that may be showing.
+            let document_still_holds_it = char_prefix(text, pending.to_chars)
+                .is_some_and(|prefix| checkpoint::fingerprint(&[prefix]) == pending.to_hash);
+            if !document_still_holds_it {
+                tracing::debug!(
+                    "slack pending text append no longer matches the document; re-presenting"
+                );
+                return self.re_present(route, &stream).await;
+            }
+        }
         let message = match self.api.read_back(&route.channel, &stream.ts).await {
             Ok(message) => message,
             Err(failure) => {
@@ -597,23 +612,31 @@ impl Reconciler<'_> {
     /// it would be worse.
     async fn retract_message(&mut self, stream: &SlackStreamState) -> Result<(), ReplySinkOutcome> {
         let body = json!({ "channel": stream.channel, "ts": stream.ts });
-        match self.api.post(SlackWebApiMethod::ChatDelete, body).await {
-            Ok(_) => Ok(()),
-            Err(SlackApiFailure::Rejected { error, .. }) if error == "message_not_found" => Ok(()),
-            Err(SlackApiFailure::Rejected { error, .. }) => {
+        let failure = match self.api.post(SlackWebApiMethod::ChatDelete, body).await {
+            Ok(_) => return Ok(()),
+            Err(SlackApiFailure::Rejected { error, .. }) if error == "message_not_found" => {
+                return Ok(());
+            }
+            Err(failure) => failure,
+        };
+        // Rate limits, transport, and auth failures keep their usual
+        // outcomes (the retry deletes, or the reply stops); only a refusal
+        // Slack will never lift leaves the stale message behind.
+        match outcome_for_failure(SlackWebApiMethod::ChatDelete, failure) {
+            // silent-ok: a refusal Slack will never lift (`cant_delete_message`,
+            // a compliance export hold) leaves the stale message behind; the
+            // fresh stream still carries the answer, and failing the reply
+            // over a leftover message would be the greater harm.
+            ReplySinkOutcome::Permanent { reason } => {
                 tracing::debug!(
                     channel = %stream.channel,
                     ts = %stream.ts,
-                    error = %error,
+                    reason = %reason,
                     "slack refused to retract the stale stream's message; leaving it"
                 );
                 Ok(())
             }
-            Err(SlackApiFailure::Ambiguous { reason }) => Err(ReplySinkOutcome::Retryable {
-                reason: ReplyOutcomeReason::new(reason),
-                retry_after: None,
-            }),
-            Err(failure) => Err(outcome_for_failure(SlackWebApiMethod::ChatDelete, failure)),
+            outcome => Err(outcome),
         }
     }
 
