@@ -101,32 +101,34 @@ impl RunOutcomeProcessCommitObserver {
         Ok(())
     }
 
-    async fn publish_authentication_required(
+    async fn publish_gate_required(
         inbox: &dyn NotificationInboxStorePort,
         process_journal_source: Option<
             &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
         >,
         snapshot: &JournaledProcessSnapshot,
         run_id: TurnRunId,
+        kind: NotificationKind,
         occurred_at: Timestamp,
     ) -> Result<(), String> {
         let Some(suspension) = snapshot.suspension.as_ref() else {
             return Ok(());
         };
-        if suspension.kind != ProcessSuspensionKind::Authorization {
+        if gate_notification_kind(suspension.kind) != Some(kind) {
             return Ok(());
         }
         let Some(gate_ref) = suspension.gate_ref.as_ref() else {
-            // A gate-less auth suspension cannot be resumed from the product
+            // A gate-less suspension cannot be resumed from the product
             // surface, so publishing an actionable notification would strand
             // an item the user cannot complete.
             return Ok(());
         };
-        if !Self::auth_gate_is_current(process_journal_source, snapshot, gate_ref).await? {
-            return Self::resolve_authentication_required(
+        if !Self::gate_is_current(process_journal_source, snapshot, kind, gate_ref).await? {
+            return Self::resolve_gate_required(
                 inbox,
                 snapshot,
                 run_id,
+                kind,
                 gate_ref,
                 occurred_at,
             )
@@ -136,19 +138,16 @@ impl RunOutcomeProcessCommitObserver {
             .scope
             .thread_id
             .clone()
-            .ok_or_else(|| "eligible auth suspension has no thread id".to_string())?;
+            .ok_or_else(|| "eligible gate suspension has no thread id".to_string())?;
         let owner_user_id = snapshot
             .owner_user_id
             .clone()
-            .ok_or_else(|| "eligible auth suspension has no owner".to_string())?;
+            .ok_or_else(|| "eligible gate suspension has no owner".to_string())?;
         let lifecycle_ref = LifecycleRef::new(gate_ref.as_str())
-            .map_err(|error| format!("build auth lifecycle reference failed: {error}"))?;
-        let notification_id = crate::run_delivery::run_notification_inbox_id(
-            run_id,
-            NotificationKind::AuthenticationRequired,
-            Some(gate_ref.as_str()),
-        )
-        .map_err(|error| format!("build auth notification id failed: {error}"))?;
+            .map_err(|error| format!("build gate lifecycle reference failed: {error}"))?;
+        let notification_id =
+            crate::run_delivery::run_notification_inbox_id(run_id, kind, Some(gate_ref.as_str()))
+                .map_err(|error| format!("build gate notification id failed: {error}"))?;
         let notification_id_for_reopen = notification_id.clone();
         let recipient = NotificationRecipient {
             tenant_id: snapshot.scope.tenant_id.clone(),
@@ -158,7 +157,7 @@ impl RunOutcomeProcessCommitObserver {
             .publish(PublishNotificationRequest {
                 id: notification_id,
                 recipient: recipient.clone(),
-                kind: NotificationKind::AuthenticationRequired,
+                kind,
                 severity: NotificationSeverity::Warning,
                 source: NotificationSource {
                     thread_id: Some(thread_id.clone()),
@@ -175,7 +174,7 @@ impl RunOutcomeProcessCommitObserver {
                 occurred_at,
             })
             .await
-            .map_err(|error| format!("publish auth notification failed: {error}"))?;
+            .map_err(|error| format!("publish gate notification failed: {error}"))?;
         // A verified resume may be followed by the same deterministic gate
         // becoming current again. Publication must remain a no-op for ordinary
         // retries, so the authoritative Suspended transition explicitly
@@ -187,36 +186,38 @@ impl RunOutcomeProcessCommitObserver {
                 occurred_at,
             })
             .await
-            .map_err(|error| format!("reopen auth notification failed: {error}"))?;
+            .map_err(|error| format!("reopen gate notification failed: {error}"))?;
         // The continuation can settle the gate between the pre-publication
         // state read and the Inbox CAS. Re-read after the write and retire the
         // just-published record if recovery won that race.
-        if !Self::auth_gate_is_current(process_journal_source, snapshot, gate_ref).await? {
-            Self::resolve_authentication_required(inbox, snapshot, run_id, gate_ref, occurred_at)
+        if !Self::gate_is_current(process_journal_source, snapshot, kind, gate_ref).await? {
+            Self::resolve_gate_required(inbox, snapshot, run_id, kind, gate_ref, occurred_at)
                 .await?;
         }
         Ok(())
     }
 
-    async fn auth_gate_is_current(
+    async fn gate_is_current(
         process_journal_source: Option<
             &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
         >,
         snapshot: &JournaledProcessSnapshot,
+        kind: NotificationKind,
         gate_ref: &ironclaw_host_api::turn::TurnGateRef,
     ) -> Result<bool, String> {
         let Some(source) = process_journal_source else {
             return Ok(true);
         };
-        Ok(Self::current_auth_gate_ref(source, snapshot)
+        Ok(Self::current_gate_ref(source, snapshot, kind)
             .await?
             .as_ref()
             == Some(gate_ref))
     }
 
-    async fn current_auth_gate_ref(
+    async fn current_gate_ref(
         source: &dyn ProcessJournalSource<Error = ironclaw_turns::TurnError>,
         snapshot: &JournaledProcessSnapshot,
+        kind: NotificationKind,
     ) -> Result<Option<ironclaw_host_api::turn::TurnGateRef>, String> {
         let current = source
             .get_process_snapshot(GetProcessSnapshotRequest {
@@ -224,35 +225,33 @@ impl RunOutcomeProcessCommitObserver {
                 process_id: snapshot.process_id,
             })
             .await
-            .map_err(|error| format!("read current auth process state failed: {error}"))?;
+            .map_err(|error| format!("read current gate process state failed: {error}"))?;
         if current.status != ProcessLifecycleStatus::Suspended {
             return Ok(None);
         }
         let Some(suspension) = current.suspension else {
             return Ok(None);
         };
-        if suspension.kind != ProcessSuspensionKind::Authorization {
+        if gate_notification_kind(suspension.kind) != Some(kind) {
             return Ok(None);
         }
         Ok(suspension.gate_ref)
     }
 
-    async fn resolve_authentication_required(
+    async fn resolve_gate_required(
         inbox: &dyn NotificationInboxStorePort,
         snapshot: &JournaledProcessSnapshot,
         run_id: TurnRunId,
+        kind: NotificationKind,
         gate_ref: &ironclaw_host_api::turn::TurnGateRef,
         occurred_at: Timestamp,
     ) -> Result<(), String> {
         let Some(owner_user_id) = snapshot.owner_user_id.clone() else {
             return Ok(());
         };
-        let notification_id = crate::run_delivery::run_notification_inbox_id(
-            run_id,
-            NotificationKind::AuthenticationRequired,
-            Some(gate_ref.as_str()),
-        )
-        .map_err(|error| format!("build auth notification id failed: {error}"))?;
+        let notification_id =
+            crate::run_delivery::run_notification_inbox_id(run_id, kind, Some(gate_ref.as_str()))
+                .map_err(|error| format!("build gate notification id failed: {error}"))?;
         match inbox
             .resolve(NotificationMutationRequest {
                 recipient: NotificationRecipient {
@@ -265,7 +264,7 @@ impl RunOutcomeProcessCommitObserver {
             .await
         {
             Ok(_) | Err(NotificationInboxError::NotificationNotFound) => Ok(()),
-            Err(error) => Err(format!("resolve auth notification failed: {error}")),
+            Err(error) => Err(format!("resolve gate notification failed: {error}")),
         }
     }
 
@@ -290,7 +289,7 @@ impl RunOutcomeProcessCommitObserver {
         // terminal approval reconciliation closes every open gate for the run.
         let current_auth_gate_ref = match (kind, self.process_journal_source.as_deref()) {
             (NotificationKind::AuthenticationRequired, Some(source)) => {
-                Self::current_auth_gate_ref(source, snapshot).await?
+                Self::current_gate_ref(source, snapshot, kind).await?
             }
             _ => None,
         };
@@ -547,11 +546,12 @@ impl ProcessJournalCommitObserver for RunOutcomeProcessCommitObserver {
         if commit.kind == ProcessJournalKind::Suspended
             && commit.state.status == ProcessLifecycleStatus::Suspended
         {
-            Self::publish_authentication_required(
+            Self::publish_gate_required(
                 self.inbox.as_ref(),
                 self.process_journal_source.as_deref(),
                 &commit.state,
                 run_id,
+                NotificationKind::AuthenticationRequired,
                 occurred_at,
             )
             .await?;
@@ -717,11 +717,12 @@ impl ProcessJournalCommitObserver for AuthNotificationBackfillProcessCommitObser
         }
         let run_id = TurnRunId::from_uuid(commit.state.process_id.as_uuid());
         let occurred_at = commit.occurred_at.unwrap_or(commit.state.created_at);
-        RunOutcomeProcessCommitObserver::publish_authentication_required(
+        RunOutcomeProcessCommitObserver::publish_gate_required(
             self.inbox.as_ref(),
             Some(self.process_journal_source.as_ref()),
             &commit.state,
             run_id,
+            NotificationKind::AuthenticationRequired,
             occurred_at,
         )
         .await
@@ -843,19 +844,11 @@ struct OutcomeProductContext {
     execution_policy: Option<TurnExecutionPolicy>,
 }
 
-fn eligible_user_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
-    if snapshot.process_kind != ProcessKind::AgentTurn
-        || snapshot.parent_process_id.is_some()
-        || snapshot.owner_user_id.is_none()
-        || snapshot.scope.thread_id.is_none()
-        || snapshot.scope.agent_id.is_none()
-    {
-        return None;
-    }
+fn parse_outcome_metadata(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
     // silent-ok: eligibility screening. Journal metadata this observer cannot
     // read describes a process it does not own, so the absence of a notification
     // is the correct outcome rather than a failure to report; the cause is
-    // recorded above before it is dropped.
+    // recorded before it is dropped.
     let envelope = serde_json::from_value::<OutcomeMetadataEnvelope>(snapshot.metadata.clone())
         .map_err(|error| {
             tracing::debug!(
@@ -865,7 +858,19 @@ fn eligible_user_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetad
             );
         })
         .ok()?;
-    let metadata = envelope.agent_turn;
+    Some(envelope.agent_turn)
+}
+
+fn eligible_user_run(snapshot: &JournaledProcessSnapshot) -> Option<OutcomeMetadata> {
+    if snapshot.process_kind != ProcessKind::AgentTurn
+        || snapshot.parent_process_id.is_some()
+        || snapshot.owner_user_id.is_none()
+        || snapshot.scope.thread_id.is_none()
+        || snapshot.scope.agent_id.is_none()
+    {
+        return None;
+    }
+    let metadata = parse_outcome_metadata(snapshot)?;
     if metadata.subagent_depth != 0 || metadata.ownerless_thread {
         return None;
     }
@@ -939,6 +944,20 @@ fn outcome_notification_id(
     let kind = kind.stable_key();
     NotificationId::new(format!("run:{run_id}:{kind}"))
         .map_err(|error| format!("build run outcome notification id failed: {error}"))
+}
+
+/// Maps a gate suspension to the inbox kind that announces it. `None` for
+/// suspensions no inbox item can act on (resource, dependent-run, external).
+fn gate_notification_kind(kind: ProcessSuspensionKind) -> Option<NotificationKind> {
+    match kind {
+        ProcessSuspensionKind::Approval => Some(NotificationKind::ApprovalRequired),
+        ProcessSuspensionKind::Authorization => Some(NotificationKind::AuthenticationRequired),
+        ProcessSuspensionKind::Resource
+        | ProcessSuspensionKind::AwaitingChildProcess
+        | ProcessSuspensionKind::ExternalTool
+        | ProcessSuspensionKind::ExternalProcess
+        | ProcessSuspensionKind::ExtensionDefined => None,
+    }
 }
 
 #[cfg(test)]
