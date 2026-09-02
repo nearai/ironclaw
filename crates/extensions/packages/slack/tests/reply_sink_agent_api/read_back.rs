@@ -1,6 +1,7 @@
 //! Ambiguity and read-back: the pending/checkpoint machinery that keeps a
 //! lost provider response from ever duplicating visible text. Split from the
-//! parent suite by theme; it drives the same harness.
+//! parent suite by theme; it drives the same harness. Text goes out by whole
+//! paragraph, so every fragment here ends one.
 
 use super::*;
 
@@ -9,7 +10,7 @@ use super::*;
 #[tokio::test]
 async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_the_continuation() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
 
@@ -17,7 +18,7 @@ async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_
     harness.fake.inject(Fault::TransportAfterAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(
         matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
@@ -29,7 +30,7 @@ async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_
         "the checkpoint remembers the unanswered request"
     );
 
-    harness.append("!");
+    harness.append("!\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert_applied(&report);
     assert!(
@@ -60,24 +61,24 @@ async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_
             .bodies(SlackWebApiMethod::ChatAppendStream)
             .last(),
         Some(
-            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "!" }] })
+            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "!\n\n" }] })
         ),
         "only the NEW delta is appended; the landed one is not repeated"
     );
     assert_eq!(
         harness.fake.stream(&ts).expect("stream").text,
-        "Hello world!"
+        "Hello\n\n world\n\n!\n\n"
     );
 
     // The append never reached Slack.
     harness.fake.inject(Fault::TransportBeforeAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append(" Bye");
+    harness.append(" Bye\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
 
-    harness.append(".");
+    harness.append(".\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert_applied(&report);
     assert!(
@@ -90,13 +91,13 @@ async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_
             .bodies(SlackWebApiMethod::ChatAppendStream)
             .last(),
         Some(
-            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": " Bye." }] })
+            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": " Bye\n\n.\n\n" }] })
         ),
         "the lost delta is re-sent together with the new one"
     );
     assert_eq!(
         harness.fake.stream(&ts).expect("stream").text,
-        "Hello world! Bye."
+        "Hello\n\n world\n\n!\n\n Bye\n\n.\n\n"
     );
 }
 
@@ -107,13 +108,13 @@ async fn a_transport_failure_after_an_append_is_ambiguous_and_read_back_decides_
 #[tokio::test]
 async fn a_found_but_textless_read_back_stays_ambiguous_without_resending() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
 
     harness.fake.inject(Fault::TransportAfterAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
     let appends_before = harness
@@ -149,7 +150,7 @@ async fn a_found_but_textless_read_back_stays_ambiguous_without_resending() {
 #[tokio::test]
 async fn read_back_verifies_a_pending_append_across_an_earlier_attention_block() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     harness.document.require_attention(ReplyAttention {
         kind: ReplyAttentionKind::Approval,
@@ -174,7 +175,7 @@ async fn read_back_verifies_a_pending_append_across_an_earlier_attention_block()
     harness.fake.inject(Fault::TransportAfterAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
     let appends_before = harness
@@ -200,7 +201,7 @@ async fn read_back_verifies_a_pending_append_across_an_earlier_attention_block()
     );
     assert_eq!(
         harness.checkpoint_json()["stream"]["appended_chars"],
-        11,
+        15,
         "the checkpoint advances over the verified delta"
     );
 }
@@ -214,13 +215,13 @@ async fn read_back_verifies_a_pending_append_across_an_earlier_attention_block()
 async fn read_back_proves_a_repeated_delta_only_past_the_applied_text() {
     // Not landed: the earlier "ok" is in the message, the pending one is not.
     let mut harness = Harness::dm();
-    harness.append("ok");
+    harness.append("ok\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
     harness.fake.inject(Fault::TransportBeforeAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append("ok");
+    harness.append("ok\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
 
@@ -236,21 +237,24 @@ async fn read_back_proves_a_repeated_delta_only_past_the_applied_text() {
             .bodies(SlackWebApiMethod::ChatAppendStream)
             .last(),
         Some(
-            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "ok" }] })
+            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "ok\n\n" }] })
         ),
         "the lost delta is re-sent"
     );
-    assert_eq!(harness.fake.stream(&ts).expect("stream").text, "okok");
+    assert_eq!(
+        harness.fake.stream(&ts).expect("stream").text,
+        "ok\n\nok\n\n"
+    );
 
     // Landed: the second "ok" is in the message past the first.
     let mut harness = Harness::dm();
-    harness.append("ok");
+    harness.append("ok\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
     harness.fake.inject(Fault::TransportAfterAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append("ok");
+    harness.append("ok\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
     let appends_before = harness
@@ -269,19 +273,22 @@ async fn read_back_proves_a_repeated_delta_only_past_the_applied_text() {
         appends_before,
         "a landed delta is never re-sent"
     );
-    assert_eq!(harness.fake.stream(&ts).expect("stream").text, "okok");
-    assert_eq!(harness.checkpoint_json()["stream"]["appended_chars"], 4);
+    assert_eq!(
+        harness.fake.stream(&ts).expect("stream").text,
+        "ok\n\nok\n\n"
+    );
+    assert_eq!(harness.checkpoint_json()["stream"]["appended_chars"], 8);
 
     // No comparable text: a punctuation-only delta leaves read-back nothing
     // to find, so the pending stays and nothing is re-sent.
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
     harness.fake.inject(Fault::TransportAfterAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append("!");
+    harness.append("!\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
     let appends_before = harness
@@ -309,7 +316,7 @@ async fn read_back_proves_a_repeated_delta_only_past_the_applied_text() {
     );
     assert_eq!(
         harness.fake.stream(&ts).expect("stream").text,
-        "Hello!",
+        "Hello\n\n!\n\n",
         "the text the user sees is never doubled"
     );
 }
@@ -320,13 +327,13 @@ async fn read_back_proves_a_repeated_delta_only_past_the_applied_text() {
 #[tokio::test]
 async fn an_unauthorized_read_back_is_reported_as_unauthorized() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
 
     harness.fake.inject(Fault::TransportAfterAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
     let appends_before = harness
@@ -370,7 +377,7 @@ async fn an_unauthorized_read_back_is_reported_as_unauthorized() {
 #[tokio::test]
 async fn an_unreadable_stream_open_answer_latches_the_ghost_stream_ambiguity() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     harness.fake.inject(Fault::InvalidBody {
         method: SlackWebApiMethod::ChatStartStream,
     });
@@ -386,7 +393,7 @@ async fn an_unreadable_stream_open_answer_latches_the_ghost_stream_ambiguity() {
         "an unreadable open answer is an unanswered open"
     );
 
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
     harness.document.complete();
@@ -415,14 +422,14 @@ async fn an_unreadable_stream_open_answer_latches_the_ghost_stream_ambiguity() {
 #[tokio::test]
 async fn an_unreadable_append_answer_arms_the_pending_for_read_back() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
 
     harness.fake.inject(Fault::InvalidBody {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(
         matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
@@ -434,7 +441,7 @@ async fn an_unreadable_append_answer_arms_the_pending_for_read_back() {
         "the checkpoint remembers the unreadable append"
     );
 
-    harness.append("!");
+    harness.append("!\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert_applied(&report);
     assert!(
@@ -447,13 +454,13 @@ async fn an_unreadable_append_answer_arms_the_pending_for_read_back() {
             .bodies(SlackWebApiMethod::ChatAppendStream)
             .last(),
         Some(
-            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "!" }] })
+            &json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "!\n\n" }] })
         ),
         "only the NEW delta is appended"
     );
     assert_eq!(
         harness.fake.stream(&ts).expect("stream").text,
-        "Hello world!"
+        "Hello\n\n world\n\n!\n\n"
     );
 }
 
@@ -463,14 +470,14 @@ async fn an_unreadable_append_answer_arms_the_pending_for_read_back() {
 #[tokio::test]
 async fn a_read_back_without_a_messages_array_proves_nothing_and_re_sends_nothing() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
 
     harness.fake.inject(Fault::TransportAfterAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }));
     let appends_before = harness
@@ -500,12 +507,12 @@ async fn a_read_back_without_a_messages_array_proves_nothing_and_re_sends_nothin
         "the pending stays for a read-back that can compare"
     );
 
-    harness.append("!");
+    harness.append("!\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert_applied(&report);
     assert!(report.evidence.read_back_verified);
     assert_eq!(
         harness.fake.stream(&ts).expect("stream").text,
-        "Hello world!"
+        "Hello\n\n world\n\n!\n\n"
     );
 }

@@ -25,8 +25,9 @@ pub(super) struct SlackReplyCheckpoint {
     pub(super) session_status: SlackSessionStatus,
     #[serde(default)]
     pub(super) stream: Option<SlackStreamState>,
-    /// Hidden provider sentinel or real activity id → fingerprint of the last
-    /// `task_update` sent for it.
+    /// Activity id → fingerprint of the last `task_update` sent for it.
+    /// (Checkpoints written before 2026-09-02 may also carry the retired
+    /// `ironclaw-run` sentinel entry; it is simply never re-sent.)
     #[serde(default)]
     pub(super) tasks: BTreeMap<String, String>,
     /// Activities with `started_ordinal` below this and no fingerprint entry

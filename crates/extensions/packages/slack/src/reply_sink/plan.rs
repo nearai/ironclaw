@@ -12,10 +12,9 @@ use ironclaw_extension_contracts::reply::{
 use serde_json::{Value, json};
 
 use super::checkpoint::{SlackAppliedState, SlackReplyCheckpoint, char_prefix, fingerprint};
-use super::{SLACK_MARKDOWN_CHUNK_MAX_CHARS, SLACK_TASK_FIELD_MAX_CHARS};
-
-const RUN_TASK_ID: &str = "ironclaw-run";
-const RUN_TASK_TITLE: &str = "IronClaw run";
+use super::{
+    SLACK_MARKDOWN_CHUNK_MAX_CHARS, SLACK_TASK_FIELD_MAX_CHARS, SLACK_TEXT_HOLD_MAX_CHARS,
+};
 
 // ── Chunk planning ───────────────────────────────────────────────────────
 
@@ -29,9 +28,11 @@ pub(super) struct ChunkPlan {
 pub(super) struct AnswerRewritten;
 
 /// Everything the checkpoint has not seen, as one `chunks` array: task cards
-/// whose fingerprint moved, the answer text past `from_chars`, a status line
-/// while the answer is still empty, a new attention block, and the terminal
-/// note. Never slices inside a char.
+/// whose fingerprint moved (and the plan header, once a real task exists),
+/// the answer text past `from_chars` — by whole paragraph while the run is
+/// live, because Slack renders every markdown chunk as its own block, and in
+/// full at the terminal — a status line while the answer is still empty, a
+/// new attention block, and the terminal note. Never slices inside a char.
 pub(super) fn plan_chunks(
     document: &ReplyDocument,
     checkpoint: &SlackReplyCheckpoint,
@@ -56,7 +57,6 @@ pub(super) fn plan_chunks(
     };
 
     let mut task_chunks = Vec::new();
-    append_hidden_run_task(document, checkpoint, &mut task_chunks, &mut applied);
     for activity in &document.activities {
         let id = activity.id.as_str();
         let published = checkpoint.tasks.get(id);
@@ -75,15 +75,36 @@ pub(super) fn plan_chunks(
         }
     }
 
-    append_plan_title(document, checkpoint, &mut chunks, &mut applied);
+    // The plan header exists only alongside real task cards: Slack renders a
+    // header without a task as an empty message, and a tool-less answer needs
+    // no header — its thinking state is the session status.
+    if !task_chunks.is_empty()
+        || !checkpoint.tasks.is_empty()
+        || checkpoint.plan_title_key.is_some()
+    {
+        append_plan_title(document, checkpoint, &mut chunks, &mut applied);
+    }
     chunks.extend(task_chunks);
 
-    if !delta.is_empty() {
-        for piece in markdown_pieces(delta) {
+    // Held text flushes when the answer is complete (terminal, or a canonical
+    // finalized text) and before an attention block, which belongs after
+    // whatever the run had already said.
+    let attention_is_new = document.attention.as_ref().is_some_and(|attention| {
+        checkpoint.attention_key.as_deref() != Some(attention_fingerprint(attention).as_str())
+    });
+    let publish = if document.is_terminal() || document.answer.finalized || attention_is_new {
+        delta
+    } else {
+        &delta[..publishable_len(prefix, delta)]
+    };
+    if !publish.is_empty() {
+        for piece in markdown_pieces(publish) {
             chunks.push(json!({ "type": "markdown_text", "text": piece }));
         }
-        applied.to_chars = from_chars + delta.chars().count() as u64;
-        applied.to_hash = fingerprint(&[text]);
+        applied.to_chars = from_chars + publish.chars().count() as u64;
+        // The hash covers exactly what Slack shows, so the next plan still
+        // detects a rewrite of the shown prefix.
+        applied.to_hash = fingerprint(&[&text[..prefix.len() + publish.len()]]);
     }
 
     if text.is_empty()
@@ -124,31 +145,6 @@ pub(super) fn plan_chunks(
     }
 
     Ok(ChunkPlan { chunks, applied })
-}
-
-fn append_hidden_run_task(
-    document: &ReplyDocument,
-    checkpoint: &SlackReplyCheckpoint,
-    task_chunks: &mut Vec<Value>,
-    applied: &mut SlackAppliedState,
-) {
-    let status = match &document.outcome {
-        Some(ReplyOutcome::Completed) => "complete",
-        Some(ReplyOutcome::Failed { .. } | ReplyOutcome::Cancelled) => "error",
-        None => "in_progress",
-    };
-    let rendered = fingerprint(&["hidden-run", status]);
-    if checkpoint.tasks.get(RUN_TASK_ID) == Some(&rendered) {
-        return;
-    }
-    task_chunks.push(json!({
-        "type": "task_update",
-        "id": RUN_TASK_ID,
-        "title": RUN_TASK_TITLE,
-        "hide_title": true,
-        "status": status,
-    }));
-    applied.tasks.insert(RUN_TASK_ID.to_string(), rendered);
 }
 
 fn append_plan_title(
@@ -339,6 +335,60 @@ pub(super) fn terminal_note(document: &ReplyDocument) -> Option<String> {
         Some(ReplyOutcome::Cancelled) => Some("_Stopped._".to_string()),
         Some(ReplyOutcome::Completed) | None => None,
     }
+}
+
+/// How much of `delta` is complete enough to show: through its last
+/// paragraph boundary (a blank line outside a code fence), or — once the
+/// unfinished paragraph has passed [`SLACK_TEXT_HOLD_MAX_CHARS`] with no
+/// blank line — through its last sentence end. Fence state carries over from
+/// `prefix`, the text already shown, so a blank line inside a fence opened
+/// earlier is never a boundary. Zero when nothing is complete yet.
+pub(super) fn publishable_len(prefix: &str, delta: &str) -> usize {
+    let mut in_fence = fence_state(prefix);
+    let mut paragraph_end = 0usize;
+    let mut sentence_end = 0usize;
+    let mut offset = 0usize;
+    for line in delta.split_inclusive('\n') {
+        let end = offset + line.len();
+        if is_fence_line(line) {
+            in_fence = !in_fence;
+        } else if !in_fence {
+            if line.trim().is_empty() {
+                paragraph_end = end;
+            }
+            let mut chars = line.char_indices().peekable();
+            while let Some((index, character)) = chars.next() {
+                if matches!(character, '.' | '!' | '?')
+                    && let Some(&(_, next)) = chars.peek()
+                    && next.is_whitespace()
+                {
+                    sentence_end = offset + index + character.len_utf8() + next.len_utf8();
+                }
+            }
+        }
+        offset = end;
+    }
+    if paragraph_end > 0 {
+        paragraph_end
+    } else if delta.chars().count() > SLACK_TEXT_HOLD_MAX_CHARS {
+        sentence_end
+    } else {
+        0
+    }
+}
+
+/// Whether `text` ends inside a fenced code block.
+fn fence_state(text: &str) -> bool {
+    text.split_inclusive('\n')
+        .filter(|line| is_fence_line(line))
+        .count()
+        % 2
+        == 1
+}
+
+fn is_fence_line(line: &str) -> bool {
+    let trimmed = line.trim_start_matches(' ');
+    line.len() - trimmed.len() <= 3 && (trimmed.starts_with("```") || trimmed.starts_with("~~~"))
 }
 
 /// Split a delta into markdown chunks of at most

@@ -205,8 +205,10 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     let mut harness = Harness::channel();
 
     // Opened: the production first revision (`IterationStarted`) carries no
-    // status, answer, activity, or attention — only `Preparing`. Slack still
-    // gets the lifecycle header immediately, without a synthetic task row.
+    // status, answer, activity, or attention — only `Preparing`. Nothing is
+    // renderable, so Slack gets the session status alone: no stream opens
+    // until there is content for it to carry, and no synthetic task is ever
+    // invented to make a header render.
     assert_eq!(harness.document.phase, ReplyPhase::Preparing);
     assert!(harness.document.status.is_none());
     assert!(harness.document.answer.text.as_str().is_empty());
@@ -214,16 +216,39 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     assert!(harness.document.attention.is_none());
     let report = harness.reconcile(ReplyReconcilePoint::Opened).await;
     assert_applied(&report);
-    assert_eq!(
-        harness.fake.calls(),
-        ["agents.sessions.setStatus", "chat.startStream"]
-    );
+    assert_eq!(harness.fake.calls(), ["agents.sessions.setStatus"]);
     assert_eq!(
         harness
             .fake
             .bodies(SlackWebApiMethod::AgentsSessionsSetStatus),
         [json!({ "status": "processing", "channel_id": CHANNEL, "thread_ts": THREAD })]
     );
+    assert!(
+        harness.fake.streams().is_empty(),
+        "nothing renderable, no stream"
+    );
+    assert!(refs(&report).is_empty());
+    assert_eq!(
+        harness.checkpoint_json()["session_status"],
+        "processing",
+        "the checkpoint persists the session state ahead of any stream"
+    );
+
+    // The first real activity opens the one stream, carrying the plan header
+    // and its task card. The answer's first characters are not a complete
+    // paragraph yet, so they wait: Slack renders every markdown chunk as its
+    // own block, and a block is a paragraph, never a token.
+    harness.document.activity_started(
+        item("act-0"),
+        text("Read runbook"),
+        Some(preview("docs/runbook.md")),
+    );
+    harness.append("Hi");
+    let report = harness
+        .reconcile(ReplyReconcilePoint::ControlCritical)
+        .await;
+    assert_applied(&report);
+    assert_eq!(harness.fake.calls()[1..], ["chat.startStream"]);
     let ts = harness.stream_ts();
     assert_eq!(refs(&report), [ts.as_str()]);
     assert_eq!(
@@ -236,50 +261,23 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
             "task_display_mode": "plan",
             "chunks": [
                 { "type": "plan_update", "title": "Thinking" },
-                { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" }
+                { "type": "task_update", "id": "act-0", "title": "Read runbook", "status": "in_progress", "details": "docs/runbook.md" }
             ]
         })]
     );
     assert_eq!(
-        harness.checkpoint_json()["session_status"],
-        "processing",
-        "the checkpoint persists with the visible stream"
-    );
-
-    // The first real activity plus the answer's first characters append to
-    // that same stream; they never create a second Agent reply.
-    harness.document.activity_started(
-        item("act-0"),
-        text("Read runbook"),
-        Some(preview("docs/runbook.md")),
-    );
-    harness.append("Hi");
-    let report = harness
-        .reconcile(ReplyReconcilePoint::ControlCritical)
-        .await;
-    assert_applied(&report);
-    assert_eq!(harness.fake.calls()[2..], ["chat.appendStream"]);
-    assert_eq!(
-        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[0],
-        json!({
-            "channel": CHANNEL,
-            "ts": ts,
-            "chunks": [
-                { "type": "task_update", "id": "act-0", "title": "Read runbook", "status": "in_progress", "details": "docs/runbook.md" },
-                { "type": "markdown_text", "text": "Hi" }
-            ]
-        })
-    );
-    assert!(
-        refs(&report).is_empty(),
-        "the stream evidence was already recorded"
+        harness.checkpoint_json()["stream"]["appended_chars"],
+        0,
+        "held text is not applied until it is a whole paragraph"
     );
     assert!(
         !report.evidence.read_back_verified,
         "nothing was read back on the happy path"
     );
 
-    // ControlCritical: attention before any text → block + suspended.
+    // ControlCritical: attention before the paragraph ends → the held text
+    // goes out first (what the run said belongs before the block), then the
+    // block, then `suspended`.
     harness.document.activity_finished(
         item("act-0"),
         ReplyActivityState::Completed,
@@ -301,17 +299,18 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
             .await,
     );
     assert_eq!(
-        harness.fake.calls()[3..],
+        harness.fake.calls()[2..],
         ["chat.appendStream", "agents.sessions.setStatus"]
     );
     assert_eq!(
-        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[1],
+        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[0],
         json!({
             "channel": CHANNEL,
             "ts": ts,
             "chunks": [
                 { "type": "plan_update", "title": "Thinking paused" },
                 { "type": "task_update", "id": "act-0", "title": "Read runbook", "status": "complete" },
+                { "type": "markdown_text", "text": "Hi" },
                 {
                     "type": "markdown_text",
                     "text": "\n> **Approval needed:** Approve writing report.md\n> The run wants to write report.md in your workspace.\n"
@@ -334,11 +333,11 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
             .await,
     );
     assert_eq!(
-        harness.fake.calls()[5..],
+        harness.fake.calls()[4..],
         ["chat.appendStream", "agents.sessions.setStatus"]
     );
     assert_eq!(
-        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[2],
+        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[1],
         json!({
             "channel": CHANNEL,
             "ts": ts,
@@ -352,13 +351,32 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
         json!({ "status": "processing", "channel_id": CHANNEL, "thread_ts": THREAD })
     );
 
-    // Progress: an activity starts and the answer begins → one append.
+    // Progress: task cards go out as they change; unfinished text waits.
     harness.document.activity_started(
         item("act-1"),
         text("Read runbook"),
         Some(preview("docs/runbook.md")),
     );
     harness.append("Hello");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+    assert_eq!(harness.fake.calls()[6..], ["chat.appendStream"]);
+    assert_eq!(
+        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[2],
+        json!({
+            "channel": CHANNEL,
+            "ts": ts,
+            "chunks": [
+                { "type": "task_update", "id": "act-1", "title": "Read runbook", "status": "in_progress", "details": "docs/runbook.md" }
+            ]
+        })
+    );
+    harness.document.activity_finished(
+        item("act-1"),
+        ReplyActivityState::Completed,
+        Some(preview("Runbook opened")),
+        None,
+    );
+    harness.append(" world");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
     assert_eq!(harness.fake.calls()[7..], ["chat.appendStream"]);
     assert_eq!(
@@ -367,43 +385,20 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
             "channel": CHANNEL,
             "ts": ts,
             "chunks": [
-                { "type": "task_update", "id": "act-1", "title": "Read runbook", "status": "in_progress", "details": "docs/runbook.md" },
-                { "type": "markdown_text", "text": "Hello" }
-            ]
-        })
-    );
-
-    // Progress: the activity finishes with output, more text → one append.
-    harness.document.activity_finished(
-        item("act-1"),
-        ReplyActivityState::Completed,
-        Some(preview("12 lines")),
-        None,
-    );
-    harness.append(" world");
-    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
-    assert_eq!(harness.fake.calls()[8..], ["chat.appendStream"]);
-    assert_eq!(
-        harness.fake.bodies(SlackWebApiMethod::ChatAppendStream)[4],
-        json!({
-            "channel": CHANNEL,
-            "ts": ts,
-            "chunks": [
-                { "type": "task_update", "id": "act-1", "title": "Read runbook", "status": "complete" },
-                { "type": "markdown_text", "text": " world" }
+                { "type": "task_update", "id": "act-1", "title": "Read runbook", "status": "complete" }
             ]
         })
     );
 
     // Terminal: the canonical answer extends the streamed text → one stop
-    // carrying the remaining delta and `session_status: active`.
+    // carrying everything still held and `session_status: active`.
     harness
         .document
         .finalize_answer(answer("HiHello world!"), Vec::new());
     harness.document.complete();
     let report = harness.reconcile(ReplyReconcilePoint::Terminal).await;
     assert_applied(&report);
-    assert_eq!(harness.fake.calls()[9..], ["chat.stopStream"]);
+    assert_eq!(harness.fake.calls()[8..], ["chat.stopStream"]);
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStopStream),
         [json!({
@@ -411,8 +406,7 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
             "ts": ts,
             "chunks": [
                 { "type": "plan_update", "title": "Thinking completed" },
-                { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "complete" },
-                { "type": "markdown_text", "text": "!" }
+                { "type": "markdown_text", "text": "Hello world!" }
             ],
             "session_status": "active"
         })]
@@ -431,13 +425,9 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
         "Hi\n> **Approval needed:** Approve writing report.md\n> The run wants to write report.md in your workspace.\nHello world!"
     );
     assert_eq!(
-        stream
-            .task_updates
-            .iter()
-            .filter(|task| task.get("hide_title") != Some(&json!(true)))
-            .count(),
+        stream.task_updates.len(),
         4,
-        "two real tools, two states each"
+        "two real tools, two states each — and nothing else"
     );
     assert_eq!(
         harness.fake.streams().len(),
@@ -456,6 +446,55 @@ async fn happy_path_streams_the_reply_through_the_native_agent_surface() {
     assert_eq!(checkpoint["stream"]["appended_chars"], 14);
     assert_eq!(checkpoint["generation"], 1);
     assert!(checkpoint["tasks"]["act-1"].is_string());
+}
+
+/// Progress text goes out one paragraph at a time — Slack renders every
+/// markdown chunk as its own block — and the terminal flushes whatever is
+/// still unfinished.
+#[tokio::test]
+async fn progress_text_streams_by_paragraph_and_the_terminal_flushes_the_rest() {
+    let mut harness = Harness::dm();
+    harness.append("First paragraph.");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+    assert!(
+        harness.fake.streams().is_empty(),
+        "an unfinished paragraph opens nothing"
+    );
+
+    harness.append("\n\nSecond");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+    let ts = harness.stream_ts();
+    assert_eq!(
+        harness.fake.bodies(SlackWebApiMethod::ChatStartStream)[0]["chunks"],
+        json!([{ "type": "markdown_text", "text": "First paragraph.\n\n" }]),
+        "the stream opens with the first whole paragraph"
+    );
+    assert_eq!(harness.checkpoint_json()["stream"]["appended_chars"], 18);
+
+    harness.append(" paragraph continues");
+    let before = harness.fake.calls().len();
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+    assert_eq!(
+        harness.fake.calls().len(),
+        before,
+        "a growing paragraph costs no provider call until it ends"
+    );
+
+    harness.document.complete();
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
+    assert_eq!(
+        harness.fake.bodies(SlackWebApiMethod::ChatStopStream),
+        [json!({
+            "channel": DM,
+            "ts": ts,
+            "chunks": [{ "type": "markdown_text", "text": "Second paragraph continues" }],
+            "session_status": "active"
+        })]
+    );
+    assert_eq!(
+        harness.fake.stream(&ts).expect("stream").text,
+        "First paragraph.\n\nSecond paragraph continues"
+    );
 }
 
 #[tokio::test]
@@ -481,7 +520,6 @@ async fn tool_arguments_are_clean_and_tool_outputs_are_not_published() {
     assert_eq!(
         stream.task_updates,
         [
-            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" }),
             json!({
                 "type": "task_update",
                 "id": "act-json",
@@ -565,15 +603,17 @@ async fn long_json_tool_arguments_remain_complete_and_outputs_are_not_published(
 async fn model_passes_never_become_plan_rows() {
     let mut harness = Harness::channel();
 
+    // A model pass alone renders nothing: no row, and no stream yet.
     harness.document.note_phase(ReplyPhase::Thinking);
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
-    let ts = harness.stream_ts();
+    assert!(harness.fake.streams().is_empty());
 
     harness.document.note_phase(ReplyPhase::Working);
     harness
         .document
         .activity_started(item("act-0"), text("Search Slack"), None);
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
+    let ts = harness.stream_ts();
 
     harness.document.activity_finished(
         item("act-0"),
@@ -597,12 +637,10 @@ async fn model_passes_never_become_plan_rows() {
     assert_eq!(
         stream.task_updates,
         [
-            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" }),
             json!({ "type": "task_update", "id": "act-0", "title": "Search Slack", "status": "in_progress" }),
             json!({ "type": "task_update", "id": "act-0", "title": "Search Slack", "status": "complete" }),
-            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "complete" }),
         ],
-        "the only non-hidden rows are real tool activities"
+        "the only rows are real tool activities"
     );
     assert_eq!(
         stream.plan_updates,
@@ -618,12 +656,15 @@ async fn model_passes_never_become_plan_rows() {
             .is_some_and(|chunk| chunk["status"] == "complete"),
         "the terminal message leaves no active spinner"
     );
+    assert_eq!(stream.text, "I found the messages you wanted.");
 }
 
 #[tokio::test]
 async fn attention_and_resume_update_the_plan_without_reopening_a_task() {
     let mut harness = Harness::channel();
-    harness.document.note_phase(ReplyPhase::Thinking);
+    harness
+        .document
+        .activity_started(item("act-0"), text("Search Slack"), None);
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
 
@@ -659,18 +700,26 @@ async fn attention_and_resume_update_the_plan_without_reopening_a_task() {
     assert_eq!(
         stream.task_updates,
         [
-            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" })
+            json!({ "type": "task_update", "id": "act-0", "title": "Search Slack", "status": "in_progress" })
         ],
-        "attention never exposes or duplicates the hidden lifecycle sentinel"
+        "attention never re-sends or duplicates a task card"
     );
 }
 
 #[tokio::test]
 async fn failed_and_cancelled_runs_leave_terminal_plan_titles_and_no_spinner() {
-    for (cancelled, expected_plan_title) in [(false, "Thinking failed"), (true, "Thinking stopped")]
-    {
+    for (cancelled, expected_plan_title, expected_note) in [
+        (
+            false,
+            "Thinking failed",
+            "**Failed:** The provider timed out.",
+        ),
+        (true, "Thinking stopped", "_Stopped._"),
+    ] {
         let mut harness = Harness::dm();
-        harness.document.note_phase(ReplyPhase::Thinking);
+        harness
+            .document
+            .activity_started(item("act-0"), text("Search Slack"), None);
         assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
         let ts = harness.stream_ts();
 
@@ -689,11 +738,18 @@ async fn failed_and_cancelled_runs_leave_terminal_plan_titles_and_no_spinner() {
         assert_eq!(
             stream.task_updates,
             [
-                json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" }),
-                json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "error" }),
+                json!({ "type": "task_update", "id": "act-0", "title": "Search Slack", "status": "in_progress" }),
+                json!({
+                    "type": "task_update",
+                    "id": "act-0",
+                    "title": "Search Slack",
+                    "status": "error",
+                    "details": "Did not finish before the run ended",
+                }),
             ],
-            "run outcomes use only the hidden lifecycle sentinel"
+            "the run's outcome needs no synthetic row; its unfinished tool is marked, never left spinning"
         );
+        assert_eq!(stream.text, expected_note);
         assert_eq!(
             stream.state,
             StreamState::Stopped {
@@ -706,7 +762,9 @@ async fn failed_and_cancelled_runs_leave_terminal_plan_titles_and_no_spinner() {
 #[tokio::test]
 async fn a_terminal_outcome_overrides_stale_attention() {
     let mut harness = Harness::dm();
-    harness.document.note_phase(ReplyPhase::Thinking);
+    harness
+        .document
+        .activity_started(item("act-0"), text("Search Slack"), None);
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
 
@@ -770,7 +828,7 @@ async fn a_terminal_revision_marks_an_unfinished_tool_as_error() {
 /// production first revision carries no status (see the happy path above).
 /// This pins the narrow contract that an explicitly supplied driver status
 /// (e.g. "retrying model request") renders as an italic markdown chunk in
-/// the stream that opens for it.
+/// the stream that opens for it — with no task and therefore no header.
 #[tokio::test]
 async fn an_explicit_driver_status_becomes_an_italic_opening_chunk() {
     let mut harness = Harness::channel();
@@ -782,11 +840,7 @@ async fn an_explicit_driver_status_becomes_an_italic_opening_chunk() {
     assert_eq!(bodies.len(), 1);
     assert_eq!(
         bodies[0]["chunks"],
-        json!([
-            { "type": "plan_update", "title": "Thinking" },
-            { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" },
-            { "type": "markdown_text", "text": "_retrying model request_\n" }
-        ])
+        json!([{ "type": "markdown_text", "text": "_retrying model request_\n" }])
     );
 }
 
@@ -798,14 +852,18 @@ async fn repeated_revisions_and_terminals_make_no_calls() {
     harness.document.note_phase(ReplyPhase::Working);
     harness.append("Hello");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
-    assert_eq!(harness.fake.calls().len(), 2);
+    assert_eq!(
+        harness.fake.calls(),
+        ["agents.sessions.setStatus"],
+        "an unfinished paragraph opens nothing"
+    );
 
     // The same desired state again (a retry, a heartbeat, a lease takeover).
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Heartbeat).await);
     assert_eq!(
         harness.fake.calls().len(),
-        2,
+        1,
         "a reflected revision costs no provider call"
     );
 
@@ -816,17 +874,14 @@ async fn repeated_revisions_and_terminals_make_no_calls() {
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
     let ts = harness.stream_ts();
     assert_eq!(
+        harness.fake.bodies(SlackWebApiMethod::ChatStartStream)[0]["chunks"],
+        json!([{ "type": "markdown_text", "text": "Hello" }]),
+        "the terminal opens the one stream carrying the whole answer"
+    );
+    assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStopStream),
-        [json!({
-            "channel": DM,
-            "ts": ts,
-            "chunks": [
-                { "type": "plan_update", "title": "Thinking completed" },
-                { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "complete" }
-            ],
-            "session_status": "active"
-        })],
-        "the terminal stop closes the run-level header"
+        [json!({ "channel": DM, "ts": ts, "session_status": "active" })],
+        "the close carries nothing more; there is no header to close"
     );
     let calls = harness.fake.calls().len();
 
@@ -847,32 +902,27 @@ async fn text_deltas_are_char_offsets_never_byte_slices() {
     let mut harness = Harness::dm();
     harness.append("hé");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
-    harness.append("llo 世界");
+    harness.append("llo 世界\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
-    harness.append("!");
+    harness.append("!\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
 
     let ts = harness.stream_ts();
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStartStream)[0]["chunks"],
-        json!([
-            { "type": "plan_update", "title": "Thinking" },
-            { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" },
-            { "type": "markdown_text", "text": "hé" }
-        ])
+        json!([{ "type": "markdown_text", "text": "héllo 世界\n\n" }])
     );
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatAppendStream),
         [
-            json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "llo 世界" }] }),
-            json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "!" }] }),
+            json!({ "channel": DM, "ts": ts, "chunks": [{ "type": "markdown_text", "text": "!\n\n" }] })
         ]
     );
     assert_eq!(
         harness.fake.stream(&ts).expect("stream").text,
-        "héllo 世界!"
+        "héllo 世界\n\n!\n\n"
     );
-    assert_eq!(harness.checkpoint_json()["stream"]["appended_chars"], 9);
+    assert_eq!(harness.checkpoint_json()["stream"]["appended_chars"], 13);
 }
 
 // ── Rate limits ──────────────────────────────────────────────────────────
@@ -880,14 +930,14 @@ async fn text_deltas_are_char_offsets_never_byte_slices() {
 #[tokio::test]
 async fn a_rate_limited_append_is_retryable_with_the_provider_hint_and_never_duplicates() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
 
     harness.fake.inject(Fault::RateLimited {
         method: SlackWebApiMethod::ChatAppendStream,
         retry_after: Duration::from_secs(7),
     });
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(
         matches!(
@@ -899,7 +949,7 @@ async fn a_rate_limited_append_is_retryable_with_the_provider_hint_and_never_dup
     );
     assert_eq!(
         harness.checkpoint_json()["stream"]["appended_chars"],
-        5,
+        7,
         "a refused append advances nothing"
     );
 
@@ -913,13 +963,13 @@ async fn a_rate_limited_append_is_retryable_with_the_provider_hint_and_never_dup
     );
     assert_eq!(
         harness.fake.stream(&ts).expect("stream").text,
-        "Hello world"
+        "Hello\n\n world\n\n"
     );
 
     harness.fake.inject(Fault::ServerError {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append("!");
+    harness.append("!\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(
         matches!(
@@ -939,12 +989,12 @@ async fn a_rate_limited_append_is_retryable_with_the_provider_hint_and_never_dup
 #[tokio::test]
 async fn stopped_by_user_maps_to_stopped_by_user_and_a_cancelled_terminal_settles_the_session() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let ts = harness.stream_ts();
 
     harness.fake.stop_by_user(&ts);
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert_eq!(report.outcome, ReplySinkOutcome::StoppedByUser);
 
@@ -981,11 +1031,11 @@ async fn stopped_by_user_maps_to_stopped_by_user_and_a_cancelled_terminal_settle
 #[tokio::test]
 async fn a_generation_change_starts_a_fresh_presentation() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
 
     harness.generation = 2;
-    harness.append(" world");
+    harness.append(" world\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
     let calls = harness.fake.calls();
     assert_eq!(
@@ -996,7 +1046,7 @@ async fn a_generation_change_starts_a_fresh_presentation() {
     let streams = harness.fake.streams();
     assert_eq!(streams.len(), 2);
     assert_eq!(
-        streams[1].1.text, "Hello world",
+        streams[1].1.text, "Hello\n\n world\n\n",
         "the fresh stream carries the whole answer"
     );
     assert_eq!(harness.checkpoint_json()["generation"], 2);
@@ -1005,7 +1055,7 @@ async fn a_generation_change_starts_a_fresh_presentation() {
 #[tokio::test]
 async fn an_unknown_checkpoint_version_starts_a_fresh_presentation() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
 
     let payload = harness
@@ -1017,7 +1067,7 @@ async fn an_unknown_checkpoint_version_starts_a_fresh_presentation() {
     harness.checkpoint = Some(
         ReplySinkCheckpoint::new(SLACK_REPLY_CHECKPOINT_VERSION + 1, payload).expect("checkpoint"),
     );
-    harness.append(" world");
+    harness.append(" world\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Progress).await);
     assert_eq!(harness.fake.streams().len(), 2);
     assert_eq!(
@@ -1030,7 +1080,7 @@ async fn an_unknown_checkpoint_version_starts_a_fresh_presentation() {
 #[tokio::test]
 async fn an_answer_rewritten_under_the_stream_is_re_presented_in_full() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let first = harness.stream_ts();
 
@@ -1057,22 +1107,15 @@ async fn an_answer_rewritten_under_the_stream_is_re_presented_in_full() {
     let streams = harness.fake.streams();
     assert_eq!(streams.len(), 2);
     assert_eq!(streams[1].1.text, "Goodbye");
-    // The fresh stream re-presents EVERYTHING the stale one showed — the
-    // plan header included: a presentation forgotten in part leaves the
-    // replacement stream without its lifecycle title.
+    // The fresh stream re-presents everything the stale one showed: here
+    // the canonical text, complete, so it goes out whole even before the
+    // terminal; with no task there is no header to repeat.
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStartStream)[1]["chunks"],
-        json!([
-            { "type": "plan_update", "title": "Thinking" },
-            { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" },
-            { "type": "markdown_text", "text": "Goodbye" }
-        ]),
-        "the re-presented stream opens with the plan header, the sentinel, and the full text"
+        json!([{ "type": "markdown_text", "text": "Goodbye" }]),
+        "the re-presented stream opens with the full canonical text"
     );
-    assert_eq!(
-        streams[1].1.plan_updates,
-        [json!({ "type": "plan_update", "title": "Thinking" })]
-    );
+    assert!(streams[1].1.plan_updates.is_empty());
 }
 
 // ── No conventional fallback ─────────────────────────────────────────────
@@ -1106,7 +1149,7 @@ async fn a_workspace_without_the_agent_feature_fails_clearly_with_no_fallback() 
         method: SlackWebApiMethod::ChatStartStream,
         error: "missing_scope",
     });
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Opened).await;
     let ReplySinkOutcome::Permanent { reason } = &report.outcome else {
         panic!("expected Permanent, got {:?}", report.outcome);
@@ -1162,7 +1205,7 @@ async fn channel_streaming_requires_the_recipient_ids_from_the_reply_context() {
 #[tokio::test]
 async fn a_direct_message_streams_without_a_stored_reply_context() {
     let mut harness = Harness::new(DM, true, false);
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     assert_eq!(
         harness.fake.bodies(SlackWebApiMethod::ChatStartStream),
@@ -1170,11 +1213,7 @@ async fn a_direct_message_streams_without_a_stored_reply_context() {
             "channel": DM,
             "thread_ts": THREAD,
             "task_display_mode": "plan",
-            "chunks": [
-                { "type": "plan_update", "title": "Thinking" },
-                { "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "in_progress" },
-                { "type": "markdown_text", "text": "Hello" }
-            ]
+            "chunks": [{ "type": "markdown_text", "text": "Hello\n\n" }]
         })],
         "recipient ids are optional in a DM and omitted when unknown"
     );
@@ -1255,27 +1294,23 @@ async fn a_terminal_without_an_open_stream_opens_and_closes_one_native_stream() 
         "_Stopped._"
     );
 
-    // Even an empty completed run gets the visible lifecycle header and is
-    // immediately closed, rather than disappearing after a blank pause.
+    // A completed run with nothing to show opens nothing: no stream and no
+    // message — only the session settles. Nothing is invented to fill it.
     let mut harness = Harness::dm();
     harness.document.complete();
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Terminal).await);
-    assert_eq!(
-        harness.fake.calls(),
-        ["chat.startStream", "chat.stopStream"]
+    assert!(
+        harness
+            .fake
+            .calls()
+            .iter()
+            .all(|call| call == "agents.sessions.setStatus"),
+        "only the session settles: {:?}",
+        harness.fake.calls()
     );
-    let stream = harness.fake.stream(&harness.stream_ts()).expect("stream");
-    assert_eq!(
-        stream.plan_updates.last(),
-        Some(&json!({ "type": "plan_update", "title": "Thinking completed" }))
-    );
-    assert_eq!(
-        stream.task_updates,
-        [
-            json!({ "type": "task_update", "id": "ironclaw-run", "title": "IronClaw run", "hide_title": true, "status": "complete" })
-        ]
-    );
+    assert!(harness.fake.streams().is_empty());
     assert!(harness.fake.posted().is_empty());
+    assert_eq!(harness.checkpoint_json()["terminal"], "applied");
 }
 
 /// The outcome note rides `chat.startStream` when the terminal opens its own
@@ -1331,7 +1366,7 @@ async fn a_retried_terminal_close_never_repeats_the_outcome_note() {
 #[tokio::test]
 async fn a_terminal_rewrite_re_presents_natively_without_a_conventional_post() {
     let mut harness = Harness::dm();
-    harness.append("The old draft answer");
+    harness.append("The old draft answer.\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
     let stale_ts = harness.stream_ts();
 
@@ -1361,12 +1396,13 @@ async fn a_terminal_rewrite_re_presents_natively_without_a_conventional_post() {
 }
 
 /// First renderable content = an attention block (a gate raised before any
-/// text): the one stream opens carrying it.
+/// text): the one stream opens carrying it — nothing opened earlier for an
+/// empty document.
 #[tokio::test]
 async fn an_attention_block_as_first_content_opens_the_stream_carrying_it() {
     let mut harness = Harness::dm();
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
-    let ts = harness.stream_ts();
+    assert!(harness.fake.streams().is_empty(), "nothing to show yet");
 
     harness.document.require_attention(ReplyAttention {
         kind: ReplyAttentionKind::Auth,
@@ -1380,20 +1416,22 @@ async fn an_attention_block_as_first_content_opens_the_stream_carrying_it() {
             .reconcile(ReplyReconcilePoint::ControlCritical)
             .await,
     );
-    let bodies = harness.fake.bodies(SlackWebApiMethod::ChatAppendStream);
-    assert_eq!(bodies.len(), 1);
+    let bodies = harness.fake.bodies(SlackWebApiMethod::ChatStartStream);
+    assert_eq!(bodies.len(), 1, "the block opens the one stream");
     let chunks = bodies[0]["chunks"].as_array().expect("chunks");
-    assert!(
-        !chunks.is_empty(),
-        "the same visible stream receives the attention chunk"
-    );
-    assert_eq!(bodies[0]["ts"], ts);
     assert!(chunks.iter().any(|chunk| {
         chunk["type"] == "markdown_text"
             && chunk["text"]
                 .as_str()
                 .is_some_and(|text| text.contains("Sign-in needed"))
     }));
+    assert!(
+        harness
+            .fake
+            .bodies(SlackWebApiMethod::ChatAppendStream)
+            .is_empty(),
+        "the stream opens carrying the block; nothing is appended after it"
+    );
 }
 
 // ── Liveness ─────────────────────────────────────────────────────────────
@@ -1564,13 +1602,13 @@ async fn slack_errors_map_to_the_documented_outcomes() {
         ("stopped_by_user", "stopped_by_user"),
     ] {
         let mut harness = Harness::dm();
-        harness.append("Hello");
+        harness.append("Hello\n\n");
         assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
         harness.fake.inject(Fault::SlackError {
             method: SlackWebApiMethod::ChatAppendStream,
             error,
         });
-        harness.append(" world");
+        harness.append(" world\n\n");
         let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
         assert_eq!(
             report.outcome.kind_name(),
@@ -1597,7 +1635,7 @@ async fn slack_errors_map_to_the_documented_outcomes() {
 #[tokio::test]
 async fn an_ambiguous_stream_open_never_opens_a_second_stream_or_posts_conventionally() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     // The startStream crosses into transport and the answer is lost: Slack
     // may have created a stream this sink has no handle for, and Slack
     // documents no way to find it.
@@ -1618,7 +1656,7 @@ async fn an_ambiguous_stream_open_never_opens_a_second_stream_or_posts_conventio
 
     // Every later reconcile stays ambiguous and never touches chat.startStream
     // again.
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(
         matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
@@ -1654,14 +1692,14 @@ async fn an_ambiguous_stream_open_never_opens_a_second_stream_or_posts_conventio
 #[tokio::test]
 async fn an_unreadable_read_back_for_a_text_carrying_pending_stays_ambiguous_without_resending() {
     let mut harness = Harness::dm();
-    harness.append("Hello");
+    harness.append("Hello\n\n");
     assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
 
     // The append reached transport unanswered; the pending carries text.
     harness.fake.inject(Fault::TransportAfterAccept {
         method: SlackWebApiMethod::ChatAppendStream,
     });
-    harness.append(" world");
+    harness.append(" world\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert!(
         matches!(report.outcome, ReplySinkOutcome::Ambiguous { .. }),
@@ -1702,7 +1740,7 @@ async fn an_unreadable_read_back_for_a_text_carrying_pending_stays_ambiguous_wit
 
     // Once read-back works again, the ordinary resolution applies (here it
     // proves the append landed) and only the genuinely new delta goes out.
-    harness.append("!");
+    harness.append("!\n\n");
     let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
     assert_applied(&report);
     assert!(report.evidence.read_back_verified);

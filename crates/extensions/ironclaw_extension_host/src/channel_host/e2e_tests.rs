@@ -3371,9 +3371,11 @@ async fn slack_dm_delivers_approval_prompt_after_immediate_ack() {
 }
 
 /// The stream-wire successor of "posts a working indicator and deletes it":
-/// on a `stream` channel the working state is the open agent stream with the
-/// session asserted `processing`, and "deleting the indicator" is closing the
-/// stream at the terminal revision — no notice message, nothing to retract.
+/// on a `stream` channel the working state is the agent session asserted
+/// `processing` — Slack's own thinking indicator — with no stream and no
+/// message until there is content; the reply then opens the one stream
+/// carrying it and closes it at the terminal revision. Nothing is invented
+/// to fill the pause, and nothing is retracted.
 #[tokio::test]
 async fn slack_dm_streams_working_state_and_closes_the_stream_after_final_reply() {
     let harness = build_harness(TurnMode::Running).await;
@@ -3381,24 +3383,16 @@ async fn slack_dm_streams_working_state_and_closes_the_stream_after_final_reply(
     let response = harness.post_event(dm_message("Ev-working", "think")).await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    // Working state opens the Agent stream immediately with its plan header
-    // and hidden run task. This removes the blank pause before the first
-    // model text or tool call while keeping the session `processing`.
     wait_for_slack_session_status(&harness, "processing").await;
-    wait_for_slack_stream_starts(&harness, 1).await;
     assert_eq!(
         harness.slack_session_statuses().first().map(String::as_str),
         Some("processing"),
         "the agent session is asserted processing while the run works"
     );
-    let opening = harness.slack_stream_starts();
-    assert_eq!(opening.len(), 1, "working state opens one Agent stream");
     assert!(
-        opening[0]["chunks"]
-            .as_array()
-            .is_some_and(|chunks| !chunks.is_empty()),
-        "the stream opens with the thinking plan rather than a blank container: {}",
-        opening[0]
+        harness.slack_stream_starts().is_empty(),
+        "no stream opens before there is content to carry: {:?}",
+        harness.slack_stream_starts()
     );
     assert!(
         harness.slack_messages().is_empty(),

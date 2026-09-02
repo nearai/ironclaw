@@ -357,18 +357,26 @@ regardless of route; the coordinator is transport-blind.
 - Ingress: `agent_session_stopped` → the channel's declared `stop` command;
   the other agent events are authenticated no-ops; every normalized message
   carries a Slack `reply_context`.
-- `SlackReplySink`: `agents.sessions.setStatus{processing}` and
-  `chat.startStream` on the first reconcile. Slack accepts a lone
-  `plan_update` but its clients render that stream as an empty message until a
-  task exists (live QA, 2026-09-01), so the opening request pairs `Thinking`
-  with one `task_update` whose title is hidden via Slack's documented
-  `hide_title` flag. The sentinel exists only at the provider edge to make the
-  plan header render; it never appears as a visible activity or generic model
-  pass. The same stream then receives
-  `chat.appendStream` (`markdown_text` deltas by offset, `task_update` chunks
-  from activity facts, Slack-only `plan_update` lifecycle labels) → attention:
-  markdown chunk +
-  `session_status: suspended` → `chat.stopStream` with `session_status`.
+- `SlackReplySink`: `agents.sessions.setStatus{processing}` on the first
+  reconcile, and `chat.startStream` only once the document holds something
+  renderable — a whole paragraph of answer text, a real task card, a driver
+  status line, or an attention block — carrying it. The stream stays in
+  `chunks` mode for its whole life (Slack forbids mixing `markdown_text` with
+  `chunks`, and a stream keeps the mode it started in). Slack renders every
+  `markdown_text` chunk as its own block, so progress text goes out by whole
+  paragraph: a delta is published through its last blank line outside a code
+  fence, a paragraph past `SLACK_TEXT_HOLD_MAX_CHARS` flushes at its last
+  sentence end, and the terminal, a finalized canonical answer, or a new
+  attention block flushes everything still held (what the run said belongs
+  before the block). The `plan_update` lifecycle label rides only with real
+  `task_update` cards, because Slack renders a header without a task as an
+  empty message: a tool-less answer has no header, its thinking state is the
+  session status, and no synthetic task is ever invented to make one render
+  (live QA, 2026-09-02: a hidden-title sentinel still draws its bullet). The
+  same stream then receives `chat.appendStream` (`markdown_text` paragraphs by
+  offset, `task_update` chunks from activity facts, Slack-only `plan_update`
+  labels) → attention: markdown chunk + `session_status: suspended` →
+  `chat.stopStream` with `session_status`.
   A terminal that arrives with no stream (nothing renderable ever, or a
   genuine rewrite that closed the stale stream) creates and closes ONE
   native stream carrying the terminal content; the terminal answer is never
@@ -392,10 +400,9 @@ regardless of route; the coordinator is transport-blind.
 - Native plan display uses `task_display_mode: plan`. This is a Slack
   presentation choice, not a second plan producer or generic plan vocabulary:
   `plan_update` supplies the single run-level lifecycle label (`Thinking`,
-  `Thinking paused`, and the terminal completed/failed/stopped label). The
-  hidden sentinel advances from in-progress to the matching terminal status
-  without exposing a title; every visible row beneath the header comes from
-  real `ReplyDocument` activity. Model-call and reasoning-episode boundaries
+  `Thinking paused`, and the terminal completed/failed/stopped label), and
+  it appears only once a real task card exists; every row beneath the header
+  comes from real `ReplyDocument` activity. Model-call and reasoning-episode boundaries
   never become visible plan rows. Terminal reconciliation converts any
   orphaned in-progress activity to an error rather than leaving a spinner
   behind. Activity input is sent in
@@ -434,9 +441,9 @@ regardless of route; the coordinator is transport-blind.
   its reply context.
 - As built: manifest `[channel.reply] transport = "stream"` + the four agent
   endpoints as exact-path bot-token egress; `src/reply_sink/` renders the
-  document (status line, markdown text by char offset, one hidden
-  provider-rendering sentinel, grouped activity `task_update` rows and
-  `plan_update` lifecycle labels, attention as a quoted block + `suspended`, terminal
+  document (status line, markdown text by whole paragraph at char offsets,
+  grouped activity `task_update` rows and the `plan_update` lifecycle label
+  they carry, attention as a quoted block + `suspended`, terminal
   `stopStream` + attachments after the stream closes) with a versioned,
   bounded checkpoint; `agent_session_stopped` normalizes to the product
   `stop` command. The importable Slack app manifest ships as the canonical

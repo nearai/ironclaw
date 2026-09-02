@@ -73,6 +73,10 @@ pub const SLACK_REPLY_CHECKPOINT_VERSION: u32 = 1;
 /// characters" — one markdown chunk never exceeds it; a longer delta is
 /// split into consecutive chunks of the same request.
 const SLACK_MARKDOWN_CHUNK_MAX_CHARS: usize = 12_000;
+/// Progress text is published by whole paragraph (Slack renders every
+/// markdown chunk as its own block). A paragraph this long with no blank
+/// line yet is flushed at its last sentence boundary instead of waiting.
+pub(crate) const SLACK_TEXT_HOLD_MAX_CHARS: usize = 600;
 
 /// Slack documents a 256-character limit for `task_update` chunks. Keep each
 /// user-visible task field within that boundary before it reaches the API.
@@ -418,8 +422,8 @@ impl Reconciler<'_> {
         }
     }
 
-    /// `agents.sessions.setStatus { processing }` then `chat.startStream`
-    /// with whatever the document already holds.
+    /// `agents.sessions.setStatus { processing }` then, once the document
+    /// holds something renderable, `chat.startStream` carrying it.
     async fn open(
         &mut self,
         route: &SlackReplyRoute,
@@ -449,8 +453,14 @@ impl Reconciler<'_> {
                 });
             }
         };
-        // The plan title is renderable on the first `Preparing` revision, so
-        // progress is visible without inventing a model or tool activity.
+        if plan.chunks.is_empty() {
+            // Nothing renderable yet (a `Preparing` revision, or an answer
+            // still short of its first paragraph): the session status already
+            // says the run is thinking, and Slack renders an empty stream as
+            // an empty message — so no stream until there is content for it
+            // to carry.
+            return Ok(());
+        }
         self.start_stream(route, &plan).await.map(|_| ())
     }
 
@@ -997,57 +1007,88 @@ mod tests {
         assert_eq!(normalized_tail(&long).chars().count(), READ_BACK_TAIL_CHARS);
     }
 
-    #[test]
-    fn preparing_phase_opens_a_visible_plan_header_with_a_hidden_sentinel() {
-        let document = ReplyDocument::default();
+    fn item(id: &str) -> ironclaw_extension_contracts::reply::ReplyItemId {
+        ironclaw_extension_contracts::reply::ReplyItemId::new(id).expect("id")
+    }
 
-        let plan = plan_chunks(&document, &SlackReplyCheckpoint::default(), 0, "", None)
-            .expect("preparing is append-only");
+    fn title(value: &str) -> ironclaw_extension_contracts::reply::ReplyDisplayText {
+        ironclaw_extension_contracts::reply::ReplyDisplayText::new(value).expect("title")
+    }
+
+    fn text_chunks(plan: &super::plan::ChunkPlan) -> Vec<String> {
+        plan.chunks
+            .iter()
+            .filter(|chunk| chunk["type"] == "markdown_text")
+            .map(|chunk| chunk["text"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    fn plan_for(document: &ReplyDocument) -> super::plan::ChunkPlan {
+        plan_chunks(document, &SlackReplyCheckpoint::default(), 0, "", None)
+            .expect("a fresh plan is append-only")
+    }
+
+    #[test]
+    fn a_document_with_nothing_to_show_plans_nothing() {
+        // Preparing and Thinking with no text, task, status, or attention:
+        // nothing is renderable, so no chunk at all — the session status
+        // alone carries the thinking state and the stream stays unopened.
+        // No sentinel task is ever invented to make a header render.
+        for phase in [ReplyPhase::Preparing, ReplyPhase::Thinking] {
+            let document = ReplyDocument {
+                phase,
+                ..ReplyDocument::default()
+            };
+            let plan = plan_for(&document);
+            assert!(
+                plan.chunks.is_empty(),
+                "{phase:?} planned {:?}",
+                plan.chunks
+            );
+            assert!(plan.applied.plan_title_key.is_none());
+            assert!(plan.applied.tasks.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_plan_header_arrives_with_the_first_real_task() {
+        let mut document = ReplyDocument::default();
+        document.activity_started(item("act-0"), title("Read runbook"), None);
+
+        let plan = plan_for(&document);
 
         assert_eq!(
             plan.chunks,
             vec![
                 json!({ "type": "plan_update", "title": "Thinking" }),
-                json!({
-                    "type": "task_update",
-                    "id": "ironclaw-run",
-                    "title": "IronClaw run",
-                    "hide_title": true,
-                    "status": "in_progress",
-                }),
-            ],
-            "the hidden provider sentinel makes the lifecycle header visible"
+                json!({ "type": "task_update", "id": "act-0", "title": "Read runbook", "status": "in_progress" }),
+            ]
+        );
+        assert!(
+            plan.chunks
+                .iter()
+                .all(|chunk| chunk.get("hide_title").is_none()),
+            "every task card is a real activity with a visible title"
         );
     }
 
     #[test]
-    fn thinking_phase_does_not_add_a_model_pass_row() {
-        let document = ReplyDocument {
-            phase: ReplyPhase::Thinking,
-            ..ReplyDocument::default()
-        };
+    fn a_tool_less_answer_streams_text_without_a_plan_header() {
+        let mut document = ReplyDocument::default();
+        document.append_answer("The answer is 19.\n\n");
+        document.complete();
 
-        let plan = plan_chunks(&document, &SlackReplyCheckpoint::default(), 0, "", None)
-            .expect("thinking is append-only");
+        let plan = plan_for(&document);
 
         assert_eq!(
             plan.chunks,
-            vec![
-                json!({ "type": "plan_update", "title": "Thinking" }),
-                json!({
-                    "type": "task_update",
-                    "id": "ironclaw-run",
-                    "title": "IronClaw run",
-                    "hide_title": true,
-                    "status": "in_progress",
-                }),
-            ],
-            "model passes do not become visible activity rows"
+            vec![json!({ "type": "markdown_text", "text": "The answer is 19.\n\n" })],
+            "no task, no header: the text is the whole presentation"
         );
     }
 
     #[test]
-    fn approved_reasoning_never_becomes_an_internal_plan_step() {
+    fn approved_reasoning_never_becomes_a_plan_row() {
         let mut document = ReplyDocument {
             phase: ReplyPhase::Thinking,
             ..ReplyDocument::default()
@@ -1055,31 +1096,104 @@ mod tests {
         document.reasoning =
             vec![ReplyReasoningText::new("Comparing the two trail profiles").expect("reasoning")];
         document.reasoning_open = true;
-        let mut checkpoint = SlackReplyCheckpoint::default();
 
-        let in_progress =
-            plan_chunks(&document, &checkpoint, 0, "", None).expect("reasoning is append-only");
-        assert_eq!(
-            in_progress.chunks,
-            vec![
-                json!({ "type": "plan_update", "title": "Thinking" }),
-                json!({
-                    "type": "task_update",
-                    "id": "ironclaw-run",
-                    "title": "IronClaw run",
-                    "hide_title": true,
-                    "status": "in_progress",
-                }),
-            ]
-        );
-        checkpoint.tasks.extend(in_progress.applied.tasks);
-        checkpoint.plan_title_key = in_progress.applied.plan_title_key;
+        assert!(plan_for(&document).chunks.is_empty());
 
         document.phase = ReplyPhase::Working;
         document.reasoning_open = false;
-        let complete =
-            plan_chunks(&document, &checkpoint, 0, "", None).expect("completion is append-only");
-        assert!(complete.chunks.is_empty());
+        assert!(plan_for(&document).chunks.is_empty());
+    }
+
+    #[test]
+    fn progress_text_is_published_by_paragraph_and_the_rest_is_held() {
+        // Slack renders every markdown chunk as its own block, so a chunk
+        // must be a complete paragraph: the boundary is published (through
+        // its blank line) and the unfinished tail waits.
+        let mut document = ReplyDocument::default();
+        document.append_answer("First paragraph.\n\nSecond paragraph that is still");
+
+        let plan = plan_for(&document);
+
+        assert_eq!(text_chunks(&plan), vec!["First paragraph.\n\n"]);
+        assert_eq!(
+            plan.applied.to_chars,
+            "First paragraph.\n\n".chars().count() as u64
+        );
+        assert_eq!(
+            plan.applied.to_hash,
+            fingerprint(&["First paragraph.\n\n"]),
+            "the hash covers exactly the published prefix so a rewrite is still detected"
+        );
+
+        let mut unfinished = ReplyDocument::default();
+        unfinished.append_answer("Still typing the first");
+        let plan = plan_for(&unfinished);
+        assert!(
+            text_chunks(&plan).is_empty(),
+            "no complete paragraph yet: nothing goes out"
+        );
+        assert_eq!(plan.applied.to_chars, 0);
+    }
+
+    #[test]
+    fn a_terminal_revision_flushes_the_held_text() {
+        let mut document = ReplyDocument::default();
+        document.append_answer("First paragraph.\n\nSecond, unfinished");
+        document.complete();
+
+        let plan = plan_for(&document);
+
+        assert_eq!(
+            text_chunks(&plan),
+            vec!["First paragraph.\n\nSecond, unfinished"]
+        );
+        assert_eq!(
+            plan.applied.to_chars,
+            document.answer.text.as_str().chars().count() as u64
+        );
+    }
+
+    #[test]
+    fn a_blank_line_inside_a_code_fence_is_not_a_paragraph_boundary() {
+        let mut document = ReplyDocument::default();
+        document.append_answer("Intro:\n\n```rust\nfn a() {}\n\nfn b() {}\n```\n\nAfter the");
+
+        let plan = plan_for(&document);
+        assert_eq!(
+            text_chunks(&plan),
+            vec!["Intro:\n\n```rust\nfn a() {}\n\nfn b() {}\n```\n\n"]
+        );
+
+        // The fence state carries over from the prefix already applied.
+        let applied = "Intro:\n\n```rust\n";
+        let plan = plan_chunks(
+            &document,
+            &SlackReplyCheckpoint::default(),
+            applied.chars().count() as u64,
+            &fingerprint(&[applied]),
+            None,
+        )
+        .expect("the applied prefix is intact");
+        assert_eq!(text_chunks(&plan), vec!["fn a() {}\n\nfn b() {}\n```\n\n"]);
+    }
+
+    #[test]
+    fn a_long_paragraph_flushes_at_a_sentence_boundary_past_the_hold_bound() {
+        let sentence = "This sentence keeps going and going. ";
+        let mut long = String::new();
+        while long.chars().count() <= SLACK_TEXT_HOLD_MAX_CHARS {
+            long.push_str(sentence);
+        }
+        let tail = "Tail without an end";
+        long.push_str(tail);
+        let mut document = ReplyDocument::default();
+        document.append_answer(&long);
+
+        let plan = plan_for(&document);
+
+        let published = text_chunks(&plan).concat();
+        assert_eq!(published, long.trim_end_matches(tail));
+        assert_eq!(plan.applied.to_chars, published.chars().count() as u64);
     }
 
     #[test]
@@ -1112,13 +1226,12 @@ mod tests {
             checkpoint.tasks_floor_ordinal > 0,
             "settled rows advance the floor"
         );
-        // Every evicted activity row is settled: only the hidden provider
-        // sentinel may remain.
+        // Every evicted activity row is settled: nothing is re-sent.
         let plan = plan_chunks(&document, &checkpoint, 0, "", None).expect("plan");
         assert!(
             plan.chunks
                 .iter()
-                .all(|chunk| chunk["type"] != "task_update" || chunk["hide_title"] == true),
+                .all(|chunk| chunk["type"] != "task_update"),
             "evicted settled rows are never re-sent"
         );
     }
