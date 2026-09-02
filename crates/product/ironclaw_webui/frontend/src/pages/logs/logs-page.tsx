@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useOutletContext } from "react-router";
 import React from "react";
 import { ConfirmDialog } from "../../design-system/confirm-dialog";
@@ -6,6 +5,7 @@ import { SearchField } from "../../design-system/search-field";
 import { SelectMenu } from "../../design-system/select-menu";
 import { useT } from "../../lib/i18n";
 import { useLogs } from "./hooks/useLogs";
+import type { GatewayOutletContext } from "../../layout/gateway-layout";
 
 const LEVELS = ["all", "trace", "debug", "info", "warn", "error"];
 const SERVER_LEVELS = ["trace", "debug", "info", "warn", "error"];
@@ -120,7 +120,8 @@ function ScopeChip({ label, value, scopeKey }) {
 
 export function LogsPage() {
   const t = useT();
-  const { isAdmin = false, threadsState } = useOutletContext() || {};
+  const { isAdmin = false, threadsState } =
+    useOutletContext<GatewayOutletContext>();
   const {
     entries,
     totalCount,

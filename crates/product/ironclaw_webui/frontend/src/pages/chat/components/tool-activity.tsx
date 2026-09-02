@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Icon } from "../../../design-system/icons";
 import React from "react";
 import { useT } from "../../../lib/i18n";
@@ -341,12 +340,11 @@ function ToolResult({ text }) {
   }
 
   if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(isFlatRow)) {
-    const columns = Array.from(
-      parsed.reduce((set, row) => {
-        Object.keys(row).forEach((k) => set.add(k));
-        return set;
-      }, new Set())
-    );
+    const columnSet = new Set<string>();
+    for (const row of parsed) {
+      Object.keys(row).forEach((key) => columnSet.add(key));
+    }
+    const columns = Array.from(columnSet);
     return (
       <div className="max-w-full overflow-x-auto rounded border border-iron-700/60">
         <table className="w-full border-collapse text-left font-mono text-[11px]">

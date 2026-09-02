@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import "./device-link-translations";
 import { Button } from "../design-system/button";

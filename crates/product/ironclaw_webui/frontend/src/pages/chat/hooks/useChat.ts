@@ -1,4 +1,3 @@
-// @ts-nocheck
 import {
   cancelRun as cancelRunRequest,
   createThread as createThreadRequest,
@@ -50,6 +49,7 @@ import {
 import {
   CONNECTION_STATUS,
   isConnectionLostStatus,
+  type ConnectionStatus,
 } from "../lib/connection-status";
 import { toRenderAttachment, toWireAttachment } from "../lib/attachments";
 import { failureMessageForRequestError } from "../lib/failureMessages";
@@ -67,6 +67,19 @@ const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
 const APPROVAL_GATE_PENDING_SEND_ERROR = "approval_gate_pending_send_blocked";
 
+type ChatSendOptions = {
+  threadId?: string | null;
+  images?: unknown[];
+  attachments?: Array<Parameters<typeof toWireAttachment>[0]>;
+  bypassPendingOnboarding?: boolean;
+  displayContent?: string;
+};
+
+type ResolveGateOptions = {
+  always?: boolean;
+  credentialRef?: string | null;
+};
+
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), AUTH_TOKEN_FLOW_TIMEOUT_MS);
@@ -78,22 +91,26 @@ async function withAuthTokenTimeout(task) {
 }
 
 function credentialStoredGateResolutionError(cause) {
-  const error = new Error("auth gate resolution failed after credential storage");
-  error.safeAuthGateCode = AUTH_GATE_CREDENTIAL_STORED_ERROR;
-  error.cause = cause;
-  return error;
+  return Object.assign(
+    new Error("auth gate resolution failed after credential storage"),
+    {
+      safeAuthGateCode: AUTH_GATE_CREDENTIAL_STORED_ERROR,
+      cause,
+    },
+  );
 }
 
 function approvalGatePendingSendError() {
-  const error = new Error(
-    "Resolve the approval request before sending another message.",
+  return Object.assign(
+    new Error("Resolve the approval request before sending another message."),
+    { safeErrorCode: APPROVAL_GATE_PENDING_SEND_ERROR },
   );
-  error.safeErrorCode = APPROVAL_GATE_PENDING_SEND_ERROR;
-  return error;
 }
 
 function threadNeedsSidebarRefresh(threadId) {
-  const cached = queryClient.getQueryData?.(["threads"]);
+  const cached = queryClient.getQueryData?.<{
+    threads?: Array<{ thread_id?: string; id?: string; title?: string }>;
+  }>(["threads"]);
   const threads = cached?.threads;
   if (!Array.isArray(threads)) return true;
   const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
@@ -139,8 +156,8 @@ export function useChat(threadId) {
   const [now, setNow] = React.useState(Date.now());
   const [activeRun, setActiveRunState] = React.useState(null);
   const activeRunRef = React.useRef(activeRun);
-  const connectionStatusRef = React.useRef(CONNECTION_STATUS.IDLE);
-  const connectionInterruptedRunIdsRef = React.useRef(new Set());
+  const connectionStatusRef = React.useRef<ConnectionStatus>(CONNECTION_STATUS.IDLE);
+  const connectionInterruptedRunIdsRef = React.useRef(new Set<string>());
   const connectionInterruptedUnknownRef = React.useRef(false);
   const setActiveRun = React.useCallback((next) => {
     const value = typeof next === "function" ? next(activeRunRef.current) : next;
@@ -516,7 +533,7 @@ export function useChat(threadId) {
   // returned response carries `thread_id` so the chat.tsx navigation
   // hook can route to `/chat/<id>` after the first send.
   const send = React.useCallback(
-    async (content, opts = {}) => {
+    async (content: string, opts: ChatSendOptions = {}) => {
       const {
         threadId: targetThreadId,
         attachments: stagedAttachments = [],
@@ -627,6 +644,7 @@ export function useChat(threadId) {
           threadId: sendThreadId,
           content,
           attachments: wireAttachments,
+          clientActionId: undefined,
         });
         if (response?.outcome !== RECORD_STATUS.REJECTED_BUSY) {
           touchThreadInCache({
@@ -853,7 +871,7 @@ export function useChat(threadId) {
   // gate / auth_required event) so the UI doesn't have to plumb them
   // through every approve-action call site.
   const resolveGate = React.useCallback(
-    async (resolution, opts = {}) => {
+    async (resolution, opts: ResolveGateOptions = {}) => {
       if (!pendingGate) return;
       const { runId, gateRef } = pendingGate;
       if (!runId || !gateRef) {
@@ -1035,7 +1053,7 @@ export function useChat(threadId) {
     [resolveGate],
   );
 
-  const noop = React.useCallback(() => {}, []);
+  const noop = React.useCallback((..._args: unknown[]) => {}, []);
   const retryMessage = React.useCallback(
     async (message) => {
       if (!message || message.status !== "error") return;
@@ -1112,7 +1130,7 @@ export function useChat(threadId) {
   // lost, exactly like `send`'s busy-notice handling below.
   const runCommand = React.useCallback(
     async (text) => {
-      const appendNotice = (content, executedThreadId, meta) => {
+      const appendNotice = (content, executedThreadId, meta = {}) => {
         const notice = {
           id: `system-command-${pendingSeqRef.current++}`,
           role: CHAT_MESSAGE_ROLES.SYSTEM,

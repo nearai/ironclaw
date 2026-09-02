@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { saveBlob } from "../../../lib/download";
@@ -9,6 +8,37 @@ import {
 } from "../lib/admin-api";
 
 const THREAD_SCRAPE_PAGE_SIZE = 100;
+
+type ThreadScrapeSummary = {
+  thread_id: string;
+  title?: string;
+};
+
+type ThreadScrapeMessage = {
+  message_id: string;
+  kind?: string;
+  content?: string;
+  run_id?: string | null;
+};
+
+type ThreadScrapeArtifact = {
+  thread_id: string;
+  messages: ThreadScrapeMessage[];
+  [key: string]: unknown;
+};
+
+type ThreadScrapePage = {
+  threads?: ThreadScrapeSummary[];
+  next_cursor?: string | null;
+};
+
+function isAbortError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      Reflect.get(error, "name") === "AbortError",
+  );
+}
 
 function artifactFilename(prefix, id) {
   const safeId = String(id || "artifact").replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -37,19 +67,19 @@ function saveArtifact(artifact, filename) {
  * Authorization and same-tenant target scope are revalidated server-side on
  * every request; the panel never sees another tenant's data.
  */
-export function useThreadScrape(userId) {
+export function useThreadScrape(userId: string) {
   const queryClient = useQueryClient();
-  const [threads, setThreads] = React.useState([]);
-  const [nextCursor, setNextCursor] = React.useState(null);
+  const [threads, setThreads] = React.useState<ThreadScrapeSummary[]>([]);
+  const [nextCursor, setNextCursor] = React.useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = React.useState("");
-  const [artifact, setArtifact] = React.useState(null);
+  const [artifact, setArtifact] = React.useState<ThreadScrapeArtifact | null>(null);
   const [isLoadingMore, setIsLoadingMore] = React.useState(false);
   const [downloadingRunId, setDownloadingRunId] = React.useState("");
   const [errorKey, setErrorKey] = React.useState("");
-  const loadMoreAbortRef = React.useRef(null);
-  const runAbortRef = React.useRef(null);
+  const loadMoreAbortRef = React.useRef<AbortController | null>(null);
+  const runAbortRef = React.useRef<AbortController | null>(null);
 
-  const listQuery = useQuery({
+  const listQuery = useQuery<ThreadScrapePage>({
     queryKey: ["admin", "threadScrape", "threads", userId],
     queryFn: ({ signal }) =>
       fetchThreadScrapeThreads(userId, {
@@ -59,7 +89,7 @@ export function useThreadScrape(userId) {
     retry: false,
   });
 
-  const artifactQuery = useQuery({
+  const artifactQuery = useQuery<ThreadScrapeArtifact>({
     queryKey: ["admin", "threadScrape", "artifact", userId, selectedThreadId],
     queryFn: ({ signal }) =>
       fetchThreadScrapeArtifact(userId, selectedThreadId, { signal }),
@@ -116,18 +146,18 @@ export function useThreadScrape(userId) {
   // Cancelled requests must not surface errors: a target switch aborts the
   // previous user's requests, and their late rejections are inert.
   React.useEffect(() => {
-    if (listQuery.error && !listQuery.isCancelled) {
+    if (listQuery.error && !isAbortError(listQuery.error)) {
       setErrorKey("admin.threadScraping.loadFailed");
     }
-  }, [listQuery.error, listQuery.isCancelled]);
+  }, [listQuery.error]);
 
   React.useEffect(() => {
-    if (artifactQuery.error && !artifactQuery.isCancelled) {
+    if (artifactQuery.error && !isAbortError(artifactQuery.error)) {
       setErrorKey("admin.threadScraping.loadFailed");
     }
-  }, [artifactQuery.error, artifactQuery.isCancelled]);
+  }, [artifactQuery.error]);
 
-  const selectThread = (threadId) => {
+  const selectThread = (threadId: string) => {
     runAbortRef.current?.abort();
     runAbortRef.current = null;
     setErrorKey("");
@@ -176,7 +206,7 @@ export function useThreadScrape(userId) {
     }
   };
 
-  const downloadRun = async (runId) => {
+  const downloadRun = async (runId: string) => {
     if (!selectedThreadId || !runId || downloadingRunId) return;
     const controller = new AbortController();
     runAbortRef.current = controller;

@@ -1,4 +1,3 @@
-// @ts-nocheck
 
 /* Per-thread run bookkeeping for the chat event handler.
  *

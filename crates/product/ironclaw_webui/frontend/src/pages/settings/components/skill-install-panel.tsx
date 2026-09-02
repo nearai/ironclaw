@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { Button } from "../../../design-system/button";
 import { Card } from "../../../design-system/card";
 import { FormField, Input, Textarea } from "../../../design-system/input";
@@ -6,7 +5,25 @@ import { Icon } from "../../../design-system/icons";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 
-export function SkillInstallPanel({ onInstall, isInstalling }) {
+type SkillInstallPayload = {
+  name: string;
+  content?: string;
+};
+
+type SkillInstallResult = {
+  success?: boolean;
+  message?: string;
+};
+
+type SkillInstallPanelProps = {
+  onInstall: (payload: SkillInstallPayload) => Promise<SkillInstallResult>;
+  isInstalling: boolean;
+};
+
+export function SkillInstallPanel({
+  onInstall,
+  isInstalling,
+}: SkillInstallPanelProps) {
   const t = useT();
   const [name, setName] = React.useState("");
   const [content, setContent] = React.useState("");
@@ -113,8 +130,8 @@ export function SkillInstallPanel({ onInstall, isInstalling }) {
   );
 }
 
-function buildPayload({ name, content }) {
-  const payload = { name: name.trim() };
+function buildPayload({ name, content }): SkillInstallPayload {
+  const payload: SkillInstallPayload = { name: name.trim() };
   if (content.trim()) payload.content = content.trim();
   return payload;
 }

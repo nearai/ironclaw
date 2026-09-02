@@ -1,4 +1,3 @@
-// @ts-nocheck
 //
 // The machinery behind the `/chat?connect=<extension>` landing card: resolving
 // the untrusted param against the server's extension inventory, driving the

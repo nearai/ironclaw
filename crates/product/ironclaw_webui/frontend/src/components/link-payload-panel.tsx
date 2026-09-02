@@ -1,4 +1,3 @@
-// @ts-nocheck
 import QRCode from "qrcode";
 import React from "react";
 import { Button } from "../design-system/button";
@@ -6,8 +5,30 @@ import { Button } from "../design-system/button";
 const COUNTDOWN_INTERVAL_MS = 1000;
 const COPIED_RESET_MS = 1500;
 
+type LinkPayloadLabels = {
+  qrAlt?: string;
+  copy?: string;
+  copied?: string;
+  open?: string;
+  expiresIn?: (time: string) => string;
+  expired?: string;
+  renew?: string;
+};
+
+type LinkPayloadPanelProps = {
+  payload?: string;
+  showQr?: boolean;
+  code?: string;
+  expiresAtMs?: number;
+  idPrefix?: string;
+  labels?: LinkPayloadLabels;
+  onRenew?: (() => void) | null;
+  isRenewing?: boolean;
+  onExpire?: (() => void) | null;
+};
+
 // "m:ss" until expiry, clamped at 0:00.
-export function formatLinkCountdown(remainingMs) {
+export function formatLinkCountdown(remainingMs: number) {
   const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -56,11 +77,11 @@ export function LinkPayloadPanel({
   onRenew = null,
   isRenewing = false,
   onExpire = null,
-}) {
+}: LinkPayloadPanelProps) {
   const [qrDataUrl, setQrDataUrl] = React.useState("");
   const [now, setNow] = React.useState(() => Date.now());
   const [copied, setCopied] = React.useState(false);
-  const copiedTimerRef = React.useRef(null);
+  const copiedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   // The deadline the `onExpire` notification has already fired for, so a
   // re-render (or a countdown tick past the deadline) cannot fire it twice
   // while a fresh payload still gets its own notification.
@@ -109,7 +130,12 @@ export function LinkPayloadPanel({
     onExpire();
   }, [expired, expiresAtMs, onExpire]);
 
-  React.useEffect(() => () => clearTimeout(copiedTimerRef.current), []);
+  React.useEffect(
+    () => () => {
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
 
   const copyCode = async () => {
     const clipboard = typeof navigator === "undefined" ? null : navigator.clipboard;
@@ -117,7 +143,7 @@ export function LinkPayloadPanel({
     try {
       await clipboard.writeText(code);
       setCopied(true);
-      clearTimeout(copiedTimerRef.current);
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
       copiedTimerRef.current = setTimeout(() => setCopied(false), COPIED_RESET_MS);
     } catch (_) {
       // Clipboard can be blocked; the code stays visible for manual copy.

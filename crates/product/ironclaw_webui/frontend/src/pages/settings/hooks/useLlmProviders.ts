@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   deleteLlmProvider,
@@ -27,7 +26,53 @@ import {
 // the identity constant across renders.
 const EMPTY_BUILTIN_OVERRIDES = Object.freeze({});
 
-export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = true }) {
+type LlmProvider = {
+  id: string;
+  name?: string;
+  description?: string;
+  adapter?: string;
+  base_url?: string;
+  default_model?: string;
+  builtin?: boolean;
+  api_key_set?: boolean;
+  [key: string]: unknown;
+};
+
+type ProviderForm = {
+  id: string;
+  name: string;
+  adapter: string;
+  baseUrl: string;
+  model: string;
+};
+
+type SaveProviderVariables = {
+  provider?: LlmProvider | null;
+  form: ProviderForm;
+  apiKey: string;
+  editingProvider?: LlmProvider | null;
+};
+
+type UpsertProviderPayload = {
+  id: string;
+  name: string;
+  adapter?: string;
+  base_url: string;
+  default_model?: string;
+  api_key?: string;
+  set_active?: boolean;
+  model?: string;
+};
+
+export function useLlmProviders({
+  settings: _settings,
+  gatewayStatus,
+  enabled = true,
+}: {
+  settings: Record<string, unknown>;
+  gatewayStatus?: { llm_backend?: string; llm_model?: string } | null;
+  enabled?: boolean;
+}) {
   const queryClient = useQueryClient();
   const providersQuery = useQuery({
     queryKey: ["llm-providers"],
@@ -79,7 +124,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
     queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
   };
 
-  const setActiveMutation = useMutation({
+  const setActiveMutation = useMutation<LlmProvider, Error, LlmProvider>({
     mutationFn: async (provider) => {
       if (!isProviderConfigured(provider, builtinOverrides)) {
         const reason = providerMissingReason(provider, builtinOverrides);
@@ -96,11 +141,15 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
   // Both custom and built-in saves go through one upsert endpoint. A built-in
   // "override" is just an overlay entry that shadows the compiled-in provider
   // by id; the backend resolves later entries last.
-  const saveProviderMutation = useMutation({
+  const saveProviderMutation = useMutation<
+    UpsertProviderPayload,
+    Error,
+    SaveProviderVariables
+  >({
     mutationFn: async ({ provider, form, apiKey, editingProvider }) => {
       const isBuiltin = Boolean(provider?.builtin);
       const id = (isBuiltin ? provider.id : form.id.trim()).trim();
-      const payload = {
+      const payload: UpsertProviderPayload = {
         id,
         name: isBuiltin ? provider.name || provider.id : form.name.trim(),
         adapter: isBuiltin ? provider.adapter : form.adapter,
@@ -122,7 +171,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus, enabled = 
     onSuccess: refresh,
   });
 
-  const deleteCustomMutation = useMutation({
+  const deleteCustomMutation = useMutation<LlmProvider, Error, LlmProvider>({
     mutationFn: async (provider) => {
       await deleteLlmProvider(provider.id);
       return provider;

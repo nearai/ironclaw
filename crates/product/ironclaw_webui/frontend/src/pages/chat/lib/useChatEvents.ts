@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 import { gateFromEvent, gateFromProjectionGate } from "./gates";
 import {
@@ -29,8 +28,9 @@ import {
 import { publishProductInspectorEnvelope } from "../inspector/product-activity-publisher";
 import { AMBIGUOUS_RUN_ID, mergeRunIdCandidate } from "./run-id-candidate";
 
-const noop = () => {};
-const emptyConnectionContext = () => ({});
+const noopRunId = (_runId?: string | null) => {};
+const noopStreamError = (_error?: unknown) => {};
+const emptyConnectionContext = (_runId?: string | null) => ({});
 const STREAM_FAILURE_COLLISION_SCAN_LIMIT = 32;
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
@@ -73,9 +73,9 @@ export function useChatEvents({
   locallyResolvedGatesRef,
   toolActivityStateRef,
   runTrackingRef,
-  noteConnectionInterruptedRunId = noop,
+  noteConnectionInterruptedRunId = noopRunId,
   connectionContextForRunFailure = emptyConnectionContext,
-  onStreamError = noop,
+  onStreamError = noopStreamError,
   onRunSettled,
   t,
 }) {
@@ -1048,7 +1048,9 @@ function clearLocallyResolvedRun(locallyResolvedGatesRef, runId) {
   const resolved = locallyResolvedGatesRef?.current;
   if (!resolved) return;
   for (const key of Array.from(resolved.keys())) {
-    if (key.startsWith(`${runId}\n`)) resolved.delete(key);
+    if (typeof key === "string" && key.startsWith(`${runId}\n`)) {
+      resolved.delete(key);
+    }
   }
 }
 

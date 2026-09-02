@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import { Button } from "../design-system/button";

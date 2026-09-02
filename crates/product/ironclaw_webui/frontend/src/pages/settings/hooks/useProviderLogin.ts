@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import { useT } from "../../../lib/i18n";
@@ -11,6 +10,34 @@ import {
 } from "../lib/settings-api";
 
 const WALLET_LOGIN_TIMEOUT_MS = 300_000;
+
+type WalletSignature = {
+  accountId: string;
+  publicKey: string;
+  signature: string;
+  message: string;
+  recipient: string;
+  nonce: number[];
+};
+
+type WalletSignatureMessage = WalletSignature & {
+  type: "nearai-wallet-login";
+  ok: true;
+};
+
+function isWalletSignatureMessage(value: unknown): value is WalletSignatureMessage {
+  if (!value || typeof value !== "object") return false;
+  return (
+    Reflect.get(value, "type") === "nearai-wallet-login" &&
+    Reflect.get(value, "ok") === true &&
+    typeof Reflect.get(value, "accountId") === "string" &&
+    typeof Reflect.get(value, "publicKey") === "string" &&
+    typeof Reflect.get(value, "signature") === "string" &&
+    typeof Reflect.get(value, "message") === "string" &&
+    typeof Reflect.get(value, "recipient") === "string" &&
+    Array.isArray(Reflect.get(value, "nonce"))
+  );
+}
 
 // `isLoopbackBrowserOrigin` moved to `src/lib/browser-origin.ts`: the login page
 // also needs it (to gate the local-install hint on more than just "no
@@ -28,7 +55,10 @@ function walletLoginChannelName() {
 // Isolated popup that connects a NEAR wallet and signs the NEAR AI login
 // message. Resolves with the BroadcastChannel payload, or null if the user
 // cancels, closes the window, or the deadline passes.
-function awaitWalletSignature(popup, channelName) {
+function awaitWalletSignature(
+  popup: Window | null,
+  channelName: string,
+): Promise<WalletSignature | null> {
   return new Promise((resolve) => {
     if (typeof window.BroadcastChannel !== "function") {
       resolve(null);
@@ -37,9 +67,9 @@ function awaitWalletSignature(popup, channelName) {
     const channel = new window.BroadcastChannel(channelName);
     const onMessage = (event) => {
       const data = event.data;
-      if (!data || data.type !== "nearai-wallet-login") return;
+      if (!isWalletSignatureMessage(data)) return;
       cleanup();
-      resolve(data.ok ? data : null);
+      resolve(data);
     };
     const closedTimer = setInterval(() => {
       if (popup && popup.closed) {
@@ -72,7 +102,11 @@ const POLL_INTERVAL_MS = 2000;
 // given, a closed window short-circuits the wait so the UI recovers the instant
 // the user cancels instead of staying disabled until the full deadline.
 // Returns "active", "closed", or "timeout".
-async function pollUntilActive(providerId, deadlineMs, popup) {
+async function pollUntilActive(
+  providerId: string,
+  deadlineMs: number,
+  popup: Window | null,
+): Promise<"active" | "closed" | "timeout"> {
   const deadline = Date.now() + deadlineMs;
   // The popup can auto-close a beat before the snapshot flips active on a
   // successful sign-in, so keep confirming activation for a short grace window
@@ -100,7 +134,9 @@ async function pollUntilActive(providerId, deadlineMs, popup) {
 // two surfaces stay in sync. `onSuccess` runs after the provider goes active
 // (the onboarding screen navigates to chat; settings just lets the refreshed
 // snapshot re-render the now-active card).
-export function useProviderLogin({ onSuccess } = {}) {
+export function useProviderLogin(
+  { onSuccess }: { onSuccess?: () => void | Promise<void> } = {},
+) {
   const t = useT();
   const queryClient = useQueryClient();
 

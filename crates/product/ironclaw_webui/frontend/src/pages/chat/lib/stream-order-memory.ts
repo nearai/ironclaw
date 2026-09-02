@@ -1,4 +1,3 @@
-// @ts-nocheck
 
 export function isFinalAssistantMessage(message) {
   return message?.role === "assistant" && message?.isFinalReply === true;

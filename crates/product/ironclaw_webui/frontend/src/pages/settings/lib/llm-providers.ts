@@ -1,4 +1,3 @@
-// @ts-nocheck
 export const API_KEY_UNCHANGED = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022";
 
 export const ADAPTER_OPTIONS = [
@@ -102,7 +101,14 @@ export function providerMissingReason(provider, overrides) {
 export function providerPayload(provider, form, apiKey, overrides) {
   const baseUrl = form.baseUrl.trim();
   const model = form.model.trim();
-  const payload = {
+  const payload: {
+    adapter: string;
+    base_url: string;
+    provider_id: string;
+    provider_type: string;
+    model?: string;
+    api_key?: string;
+  } = {
     adapter: provider?.builtin ? provider.adapter : form.adapter,
     base_url: baseUrl || provider?.base_url || "",
     provider_id: provider?.id || form.id.trim(),
