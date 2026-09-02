@@ -5536,7 +5536,9 @@ use ironclaw_assistant::run_completions::coordinator::{
 use ironclaw_assistant::run_completions::push::{
     RunCompletionExternalDelivery, WebAppEnrollmentProbe, WebAppEnrollmentSnapshot,
 };
-use ironclaw_assistant::run_completions::records::{CompletionDeliveryState, RunCompletionNotice};
+use ironclaw_assistant::run_completions::records::{
+    CompletionDeliveryState, CompletionReadEvidence, RunCompletionNotice,
+};
 use ironclaw_assistant::run_completions::store::{
     NewRunCompletionNotice, NoticeCreateOutcome, RUN_NOTICES_MOUNT_ALIAS, RunCompletionNoticeStore,
     RunCompletionNotices, RunCompletionOwner,
@@ -5574,6 +5576,19 @@ impl WebAppEnrollmentProbe for ScriptedEnrollment {
         _owner: &RunCompletionOwner,
     ) -> Result<WebAppEnrollmentSnapshot, String> {
         Ok(self.0.clone())
+    }
+}
+
+/// The host-owned registrations cannot be read (backend outage).
+struct FailingEnrollment;
+
+#[async_trait]
+impl WebAppEnrollmentProbe for FailingEnrollment {
+    async fn enrollment(
+        &self,
+        _owner: &RunCompletionOwner,
+    ) -> Result<WebAppEnrollmentSnapshot, String> {
+        Err("registration store unavailable".to_string())
     }
 }
 
@@ -5643,6 +5658,21 @@ async fn completion_delivery(
     enrollment: WebAppEnrollmentSnapshot,
     notices: Arc<dyn RunCompletionNotices>,
 ) -> (RunCompletionExternalDelivery, Arc<RecordingChannelAdapter>) {
+    completion_delivery_with_probe(
+        catalog,
+        capable_binding_ref,
+        Arc::new(ScriptedEnrollment(enrollment)),
+        notices,
+    )
+    .await
+}
+
+async fn completion_delivery_with_probe(
+    catalog: Vec<TestNotificationTarget>,
+    capable_binding_ref: Option<&'static str>,
+    enrollments: Arc<dyn WebAppEnrollmentProbe>,
+    notices: Arc<dyn RunCompletionNotices>,
+) -> (RunCompletionExternalDelivery, Arc<RecordingChannelAdapter>) {
     let fixture = notify_user_fixture(catalog.clone(), None);
     seed_notification_targets(&fixture.store, &catalog).await;
     let adapter = Arc::clone(&fixture.adapter);
@@ -5655,9 +5685,79 @@ async fn completion_delivery(
         services,
         notices,
         Arc::new(fixture.codecs.clone()),
-        Arc::new(ScriptedEnrollment(enrollment)),
+        enrollments,
     );
     (delivery, adapter)
+}
+
+/// Fail closed on backend uncertainty: when the host-owned registrations
+/// cannot be read, no browser may win a `local_os` grant even though a
+/// capable target is selected — an OS notification is never minted from a
+/// guess about enrollment.
+#[tokio::test]
+async fn local_os_intents_are_denied_when_the_enrollment_probe_fails() {
+    let notices = completion_notice_store();
+    let (delivery, _adapter) = completion_delivery_with_probe(
+        vec![DM_TARGET, LATE_ACTIVATED_TARGET],
+        Some(LATE_ACTIVATED_TARGET.binding_ref),
+        Arc::new(FailingEnrollment),
+        Arc::clone(&notices),
+    )
+    .await;
+
+    assert!(
+        !delivery
+            .allows_local_os(&completion_owner(), "rbi-any")
+            .await,
+        "a failed enrollment probe denies the intent rather than guessing"
+    );
+}
+
+/// A push claim that conflicts (the notice was read between the
+/// coordinator's scan and the claim) stands down as handled: nothing egresses
+/// and the read record is untouched.
+#[tokio::test]
+async fn run_completion_push_stands_down_when_the_claim_conflicts() {
+    let notices = completion_notice_store();
+    let notice = pending_completion_notice(notices.as_ref()).await;
+    let (delivery, adapter) = completion_delivery(
+        vec![DM_TARGET, LATE_ACTIVATED_TARGET],
+        Some(LATE_ACTIVATED_TARGET.binding_ref),
+        WebAppEnrollmentSnapshot::default(),
+        Arc::clone(&notices),
+    )
+    .await;
+    let read = notices
+        .mark_read(
+            &completion_owner(),
+            &notice.notice_id,
+            CompletionReadEvidence::FocusedThreadVisit {
+                browser_instance_id: "rbi-1".to_string(),
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("read before the claim");
+
+    let handled = delivery
+        .attempt_push(&completion_owner(), &notice)
+        .await
+        .expect("push attempt");
+    assert!(handled, "a conflicting claim is handled, not retried");
+    assert!(
+        adapter.envelopes().is_empty(),
+        "nothing egresses after a lost claim"
+    );
+    let after = notices
+        .get(&completion_owner(), &notice.notice_id)
+        .await
+        .expect("get")
+        .expect("notice exists");
+    assert_eq!(
+        after.delivery, read.delivery,
+        "the read record is untouched"
+    );
+    assert!(after.is_read());
 }
 
 #[tokio::test]

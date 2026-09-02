@@ -2190,6 +2190,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_secret_store_delete_lease_removes_the_row_and_reports_absent_leases() {
+        let fs = Arc::new(InMemoryBackend::new());
+        let store = SecretStore::new(default_scoped_fs(fs), test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("socket-ticket").unwrap();
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("ticket-body"),
+                None,
+            )
+            .await
+            .unwrap();
+        let lease = store.lease_once(&scope, &handle).await.unwrap();
+        assert_eq!(store.leases_for_scope(&scope).await.unwrap().len(), 1);
+
+        assert!(store.delete_lease(&scope, lease.id).await.unwrap());
+        assert!(
+            store.leases_for_scope(&scope).await.unwrap().is_empty(),
+            "the lease row is gone, not merely marked terminal"
+        );
+        assert!(matches!(
+            store.consume(&scope, lease.id).await.unwrap_err(),
+            SecretStoreError::UnknownLease { .. }
+        ));
+        assert!(
+            !store.delete_lease(&scope, lease.id).await.unwrap(),
+            "deleting an absent lease reports false rather than failing"
+        );
+        assert!(
+            store.metadata(&scope, &handle).await.unwrap().is_some(),
+            "the secret itself is untouched"
+        );
+    }
+
+    #[tokio::test]
     async fn filesystem_credential_broker_round_trips_account_and_session() {
         let fs = Arc::new(InMemoryBackend::new());
         let broker = CredentialBroker::new(default_scoped_fs(fs), test_crypto());

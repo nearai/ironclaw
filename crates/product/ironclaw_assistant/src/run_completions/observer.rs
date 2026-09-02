@@ -225,4 +225,315 @@ mod tests {
             RunCompletionJournalObserver::observation(&commit).expect("still eligible");
         assert_eq!(observation.completed_at, commit.state.created_at);
     }
+
+    // ---- retry contract through the journal-facing caller ----
+
+    use crate::run_completions::RunCompletionSurfaceServices;
+    use crate::run_completions::ingest::RunCompletionIngest;
+    use crate::run_completions::records::{
+        CompletionDeliveryStateKind, CompletionIntentRecord, CompletionReadEvidence,
+        RunCompletionNotice,
+    };
+    use crate::run_completions::store::{
+        NewGrant, NewRunCompletionNotice, NoticeCreateOutcome, RunCompletionNoticeStore,
+        RunCompletionNotices, RunCompletionOwner, RunCompletionStoreError,
+    };
+    use crate::run_completions::stream::RunCompletionStreamHub;
+    use chrono::{DateTime, Utc as ChronoUtc};
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_threads::{
+        AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
+        MessageContent, SessionThreadService, ThreadScope,
+    };
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    const DUE_OK: u8 = 0;
+    const DUE_UNAVAILABLE: u8 = 1;
+    const DUE_CONFLICT: u8 = 2;
+
+    /// The real in-memory store with a scripted `mark_owner_due` outcome, so
+    /// the observer sees a retryable or a terminal ingest failure on the
+    /// first store write of an otherwise eligible completion.
+    struct ScriptedDueStore {
+        inner: Arc<dyn RunCompletionNotices>,
+        due_mode: AtomicU8,
+    }
+
+    #[async_trait]
+    impl RunCompletionNotices for ScriptedDueStore {
+        async fn create_notice(
+            &self,
+            owner: &RunCompletionOwner,
+            new_notice: NewRunCompletionNotice,
+        ) -> Result<NoticeCreateOutcome, RunCompletionStoreError> {
+            self.inner.create_notice(owner, new_notice).await
+        }
+        async fn get(
+            &self,
+            owner: &RunCompletionOwner,
+            notice_id: &str,
+        ) -> Result<Option<RunCompletionNotice>, RunCompletionStoreError> {
+            self.inner.get(owner, notice_id).await
+        }
+        async fn record_intent(
+            &self,
+            owner: &RunCompletionOwner,
+            notice_id: &str,
+            intent: CompletionIntentRecord,
+        ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
+            self.inner.record_intent(owner, notice_id, intent).await
+        }
+        async fn mark_read(
+            &self,
+            owner: &RunCompletionOwner,
+            notice_id: &str,
+            evidence: CompletionReadEvidence,
+            read_at: DateTime<ChronoUtc>,
+        ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
+            self.inner
+                .mark_read(owner, notice_id, evidence, read_at)
+                .await
+        }
+        async fn issue_grant(
+            &self,
+            owner: &RunCompletionOwner,
+            notice_id: &str,
+            grant: NewGrant,
+        ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
+            self.inner.issue_grant(owner, notice_id, grant).await
+        }
+        async fn acknowledge_presented(
+            &self,
+            owner: &RunCompletionOwner,
+            notice_id: &str,
+            grant_id: &str,
+            presented_at: DateTime<ChronoUtc>,
+        ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
+            self.inner
+                .acknowledge_presented(owner, notice_id, grant_id, presented_at)
+                .await
+        }
+        async fn regress_expired_grant(
+            &self,
+            owner: &RunCompletionOwner,
+            notice_id: &str,
+            grant_id: &str,
+            closes_at: DateTime<ChronoUtc>,
+        ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
+            self.inner
+                .regress_expired_grant(owner, notice_id, grant_id, closes_at)
+                .await
+        }
+        async fn claim_push(
+            &self,
+            owner: &RunCompletionOwner,
+            notice_id: &str,
+            delivery_id: &str,
+            claimed_at: DateTime<ChronoUtc>,
+        ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
+            self.inner
+                .claim_push(owner, notice_id, delivery_id, claimed_at)
+                .await
+        }
+        async fn settle_no_target(
+            &self,
+            owner: &RunCompletionOwner,
+            notice_id: &str,
+            settled_at: DateTime<ChronoUtc>,
+        ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
+            self.inner
+                .settle_no_target(owner, notice_id, settled_at)
+                .await
+        }
+        async fn list_after(
+            &self,
+            owner: &RunCompletionOwner,
+            after_sequence: Option<u64>,
+            limit: usize,
+        ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
+            self.inner.list_after(owner, after_sequence, limit).await
+        }
+        async fn unread_snapshot(
+            &self,
+            owner: &RunCompletionOwner,
+        ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
+            self.inner.unread_snapshot(owner).await
+        }
+        async fn unread_for_thread(
+            &self,
+            owner: &RunCompletionOwner,
+            thread_id: &str,
+            limit: usize,
+        ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
+            self.inner.unread_for_thread(owner, thread_id, limit).await
+        }
+        async fn in_delivery_state(
+            &self,
+            owner: &RunCompletionOwner,
+            state: CompletionDeliveryStateKind,
+            limit: usize,
+        ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
+            self.inner.in_delivery_state(owner, state, limit).await
+        }
+        async fn mark_owner_due(
+            &self,
+            owner: &RunCompletionOwner,
+        ) -> Result<(), RunCompletionStoreError> {
+            match self.due_mode.load(Ordering::SeqCst) {
+                DUE_UNAVAILABLE => Err(RunCompletionStoreError::Unavailable {
+                    reason: "scripted outage".to_string(),
+                }),
+                DUE_CONFLICT => Err(RunCompletionStoreError::Conflict {
+                    reason: "scripted shape rejection",
+                }),
+                _ => self.inner.mark_owner_due(owner).await,
+            }
+        }
+        async fn clear_owner_due(
+            &self,
+            owner: &RunCompletionOwner,
+        ) -> Result<(), RunCompletionStoreError> {
+            self.inner.clear_owner_due(owner).await
+        }
+        async fn due_owners(
+            &self,
+            scope_owner: &RunCompletionOwner,
+        ) -> Result<Vec<RunCompletionOwner>, RunCompletionStoreError> {
+            self.inner.due_owners(scope_owner).await
+        }
+        async fn head_sequence(
+            &self,
+            owner: &RunCompletionOwner,
+        ) -> Result<u64, RunCompletionStoreError> {
+            self.inner.head_sequence(owner).await
+        }
+    }
+
+    fn scripted_services() -> (Arc<RunCompletionSurfaceServices>, Arc<ScriptedDueStore>) {
+        let inner = Arc::new(RunCompletionNoticeStore::new(Arc::new(
+            ScopedFilesystem::new(Arc::new(InMemoryBackend::new()), |scope: &ResourceScope| {
+                MountView::new(vec![
+                    MountGrant::new(
+                        MountAlias::new(crate::run_completions::store::RUN_NOTICES_MOUNT_ALIAS)?,
+                        VirtualPath::new(format!(
+                            "/tenants/{}/users/{}/run-notices",
+                            scope.tenant_id, scope.user_id
+                        ))?,
+                        MountPermissions::read_write_list_delete(),
+                    ),
+                    MountGrant::new(
+                        MountAlias::new("/tenant-shared")?,
+                        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id))?,
+                        MountPermissions::read_write(),
+                    ),
+                ])
+            }),
+        ))) as Arc<dyn RunCompletionNotices>;
+        let scripted = Arc::new(ScriptedDueStore {
+            inner,
+            due_mode: AtomicU8::new(DUE_OK),
+        });
+        let store: Arc<dyn RunCompletionNotices> = scripted.clone();
+        let hub = Arc::new(RunCompletionStreamHub::new(Arc::clone(&store)));
+        (
+            Arc::new(RunCompletionSurfaceServices::new(
+                store,
+                hub,
+                Arc::new(ironclaw_notifications::NoopNotificationInboxStore),
+            )),
+            scripted,
+        )
+    }
+
+    /// The journal store keeps its durable observer cursor only while the
+    /// observer returns `Err`: a backend outage must replay, a shape
+    /// rejection must advance so one bad run never starves every later
+    /// completion. Driven through the observer, the only journal-facing
+    /// caller.
+    #[tokio::test]
+    async fn retryable_ingest_failures_hold_the_cursor_and_terminal_failures_advance() {
+        let (services, scripted) = scripted_services();
+        let threads = InMemorySessionThreadService::default();
+        let commit = eligible_commit();
+        let thread_id = commit
+            .state
+            .scope
+            .thread_id
+            .clone()
+            .expect("eligible commit names a thread");
+        let thread_scope = ThreadScope {
+            tenant_id: commit.state.scope.tenant_id.clone(),
+            agent_id: commit
+                .state
+                .scope
+                .agent_id
+                .clone()
+                .expect("eligible commit names an agent"),
+            project_id: commit.state.scope.project_id.clone(),
+            owner_user_id: commit.state.owner_user_id.clone(),
+            mission_id: None,
+        };
+        threads
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope.clone(),
+                thread_id: Some(thread_id.clone()),
+                created_by_actor_id: "user-alpha".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .expect("thread ensured");
+        threads
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                scope: thread_scope,
+                thread_id,
+                turn_run_id: TurnRunId::from_uuid(commit.state.process_id.as_uuid()).to_string(),
+                content: MessageContent::text("final reply"),
+            })
+            .await
+            .expect("finalized reply appended");
+        let observer = RunCompletionJournalObserver::new(Arc::new(RunCompletionIngest::new(
+            Arc::clone(&services),
+            Arc::new(threads),
+        )));
+
+        scripted.due_mode.store(DUE_UNAVAILABLE, Ordering::SeqCst);
+        assert!(
+            observer
+                .observe_process_commit(commit.clone())
+                .await
+                .is_err(),
+            "a backend outage holds the cursor for replay"
+        );
+
+        scripted.due_mode.store(DUE_CONFLICT, Ordering::SeqCst);
+        assert!(
+            observer
+                .observe_process_commit(commit.clone())
+                .await
+                .is_ok(),
+            "a shape rejection advances the cursor with a sanitized anomaly"
+        );
+
+        scripted.due_mode.store(DUE_OK, Ordering::SeqCst);
+        observer
+            .observe_process_commit(commit)
+            .await
+            .expect("the replayed commit ingests once the backend is back");
+        let notices = services
+            .notices
+            .unread_snapshot(&RunCompletionOwner {
+                tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+                user_id: user("user-alpha"),
+            })
+            .await
+            .expect("snapshot");
+        assert_eq!(
+            notices.len(),
+            1,
+            "exactly one notice for the replayed completion"
+        );
+    }
 }

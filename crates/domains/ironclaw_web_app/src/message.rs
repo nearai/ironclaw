@@ -357,6 +357,36 @@ mod tests {
     }
 
     #[test]
+    fn run_completion_payload_derives_the_thread_link_and_carries_the_dedupe_fields() {
+        let payload = WebAppNotificationPayload::run_completion(
+            "IronClaw",
+            "An agent run finished.",
+            "/chat/",
+            "thr/ead?id=ü",
+            "rcn-abc",
+            "rct-thread",
+            250,
+        );
+        assert_eq!(payload.url, "/chat/thr%2Fead%3Fid%3D%C3%BC");
+        assert_eq!(
+            payload.schema.as_deref(),
+            Some(WEB_APP_NOTIFICATION_SCHEMA_V2)
+        );
+        assert_eq!(
+            payload.kind.as_deref(),
+            Some(WEB_APP_NOTIFICATION_KIND_RUN_COMPLETION)
+        );
+        assert_eq!(payload.notice_id.as_deref(), Some("rcn-abc"));
+        assert_eq!(payload.thread_id.as_deref(), Some("thr/ead?id=ü"));
+        assert_eq!(payload.tag.as_deref(), Some("rct-thread"));
+        assert_eq!(payload.unread_count, Some(MAX_UNREAD_COUNT));
+        assert!(
+            payload.to_json_bytes().is_ok(),
+            "the typed payload stays inside the push byte budget"
+        );
+    }
+
+    #[test]
     fn non_app_relative_urls_collapse_to_root() {
         for url in [
             "https://evil.example.com/x",

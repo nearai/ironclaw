@@ -237,6 +237,27 @@ mod tests {
             "a consumed lease must never authenticate again",
         );
         assert_eq!(store.consume("not-a-lease").await.expect("junk"), None);
+
+        // Both rows are reclaimed: every socket connect mints one ticket,
+        // so a consumed ticket must not leave a permanent secret or lease.
+        assert!(
+            store
+                .secrets
+                .metadata_for_scope(&store.scope)
+                .await
+                .expect("metadata")
+                .is_empty(),
+            "the consumed ticket secret is deleted"
+        );
+        assert!(
+            store
+                .secrets
+                .leases_for_scope(&store.scope)
+                .await
+                .expect("leases")
+                .is_empty(),
+            "the consumed one-shot lease row is deleted"
+        );
     }
 
     #[tokio::test]

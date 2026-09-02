@@ -4334,6 +4334,172 @@ async fn m2_service_stream_contract_uses_fake_projection_port_with_authenticated
     );
 }
 
+fn run_completion_services_for_test()
+-> Arc<ironclaw_assistant::run_completions::RunCompletionSurfaceServices> {
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    let store = Arc::new(
+        ironclaw_assistant::run_completions::store::RunCompletionNoticeStore::new(Arc::new(
+            ironclaw_filesystem::ScopedFilesystem::new(
+                Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+                |scope: &ironclaw_host_api::resource::ResourceScope| {
+                    MountView::new(vec![
+                        MountGrant::new(
+                            MountAlias::new(
+                                ironclaw_assistant::run_completions::store::RUN_NOTICES_MOUNT_ALIAS,
+                            )?,
+                            VirtualPath::new(format!(
+                                "/tenants/{}/users/{}/run-notices",
+                                scope.tenant_id, scope.user_id
+                            ))?,
+                            MountPermissions::read_write_list_delete(),
+                        ),
+                        MountGrant::new(
+                            MountAlias::new("/tenant-shared")?,
+                            VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id))?,
+                            MountPermissions::read_write(),
+                        ),
+                    ])
+                },
+            ),
+        )),
+    ) as Arc<dyn ironclaw_assistant::run_completions::store::RunCompletionNotices>;
+    let hub = Arc::new(
+        ironclaw_assistant::run_completions::stream::RunCompletionStreamHub::new(Arc::clone(
+            &store,
+        )),
+    );
+    Arc::new(
+        ironclaw_assistant::run_completions::RunCompletionSurfaceServices::new(
+            store,
+            hub,
+            Arc::new(ironclaw_notifications::NoopNotificationInboxStore),
+        ),
+    )
+}
+
+/// The `RunCompletions` selector on the frozen `stream_events` method: the
+/// owner's durable notices replay under the `rc:` cursor namespace, a
+/// resume cursor is honoured strictly-after, and cursors from another
+/// namespace (or a malformed sequence) are rejected as invalid requests
+/// rather than silently replaying from the origin. Without the notification
+/// services wired the selector is unavailable, never a thread stream.
+#[tokio::test]
+async fn run_completions_selector_replays_under_the_rc_cursor_namespace_and_rejects_foreign_cursors()
+ {
+    use ironclaw_assistant::run_completions::store::{
+        NewRunCompletionNotice, NoticeCreateOutcome, RunCompletionOwner,
+    };
+
+    let web_caller = caller();
+    let unwired = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let unavailable = ProductSurface::stream_events(
+        &unwired,
+        web_caller.clone(),
+        ProductSurfaceStreamRequest {
+            selector: ProductStreamSelector::RunCompletions,
+            after_cursor: None,
+        },
+    )
+    .await
+    .expect_err("no notification services wired");
+    assert_eq!(unavailable.status_code, 503);
+
+    let run_completions = run_completion_services_for_test();
+    let services = session_services(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_run_completions(Arc::clone(&run_completions));
+    let owner = RunCompletionOwner {
+        tenant_id: web_caller.tenant_id.clone(),
+        user_id: web_caller.user_id.clone(),
+    };
+    let created = match run_completions
+        .notices
+        .create_notice(
+            &owner,
+            NewRunCompletionNotice {
+                notice_id: "rcn-stream".to_string(),
+                run_id: TurnRunId::new().to_string(),
+                thread_id: "thread-alpha".to_string(),
+                agent_id: None,
+                project_id: None,
+                thread_tag: "rct-thread-alpha".to_string(),
+                terminal_projection_ref: "run-completion/rcn-stream".to_string(),
+                completed_at: chrono::Utc::now(),
+                arbitration_closes_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .expect("notice created")
+    {
+        NoticeCreateOutcome::Created(notice) | NoticeCreateOutcome::AlreadyRecorded(notice) => {
+            notice
+        }
+    };
+
+    let replay = ProductSurface::stream_events(
+        &services,
+        web_caller.clone(),
+        ProductSurfaceStreamRequest {
+            selector: ProductStreamSelector::RunCompletions,
+            after_cursor: None,
+        },
+    )
+    .await
+    .expect("owner stream opens");
+    assert_eq!(
+        replay.events.len(),
+        1,
+        "the durable notice replays on subscribe"
+    );
+    assert_eq!(
+        replay.events[0].cursor.as_str(),
+        format!("rc:{}", created.sequence),
+        "the resume cursor names the owner's completion sequence"
+    );
+    assert!(
+        matches!(replay.events[0].event, ProductStreamEvent::RunCompletion(_)),
+        "the selector carries run-completion events, never thread payloads"
+    );
+    drop(replay);
+
+    let resumed = ProductSurface::stream_events(
+        &services,
+        web_caller.clone(),
+        ProductSurfaceStreamRequest {
+            selector: ProductStreamSelector::RunCompletions,
+            after_cursor: Some(format!("rc:{}", created.sequence)),
+        },
+    )
+    .await
+    .expect("resume strictly after the replayed sequence");
+    assert!(
+        resumed.events.is_empty(),
+        "a resume cursor at the head replays nothing"
+    );
+    drop(resumed);
+
+    for foreign in ["cursor-alpha", "rc:abc", "rc:"] {
+        let rejected = ProductSurface::stream_events(
+            &services,
+            web_caller.clone(),
+            ProductSurfaceStreamRequest {
+                selector: ProductStreamSelector::RunCompletions,
+                after_cursor: Some(foreign.to_string()),
+            },
+        )
+        .await
+        .expect_err("a cursor from another namespace never resumes this stream");
+        assert_eq!(rejected.status_code, 400, "{foreign}");
+        assert!(!rejected.retryable, "{foreign}");
+    }
+}
+
 #[tokio::test]
 async fn product_surface_subscription_stays_open_instead_of_polling_drain() {
     let web_caller = caller();

@@ -345,8 +345,9 @@ pub async fn unread_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::run_completions::records::{CompletionDeliveryState, CompletionSurface};
     use crate::run_completions::store::{
-        NewRunCompletionNotice, RunCompletionNoticeStore, RunCompletionNotices,
+        NewGrant, NewRunCompletionNotice, RunCompletionNoticeStore, RunCompletionNotices,
     };
     use crate::run_completions::stream::RunCompletionStreamHub;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
@@ -530,5 +531,189 @@ mod tests {
             remaining[0].notice_id, newer.notice_id,
             "a completion the view has not rendered stays unread"
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_or_empty_opaque_ids_are_rejected_before_any_store_read() {
+        let services = services();
+        let oversized = submit_intent(
+            &services,
+            caller("user-a"),
+            RunCompletionIntentRequest {
+                notice_id: "rcn-any".to_string(),
+                browser_instance_id: "b".repeat(RUN_COMPLETION_OPAQUE_ID_MAX_BYTES + 1),
+                tab_id: "tab-1".to_string(),
+                state_revision: 1,
+                focus_epoch: 0,
+                intent: RunCompletionIntentKind::InApp,
+            },
+        )
+        .await
+        .expect_err("an oversized browser id is invalid input");
+        assert_eq!(oversized.status_code, 400);
+        assert_eq!(oversized.field.as_deref(), Some("browser_instance_id"));
+
+        let empty = submit_intent(
+            &services,
+            caller("user-a"),
+            RunCompletionIntentRequest {
+                notice_id: "rcn-any".to_string(),
+                browser_instance_id: "rbi-1".to_string(),
+                tab_id: String::new(),
+                state_revision: 1,
+                focus_epoch: 0,
+                intent: RunCompletionIntentKind::InApp,
+            },
+        )
+        .await
+        .expect_err("an empty tab id is invalid input");
+        assert_eq!(empty.status_code, 400);
+        assert_eq!(empty.field.as_deref(), Some("tab_id"));
+    }
+
+    async fn granted(
+        services: &RunCompletionSurfaceServices,
+        notice: &RunCompletionNotice,
+        grant_id: &str,
+    ) {
+        services
+            .notices
+            .issue_grant(
+                &owner_of(&caller("user-a")),
+                &notice.notice_id,
+                NewGrant {
+                    grant_id: grant_id.to_string(),
+                    browser_instance_id: "rbi-1".to_string(),
+                    surface: CompletionSurface::InApp,
+                    state_revision: 1,
+                    expires_at: Utc::now() + ChronoDuration::seconds(2),
+                },
+            )
+            .await
+            .expect("grant issued");
+    }
+
+    /// Read evidence must name the browser the outstanding grant was issued
+    /// to: a stale or foreign grant id is a conflict and mints nothing.
+    #[tokio::test]
+    async fn reply_rendered_acknowledgement_with_a_stale_grant_id_is_a_conflict() {
+        let services = services();
+        let notice = seed(&services, "user-a", "ack", "thread-a").await;
+        granted(&services, &notice, "rcg-real").await;
+
+        let forged = acknowledge(
+            &services,
+            caller("user-a"),
+            RunCompletionAcknowledgeRequest {
+                notice_id: notice.notice_id.clone(),
+                grant_id: "rcg-forged".to_string(),
+                state_revision: 1,
+                outcome: RunCompletionAcknowledgeOutcome::ReplyRendered,
+            },
+        )
+        .await
+        .expect_err("a grant id that is not the outstanding grant cannot mint read evidence");
+        assert_eq!(forged.status_code, 409);
+        let untouched = services
+            .notices
+            .get(&owner_of(&caller("user-a")), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert!(!untouched.is_read(), "the notice stays unread");
+        assert!(matches!(
+            untouched.delivery,
+            CompletionDeliveryState::Granted { .. }
+        ));
+
+        let settled = acknowledge(
+            &services,
+            caller("user-a"),
+            RunCompletionAcknowledgeRequest {
+                notice_id: notice.notice_id.clone(),
+                grant_id: "rcg-real".to_string(),
+                state_revision: 1,
+                outcome: RunCompletionAcknowledgeOutcome::ReplyRendered,
+            },
+        )
+        .await
+        .expect("the real grant mints read evidence");
+        assert_eq!(settled.settled_notice_ids, vec![notice.notice_id.clone()]);
+        let read = services
+            .notices
+            .get(&owner_of(&caller("user-a")), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert!(read.is_read());
+    }
+
+    #[tokio::test]
+    async fn presented_and_effect_failed_acknowledgements_transition_the_grant() {
+        let services = services();
+        let presented_notice = seed(&services, "user-a", "presented", "thread-a").await;
+        granted(&services, &presented_notice, "rcg-presented").await;
+        acknowledge(
+            &services,
+            caller("user-a"),
+            RunCompletionAcknowledgeRequest {
+                notice_id: presented_notice.notice_id.clone(),
+                grant_id: "rcg-presented".to_string(),
+                state_revision: 1,
+                outcome: RunCompletionAcknowledgeOutcome::Presented,
+            },
+        )
+        .await
+        .expect("presented");
+        let presented = services
+            .notices
+            .get(&owner_of(&caller("user-a")), &presented_notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert!(matches!(
+            presented.delivery,
+            CompletionDeliveryState::Presented {
+                surface: CompletionSurface::InApp,
+                ..
+            }
+        ));
+        assert!(
+            !presented.is_read(),
+            "presentation is not read (principle 3)"
+        );
+
+        let failed_notice = seed(&services, "user-a", "failed", "thread-b").await;
+        granted(&services, &failed_notice, "rcg-failed").await;
+        let before = services.stale_grant_count();
+        acknowledge(
+            &services,
+            caller("user-a"),
+            RunCompletionAcknowledgeRequest {
+                notice_id: failed_notice.notice_id.clone(),
+                grant_id: "rcg-failed".to_string(),
+                state_revision: 1,
+                outcome: RunCompletionAcknowledgeOutcome::EffectFailed,
+            },
+        )
+        .await
+        .expect("effect failed");
+        let regressed = services
+            .notices
+            .get(&owner_of(&caller("user-a")), &failed_notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        match regressed.delivery {
+            CompletionDeliveryState::PendingArbitration {
+                closes_at,
+                grants_issued,
+            } => {
+                assert_eq!(grants_issued, 1, "the spent grant stays counted");
+                assert!(closes_at > Utc::now(), "a fresh arbitration window reopens");
+            }
+            other => panic!("expected a regressed pending record, got {other:?}"),
+        }
+        assert_eq!(services.stale_grant_count(), before + 1);
     }
 }

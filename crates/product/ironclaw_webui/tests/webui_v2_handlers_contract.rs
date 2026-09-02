@@ -9099,6 +9099,115 @@ async fn session_websocket_bounds_subscribe_frames_per_window() {
     serve_handle.abort();
 }
 
+/// `unsubscribe` cancels exactly the named logical subscription and answers
+/// with its generation; the socket and every other subscription stay open.
+#[tokio::test]
+async fn session_websocket_unsubscribe_cancels_the_generation_and_acks() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat", "thread-x", None).into(),
+    ))
+    .await
+    .expect("send subscribe");
+    let subscribed = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed["type"], "subscribed");
+    let generation = subscribed["generation"].as_u64().expect("generation");
+
+    ws.send(WsMessage::Text(
+        r#"{"type":"unsubscribe","subscription_id":"chat"}"#.to_string().into(),
+    ))
+    .await
+    .expect("send unsubscribe");
+    let unsubscribed = next_session_frame(&mut ws).await;
+    assert_eq!(unsubscribed["type"], "unsubscribed");
+    assert_eq!(unsubscribed["subscription_id"], "chat");
+    assert_eq!(unsubscribed["generation"], generation);
+
+    // Unknown ids are ignored, and the socket still answers afterwards.
+    ws.send(WsMessage::Text(
+        r#"{"type":"unsubscribe","subscription_id":"never-subscribed"}"#
+            .to_string()
+            .into(),
+    ))
+    .await
+    .expect("send stray unsubscribe");
+    ws.send(WsMessage::Text(r#"{"type":"ping"}"#.to_string().into()))
+        .await
+        .expect("send ping");
+    let pong = next_session_frame(&mut ws).await;
+    assert_eq!(
+        pong["type"], "pong",
+        "a stray unsubscribe is silently ignored"
+    );
+
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+}
+
+/// The concurrent-subscription cap counts distinct logical ids: replacing
+/// an active id never counts against it, while the seventeenth distinct id
+/// (`MAX_ACTIVE_SUBSCRIPTIONS` = 16) is a protocol violation that closes
+/// the socket.
+#[tokio::test]
+async fn session_websocket_caps_distinct_subscriptions_but_allows_replacing_an_active_one() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    for index in 0..16 {
+        ws.send(WsMessage::Text(
+            session_subscribe_frame(&format!("sub-{index}"), "thread-x", None).into(),
+        ))
+        .await
+        .expect("send subscribe");
+        let subscribed = next_session_frame(&mut ws).await;
+        assert_eq!(subscribed["type"], "subscribed", "{index}");
+    }
+    // Replacing an existing id is not a seventeenth subscription.
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("sub-0", "thread-y", None).into(),
+    ))
+    .await
+    .expect("send replacement");
+    let replaced = next_session_frame(&mut ws).await;
+    assert_eq!(replaced["type"], "subscribed");
+    assert_eq!(replaced["subscription_id"], "sub-0");
+
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("sub-16", "thread-x", None).into(),
+    ))
+    .await
+    .expect("send seventeenth");
+    let violation = next_session_frame(&mut ws).await;
+    assert_eq!(violation["type"], "protocol_error");
+    assert_eq!(violation["violation"], "too_many_subscriptions");
+
+    serve_handle.abort();
+}
+
 /// Every product mutation stays on authenticated HTTP: mutation-shaped
 /// frames (operation IDs, turn submissions, gate resolutions) are protocol
 /// violations that close the socket, and the handler never reaches
