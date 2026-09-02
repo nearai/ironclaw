@@ -4,7 +4,10 @@ import {
   type InterfaceTheme,
 } from "../design-system/theme";
 import { useGatewayStatus } from "../hooks/useGatewayStatus";
-import { useNotifications } from "../hooks/useNotifications";
+import {
+  useNotifications,
+  type NotificationProfile,
+} from "../hooks/useNotifications";
 import { useLlmProviders } from "../pages/settings/hooks/useLlmProviders";
 import { shouldRouteToOnboarding } from "../lib/onboarding-gate";
 import {
@@ -34,7 +37,7 @@ const CommandPalette = React.lazy(() =>
 export type GatewayOutletContext = {
   gatewayStatus: ReturnType<typeof useGatewayStatus>["data"];
   gatewayStatusQuery: ReturnType<typeof useGatewayStatus>;
-  currentUser: Parameters<typeof useNotifications>[0]["profile"];
+  currentUser: NotificationProfile | null;
   workspaceRequiresScopedProjection: boolean;
   isChecking: boolean;
   isAdmin: boolean;
@@ -54,7 +57,7 @@ export type GatewayOutletContext = {
 
 type GatewayLayoutProps = {
   token: string;
-  profile: Parameters<typeof useNotifications>[0]["profile"];
+  profile: NotificationProfile | null;
   isChecking?: boolean;
   isAdmin: boolean;
   rebornProjectsEnabled?: boolean;

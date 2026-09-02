@@ -5,6 +5,7 @@ import {
   importSettings as importSettingsPayload,
   NoSupportedSettingsImportError,
   updateSetting,
+  type SettingUpdateSuccess,
 } from "../lib/settings-api";
 import { throwIfApiFailed } from "../lib/api-result";
 import { RESTART_REQUIRED_KEYS } from "../lib/settings-schema";
@@ -31,20 +32,20 @@ export function useSettings() {
   const [savedKeys, setSavedKeys] = React.useState<Record<string, boolean>>({});
   const [needsRestart, setNeedsRestart] = React.useState(false);
 
-  const mutation = useMutation<unknown, Error, SettingMutationVariables>({
+  const mutation = useMutation<SettingUpdateSuccess, Error, SettingMutationVariables>({
     // A resolved response with `success: false` is a failed save, not a
     // success — surface it so the UI shows the error rather than a fake
     // "Saved" indicator (and never flips `needsRestart`).
     mutationFn: async ({ key, value }) =>
       throwIfApiFailed(await updateSetting(key, value), "Save failed"),
-    onSuccess: (_data, { key, value }) => {
+    onSuccess: (data, { key }) => {
       queryClient.setQueryData<SettingsExport>(["settings-export"], (old) => {
         if (!old) return old;
         const next = { ...old, settings: { ...old.settings } };
-        if (value === null || value === undefined) {
+        if (data.value === null || data.value === undefined) {
           delete next.settings[key];
         } else {
-          next.settings[key] = value;
+          next.settings[key] = data.value;
         }
         return next;
       });

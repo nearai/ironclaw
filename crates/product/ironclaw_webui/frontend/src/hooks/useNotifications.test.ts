@@ -17,7 +17,11 @@ function sourceForTest() {
       skippingImport = !line.trimEnd().endsWith(";");
       continue;
     }
-    lines.push(line.replace(/^export function /, "function "));
+    lines.push(
+      line
+        .replace(/^export function /, "function ")
+        .replace(/^export type /, "type "),
+    );
   }
   return `${lines.join("\n")}\nglobalThis.__testExports = { useNotifications };`;
 }

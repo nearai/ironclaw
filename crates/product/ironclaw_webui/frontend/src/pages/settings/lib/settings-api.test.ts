@@ -8,6 +8,7 @@ import {
   setUserModelPreference,
   settingsFromOperatorConfig,
   toolFromConfigEntry,
+  updateSetting,
   updateToolPermission,
   upsertLlmProvider,
 } from "./settings-api";
@@ -115,6 +116,62 @@ test("settingsFromOperatorConfig maps the global auto-approve key", () => {
   });
 
   assert.deepEqual(settings, { "agent.auto_approve_tools": true });
+});
+
+test("updateSetting preserves an application-level save failure", async () => {
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    async () =>
+      new Response(JSON.stringify({ success: false, message: "policy denied" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  );
+
+  try {
+    assert.deepEqual(await updateSetting("provider.default", "nearai"), {
+      success: false,
+      message: "policy denied",
+    });
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("updateSetting returns the backend-confirmed value", async () => {
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    async () =>
+      new Response(
+        JSON.stringify({
+          entry: {
+            key: "provider.default",
+            value: "normalized-provider",
+            mutable: true,
+            source: "override",
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+  );
+
+  try {
+    const result = await updateSetting("provider.default", " Requested Provider ");
+    assert.equal(result.success, true);
+    assert.equal(result.value, "normalized-provider");
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 test("toolFromConfigEntry maps operator config tools for the tools tab", () => {

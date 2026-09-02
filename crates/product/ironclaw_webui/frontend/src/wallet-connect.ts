@@ -43,8 +43,7 @@ async function run() {
       features: { signMessage: true },
     });
     setStatus("Choose a wallet to continue…");
-    await connector.connect();
-    const wallet = await connector.wallet();
+    const wallet = await connector.connect();
 
     setStatus("Approve the signature in your wallet…");
     const nonce = buildNonce();

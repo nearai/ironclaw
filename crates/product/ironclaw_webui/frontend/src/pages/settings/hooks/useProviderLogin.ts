@@ -25,8 +25,14 @@ type WalletSignatureMessage = WalletSignature & {
   ok: true;
 };
 
+type WalletLoginFailureMessage = {
+  type: "nearai-wallet-login";
+  ok: false;
+};
+
 function isWalletSignatureMessage(value: unknown): value is WalletSignatureMessage {
   if (!value || typeof value !== "object") return false;
+  const nonce = Reflect.get(value, "nonce");
   return (
     Reflect.get(value, "type") === "nearai-wallet-login" &&
     Reflect.get(value, "ok") === true &&
@@ -35,7 +41,25 @@ function isWalletSignatureMessage(value: unknown): value is WalletSignatureMessa
     typeof Reflect.get(value, "signature") === "string" &&
     typeof Reflect.get(value, "message") === "string" &&
     typeof Reflect.get(value, "recipient") === "string" &&
-    Array.isArray(Reflect.get(value, "nonce"))
+    Array.isArray(nonce) &&
+    nonce.every(
+      (byte: unknown) =>
+        typeof byte === "number" &&
+        Number.isInteger(byte) &&
+        byte >= 0 &&
+        byte <= 255,
+    )
+  );
+}
+
+function isWalletLoginFailureMessage(
+  value: unknown,
+): value is WalletLoginFailureMessage {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    Reflect.get(value, "type") === "nearai-wallet-login" &&
+    Reflect.get(value, "ok") === false
   );
 }
 
@@ -67,6 +91,11 @@ function awaitWalletSignature(
     const channel = new window.BroadcastChannel(channelName);
     const onMessage = (event) => {
       const data = event.data;
+      if (isWalletLoginFailureMessage(data)) {
+        cleanup();
+        resolve(null);
+        return;
+      }
       if (!isWalletSignatureMessage(data)) return;
       cleanup();
       resolve(data);
@@ -161,7 +190,7 @@ export function useProviderLogin(
   const finishActive = React.useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
     if (onSuccess) {
-      onSuccess();
+      await onSuccess();
     }
   }, [queryClient, onSuccess]);
 
