@@ -183,6 +183,7 @@ scope nothing else touches stays blocked until some later spawn happens to
 touch that scope. A true startup/boot pass for background edges (which need
 one regardless, since they have no gate to block on) is new work owned by
 Part II Task 7; blocking-mode recovery remains lazy as described here.
+(status, 2026-09-02: the boot pass did not ship with R2 — see §4.2 trigger 3.)
 
 ### 2.6 Parallel children
 
@@ -352,7 +353,14 @@ substitute for it.
    `group_ref = "bg:{parent_thread_id}"` (§4.3), so the existing
    group-ref dependency query serves it; the batch is capped at
    `MAX_QUEUED_INPUTS_PER_RUN`.
-3. **Boot pass**: restart re-drives every non-closed background edge
+3. **Boot pass**: **Not shipped (2026-09-02).** R2 landed
+   triggers 1 and 2 only; a restart re-drives nothing by itself. The stranding
+   window is a refusal after a successful observer pass (`ThreadBusy` or a
+   transient activation error leaves the edge `ResultAppended`) on a thread no
+   later run touches — the result row is already in the transcript, only the
+   autonomous wake is lost. A cross-scope re-drive needs a partition-leading
+   dependency query the kernel charter does not have today; it is R4 work
+   alongside boot-recovery fairness. restart re-drives every non-closed background edge
    (`Settled`, `ResultAppended`, `AttentionScheduled`) through the same
    recovery logic as the run-start sweep — `Settled`/`ResultAppended`
    re-enter the deliver path, **including activation of parked parents**
@@ -482,9 +490,12 @@ auth gate.
 And the child-side gates: a child blocked on **its own** approval or auth
 gate has produced no terminal event, so its edge stays `Open` and nothing
 delivers — a blocking parent keeps waiting, a background parent keeps
-working. Today that block is silent from the parent's side; surfacing and
-escalating it to the parent is exactly R3 (the gate-escalation walk), and
-child gate state becomes inspectable at R5.
+working. Today that block is silent from the parent's side; R3 slice 3a
+(2026-09-02) surfaces a child's approval/auth gate to the parent's
+**human owner** as an actionable inbox item that opens the child thread
+(`run_outcome_observer.rs`, `observe_child_gate_commit`); the parent
+*model* learns of a blocked child at R5 (`subagent_inspect`), since it
+cannot act on it before R6/R8.
 
 ## 5. Decision log
 
@@ -563,7 +574,9 @@ the append-model design review.
   (authoring UX; `SubagentKindId` is already the primitive), and
   fleet-wide cross-session messaging (R6 covers the in-scope
   parent→child case). Evidence is changelog-grade — shipped-behavior
-  descriptions, not source.
+  descriptions, not source. (status, 2026-09-02: the cap did not ship with
+  R2 and is open R2 debt for its own follow-up slice — the descendant cap
+  is the only admission bound today.)
 - **D9 ◇ Not in scope**: `TurnOwner` vs `TurnThreadOwner` stay separate
   types (ownership shape vs resolution disposition); no stored counters;
   never append to `completion_observer.rs`; new files < 800 lines;
@@ -638,10 +651,10 @@ work, in order — names map to the retired shape doc's slices for continuity:
 
 | # | Work | Contents | Was |
 | --- | --- | --- | --- |
-| R2 | **Background core** | Everything in §4.3 + integration tests: per-child beat, three-trigger healing, `ThreadBusy` heal, crash-replay idempotency, the failure-injection matrix. Plus a **concurrent-running-children cap** at spawn admission (same path as the descendant cap) — Claude Code's changelog shows this cap removed and re-added under production pressure; it is D10's "active children per parent" line made real | slice 2 (reshaped: append model replaces wake-only Tasks 8–9) |
-| R3 | **Gate escalation walk** | A blocked child (approval/auth) escalates to its parent; prod-enable gate | slice 4 |
+| R2 | **Background core** | Everything in §4.3 + integration tests: per-child beat, three-trigger healing, `ThreadBusy` heal, crash-replay idempotency, the failure-injection matrix. Plus a **concurrent-running-children cap** at spawn admission (same path as the descendant cap) — Claude Code's changelog shows this cap removed and re-added under production pressure; it is D10's "active children per parent" line made real — **shipped 2026-08 except the concurrent-running-children cap (open debt, own slice) and the boot pass (moved to R4, §4.2)** | slice 2 (reshaped: append model replaces wake-only Tasks 8–9) |
+| R3 | **Gate escalation walk** | 3a: a blocked child's approval/auth gate reaches the parent's owner as an actionable inbox item opening the child thread (shipped 2026-09); 3b: verify/land the WebUI gate card on a hidden child thread opened by URL; R3 is a prerequisite of the R9 enable, not the enable itself | slice 4 |
 | R4 | **Counters, operator command, e2e revival** | `ResolveReport` counters; `ironclaw subagent edges`; un-ignore the five e2e tests via harness-side enablement; boot-recovery fairness | slice 5 |
-| R5 | **`subagent_inspect` + per-kind config** | Model-facing status/gate/byte-count metadata (never raw transcript); per-kind budget + model override. Plus the **degraded-result taxonomy**: `child_terminal_output` distinguishes clean success / partial-on-forced-cutoff / provider error — Claude Code shipped three separate fixes for children returning empty on rate-limit cutoff or fabricating success on API error; D10's lifecycle-taxonomy line | slice 6 |
+| R5 | **`subagent_inspect` + per-kind config** | Model-facing status/gate/byte-count metadata (never raw transcript); per-kind budget + model override. Plus the **degraded-result taxonomy**: `child_terminal_output` distinguishes clean success / partial-on-forced-cutoff / provider error — Claude Code shipped three separate fixes for children returning empty on rate-limit cutoff or fabricating success on API error; D10's lifecycle-taxonomy line; the parent model learns of a blocked child here | slice 6 |
 | R6 | **`subagent_extend` + human priority** | `activate(child, …, ParentAgent)` with consent-to-wake + budget window; `human_waiting` reservation marker | slice 7 |
 | R7 | **WebUI child tree** | `GET …/threads/{id}/children` lineage projection; `ThreadTree` sidebar; raw-vs-framed display rule; interrupt & take over | slice 8 |
 | R8 | **`subagent_cancel`** (security review) + **scan checkpoint** | Model-facing cancel with clean tree teardown; **budget breach halts running children through this same teardown path** (Claude Code's `--max-budget-usd` fix: denying new spawns is not enough); **re-decide D7** (drain-site scan) here, before enable | slice 9 (+ deferred slice 3) |
@@ -729,6 +742,7 @@ Things no slice may break; each is enforced or pinned today.
 | Integration scenarios (edges) | `tests/integration/subagent_await_edge.rs` (`reborn_integration_subagent_await_edge`) |
 | Disabled-capability pins | `tests/integration/tool_call.rs` |
 | E2E suite (ignored until R4) | `tests/reborn_subagent_spawn_e2e.rs` |
+| Child gate → owner inbox (R3 3a) | `crates/product/ironclaw_assistant/src/run_outcome_observer.rs` (`child_gate_run`, `observe_child_gate_commit`) |
 
 Family rules: `crates/loop/AGENTS.md` and per-crate `AGENTS.md`/`README.md`
 files govern placement; `tests/integration/AGENTS.md` governs scenario
@@ -738,27 +752,11 @@ change.
 ---
 
 
-## 9. Part II — pending work: R3 gate escalation walk
+## 9. Part II — pending work
 
-**R2 (background core) shipped as three slices (D13): the inert surface in
-PR #7788 (slice 2a); slice 2b, which makes background spawn return a receipt
-and deliver to a live parent; and slice 2c, which adds parked-parent
-activation, streak-cap deferral, the healing sweeps, and the
-failure-injection matrix — 2b and 2c both land in the slices-2b/2c PR that
-landed this paragraph.** Its implementation plan —
-receipt semantics, the durable delivery-chain state machine, the resolver's
-background tail, the run-start sweep, and the five integration scenarios
-pinning them (`tests/integration/subagent_await_edge.rs`) — is retired from
-this document; the shipped mechanism is Part I (§2, §4) and the code itself.
-
-**R3 (§6): a blocked child's own approval/auth gate escalates to its
-parent, plus the prod-enable gate that clears `builtin.spawn_subagent`'s
-deny-filter (§7's first invariant).** Today a child blocked on its own gate
-is silent from the parent's side (§4.6's closing paragraph): the edge stays
-`Open`, a blocking parent keeps waiting on its dependent-run gate, and a
-background parent keeps working with no visibility at all. R3's plan is not
-yet written — start from the §6 roadmap row, the §4.6 child-gate paragraph,
-and this document's own maintenance rule (§ "Replaces", top of file) when
-drafting it: task-by-task under `superpowers:subagent-driven-development` or
-`superpowers:executing-plans`, spec-first against Part I, pruned in turn when
-R3 ships.
+R3 slice 3a shipped (2026-09; PR number recorded at merge). Next: 3b (WebUI
+gate card on a hidden child thread opened by URL — verify first, it may
+already render), then the two R2 debts as their own slices
+(concurrent-running-children cap at spawn admission; `ThreadBusy` re-enqueue
+in `activate_parked_parent`). Plans are written here, spec-first against
+Part I, when a slice starts.
