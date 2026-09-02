@@ -7,7 +7,7 @@
 // asset bundle, so this file is never served to the browser.
 
 import assert from "node:assert/strict";
-import { beforeEach, test } from "vitest";
+import { afterEach, beforeEach, test } from "vitest";
 import {
   createMemoryStorage,
   replaceBrowserGlobal,
@@ -23,9 +23,11 @@ import {
 
 // Minimal localStorage stub. The store reads `window.localStorage` lazily, so
 // installing it on the global before the calls is enough.
+let restoreWindow: (() => void) | null = null;
+
 function installStorage() {
   const storage = createMemoryStorage();
-  replaceBrowserGlobal("window", { localStorage: storage });
+  restoreWindow = replaceBrowserGlobal("window", { localStorage: storage });
   return storage;
 }
 
@@ -34,6 +36,11 @@ beforeEach(() => {
   setAuthScope(null);
   // Reset module state between tests (the in-memory Set persists per process).
   clearAllPins();
+});
+
+afterEach(() => {
+  restoreWindow?.();
+  restoreWindow = null;
 });
 
 test("togglePin round-trips with isPinned", () => {
@@ -96,7 +103,8 @@ test("clearAllPins resets the set and removes pin keys but leaves others", () =>
 });
 
 test("storage failures are swallowed (in-memory still works)", () => {
-  replaceBrowserGlobal("window", {
+  restoreWindow?.();
+  restoreWindow = replaceBrowserGlobal("window", {
     localStorage: {
       getItem: () => {
         throw new Error("quota / private mode");

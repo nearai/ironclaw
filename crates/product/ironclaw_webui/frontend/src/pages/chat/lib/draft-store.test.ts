@@ -7,7 +7,7 @@
 // asset bundle, so this file is never served to the browser.
 
 import assert from "node:assert/strict";
-import { beforeEach, test } from "vitest";
+import { afterEach, beforeEach, test } from "vitest";
 import { setAuthScope } from "../../../lib/auth-scope";
 import {
   createMemoryStorage,
@@ -24,15 +24,22 @@ import {
 // Minimal localStorage stub — the store reads `window.localStorage` lazily
 // inside each function, so installing it on the global before the calls is
 // enough (the module never touches storage at import time).
+let restoreWindow: (() => void) | null = null;
+
 function installStorage() {
   const storage = createMemoryStorage();
-  replaceBrowserGlobal("window", { localStorage: storage });
+  restoreWindow = replaceBrowserGlobal("window", { localStorage: storage });
   return storage;
 }
 
 beforeEach(() => {
   installStorage();
   setAuthScope(null);
+});
+
+afterEach(() => {
+  restoreWindow?.();
+  restoreWindow = null;
 });
 
 test("drafts are isolated per authenticated user across a session switch", () => {
@@ -118,7 +125,8 @@ test("storage failures are swallowed (best-effort persistence)", () => {
   storage.removeItem = () => {
     throw new Error("quota / private mode");
   };
-  replaceBrowserGlobal("window", { localStorage: storage });
+  restoreWindow?.();
+  restoreWindow = replaceBrowserGlobal("window", { localStorage: storage });
   assert.doesNotThrow(() => setDraft("thread-1", "x"));
   assert.equal(getDraft("thread-1"), "");
   assert.doesNotThrow(() => clearDraft("thread-1"));

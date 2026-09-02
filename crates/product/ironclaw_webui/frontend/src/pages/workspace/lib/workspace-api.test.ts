@@ -33,12 +33,12 @@ function jsonResponse(body, status = 200) {
 
 function installFetch(handler) {
   const originalFetch = globalThis.fetch;
-  const originalSessionStorage = globalThis.sessionStorage;
-  const originalWindow = globalThis.window;
   const calls = [];
 
-  replaceBrowserGlobal("window", { location: { origin: "http://localhost" } });
-  replaceBrowserGlobal(
+  const restoreWindow = replaceBrowserGlobal("window", {
+    location: { origin: "http://localhost" },
+  });
+  const restoreSessionStorage = replaceBrowserGlobal(
     "sessionStorage",
     createMemoryStorage({ ironclaw_token: "token-1" }),
   );
@@ -51,8 +51,8 @@ function installFetch(handler) {
     calls,
     restore() {
       globalThis.fetch = originalFetch;
-      globalThis.sessionStorage = originalSessionStorage;
-      globalThis.window = originalWindow;
+      restoreSessionStorage();
+      restoreWindow();
     },
   };
 }

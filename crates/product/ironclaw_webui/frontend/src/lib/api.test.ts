@@ -30,22 +30,28 @@ import {
 } from "./api";
 
 const originalFetch = globalThis.fetch;
-const originalSessionStorage = globalThis.sessionStorage;
+const restoreBrowserGlobals: Array<() => void> = [];
 
 function installSessionToken(token: string) {
-  replaceBrowserGlobal(
-    "sessionStorage",
-    createMemoryStorage(token ? { ironclaw_token: token } : {}),
+  restoreBrowserGlobals.push(
+    replaceBrowserGlobal(
+      "sessionStorage",
+      createMemoryStorage(token ? { ironclaw_token: token } : {}),
+    ),
   );
 }
 
 function installWindowOrigin(origin: string) {
-  replaceBrowserGlobal("window", { location: { origin } });
+  restoreBrowserGlobals.push(
+    replaceBrowserGlobal("window", { location: { origin } }),
+  );
 }
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  globalThis.sessionStorage = originalSessionStorage;
+  while (restoreBrowserGlobals.length > 0) {
+    restoreBrowserGlobals.pop()?.();
+  }
 });
 
 function withCryptoGlobal(replacement, run) {
@@ -185,6 +191,7 @@ test("listThreads passes pagination and candidate-thread filters", async () => {
   const calls = [];
   const controller = new AbortController();
   installSessionToken("token-1");
+  installWindowOrigin("http://localhost");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ threads: [] }), {
@@ -484,15 +491,18 @@ test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", asy
   globalThis.URL.createObjectURL = () => {
     throw new Error("blob: URLs violate the SPA CSP img-src 'self' data:");
   };
-  replaceBrowserGlobal("FileReader", class FakeFileReader {
-    result = "";
-    onload: (() => void) | null = null;
+  const restoreFileReader = replaceBrowserGlobal(
+    "FileReader",
+    class FakeFileReader {
+      result = "";
+      onload: (() => void) | null = null;
 
-    readAsDataURL() {
-      this.result = "data:image/png;base64,AQIDBA==";
-      if (this.onload) this.onload();
-    }
-  });
+      readAsDataURL() {
+        this.result = "data:image/png;base64,AQIDBA==";
+        if (this.onload) this.onload();
+      }
+    },
+  );
 
   try {
     const url = await fetchAttachmentDataUrl(
@@ -501,6 +511,7 @@ test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", asy
     assert.ok(typeof url === "string" && url.startsWith("data:"), `expected a data URL, got ${url}`);
   } finally {
     globalThis.URL.createObjectURL = priorCreateObjectURL;
+    restoreFileReader();
   }
 });
 

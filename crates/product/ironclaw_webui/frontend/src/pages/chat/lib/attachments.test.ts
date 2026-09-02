@@ -7,7 +7,7 @@
 // carries. Everything else is pure.
 
 import assert from "node:assert/strict";
-import { beforeAll as before, test } from "vitest";
+import { afterAll as after, beforeAll as before, test } from "vitest";
 
 import { replaceBrowserGlobal } from "../../../test-support/browser-mocks";
 
@@ -21,6 +21,8 @@ import {
   toWireAttachment,
 } from "./attachments";
 
+let restoreFileReader: (() => void) | null = null;
+
 before(() => {
   class FakeFileReader {
     result: string | ArrayBuffer | null = null;
@@ -33,7 +35,12 @@ before(() => {
       });
     }
   }
-  replaceBrowserGlobal("FileReader", FakeFileReader);
+  restoreFileReader = replaceBrowserGlobal("FileReader", FakeFileReader);
+});
+
+after(() => {
+  restoreFileReader?.();
+  restoreFileReader = null;
 });
 
 // A fake `File` carrying its own data URL so the stubbed reader is
