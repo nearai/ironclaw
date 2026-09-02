@@ -1656,11 +1656,12 @@ where
         // serialize three fetches the surrounding code deliberately runs in
         // parallel. A caller that already supplied a budget is authoritative.
         //
-        // ponytail: the only provider populating `context_length` today reads
-        // a static table, so this future resolves immediately. If a provider
-        // ever makes `model_metadata()` do real I/O, promote this to a
-        // `tokio::spawn` alongside `user_profile_fetch` instead of widening
-        // the critical path.
+        // `model_metadata()` is a static, I/O-free description of the
+        // configured model by the ironclaw_llm contract (CONTRACT.md,
+        // "LlmProvider Trait" key notes), so this await resolves
+        // immediately. ponytail: if that contract is ever relaxed, promote
+        // this to a `tokio::spawn` alongside `user_profile_fetch` instead of
+        // widening the critical path.
         let run_context = if run_context.resolved_context_budget.is_some() {
             run_context
         } else {

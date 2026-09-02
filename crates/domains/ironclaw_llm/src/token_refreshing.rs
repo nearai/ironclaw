@@ -246,8 +246,11 @@ impl LlmProvider for TokenRefreshingProvider {
         self.inner.list_model_catalog().await
     }
 
+    // `model_metadata()` is a static, I/O-free description of the configured
+    // model (CONTRACT.md, "LlmProvider Trait" key notes) -- it must never
+    // touch the network or take the token-refresh lock, so no pre-emptive
+    // refresh happens here.
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        self.ensure_fresh_token().await;
         self.inner.model_metadata().await
     }
 
@@ -584,6 +587,77 @@ mod tests {
         assert_eq!(sink.deltas.lock().unwrap().as_slice(), ["partial"]);
         assert_eq!(inner.tool_calls.load(Ordering::Relaxed), 1);
         assert_eq!(inner.token_updates.load(Ordering::Relaxed), 0);
+    }
+
+    /// Binds a local TCP listener that counts connection attempts and replies
+    /// with a minimal HTTP error response so any client `send()` completes
+    /// quickly instead of hanging. Used to observe whether `refresh_tokens()`
+    /// (which POSTs to `{auth_endpoint}/oauth/token`) was ever attempted,
+    /// without a mock-HTTP dependency.
+    fn spawn_counting_auth_endpoint() -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let connections_task = connections.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                connections_task.fetch_add(1, Ordering::SeqCst);
+                use tokio::io::AsyncWriteExt;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        (format!("http://{addr}"), connections)
+    }
+
+    #[tokio::test]
+    async fn model_metadata_does_not_refresh_the_token() {
+        let dir = tempdir().unwrap();
+        let (auth_endpoint, connections) = spawn_counting_auth_endpoint();
+        let mut config = test_codex_config(dir.path().join("session.json"));
+        config.auth_endpoint = auth_endpoint;
+        let jwt = make_test_jwt("acct_test");
+        let inner = Arc::new(
+            OpenAiCodexProvider::new(&config.model, &config.api_base_url, &jwt, 300)
+                .expect("provider creation should succeed"),
+        );
+        let session = Arc::new(OpenAiCodexSessionManager::new(config).unwrap());
+        // A session that needs a refresh: expired, with a non-empty refresh
+        // token so `refresh_tokens()` would actually attempt the HTTP call
+        // rather than short-circuiting on a missing refresh token.
+        session
+            .set_session(OpenAiCodexSession {
+                access_token: make_test_jwt("acct_test"),
+                refresh_token: "refresh-token".to_string(),
+                expires_at: chrono::Utc::now() - chrono::Duration::hours(1),
+                created_at: chrono::Utc::now() - chrono::Duration::hours(2),
+            })
+            .await;
+        assert!(
+            session.needs_refresh().await,
+            "test session must report it needs a refresh"
+        );
+
+        let provider = TokenRefreshingProvider::new(inner.clone(), session);
+        let metadata = provider
+            .model_metadata()
+            .await
+            .expect("model_metadata should succeed without touching the network");
+
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            0,
+            "model_metadata() must not perform a token refresh"
+        );
+        let inner_metadata = inner.model_metadata().await.unwrap();
+        assert_eq!(metadata.id, inner_metadata.id);
+        assert_eq!(metadata.context_length, inner_metadata.context_length);
     }
 
     #[tokio::test]
