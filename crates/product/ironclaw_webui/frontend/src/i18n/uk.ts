@@ -205,7 +205,6 @@ registerPack("uk", {
   "activity.separator": ", ",
   "tool.tabDetails": "Деталі",
   "tool.tabParameters": "Параметри",
-  "tool.tabResult": "Результат",
   "tool.tabError": "Error",
   "tool.tabDeclined": "Відхилено",
   "tool.noDetail": "Без додаткових деталей.",
@@ -1401,7 +1400,6 @@ registerPack("uk", {
   "common.file": "файл",
   "chat.previewAttachment": "Переглянути {name}",
   "chat.downloadAttachment": "Завантажити {name}",
-  "tool.resultAlt": "Результат інструмента"
 });
 
 registerPack("uk", {

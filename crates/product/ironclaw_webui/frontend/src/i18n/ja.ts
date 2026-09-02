@@ -205,7 +205,6 @@ registerPack("ja", {
   "activity.separator": "、",
   "tool.tabDetails": "詳細",
   "tool.tabParameters": "パラメーター",
-  "tool.tabResult": "結果",
   "tool.tabError": "エラー",
   "tool.tabDeclined": "拒否済み",
   "tool.noDetail": "追加の詳細なし。",
@@ -1401,7 +1400,6 @@ registerPack("ja", {
   "common.file": "ファイル",
   "chat.previewAttachment": "{name} をプレビュー",
   "chat.downloadAttachment": "{name} をダウンロード",
-  "tool.resultAlt": "ツール結果"
 });
 
 registerPack("ja", {

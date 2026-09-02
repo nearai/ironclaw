@@ -205,7 +205,6 @@ registerPack("hi", {
   "activity.separator": ", ",
   "tool.tabDetails": "विवरण",
   "tool.tabParameters": "पैरामीटर्स",
-  "tool.tabResult": "परिणाम",
   "tool.tabError": "Error",
   "tool.tabDeclined": "अस्वीकृत",
   "tool.noDetail": "कोई अतिरिक्त विवरण नहीं।",
@@ -1401,7 +1400,6 @@ registerPack("hi", {
   "common.file": "फ़ाइल",
   "chat.previewAttachment": "{name} का प्रीव्यू",
   "chat.downloadAttachment": "{name} डाउनलोड करें",
-  "tool.resultAlt": "टूल परिणाम"
 });
 
 registerPack("hi", {

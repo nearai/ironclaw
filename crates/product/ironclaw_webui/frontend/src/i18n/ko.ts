@@ -205,7 +205,6 @@ registerPack("ko", {
   "activity.separator": ", ",
   "tool.tabDetails": "세부 정보",
   "tool.tabParameters": "매개 변수",
-  "tool.tabResult": "결과",
   "tool.tabError": "Error",
   "tool.tabDeclined": "거부됨",
   "tool.noDetail": "추가 세부 정보가 없습니다.",
@@ -1401,7 +1400,6 @@ registerPack("ko", {
   "common.file": "파일",
   "chat.previewAttachment": "{name} 미리보기",
   "chat.downloadAttachment": "{name} 다운로드",
-  "tool.resultAlt": "도구 결과"
 });
 
 registerPack("ko", {

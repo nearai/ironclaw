@@ -141,7 +141,6 @@ function ToolActivityCard({ activity, nested = false }) {
     toolError,
     toolDurationMs,
     toolParameters,
-    toolResultPreview,
   } = activity;
 
   const [expanded, setExpanded] = React.useState(
@@ -208,7 +207,6 @@ function ToolActivityCard({ activity, nested = false }) {
           controlsId={controlsId}
           toolDetail={toolDetail}
           toolParameters={toolParameters}
-          toolResultPreview={toolResultPreview}
           toolError={toolError}
           toolStatus={toolStatus}
           toolDurationMs={hasDuration ? toolDurationMs : null}
@@ -218,14 +216,15 @@ function ToolActivityCard({ activity, nested = false }) {
   );
 }
 
-/* Tabbed Panel — Details / Parameters / Result / Error. Only tabs that have
-   content are shown; the first available tab is selected by default (Error
-   first when present so failures surface immediately). */
+/* Tabbed Panel — Details / Parameters / Error. Only tabs that have content
+   are shown; the first available tab is selected by default (Error first
+   when present so failures surface immediately). A tool's output is never
+   presented here: the card shows what was called and with what, and the
+   durable record keeps the output for diagnostics. */
 function ToolDetailPanel({
   controlsId,
   toolDetail,
   toolParameters,
-  toolResultPreview,
   toolError,
   toolStatus,
   toolDurationMs,
@@ -241,9 +240,8 @@ function ToolDetailPanel({
     }
     if (toolDetail) next.push({ id: "details", label: t("tool.tabDetails") });
     if (toolParameters) next.push({ id: "params", label: t("tool.tabParameters") });
-    if (toolResultPreview) next.push({ id: "result", label: t("tool.tabResult") });
     return next;
-  }, [t, toolError, toolDetail, toolParameters, toolResultPreview, toolStatus]);
+  }, [t, toolError, toolDetail, toolParameters, toolStatus]);
 
   const [activeState, setActive] = React.useState(null);
   const active = activeState && tabs.some((tab) => tab.id === activeState)
@@ -303,7 +301,6 @@ function ToolDetailPanel({
         (<div className="v2-wrap-anywhere whitespace-pre-wrap text-iron-200">{toolDetail}</div>)}
         {active === "params" &&
         (<pre className={[PRE_WRAP_CLASS, "text-iron-100"].join(" ")}>{toolParameters}</pre>)}
-        {active === "result" && (<ToolResult text={toolResultPreview} />)}
         {(active === "error" || active === "declined") &&
         (<pre
           className={[
@@ -314,90 +311,4 @@ function ToolDetailPanel({
       </div>
     </div>
   );
-}
-
-/* Rich tool-result rendering: inline image for data URLs, a table for arrays
-   of flat objects, pretty-printed JSON for other structured payloads, and a
-   plain preformatted block otherwise. */
-function ToolResult({ text }) {
-  const t = useT();
-  const value = typeof text === "string" ? text.trim() : "";
-
-  if (/^data:image\/(?:png|jpe?g|gif|webp|bmp);/i.test(value)) {
-    return (<img
-      src={value}
-      alt={t("tool.resultAlt")}
-      className="max-h-72 max-w-full rounded-lg border border-iron-700 object-contain"
-    />);
-  }
-
-  let parsed;
-  if ((value.startsWith("{") || value.startsWith("[")) && value.length < 200000) {
-    try {
-      parsed = JSON.parse(value);
-    } catch {
-      parsed = undefined;
-    }
-  }
-
-  if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(isFlatRow)) {
-    const columns = Array.from(
-      parsed.reduce((set, row) => {
-        Object.keys(row).forEach((k) => set.add(k));
-        return set;
-      }, new Set())
-    );
-    return (
-      <div className="max-w-full overflow-x-auto rounded border border-iron-700/60">
-        <table className="w-full border-collapse text-left font-mono text-[11px]">
-          <thead>
-            <tr>
-              {columns.map(
-                (col) => (<th
-                  key={col}
-                  className="border-b border-iron-700/60 bg-iron-900 px-2 py-1 font-semibold text-iron-100"
-                >{col}</th>)
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {parsed.map(
-              (row, i) => (<tr key={i}>
-                {columns.map(
-                  (col) => (<td
-                    key={col}
-                    className="border-b border-iron-700/40 px-2 py-1 text-iron-200"
-                  >{formatCell(row[col])}</td>)
-                )}
-              </tr>)
-            )}
-          </tbody>
-        </table>
-      </div>
-    );
-  }
-
-  if (parsed !== undefined && typeof parsed === "object") {
-    return (<pre
-      className={[PRE_WRAP_CLASS, "text-[var(--v2-positive-text)]"].join(" ")}
-    >{JSON.stringify(parsed, null, 2)}</pre>);
-  }
-
-  return (<pre
-    className={[PRE_WRAP_CLASS, "text-[var(--v2-positive-text)]"].join(" ")}
-  >{text}</pre>);
-}
-
-function isFlatRow(row) {
-  return (
-    row &&
-    typeof row === "object" &&
-    !Array.isArray(row) &&
-    Object.values(row).every((v) => v === null || typeof v !== "object")
-  );
-}
-
-function formatCell(value) {
-  if (value === null || value === undefined) return "";
-  return String(value);
 }

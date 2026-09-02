@@ -205,7 +205,6 @@ registerPack("zh-CN", {
   "activity.separator": "、",
   "tool.tabDetails": "详情",
   "tool.tabParameters": "参数",
-  "tool.tabResult": "结果",
   "tool.tabError": "错误",
   "tool.tabDeclined": "已拒绝",
   "tool.noDetail": "无附加详情。",
@@ -1400,7 +1399,6 @@ registerPack("zh-CN", {
   "common.file": "文件",
   "chat.previewAttachment": "预览 {name}",
   "chat.downloadAttachment": "下载 {name}",
-  "tool.resultAlt": "工具结果"
 });
 
 registerPack("zh-CN", {

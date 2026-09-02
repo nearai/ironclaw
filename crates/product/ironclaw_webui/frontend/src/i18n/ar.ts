@@ -205,7 +205,6 @@ registerPack("ar", {
   "activity.separator": "، ",
   "tool.tabDetails": "التفاصيل",
   "tool.tabParameters": "المعلمات",
-  "tool.tabResult": "النتيجة",
   "tool.tabError": "خطأ",
   "tool.tabDeclined": "مرفوض",
   "tool.noDetail": "لا توجد تفاصيل إضافية.",
@@ -1401,7 +1400,6 @@ registerPack("ar", {
   "common.file": "ملف",
   "chat.previewAttachment": "معاينة {name}",
   "chat.downloadAttachment": "تنزيل {name}",
-  "tool.resultAlt": "نتيجة الأداة"
 });
 
 registerPack("ar", {

@@ -205,7 +205,6 @@ registerPack("pt-BR", {
   "activity.separator": ", ",
   "tool.tabDetails": "Detalhes",
   "tool.tabParameters": "Parâmetros",
-  "tool.tabResult": "Resultado",
   "tool.tabError": "Error",
   "tool.tabDeclined": "Recusado",
   "tool.noDetail": "Sem detalhes adicionais.",
@@ -1401,7 +1400,6 @@ registerPack("pt-BR", {
   "common.file": "arquivo",
   "chat.previewAttachment": "Visualizar {name}",
   "chat.downloadAttachment": "Baixar {name}",
-  "tool.resultAlt": "Resultado da ferramenta"
 });
 
 registerPack("pt-BR", {
