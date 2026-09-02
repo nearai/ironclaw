@@ -59,7 +59,7 @@ export const Placeholder: Story = { args: { initialValue: "", placeholder: "Sele
 export const Selecting: Story = {
   // The listbox open/close + selection is the behavior worth proving.
   play: async ({ canvas, userEvent }) => {
-    const trigger = canvas.getByRole("button", { name: /model provider/i });
+    const trigger = canvas.getByRole("combobox", { name: /model provider/i });
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(trigger);
     await expect(trigger).toHaveAttribute("aria-expanded", "true");
