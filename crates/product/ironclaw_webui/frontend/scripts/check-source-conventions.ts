@@ -16,6 +16,10 @@ const JAVASCRIPT_FAMILY_EXTENSIONS = new Set([
 ]);
 const TYPESCRIPT_EXTENSIONS = new Set([".ts", ".tsx"]);
 const EXPLICIT_RELATIVE_EXTENSION = /\.(?:[cm]?[jt]sx?)(?:[?#].*)?$/i;
+const SINGLE_LINE_CHECK_PRAGMA =
+  /^\/\/\/?\s*@(ts-check|ts-nocheck)(?:(?:[^\S\r\n]|:).*)?$/i;
+const SINGLE_LINE_IGNORE_DIRECTIVE = /^\/\/\/?\s*@ts-ignore/;
+const MULTI_LINE_IGNORE_DIRECTIVE = /^(?:\/|\*)*\s*@ts-ignore/;
 
 export type ConventionViolationKind =
   | "explicit-relative-extension"
@@ -86,6 +90,41 @@ function compareViolations(left: ConventionViolation, right: ConventionViolation
   );
 }
 
+function effectiveNocheckPosition(sourceText: string): number | undefined {
+  let position: number | undefined;
+  for (const range of ts.getLeadingCommentRanges(sourceText, 0) ?? []) {
+    if (range.kind !== ts.SyntaxKind.SingleLineCommentTrivia) continue;
+    const comment = sourceText.slice(range.pos, range.end);
+    const match = SINGLE_LINE_CHECK_PRAGMA.exec(comment);
+    if (!match) continue;
+    position =
+      match[1].toLowerCase() === "ts-nocheck"
+        ? range.pos + comment.indexOf("@")
+        : undefined;
+  }
+  return position;
+}
+
+function effectiveIgnoreOffset(
+  comment: string,
+  token: ts.SyntaxKind,
+): number | undefined {
+  if (token === ts.SyntaxKind.SingleLineCommentTrivia) {
+    return SINGLE_LINE_IGNORE_DIRECTIVE.test(comment)
+      ? comment.indexOf("@")
+      : undefined;
+  }
+
+  const lastLineStart = Math.max(
+    comment.lastIndexOf("\n"),
+    comment.lastIndexOf("\r"),
+  ) + 1;
+  const lastLine = comment.slice(lastLineStart);
+  return MULTI_LINE_IGNORE_DIRECTIVE.test(lastLine)
+    ? lastLineStart + lastLine.indexOf("@")
+    : undefined;
+}
+
 function checkTypeScriptSuppressions(
   filePath: string,
   sourceFile: ts.SourceFile,
@@ -94,13 +133,23 @@ function checkTypeScriptSuppressions(
   seenLegacyTsNocheckFiles?: Set<string>,
 ): ConventionViolation[] {
   const violations: ConventionViolation[] = [];
+  const nocheckPosition = effectiveNocheckPosition(sourceText);
+  if (nocheckPosition !== undefined) {
+    const line =
+      sourceFile.getLineAndCharacterOfPosition(nocheckPosition).line + 1;
+    if (legacyTsNocheckFiles.has(filePath)) {
+      seenLegacyTsNocheckFiles?.add(filePath);
+    } else {
+      violations.push({ file: filePath, kind: "unbaselined-ts-nocheck", line });
+    }
+  }
+
   const scanner = ts.createScanner(
     ts.ScriptTarget.Latest,
     false,
     sourceFile.languageVariant,
     sourceText,
   );
-  let remainingLegacyNocheck = legacyTsNocheckFiles.has(filePath) ? 1 : 0;
 
   for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
     if (
@@ -111,19 +160,11 @@ function checkTypeScriptSuppressions(
     }
 
     const comment = scanner.getTokenText();
-    const directivePattern = /@ts-(nocheck|ignore)\b/g;
-    for (const match of comment.matchAll(directivePattern)) {
-      const position = scanner.getTokenPos() + (match.index ?? 0);
-      const line = sourceFile.getLineAndCharacterOfPosition(position).line + 1;
-      if (match[1] === "ignore") {
-        violations.push({ file: filePath, kind: "prohibited-ts-ignore", line });
-      } else if (remainingLegacyNocheck > 0) {
-        remainingLegacyNocheck -= 1;
-        seenLegacyTsNocheckFiles?.add(filePath);
-      } else {
-        violations.push({ file: filePath, kind: "unbaselined-ts-nocheck", line });
-      }
-    }
+    const ignoreOffset = effectiveIgnoreOffset(comment, token);
+    if (ignoreOffset === undefined) continue;
+    const position = scanner.getTokenPos() + ignoreOffset;
+    const line = sourceFile.getLineAndCharacterOfPosition(position).line + 1;
+    violations.push({ file: filePath, kind: "prohibited-ts-ignore", line });
   }
 
   return violations;

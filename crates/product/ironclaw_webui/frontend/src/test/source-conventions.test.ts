@@ -95,7 +95,7 @@ test("rejects unbaselined TypeScript suppression directives without blocking exp
   );
 });
 
-test("allows one legacy nocheck only in its baselined file", () => {
+test("allows an effective legacy nocheck only in its baselined file", () => {
   const baseline = new Set(["legacy.ts"]);
 
   assert.deepEqual(checkSourceFile("legacy.ts", "// @ts-nocheck\nexport {};\n", baseline), []);
@@ -104,11 +104,11 @@ test("allows one legacy nocheck only in its baselined file", () => {
       "legacy.ts",
       "/* @ts-nocheck */\n// @ts-nocheck\nexport {};\n",
       baseline,
-    ).map(({ kind, line }) => ({ kind, line })),
-    [{ kind: "unbaselined-ts-nocheck", line: 2 }],
+    ),
+    [],
   );
   assert.deepEqual(
-    checkSourceFile("new.ts", "/* @ts-nocheck */\nexport {};\n", baseline).map(
+    checkSourceFile("new.ts", "// @ts-nocheck\nexport {};\n", baseline).map(
       ({ kind, line }) => ({ kind, line }),
     ),
     [{ kind: "unbaselined-ts-nocheck", line: 1 }],
@@ -120,6 +120,25 @@ test("does not treat suppression text inside strings as a directive", () => {
     checkSourceFile(
       "feature.ts",
       'const documentation = "Do not add // @ts-ignore or // @ts-nocheck";\n',
+    ),
+    [],
+  );
+});
+
+test("matches only suppression directives that TypeScript applies", () => {
+  const source = [
+    "// docs: @ts-nocheck",
+    "// @ts-nocheck-disabled",
+    "/* @ts-nocheck */",
+    "const trailing = 1; // @ts-nocheck",
+    "// docs: @ts-ignore",
+  ].join("\n");
+
+  assert.deepEqual(checkSourceFile("feature.ts", source), []);
+  assert.deepEqual(
+    checkSourceFile(
+      "checked.ts",
+      "// @ts-nocheck\n// @ts-check\nconst value: string = 1;\n",
     ),
     [],
   );
@@ -153,7 +172,10 @@ test("recursively scans source trees and reports stable relative paths", () => {
 test("rejects stale nocheck baseline entries", () => {
   const root = mkdtempSync(join(tmpdir(), "ironclaw-source-conventions-"));
   temporaryRoots.push(root);
-  writeFileSync(join(root, "cleaned-up.ts"), "export {};\n");
+  writeFileSync(
+    join(root, "cleaned-up.ts"),
+    "// docs: @ts-nocheck\nexport {};\n",
+  );
 
   const violations = checkSourceTree(
     root,
