@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Boot-time service-worker registration, isolated from the device-push
 // enrollment lib on purpose. `main.tsx` calls this on every startup, so it
 // must stay dependency-free — pulling in the enrollment machinery

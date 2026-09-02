@@ -18,8 +18,11 @@ corepack pnpm build
 `corepack pnpm lint` enforces the authored-source conventions before running
 the TypeScript typecheck: modules under `src/` use `.ts`/`.tsx`, relative module
 imports are extensionless, and React markup does not use legacy `html\`...\``
-tagged templates. Explicit filenames passed to file APIs such as `new URL(...)`
-and generated JavaScript asset names are outside this module-import rule.
+tagged templates. It also rejects `@ts-ignore` and limits `@ts-nocheck` to the
+shrinking legacy allowlist in `scripts/ts-nocheck-baseline.txt`; intentional
+`@ts-expect-error` assertions remain valid. Explicit filenames passed to file
+APIs such as `new URL(...)` and generated JavaScript asset names are outside
+the module-import rule.
 
 `corepack pnpm build` runs Vite and writes ignored preview output to
 `frontend/dist/`. Cargo does not embed that local preview directory.

@@ -75,20 +75,73 @@ test("allows TypeScript modules and non-module literal filenames", () => {
   assert.deepEqual(checkSourceFile("styles.css", "@layer base {}\n"), []);
 });
 
+test("rejects unbaselined TypeScript suppression directives without blocking expect-error tests", () => {
+  const violations = checkSourceFile(
+    "feature.ts",
+    [
+      "// @ts-nocheck",
+      "const ignored = 1; // @ts-ignore",
+      "// @ts-expect-error intentional negative type assertion",
+      'const value: string = 1;',
+    ].join("\n"),
+  );
+
+  assert.deepEqual(
+    violations.map(({ kind, line }) => ({ kind, line })),
+    [
+      { kind: "unbaselined-ts-nocheck", line: 1 },
+      { kind: "prohibited-ts-ignore", line: 2 },
+    ],
+  );
+});
+
+test("allows one legacy nocheck only in its baselined file", () => {
+  const baseline = new Set(["legacy.ts"]);
+
+  assert.deepEqual(checkSourceFile("legacy.ts", "// @ts-nocheck\nexport {};\n", baseline), []);
+  assert.deepEqual(
+    checkSourceFile(
+      "legacy.ts",
+      "/* @ts-nocheck */\n// @ts-nocheck\nexport {};\n",
+      baseline,
+    ).map(({ kind, line }) => ({ kind, line })),
+    [{ kind: "unbaselined-ts-nocheck", line: 2 }],
+  );
+  assert.deepEqual(
+    checkSourceFile("new.ts", "/* @ts-nocheck */\nexport {};\n", baseline).map(
+      ({ kind, line }) => ({ kind, line }),
+    ),
+    [{ kind: "unbaselined-ts-nocheck", line: 1 }],
+  );
+});
+
+test("does not treat suppression text inside strings as a directive", () => {
+  assert.deepEqual(
+    checkSourceFile(
+      "feature.ts",
+      'const documentation = "Do not add // @ts-ignore or // @ts-nocheck";\n',
+    ),
+    [],
+  );
+});
+
 test("recursively scans source trees and reports stable relative paths", () => {
   const root = mkdtempSync(join(tmpdir(), "ironclaw-source-conventions-"));
   temporaryRoots.push(root);
   mkdirSync(join(root, "nested"));
+  writeFileSync(join(root, "legacy.ts"), "// @ts-nocheck\nexport {};\n");
   writeFileSync(join(root, "nested", "legacy.js"), 'import "./other.ts";\n');
+  writeFileSync(join(root, "nested", "new-suppression.ts"), "// @ts-nocheck\nexport {};\n");
   writeFileSync(join(root, "valid.ts"), 'import "./valid";\n');
 
-  const violations = checkSourceTree(root);
+  const violations = checkSourceTree(root, new Set(["legacy.ts"]));
 
   assert.deepEqual(
     violations.map(({ file, kind, line }) => ({ file, kind, line })),
     [
       { file: "nested/legacy.js", kind: "explicit-relative-extension", line: 1 },
       { file: "nested/legacy.js", kind: "invalid-module-extension", line: 1 },
+      { file: "nested/new-suppression.ts", kind: "unbaselined-ts-nocheck", line: 1 },
     ],
   );
   assert.equal(

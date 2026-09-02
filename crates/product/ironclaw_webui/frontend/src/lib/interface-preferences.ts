@@ -1,4 +1,3 @@
-// @ts-nocheck
 import React from "react";
 
 // `ironclaw:v2-*` is the WebUI v2 browser-local preference namespace.

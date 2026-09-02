@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { apiFetch } from "./api";
 import { channelSetupError } from "./channel-setup-api";
 

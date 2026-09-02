@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Shared helpers for the generic extension-setup API modules: sanitized
 // error extraction and optional-field normalization. The per-channel
 // setup/pairing modules these once served are gone — the unified channel

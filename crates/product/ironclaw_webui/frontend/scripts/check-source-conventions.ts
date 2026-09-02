@@ -20,7 +20,9 @@ const EXPLICIT_RELATIVE_EXTENSION = /\.(?:[cm]?[jt]sx?)(?:[?#].*)?$/i;
 export type ConventionViolationKind =
   | "explicit-relative-extension"
   | "html-tagged-template"
-  | "invalid-module-extension";
+  | "invalid-module-extension"
+  | "prohibited-ts-ignore"
+  | "unbaselined-ts-nocheck";
 
 export type ConventionViolation = {
   file: string;
@@ -83,7 +85,52 @@ function compareViolations(left: ConventionViolation, right: ConventionViolation
   );
 }
 
-export function checkSourceFile(filePath: string, sourceText: string): ConventionViolation[] {
+function checkTypeScriptSuppressions(
+  filePath: string,
+  sourceFile: ts.SourceFile,
+  sourceText: string,
+  legacyTsNocheckFiles: ReadonlySet<string>,
+): ConventionViolation[] {
+  const violations: ConventionViolation[] = [];
+  const scanner = ts.createScanner(
+    ts.ScriptTarget.Latest,
+    false,
+    sourceFile.languageVariant,
+    sourceText,
+  );
+  let remainingLegacyNocheck = legacyTsNocheckFiles.has(filePath) ? 1 : 0;
+
+  for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+    if (
+      token !== ts.SyntaxKind.SingleLineCommentTrivia &&
+      token !== ts.SyntaxKind.MultiLineCommentTrivia
+    ) {
+      continue;
+    }
+
+    const comment = scanner.getTokenText();
+    const directivePattern = /@ts-(nocheck|ignore)\b/g;
+    for (const match of comment.matchAll(directivePattern)) {
+      const position = scanner.getTokenPos() + (match.index ?? 0);
+      const line = sourceFile.getLineAndCharacterOfPosition(position).line + 1;
+      if (match[1] === "ignore") {
+        violations.push({ file: filePath, kind: "prohibited-ts-ignore", line });
+      } else if (remainingLegacyNocheck > 0) {
+        remainingLegacyNocheck -= 1;
+      } else {
+        violations.push({ file: filePath, kind: "unbaselined-ts-nocheck", line });
+      }
+    }
+  }
+
+  return violations;
+}
+
+export function checkSourceFile(
+  filePath: string,
+  sourceText: string,
+  legacyTsNocheckFiles: ReadonlySet<string> = new Set(),
+): ConventionViolation[] {
   const extension = extname(filePath).toLowerCase();
   if (!JAVASCRIPT_FAMILY_EXTENSIONS.has(extension)) return [];
 
@@ -98,6 +145,9 @@ export function checkSourceFile(filePath: string, sourceText: string): Conventio
     ts.ScriptTarget.Latest,
     true,
     scriptKindForExtension(extension),
+  );
+  violations.push(
+    ...checkTypeScriptSuppressions(filePath, sourceFile, sourceText, legacyTsNocheckFiles),
   );
 
   function visit(node: ts.Node): void {
@@ -144,11 +194,14 @@ function sourceFilesUnder(root: string): string[] {
   return files.sort();
 }
 
-export function checkSourceTree(sourceRoot: string): ConventionViolation[] {
+export function checkSourceTree(
+  sourceRoot: string,
+  legacyTsNocheckFiles: ReadonlySet<string> = new Set(),
+): ConventionViolation[] {
   const root = resolve(sourceRoot);
   const violations = sourceFilesUnder(root).flatMap((absolutePath) => {
     const file = relative(root, absolutePath).split(sep).join("/");
-    return checkSourceFile(file, readFileSync(absolutePath, "utf8"));
+    return checkSourceFile(file, readFileSync(absolutePath, "utf8"), legacyTsNocheckFiles);
   });
   return violations.sort(compareViolations);
 }
@@ -157,6 +210,9 @@ const VIOLATION_MESSAGES: Record<ConventionViolationKind, string> = {
   "explicit-relative-extension": "relative module imports must be extensionless",
   "html-tagged-template": "React markup must use JSX instead of html tagged templates",
   "invalid-module-extension": "authored modules must use .ts or .tsx",
+  "prohibited-ts-ignore":
+    "@ts-ignore is prohibited; fix the type error or use a justified @ts-expect-error",
+  "unbaselined-ts-nocheck": "@ts-nocheck is not in the legacy suppression baseline",
 };
 
 export function formatViolation(violation: ConventionViolation): string {
@@ -166,7 +222,14 @@ export function formatViolation(violation: ConventionViolation): string {
 function runCli(): void {
   const scriptDirectory = dirname(fileURLToPath(import.meta.url));
   const sourceRoot = resolve(scriptDirectory, "../src");
-  const violations = checkSourceTree(sourceRoot);
+  const baselinePath = resolve(scriptDirectory, "ts-nocheck-baseline.txt");
+  const legacyTsNocheckFiles = new Set(
+    readFileSync(baselinePath, "utf8")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean),
+  );
+  const violations = checkSourceTree(sourceRoot, legacyTsNocheckFiles);
   if (violations.length === 0) return;
 
   for (const violation of violations) {

@@ -1,4 +1,3 @@
-// @ts-nocheck
 
 const PRESENTATION = {
   approval_required: { icon: "shield", key: "approval" },
