@@ -1335,8 +1335,14 @@ const STREAM_COALESCE_MAX_DELTAS: u32 = 64;
 // 2 KiB of new text: caps the amount of re-sanitized/re-sent text per UI
 // update independent of chunk count (some providers send few, large chunks).
 const STREAM_COALESCE_MAX_BYTES: usize = 2048;
-// 100 ms: caps perceived staleness of streamed text in the UI even while a
-// provider is sending many small chunks below the size/count thresholds.
+// 100 ms: while deltas keep arriving, caps perceived staleness of streamed
+// text in the UI even for many small chunks below the size/count
+// thresholds. This bound is evaluated only on delta arrival — there is no
+// background timer — so it does not fire during a mid-stream provider
+// pause; a pause between deltas can leave up to STREAM_COALESCE_MAX_BYTES
+// of already-received text unemitted until the provider sends its next
+// delta (which re-checks the elapsed time) or the streaming call returns
+// and `flush()` runs.
 const STREAM_COALESCE_MAX_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 struct ProviderStreamSinkState {
@@ -1405,7 +1411,9 @@ impl CompletionStreamSink for ProviderStreamSink {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+            let is_first_delta_after_replacement =
+                self.replace_on_next_delta.swap(false, Ordering::SeqCst);
+            if is_first_delta_after_replacement {
                 guard.accumulated_text.clear();
                 guard.pending_deltas = 0;
                 guard.pending_bytes = 0;
@@ -1413,7 +1421,13 @@ impl CompletionStreamSink for ProviderStreamSink {
             guard.accumulated_text.push_str(&delta);
             guard.pending_deltas = guard.pending_deltas.saturating_add(1);
             guard.pending_bytes = guard.pending_bytes.saturating_add(delta.len());
-            let should_emit = guard.pending_deltas >= STREAM_COALESCE_MAX_DELTAS
+            // The first delta of a retry/failover replacement must emit
+            // immediately, bypassing the coalescing window: the UI is still
+            // showing the previous (failed) attempt's stale text, and
+            // buffering the swap for up to 64 deltas / 2 KiB / 100 ms would
+            // leave that stale text visible for the whole window.
+            let should_emit = is_first_delta_after_replacement
+                || guard.pending_deltas >= STREAM_COALESCE_MAX_DELTAS
                 || guard.pending_bytes >= STREAM_COALESCE_MAX_BYTES
                 || guard.last_emit.elapsed() >= STREAM_COALESCE_MAX_INTERVAL;
             if should_emit {
@@ -3066,33 +3080,31 @@ mod tests {
 
     #[tokio::test]
     async fn provider_stream_sink_replaces_partial_attempt_on_first_new_delta() {
-        // Each `text_delta` is followed by an explicit `flush()` — the same
-        // call `complete_model_request` makes once the provider's streaming
-        // call returns — so this test observes the same per-delta ordering
-        // and content it did before coalescing, without depending on the
-        // coalescing thresholds (64 deltas / 2 KiB / 100 ms) never firing.
+        // Retry/failover semantics: `replace_on_next_text_delta` must not
+        // wait for the coalescing window. The UI is still showing the
+        // previous (failed) attempt's stale text, so the new attempt's
+        // first delta must swap it out immediately — exactly as every delta
+        // did before coalescing existed.
         let inner = Arc::new(RecordingSafeTextSink::default());
         let sink = ProviderStreamSink::new(inner.clone());
 
-        sink.text_delta("partial".to_string()).await;
-        sink.flush().await;
-        sink.replace_on_next_text_delta().await;
-
-        // Replacement is deferred so the UI keeps showing the old draft while
-        // the provider retry is waiting for its first byte.
-        assert_eq!(
+        // Two deltas, neither crossing the 64-delta / 2 KiB / 100 ms
+        // coalescing thresholds, and no `flush()` in between — this is the
+        // real production access pattern: `complete_model_request` only
+        // calls `flush()` once, after the whole provider call returns.
+        sink.text_delta("partial one ".to_string()).await;
+        sink.text_delta("partial two".to_string()).await;
+        assert!(
             inner
                 .updates
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_slice(),
-            ["partial"]
+                .is_empty(),
+            "buffered deltas below the coalescing thresholds must not reach the sink yet"
         );
 
-        sink.text_delta("Hel".to_string()).await;
-        sink.flush().await;
-        sink.text_delta("lo".to_string()).await;
-        sink.flush().await;
+        sink.replace_on_next_text_delta().await;
+        sink.text_delta("Hello".to_string()).await;
 
         assert_eq!(
             inner
@@ -3100,7 +3112,9 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .as_slice(),
-            ["partial", "Hel", "Hello"]
+            ["Hello"],
+            "the first delta after a replacement must emit immediately with the \
+             previous attempt's buffered text discarded, with no flush() call"
         );
     }
 
