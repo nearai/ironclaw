@@ -370,27 +370,37 @@ impl DeliveryCoordinator {
         run_id: TurnRunId,
         timeout: Duration,
     ) -> bool {
+        let key = RunKey::new(scope, run_id);
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            match self.list_reply_publications(scope.clone(), run_id).await {
-                Ok(records) if records.iter().all(|r| !r.publication.status.is_active()) => {
-                    return true;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::debug!(
-                        target: "ironclaw::reborn::reply_publication",
-                        %run_id,
-                        %error,
-                        "could not read the run's publications while waiting for settlement"
-                    );
-                    return false;
+            // A worker on this process settles the row and then forgets its
+            // target: while one is live, watch it here instead of scanning
+            // the thread's rows every tick. The store is the only truth once
+            // no local worker remains (settled here, or owned by another node).
+            let local_worker = self
+                .started_reply_publication()
+                .is_some_and(|publication| publication.has_live_targets(&key));
+            if !local_worker {
+                match self.list_reply_publications(scope.clone(), run_id).await {
+                    Ok(records) if records.iter().all(|r| !r.publication.status.is_active()) => {
+                        return true;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::debug!(
+                            target: "ironclaw::reborn::reply_publication",
+                            %run_id,
+                            %error,
+                            "could not read the run's publications while waiting for settlement"
+                        );
+                        return false;
+                    }
                 }
             }
             if tokio::time::Instant::now() >= deadline {
                 return false;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(Duration::from_millis(if local_worker { 25 } else { 100 })).await;
         }
     }
 
@@ -604,6 +614,13 @@ impl ReplyPublication {
         self.targets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether this process still runs a worker for any of the run's targets.
+    fn has_live_targets(&self, key: &RunKey) -> bool {
+        self.lock_targets()
+            .get(key)
+            .is_some_and(|targets| !targets.is_empty())
     }
 
     fn wake_run(&self, key: &RunKey) {

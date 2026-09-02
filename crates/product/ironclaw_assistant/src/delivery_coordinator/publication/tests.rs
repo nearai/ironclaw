@@ -282,12 +282,28 @@ fn harness_over_files(
     settings: ReplyPublicationSettings,
     project_filesystem: Arc<dyn crate::ProjectFilesystemReader>,
 ) -> Harness {
+    harness_over_store(
+        label,
+        transport,
+        session_channel,
+        settings,
+        project_filesystem,
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store()),
+    )
+}
+
+fn harness_over_store(
+    label: &str,
+    transport: ReplyTransport,
+    session_channel: Option<&str>,
+    settings: ReplyPublicationSettings,
+    project_filesystem: Arc<dyn crate::ProjectFilesystemReader>,
+    store: Arc<dyn OutboundStateStorePort>,
+) -> Harness {
     let tenant_id = TenantId::new(format!("{label}-tenant")).unwrap();
     let agent_id = AgentId::new(format!("{label}-agent")).unwrap();
     let thread_id = ThreadId::new(format!("{label}-thread")).unwrap();
     let user_id = UserId::new(format!("{label}-user")).unwrap();
-    let store: Arc<dyn OutboundStateStorePort> =
-        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let sink = Arc::new(RecordingReplySink::new(label));
     let resolver = Arc::new(SinkResolver {
         sink: Arc::clone(&sink),

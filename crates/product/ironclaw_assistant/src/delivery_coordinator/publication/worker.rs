@@ -55,6 +55,10 @@ struct Published {
     finalized: bool,
     has_text: bool,
     at: Option<tokio::time::Instant>,
+    /// The store's published revision as this worker last saw it — `None`
+    /// until the first row read. Every wake is planned against this mirror;
+    /// the row itself is read only when a reconcile is due.
+    revision: Option<u64>,
 }
 
 pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<TargetState>) {
@@ -81,31 +85,34 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
             target.wake.notified().await;
             continue;
         }
-        // 2. Published state.
-        let record = match coordinator
-            .load_reply_publication(run_key.scope.clone(), target.delivery_id)
-            .await
-        {
-            Ok(Some(record)) => record,
-            Ok(None) => {
-                tracing::debug!(target: LOG_TARGET, delivery_id = %target.delivery_id, "reply publication row vanished; worker exits");
-                return;
-            }
-            Err(error) => {
-                tracing::debug!(target: LOG_TARGET, %error, "reply publication load failed; retrying");
-                tokio::time::sleep(publication.settings.retry_backoff).await;
-                continue;
-            }
-        };
-        if !record.publication.status.is_active() {
-            return;
-        }
+        // 2. Published state — from the local mirror. Every streamed token
+        // wakes this loop and most wakes end inside the pacing window or on a
+        // transport that only hears the terminal, so the row is read only
+        // once a reconcile is actually due (step 3b); the first pass seeds
+        // the mirror from the store.
         let terminal = snapshot.document.is_terminal();
-        let behind = snapshot.revision > record.publication.published_revision;
+        let published_revision = match published.revision {
+            Some(revision) => revision,
+            None => match load_row(&coordinator, &run_key, &target).await {
+                Ok(record) => {
+                    if !record.publication.status.is_active() {
+                        return;
+                    }
+                    published.revision = Some(record.publication.published_revision);
+                    record.publication.published_revision
+                }
+                Err(LoadFailure::Vanished) => return,
+                Err(LoadFailure::Retry) => {
+                    tokio::time::sleep(publication.settings.retry_backoff).await;
+                    continue;
+                }
+            },
+        };
+        let behind = snapshot.revision > published_revision;
         let mut heartbeat = false;
         if !behind {
             let can_heartbeat = !terminal
-                && record.publication.published_revision > 0
+                && published_revision > 0
                 && target
                     .transport
                     .reconciles_at(ReplyReconcilePoint::Heartbeat);
@@ -133,7 +140,7 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
         let point = if heartbeat {
             ReplyReconcilePoint::Heartbeat
         } else {
-            reconcile_point(&snapshot, &record, &published, terminal)
+            reconcile_point(&snapshot, published_revision, &published, terminal)
         };
         if !target.transport.reconciles_at(point) {
             // A `message` channel waits for the terminal revision.
@@ -204,6 +211,24 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
             }
             continue;
         }
+        // 3b. The row, read now that a reconcile is due. A published
+        // revision the mirror did not know about means another owner moved
+        // this publication: re-plan against the fresh row.
+        let record = match load_row(&coordinator, &run_key, &target).await {
+            Ok(record) => record,
+            Err(LoadFailure::Vanished) => return,
+            Err(LoadFailure::Retry) => {
+                tokio::time::sleep(publication.settings.retry_backoff).await;
+                continue;
+            }
+        };
+        if !record.publication.status.is_active() {
+            return;
+        }
+        if record.publication.published_revision != published_revision {
+            published.revision = Some(record.publication.published_revision);
+            continue;
+        }
         // 4. Own the publication — the atomic claim immediately before
         // provider egress. Re-entry doubles as the heartbeat. Failure paths
         // discovered during preparation also settle under this claim.
@@ -220,6 +245,7 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
                 if claimed.publication.published_revision != record.publication.published_revision {
                     // Another owner advanced this publication between the
                     // load and the claim; re-plan against the fresh row.
+                    published.revision = Some(claimed.publication.published_revision);
                     continue;
                 }
                 claimed
@@ -324,6 +350,35 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
         match step {
             LoopStep::Continue => {}
             LoopStep::Exit => return,
+        }
+    }
+}
+
+/// Why one row read gave the worker nothing to plan against.
+enum LoadFailure {
+    /// The row is gone; the worker exits.
+    Vanished,
+    /// A transient store failure; retry after the backoff.
+    Retry,
+}
+
+async fn load_row(
+    coordinator: &Arc<DeliveryCoordinator>,
+    run_key: &RunKey,
+    target: &TargetState,
+) -> Result<ReplyPublicationRecord, LoadFailure> {
+    match coordinator
+        .load_reply_publication(run_key.scope.clone(), target.delivery_id)
+        .await
+    {
+        Ok(Some(record)) => Ok(record),
+        Ok(None) => {
+            tracing::debug!(target: LOG_TARGET, delivery_id = %target.delivery_id, "reply publication row vanished; worker exits");
+            Err(LoadFailure::Vanished)
+        }
+        Err(error) => {
+            tracing::debug!(target: LOG_TARGET, %error, "reply publication load failed; retrying");
+            Err(LoadFailure::Retry)
         }
     }
 }
@@ -433,6 +488,7 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
             published.finalized = snapshot.document.answer.finalized;
             published.has_text = !snapshot.document.answer.text.as_str().is_empty();
             published.at = Some(tokio::time::Instant::now());
+            published.revision = Some(snapshot.revision);
             *attempts = 0;
             if terminal {
                 settle(
@@ -710,14 +766,21 @@ async fn reconcile(
         extension_generation: generation,
         materialized_attachments,
     };
-    // The lease was claimed immediately before this call; clamping the sink
-    // timeout to the lease TTL guarantees the claim outlives the provider
-    // operation, so lease expiry can never produce two simultaneous
-    // provider calls.
-    let timeout = publication
-        .settings
-        .reconcile_timeout
-        .min(publication.settings.lease_ttl);
+    // The sink call is bounded by what is LEFT of the claim — the desired
+    // revision write between the claim and this call consumed lease time —
+    // so the claim always outlives the provider operation and lease expiry
+    // can never produce two simultaneous provider calls.
+    let remaining = record
+        .publication
+        .lease
+        .as_ref()
+        .map(|lease| {
+            (lease.expires_at - chrono::Utc::now())
+                .to_std()
+                .unwrap_or(Duration::ZERO)
+        })
+        .unwrap_or(publication.settings.lease_ttl);
+    let timeout = publication.settings.reconcile_timeout.min(remaining);
     let reconcile =
         tokio::time::timeout(timeout, sink.reconcile(request, channel.egress.as_ref())).await;
     match reconcile {
@@ -841,13 +904,13 @@ async fn materialize(
 
 fn reconcile_point(
     snapshot: &ReplySnapshot,
-    record: &ReplyPublicationRecord,
+    published_revision: u64,
     published: &Published,
     terminal: bool,
 ) -> ReplyReconcilePoint {
     if terminal {
         ReplyReconcilePoint::Terminal
-    } else if record.publication.published_revision == 0 {
+    } else if published_revision == 0 {
         ReplyReconcilePoint::Opened
     } else if attention_signature(snapshot) != published.attention
         || snapshot.document.answer.finalized != published.finalized

@@ -30,7 +30,7 @@ use super::{
     DenyAllEgress, FakeTurnKernel, FixedReplyContext, SinkResolver, harness, harness_with_settings,
     settings, wait_until,
 };
-use crate::delivery_coordinator::publication::ReplyPublicationWiring;
+use crate::delivery_coordinator::publication::{ReplyPublicationSettings, ReplyPublicationWiring};
 use crate::delivery_coordinator::{
     DeliveryCoordinator, DeliveryRetryPolicy, NoDeliveryRegistrations,
 };
@@ -911,4 +911,370 @@ async fn an_actorless_first_revision_does_not_lock_the_session_channel_out() {
         Some("web-app"),
         "the session channel registers once the actor is known"
     );
+}
+
+// ── Store probe ──────────────────────────────────────────────────────────
+
+/// Delegates every store operation to the real in-memory store while
+/// counting the reads the publication lane issues and, when asked, slowing
+/// the desired-revision write so a claim's remaining lease can be measured.
+struct ProbeStore {
+    inner: Arc<dyn OutboundStateStorePort>,
+    loads: std::sync::atomic::AtomicUsize,
+    lists: std::sync::atomic::AtomicUsize,
+    advance_delay: Mutex<Duration>,
+}
+
+impl ProbeStore {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::new(
+                ironclaw_outbound::test_support::in_memory_backed_outbound_state_store(),
+            ),
+            loads: std::sync::atomic::AtomicUsize::new(0),
+            lists: std::sync::atomic::AtomicUsize::new(0),
+            advance_delay: Mutex::new(Duration::ZERO),
+        })
+    }
+
+    fn loads(&self) -> usize {
+        self.loads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn lists(&self) -> usize {
+        self.lists.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl OutboundStateStorePort for ProbeStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), ironclaw_outbound::OutboundError> {
+        self.inner.put_run_delivery_cleanup(record).await
+    }
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: ironclaw_outbound::RunDeliveryCleanupRequest,
+    ) -> Result<Vec<ironclaw_outbound::RunDeliveryCleanupRecord>, ironclaw_outbound::OutboundError>
+    {
+        self.inner.load_run_delivery_cleanup(request).await
+    }
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), ironclaw_outbound::OutboundError> {
+        self.inner.complete_run_delivery_cleanup(record).await
+    }
+    async fn put_thread_notification_policy(
+        &self,
+        policy: ironclaw_outbound::ThreadNotificationPolicy,
+    ) -> Result<(), ironclaw_outbound::OutboundError> {
+        self.inner.put_thread_notification_policy(policy).await
+    }
+    async fn load_thread_notification_policy(
+        &self,
+        scope: TurnScope,
+    ) -> Result<ironclaw_outbound::ThreadNotificationPolicy, ironclaw_outbound::OutboundError> {
+        self.inner.load_thread_notification_policy(scope).await
+    }
+    async fn upsert_subscription(
+        &self,
+        record: ironclaw_outbound::ProjectionSubscriptionRecord,
+    ) -> Result<(), ironclaw_outbound::OutboundError> {
+        self.inner.upsert_subscription(record).await
+    }
+    async fn load_subscription_cursor(
+        &self,
+        request: ironclaw_outbound::LoadSubscriptionCursorRequest,
+    ) -> Result<
+        Option<ironclaw_event_projections::ProjectionCursor>,
+        ironclaw_outbound::OutboundError,
+    > {
+        self.inner.load_subscription_cursor(request).await
+    }
+    async fn record_delivery_attempt(
+        &self,
+        attempt: ironclaw_outbound::OutboundDeliveryAttempt,
+    ) -> Result<(), ironclaw_outbound::OutboundError> {
+        self.inner.record_delivery_attempt(attempt).await
+    }
+    async fn claim_delivery_attempt_for_send(
+        &self,
+        request: ironclaw_outbound::ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, ironclaw_outbound::OutboundError> {
+        self.inner.claim_delivery_attempt_for_send(request).await
+    }
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: ironclaw_outbound::RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, ironclaw_outbound::OutboundError> {
+        self.inner
+            .recover_interrupted_delivery_attempt(request)
+            .await
+    }
+    async fn update_delivery_status(
+        &self,
+        request: ironclaw_outbound::UpdateDeliveryStatusRequest,
+    ) -> Result<(), ironclaw_outbound::OutboundError> {
+        self.inner.update_delivery_status(request).await
+    }
+    async fn list_delivery_attempts(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::OutboundDeliveryAttempt>, ironclaw_outbound::OutboundError>
+    {
+        self.inner.list_delivery_attempts(scope).await
+    }
+    async fn open_reply_publication(
+        &self,
+        request: ironclaw_outbound::OpenReplyPublicationRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationRecord, ironclaw_outbound::OutboundError> {
+        self.inner.open_reply_publication(request).await
+    }
+    async fn claim_reply_publication_lease(
+        &self,
+        request: ironclaw_outbound::ClaimReplyPublicationLeaseRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationClaim, ironclaw_outbound::OutboundError> {
+        self.inner.claim_reply_publication_lease(request).await
+    }
+    async fn advance_reply_publication(
+        &self,
+        request: ironclaw_outbound::AdvanceReplyPublicationRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationRecord, ironclaw_outbound::OutboundError> {
+        let delay = *self.advance_delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        self.inner.advance_reply_publication(request).await
+    }
+    async fn settle_reply_publication(
+        &self,
+        request: ironclaw_outbound::SettleReplyPublicationRequest,
+    ) -> Result<ironclaw_outbound::ReplyPublicationRecord, ironclaw_outbound::OutboundError> {
+        self.inner.settle_reply_publication(request).await
+    }
+    async fn release_reply_publication_lease(
+        &self,
+        request: ironclaw_outbound::ReleaseReplyPublicationLeaseRequest,
+    ) -> Result<(), ironclaw_outbound::OutboundError> {
+        self.inner.release_reply_publication_lease(request).await
+    }
+    async fn load_reply_publication(
+        &self,
+        scope: TurnScope,
+        delivery_id: ironclaw_outbound::OutboundDeliveryId,
+    ) -> Result<Option<ironclaw_outbound::ReplyPublicationRecord>, ironclaw_outbound::OutboundError>
+    {
+        self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.load_reply_publication(scope, delivery_id).await
+    }
+    async fn list_reply_publications(
+        &self,
+        scope: TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, ironclaw_outbound::OutboundError>
+    {
+        self.lists.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.list_reply_publications(scope, run_id).await
+    }
+    async fn list_open_reply_publications(
+        &self,
+        scope: TurnScope,
+    ) -> Result<Vec<ironclaw_outbound::ReplyPublicationRecord>, ironclaw_outbound::OutboundError>
+    {
+        self.inner.list_open_reply_publications(scope).await
+    }
+}
+
+fn probed_harness(
+    label: &str,
+    transport: ReplyTransport,
+    settings: ReplyPublicationSettings,
+) -> (super::Harness, Arc<ProbeStore>) {
+    let probe = ProbeStore::new();
+    let harness = super::harness_over_store(
+        label,
+        transport,
+        None,
+        settings,
+        Arc::new(crate::NoProjectFilesystem),
+        Arc::clone(&probe) as Arc<dyn OutboundStateStorePort>,
+    );
+    (harness, probe)
+}
+
+/// A wake inside the progress-pacing window is decided from local facts —
+/// the transport's cadence and the pacing clock — before the store is read.
+/// Every streamed token chunk wakes the worker; a store read per wake would
+/// be tens of reads per second per streaming run, discarded unread.
+#[tokio::test]
+async fn progress_wakes_inside_the_pacing_window_do_not_read_the_store() {
+    let mut paced = settings();
+    paced.min_progress_interval = Duration::from_millis(400);
+    let (harness, probe) = probed_harness("paced-reads", ReplyTransport::Stream, paced);
+    harness
+        .coordinator
+        .register_reply_target(harness.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+    harness.text("a");
+    wait_until(|| async {
+        harness
+            .publications()
+            .await
+            .first()
+            .filter(|record| record.publication.published_revision >= 1)
+            .cloned()
+    })
+    .await;
+    let loads_before = probe.loads();
+
+    for index in 0..40 {
+        harness.text(&format!("a{index}"));
+        // Provider chunks arrive spaced out; each one is its own wake.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let loads = probe.loads() - loads_before;
+    assert!(
+        loads <= 2,
+        "{loads} store reads for 40 paced wakes; the pacing window must be checked first"
+    );
+}
+
+/// Waiting for settlement watches the worker this process is running; the
+/// store is read only when no local worker remains (a publisher on another
+/// node), never in a 25 ms polling loop over the whole thread's rows.
+#[tokio::test]
+async fn awaiting_settlement_does_not_scan_the_store_while_a_local_worker_is_live() {
+    let base = harness("settle-wait", ReplyTransport::Message, None);
+    let probe = ProbeStore::new();
+    let mut stalling = settings();
+    // The stall must outlast the wait: a short lease would cut the sink call
+    // and settle Unknown right at the deadline.
+    stalling.lease_ttl = Duration::from_secs(5);
+    stalling.reconcile_timeout = Duration::from_secs(30);
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&probe) as Arc<dyn OutboundStateStorePort>,
+        Arc::new(AnySinkResolver {
+            sink: Arc::new(StallingSink {
+                delay: Duration::from_secs(20),
+            }),
+            transport: ReplyTransport::Message,
+        }),
+        Arc::new(FixedReplyContext(Some(b"vendor-ctx".to_vec()))),
+        Arc::new(NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+        },
+    ));
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
+        projection: Arc::clone(&base.projection),
+        turn_coordinator: Arc::clone(&base.kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&base.threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
+        project_filesystem: Arc::new(crate::NoProjectFilesystem),
+        session_channel: None,
+        settings: stalling,
+    }));
+    coordinator
+        .register_reply_target(base.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+    base.complete_with("slow answer").await;
+    coordinator
+        .reply_run_terminal(&base.scope, base.run_id)
+        .await;
+    let lists_before = probe.lists();
+
+    let settled = coordinator
+        .await_reply_settled(&base.scope, base.run_id, Duration::from_millis(400))
+        .await;
+
+    assert!(!settled, "the sink is still stalling");
+    let scans = probe.lists() - lists_before;
+    assert!(
+        scans <= 2,
+        "{scans} thread scans while waiting 400 ms on a live local worker"
+    );
+    coordinator.shutdown_reply_publication().await;
+}
+
+/// The sink call is bounded by what is LEFT of the claim, not by the full
+/// TTL: the desired-revision write between the claim and the call consumes
+/// lease time, and a call budgeted with the full TTL could outlive the claim
+/// and overlap a takeover's provider call.
+#[tokio::test]
+async fn the_sink_timeout_is_bounded_by_the_remaining_lease_not_the_full_ttl() {
+    let mut bounded = settings();
+    bounded.lease_ttl = Duration::from_millis(1_000);
+    bounded.reconcile_timeout = Duration::from_secs(30);
+    bounded.terminal_attempt_budget = 1;
+    let base = harness("remaining-lease", ReplyTransport::Message, None);
+    let probe = ProbeStore::new();
+    *probe.advance_delay.lock().unwrap() = Duration::from_millis(700);
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&probe) as Arc<dyn OutboundStateStorePort>,
+        Arc::new(AnySinkResolver {
+            sink: Arc::new(StallingSink {
+                delay: Duration::from_secs(20),
+            }),
+            transport: ReplyTransport::Message,
+        }),
+        Arc::new(FixedReplyContext(Some(b"vendor-ctx".to_vec()))),
+        Arc::new(NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+        },
+    ));
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
+        projection: Arc::clone(&base.projection),
+        turn_coordinator: Arc::clone(&base.kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&base.threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
+        project_filesystem: Arc::new(crate::NoProjectFilesystem),
+        session_channel: None,
+        settings: bounded,
+    }));
+    coordinator
+        .register_reply_target(base.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+    base.complete_with("slow answer").await;
+    let started = tokio::time::Instant::now();
+    coordinator
+        .reply_run_terminal(&base.scope, base.run_id)
+        .await;
+    let settled = wait_until(|| async {
+        probe
+            .list_reply_publications(base.scope.clone(), base.run_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| !record.publication.status.is_active())
+    })
+    .await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        settled.publication.status,
+        ironclaw_outbound::ReplyPublicationStatus::Settled(
+            ironclaw_outbound::ReplyPublicationSettlement::Unknown
+        )
+    );
+    // Claim → 700 ms desired write → sink cut at the lease's remaining
+    // ~300 ms → 700 ms evidence write ≈ 1.7 s. A call budgeted with the full
+    // 1 s TTL lands at ≈ 2.4 s.
+    assert!(
+        elapsed < Duration::from_millis(2_100),
+        "the sink ran past the claim it was covered by: settled after {elapsed:?}"
+    );
+    coordinator.shutdown_reply_publication().await;
 }
