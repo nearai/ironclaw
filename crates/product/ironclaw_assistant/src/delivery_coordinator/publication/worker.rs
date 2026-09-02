@@ -270,7 +270,7 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
             }
         };
         let fence = record.publication.fence;
-        let step = match prep {
+        let (record, step) = match prep {
             Ok(prepared) => {
                 // 5. The newest desired revision is durable before any
                 // provider access, under the fence the claim handed back.
@@ -278,24 +278,21 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
                 let record = if record.publication.desired_revision < desired
                     || (terminal && record.publication.terminal_revision.is_none())
                 {
-                    match coordinator
-                        .advance_reply_publication(AdvanceReplyPublicationRequest {
-                            delivery_id: target.delivery_id,
-                            scope: run_key.scope.clone(),
-                            fence,
-                            desired_revision: desired,
-                            published_revision: record.publication.published_revision,
-                            terminal_revision: record
-                                .publication
-                                .terminal_revision
-                                .or(terminal.then_some(snapshot.revision)),
-                            generation: record.publication.generation,
-                            checkpoint: None,
-                            evidence: record.publication.evidence.clone(),
-                            now: chrono::Utc::now(),
-                        })
-                        .await
-                    {
+                    let request = AdvanceScope {
+                        target: &target,
+                        run_key: &run_key,
+                        snapshot: &snapshot,
+                        record: &record,
+                        fence,
+                        terminal,
+                    }
+                    .request(
+                        record.publication.published_revision,
+                        record.publication.generation,
+                        None,
+                        record.publication.evidence.clone(),
+                    );
+                    match coordinator.advance_reply_publication(request).await {
                         Ok(record) => record,
                         Err(error) => {
                             tracing::debug!(target: LOG_TARGET, %error, "desired reply revision could not be persisted");
@@ -311,43 +308,27 @@ pub(super) async fn run_target(publication: Arc<ReplyPublication>, target: Arc<T
                 };
                 // 6. Reconcile, bounded within the lease just claimed.
                 let step = reconcile(&publication, &snapshot, &record, point, prepared).await;
-                handle_step(
-                    StepContext {
-                        publication: &publication,
-                        coordinator: &coordinator,
-                        target: &target,
-                        run_key: &run_key,
-                        snapshot: &snapshot,
-                        record: &record,
-                        fence,
-                        terminal,
-                        published: &mut published,
-                        attempts: &mut attempts,
-                    },
-                    step,
-                )
-                .await
+                (record, step)
             }
-            Err(step) => {
-                handle_step(
-                    StepContext {
-                        publication: &publication,
-                        coordinator: &coordinator,
-                        target: &target,
-                        run_key: &run_key,
-                        snapshot: &snapshot,
-                        record: &record,
-                        fence,
-                        terminal,
-                        published: &mut published,
-                        attempts: &mut attempts,
-                    },
-                    step,
-                )
-                .await
-            }
+            Err(step) => (record, step),
         };
-        match step {
+        let outcome = handle_step(
+            StepContext {
+                publication: &publication,
+                coordinator: &coordinator,
+                target: &target,
+                run_key: &run_key,
+                snapshot: &snapshot,
+                record: &record,
+                fence,
+                terminal,
+                published: &mut published,
+                attempts: &mut attempts,
+            },
+            step,
+        )
+        .await;
+        match outcome {
             LoopStep::Continue => {}
             LoopStep::Exit => return,
         }
@@ -422,6 +403,49 @@ enum LoopStep {
     Exit,
 }
 
+/// What every guarded advance of one reconcile derives from: the row as
+/// loaded, the snapshot being published, the claim's fence, and whether the
+/// snapshot is terminal. The derived fields — a desired revision that never
+/// moves backwards and a terminal revision set once — live here alone.
+struct AdvanceScope<'a> {
+    target: &'a TargetState,
+    run_key: &'a RunKey,
+    snapshot: &'a ReplySnapshot,
+    record: &'a ReplyPublicationRecord,
+    fence: u64,
+    terminal: bool,
+}
+
+impl AdvanceScope<'_> {
+    fn request(
+        &self,
+        published_revision: u64,
+        generation: Option<u64>,
+        checkpoint: Option<ReplySinkCheckpoint>,
+        evidence: ReplyPublicationEvidence,
+    ) -> AdvanceReplyPublicationRequest {
+        AdvanceReplyPublicationRequest {
+            delivery_id: self.target.delivery_id,
+            scope: self.run_key.scope.clone(),
+            fence: self.fence,
+            desired_revision: self
+                .snapshot
+                .revision
+                .max(self.record.publication.desired_revision),
+            published_revision,
+            terminal_revision: self
+                .record
+                .publication
+                .terminal_revision
+                .or(self.terminal.then_some(self.snapshot.revision)),
+            generation,
+            checkpoint,
+            evidence,
+            now: chrono::Utc::now(),
+        }
+    }
+}
+
 struct StepContext<'a> {
     publication: &'a Arc<ReplyPublication>,
     coordinator: &'a Arc<DeliveryCoordinator>,
@@ -448,6 +472,14 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
         published,
         attempts,
     } = context;
+    let scope = AdvanceScope {
+        target,
+        run_key,
+        snapshot,
+        record,
+        fence,
+        terminal,
+    };
     match step {
         Step::Applied { report, generation } => {
             let evidence = ReplyPublicationEvidence {
@@ -460,21 +492,12 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
                     .is_some_and(|previous| previous != generation),
             };
             let advanced = coordinator
-                .advance_reply_publication(AdvanceReplyPublicationRequest {
-                    delivery_id: target.delivery_id,
-                    scope: run_key.scope.clone(),
-                    fence,
-                    desired_revision: snapshot.revision.max(record.publication.desired_revision),
-                    published_revision: snapshot.revision,
-                    terminal_revision: record
-                        .publication
-                        .terminal_revision
-                        .or(terminal.then_some(snapshot.revision)),
-                    generation: Some(generation),
-                    checkpoint: report.checkpoint.clone(),
+                .advance_reply_publication(scope.request(
+                    snapshot.revision,
+                    Some(generation),
+                    report.checkpoint.clone(),
                     evidence,
-                    now: chrono::Utc::now(),
-                })
+                ))
                 .await;
             if let Err(error) = advanced {
                 tracing::debug!(target: LOG_TARGET, %error, "reply publication advance refused; the claim was lost or the publication settled");
@@ -510,20 +533,7 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
             checkpoint,
         } => {
             *attempts = attempts.saturating_add(1);
-            record_outcome(
-                coordinator,
-                target,
-                OutcomeWrite {
-                    run_key,
-                    snapshot,
-                    record,
-                    fence,
-                    last_outcome: reason.clone(),
-                    generation,
-                    checkpoint,
-                },
-            )
-            .await;
+            record_outcome(coordinator, &scope, reason.clone(), generation, checkpoint).await;
             if terminal && *attempts >= publication.settings.terminal_attempt_budget {
                 tracing::debug!(target: LOG_TARGET, delivery_id = %target.delivery_id, ?reason, "terminal reply reconcile exhausted its retry budget; failing closed");
                 settle(
@@ -557,20 +567,7 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
             // publication fails closed as `Unknown` instead.
             let has_read_back_state =
                 checkpoint.is_some() || record.publication.checkpoint.is_some();
-            record_outcome(
-                coordinator,
-                target,
-                OutcomeWrite {
-                    run_key,
-                    snapshot,
-                    record,
-                    fence,
-                    last_outcome: Some(reason),
-                    generation,
-                    checkpoint,
-                },
-            )
-            .await;
+            record_outcome(coordinator, &scope, Some(reason), generation, checkpoint).await;
             if !has_read_back_state
                 || (terminal && *attempts >= publication.settings.terminal_attempt_budget)
             {
@@ -592,20 +589,7 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
             kind,
             generation,
         } => {
-            record_outcome(
-                coordinator,
-                target,
-                OutcomeWrite {
-                    run_key,
-                    snapshot,
-                    record,
-                    fence,
-                    last_outcome: Some(reason),
-                    generation,
-                    checkpoint: None,
-                },
-            )
-            .await;
+            record_outcome(coordinator, &scope, Some(reason), generation, None).await;
             settle(
                 coordinator,
                 target,
@@ -619,16 +603,10 @@ async fn handle_step(context: StepContext<'_>, step: Step) -> LoopStep {
         Step::Stopped { generation } => {
             record_outcome(
                 coordinator,
-                target,
-                OutcomeWrite {
-                    run_key,
-                    snapshot,
-                    record,
-                    fence,
-                    last_outcome: Some(ReplyOutcomeReason::new("stopped by user")),
-                    generation,
-                    checkpoint: None,
-                },
+                &scope,
+                Some(ReplyOutcomeReason::new("stopped by user")),
+                generation,
+                None,
             )
             .await;
             kernel_ports::request_stop(
@@ -937,52 +915,30 @@ fn attention_signature(snapshot: &ReplySnapshot) -> Option<(ReplyAttentionKind, 
 
 /// One non-applied outcome's durable write: evidence and (when handed back)
 /// the checkpoint, under the worker's fence.
-struct OutcomeWrite<'a> {
-    run_key: &'a RunKey,
-    snapshot: &'a ReplySnapshot,
-    record: &'a ReplyPublicationRecord,
-    fence: u64,
+async fn record_outcome(
+    coordinator: &Arc<DeliveryCoordinator>,
+    scope: &AdvanceScope<'_>,
     last_outcome: Option<ReplyOutcomeReason>,
     generation: u64,
     checkpoint: Option<ReplySinkCheckpoint>,
-}
-
-async fn record_outcome(
-    coordinator: &Arc<DeliveryCoordinator>,
-    target: &TargetState,
-    write: OutcomeWrite<'_>,
 ) {
-    let terminal = write.snapshot.document.is_terminal();
     let evidence = ReplyPublicationEvidence {
-        provider_refs: write.record.publication.evidence.provider_refs.clone(),
-        read_back_verified: write.record.publication.evidence.read_back_verified,
-        last_outcome: write.last_outcome,
-        generation_changed: write
+        provider_refs: scope.record.publication.evidence.provider_refs.clone(),
+        read_back_verified: scope.record.publication.evidence.read_back_verified,
+        last_outcome,
+        generation_changed: scope
             .record
             .publication
             .generation
-            .is_some_and(|previous| previous != write.generation),
+            .is_some_and(|previous| previous != generation),
     };
     if let Err(error) = coordinator
-        .advance_reply_publication(AdvanceReplyPublicationRequest {
-            delivery_id: target.delivery_id,
-            scope: write.run_key.scope.clone(),
-            fence: write.fence,
-            desired_revision: write
-                .snapshot
-                .revision
-                .max(write.record.publication.desired_revision),
-            published_revision: write.record.publication.published_revision,
-            terminal_revision: write
-                .record
-                .publication
-                .terminal_revision
-                .or(terminal.then_some(write.snapshot.revision)),
-            generation: Some(write.generation),
-            checkpoint: write.checkpoint,
+        .advance_reply_publication(scope.request(
+            scope.record.publication.published_revision,
+            Some(generation),
+            checkpoint,
             evidence,
-            now: chrono::Utc::now(),
-        })
+        ))
         .await
     {
         tracing::debug!(target: LOG_TARGET, %error, "reply publication evidence write refused");
