@@ -8,8 +8,9 @@
 //! provider advertises the capability) with no extension-name conditions in
 //! this file. Stream liveness is never outbound authority — the push path
 //! crosses the same `OutboundPolicyService` + `DeliveryCoordinator` chain as
-//! every other channel send, and the delivered payload is the typed
-//! [`OutboundPart::RunCompletion`] fact, never reply content.
+//! every other channel send (through the shared notification delivery core),
+//! and the delivered payload is the typed [`OutboundPart::RunCompletion`]
+//! fact, never reply content.
 
 use std::sync::Arc;
 
@@ -17,43 +18,33 @@ use chrono::Utc;
 use ironclaw_extension_contracts::channel_adapter::{OutboundPart, RunCompletionNoticeView};
 use ironclaw_extension_contracts::preference_target::ActivePreferenceTargetCodecs;
 use ironclaw_host_api::ids::{AgentId, ProjectId, ThreadId};
-use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use ironclaw_host_api::turn::{TurnActor, TurnRunId, TurnScope};
 use ironclaw_outbound::{
-    CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, DeliveryDefaultScope, OutboundDeliveryTargetScope, OutboundError,
-    PrepareCommunicationDeliveryRequest, ProjectionUpdateRef, ReplyTargetBindingClaim,
-    ReplyTargetBindingValidator, ReplyTargetValidationRequest, RunNotificationContext,
-    RunNotificationEventKind, RunNotificationOrigin,
+    ReplyTargetBindingClaim, ReplyTargetBindingValidator, ReplyTargetValidationRequest,
+    RunNotificationEventKind,
 };
 use ironclaw_threads::ThreadScope;
 
 use super::coordinator::{CompletionPushFallback, LocalOsIntentPolicy};
 use super::records::RunCompletionNotice;
 use super::store::{RunCompletionNotices, RunCompletionOwner, RunCompletionStoreError};
-use crate::delivery_coordinator::{
-    CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
-};
+use crate::delivery_coordinator::{CoordinatedDeliveryOutcome, DeliveryIntent};
 use crate::model_channel_delivery::CodecChannelTargetResolver;
 use crate::notification_channel_resolution::{
     EffectiveNotificationChannel, LookupErrorPolicy, resolve_effective_notification_channels_arc,
 };
-use crate::run_delivery::AllowNoProjectionAccess;
 use crate::run_delivery::RunDeliveryServices;
-use crate::run_delivery::prompts;
+use crate::run_delivery::notifications::{
+    ChannelNotificationContext, NotificationChannelTarget, NotificationDeliveryShape,
+    deliver_notification_parts,
+};
 
 const TRACE_TARGET: &str = "ironclaw::reborn::run_completions";
 
 /// Bounded scan when computing the grouped unread count for one thread's
 /// push copy; the wire cap is two digits anyway.
 const UNREAD_COUNT_SCAN_LIMIT: usize = 100;
-
-/// One resolved run-completion delivery target: the capability-filtered
-/// binding plus the extension whose channel carries it (read from the
-/// catalog entry, never guessed).
-struct CompletionTarget {
-    target: ReplyTargetBindingRef,
-    extension_id: String,
-}
 
 /// The typed run identity a push delivery is authorized under, parsed once
 /// from the durable notice before any egress work begins.
@@ -117,7 +108,7 @@ impl RunCompletionExternalDelivery {
     async fn resolve_completion_target(
         &self,
         owner: &RunCompletionOwner,
-    ) -> Result<Option<CompletionTarget>, OutboundError> {
+    ) -> Result<Option<NotificationChannelTarget>, OutboundError> {
         let key = CommunicationPreferenceKey {
             scope: DeliveryDefaultScope::personal(owner.tenant_id.clone(), owner.user_id.clone()),
         };
@@ -138,23 +129,27 @@ impl RunCompletionExternalDelivery {
             if !entry.capabilities.run_completions {
                 continue;
             }
-            return Ok(Some(CompletionTarget {
+            return Ok(Some(NotificationChannelTarget {
                 target: entry.destination,
                 extension_id: entry.summary.channel.as_str().to_string(),
+                // A completion push carries fixed copy and no OAuth URL
+                // (§7.10), so it is never DM-gated and the personal-DM
+                // classification is not consulted on this path.
+                direct_message: false,
             }));
         }
         Ok(None)
     }
 
     /// Deliver the typed completion fact to the resolved target through the
-    /// ordinary outbound chain. The durable attempt record is the outcome
-    /// evidence either way; this function only reports whether egress was
-    /// coordinated.
+    /// shared notification delivery core. The durable attempt record is the
+    /// outcome evidence either way; this function only reports whether
+    /// egress was coordinated.
     async fn deliver_completion(
         &self,
         owner: &RunCompletionOwner,
         notice: &RunCompletionNotice,
-        target: &CompletionTarget,
+        target: &NotificationChannelTarget,
         identity: CompletionRunIdentity,
         unread_count_for_thread: u16,
     ) {
@@ -191,43 +186,19 @@ impl RunCompletionExternalDelivery {
             self.codecs.active_preference_target_codecs(),
             "run completion notification",
         );
-        let projection_access_policy = AllowNoProjectionAccess;
-        let outbound_policy = ironclaw_outbound::OutboundPolicyService::new(
-            self.services.outbound_store.as_ref(),
-            &projection_access_policy,
-            &authority,
-        );
-        let projection_id = prompts::run_notification_projection_id(
+        let context = ChannelNotificationContext {
+            scope: &scope,
+            thread_scope: &thread_scope,
+            actor: &actor,
             run_id,
-            RunNotificationEventKind::RunCompleted,
-            Some(&notice.notice_id),
-        );
-        let projection_ref = match ProjectionUpdateRef::new(projection_id) {
-            Ok(projection_ref) => projection_ref,
-            Err(error) => {
-                tracing::debug!(
-                    target: TRACE_TARGET,
-                    %error,
-                    "run-completion push skipped: invalid projection ref",
-                );
-                return;
-            }
+            reply_target_authority: &authority,
+            target_resolver: &target_resolver,
         };
-        let delivery = PrepareCommunicationDeliveryRequest {
-            resolution_request: CommunicationDeliveryResolutionRequest {
-                scope: scope.clone(),
-                actor,
-                modality: CommunicationModality::Text,
-                intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
-                    event_kind: RunNotificationEventKind::RunCompleted,
-                    origin: RunNotificationOrigin::RunScopedTarget {
-                        target: target.target.clone(),
-                    },
-                }),
-            },
-            turn_run_id: Some(run_id),
-            projection_ref,
-            attempted_at: Utc::now(),
+        let shape = NotificationDeliveryShape {
+            event_kind: RunNotificationEventKind::RunCompleted,
+            intent: DeliveryIntent::RunCompletionNotice,
+            require_direct_message_target: false,
+            notice_discriminator: Some(&notice.notice_id),
         };
         let view = RunCompletionNoticeView {
             notice_id: notice.notice_id.clone(),
@@ -235,26 +206,15 @@ impl RunCompletionExternalDelivery {
             opaque_thread_tag: notice.thread_tag.clone(),
             unread_count_for_thread,
         };
-        let outcome = self
-            .services
-            .coordinator
-            .deliver(
-                &outbound_policy,
-                &target_resolver,
-                self.services.project_filesystem.as_ref(),
-                CoordinatedDeliveryRequest {
-                    intent: DeliveryIntent::RunCompletionNotice,
-                    delivery,
-                    parts: vec![OutboundPart::RunCompletion(Box::new(view))],
-                    attachments: Vec::new(),
-                    thread_anchor: None,
-                    require_direct_message_target: false,
-                    extension_id: &target.extension_id,
-                    thread_scope: &thread_scope,
-                },
-            )
-            .await;
-        match outcome {
+        match deliver_notification_parts(
+            &self.services,
+            &context,
+            &shape,
+            vec![OutboundPart::RunCompletion(Box::new(view))],
+            target,
+        )
+        .await
+        {
             Ok(CoordinatedDeliveryOutcome::Failed { failure_kind, .. }) => {
                 tracing::debug!(
                     target: TRACE_TARGET,
@@ -263,10 +223,10 @@ impl RunCompletionExternalDelivery {
                 );
             }
             Ok(_) => {}
-            Err(error) => {
+            Err(failure) => {
                 tracing::debug!(
                     target: TRACE_TARGET,
-                    %error,
+                    %failure,
                     "run-completion push delivery errored; durable attempt records the cause",
                 );
             }

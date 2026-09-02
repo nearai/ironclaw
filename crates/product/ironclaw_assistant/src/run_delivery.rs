@@ -69,9 +69,6 @@ mod triggered;
 
 pub use observer::RunDeliveryObserver;
 pub use pre_submit_failure::PreSubmitFailureInboxNotifier;
-// Shared no-projection access policy, re-exported for the run-completions
-// push facade (the same policy stance the notification facade takes).
-pub(crate) use observer::AllowNoProjectionAccess;
 pub use triggered::TriggeredRunDeliveryDriver;
 
 const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);

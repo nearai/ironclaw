@@ -4,10 +4,11 @@
 //!
 //! The probe reads the SAME host-owned delivery registrations the delivery
 //! coordinator resolves for actual pushes, so "Enrolled" here can never
-//! diverge from what a push would use. Browser-instance correlation rides
-//! inside the registration's channel-opaque `document` (interpreted only
-//! where it is used, mirroring the web-app adapter's own parsing rule);
-//! records that predate correlation degrade to profile-level presence.
+//! diverge from what a push would use. The registration document is
+//! interpreted through the web-app domain's own grammar
+//! ([`RegistrationDocument`]) — the parser the delivery adapter sends with —
+//! so composition wires the correlation without owning any of the document
+//! shape; records that predate correlation degrade to profile-level presence.
 
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use ironclaw_host_api::ids::ExtensionId;
 use ironclaw_product_contracts::delivery::{
     DeliveryRegistrationScope, DeliveryRegistrationService,
 };
+use ironclaw_web_app::RegistrationDocument;
 
 pub(crate) struct RegistrationEnrollmentProbe {
     registrations: Arc<dyn DeliveryRegistrationService>,
@@ -54,51 +56,26 @@ impl WebAppEnrollmentProbe for RegistrationEnrollmentProbe {
             .map_err(|error| error.to_string())?;
         let mut snapshot = WebAppEnrollmentSnapshot::default();
         for registration in registrations {
-            match browser_instance_of(&registration.document) {
-                Some(instance_id) => snapshot.instance_ids.push(instance_id),
-                None => snapshot.uncorrelated += 1,
+            match RegistrationDocument::parse(&registration.document) {
+                Ok(document) => match document.browser_instance_id {
+                    Some(instance_id) => snapshot.instance_ids.push(instance_id),
+                    None => snapshot.uncorrelated += 1,
+                },
+                Err(error) => {
+                    // A document the delivery half cannot parse can never be
+                    // pushed to, so it is not an enrollment either; the
+                    // adapter prunes it on its own path.
+                    tracing::debug!(
+                        target: "ironclaw::reborn::run_completions",
+                        %error,
+                        "enrollment probe skipped an unparseable registration",
+                    );
+                }
             }
         }
         Ok(snapshot)
     }
 }
 
-/// The optional `browser_instance_id` a correlated enrollment document
-/// carries. A malformed document counts as uncorrelated rather than
-/// failing the probe — the adapter prunes it on its own path.
-fn browser_instance_of(document: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct CorrelatedDocument {
-        #[serde(default)]
-        browser_instance_id: Option<String>,
-    }
-    serde_json::from_str::<CorrelatedDocument>(document)
-        .ok()
-        .and_then(|document| document.browser_instance_id)
-        .filter(|id| !id.is_empty() && id.len() <= 128)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn correlated_document_yields_instance_id() {
-        let document = r#"{"keys":{"p256dh":"k","auth":"a"},"browser_instance_id":"bi-1"}"#;
-        assert_eq!(browser_instance_of(document).as_deref(), Some("bi-1"));
-    }
-
-    #[test]
-    fn legacy_and_malformed_documents_are_uncorrelated() {
-        assert_eq!(
-            browser_instance_of(r#"{"keys":{"p256dh":"k","auth":"a"}}"#),
-            None
-        );
-        assert_eq!(browser_instance_of("not json"), None);
-        assert_eq!(
-            browser_instance_of(r#"{"browser_instance_id":""}"#),
-            None,
-            "empty ids never correlate"
-        );
-    }
-}
+mod tests;

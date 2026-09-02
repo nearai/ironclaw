@@ -35,8 +35,8 @@ use super::super::router::{WebUiV2Capabilities, WebUiV2State};
 use super::super::session_events::codec;
 use super::super::session_events::driver::{DriverStep, ProductStreamDriver};
 use super::super::session_events::protocol::{
-    MAX_ACTIVE_SUBSCRIPTIONS, SUBSCRIPTION_QUEUE_BATCHES, SessionClientFrame,
-    SessionProtocolViolation, SessionServerFrame, parse_client_frame,
+    MAX_ACTIVE_SUBSCRIPTIONS, MAX_CLIENT_FRAME_BYTES, SUBSCRIPTION_QUEUE_BATCHES,
+    SessionClientFrame, SessionProtocolViolation, SessionServerFrame, parse_client_frame,
 };
 use super::super::sse_capacity::{SSE_MAX_LIFETIME, SseAcquireResult, SseSlot};
 use super::{parse_cursor_token, sse_capacity_rejected};
@@ -121,7 +121,14 @@ pub async fn session_websocket(
         }
     };
     let services = state.services().clone();
-    Ok(upgrade.on_upgrade(move |socket| session_socket_loop(services, caller, slot, socket)))
+    // The protocol's frame bound is enforced at the transport too, so an
+    // oversized inbound message is rejected while it is being read rather
+    // than buffered in full (tungstenite's defaults are megabytes) and only
+    // then measured by `parse_client_frame`. Outbound frames are unaffected.
+    Ok(upgrade
+        .max_message_size(MAX_CLIENT_FRAME_BYTES)
+        .max_frame_size(MAX_CLIENT_FRAME_BYTES)
+        .on_upgrade(move |socket| session_socket_loop(services, caller, slot, socket)))
 }
 
 /// Everything one subscription task reports back to the socket loop.

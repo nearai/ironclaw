@@ -25,6 +25,9 @@ use ironclaw_host_api::resource::SYSTEM_RESERVED_ID;
 use ironclaw_host_api::turn::{TurnRunId, TurnScope};
 use ironclaw_processes::{ProcessJournalCommit, ProcessJournalCommitObserver, ProcessJournalKind};
 
+/// Crate-private: composition's runtime assembly is the production
+/// constructor, and the `test-support` seam hands an integration test the
+/// same adapter behind an opaque `impl ProcessJournalCommitObserver`.
 pub(crate) struct RunCompletionJournalObserver {
     ingest: Arc<RunCompletionIngest>,
 }
@@ -106,3 +109,6 @@ impl ProcessJournalCommitObserver for RunCompletionJournalObserver {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

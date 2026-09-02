@@ -263,17 +263,32 @@ last-admin protection); `create_user` returns the one-time API bearer exactly
 once in `api_token`. `webui.v2.settings.tools` is a normal authenticated-caller
 route (tenant/user-scoped tool-approval settings), not an operator route.
 
-### Streaming model (SSE + WebSocket)
+### Streaming model (compatibility SSE + session WebSocket)
 
-- `stream_events` (SSE) and `stream_events_ws` (WebSocket) render each
-  `ProductOutboundEnvelope` into the redacted `WebChatV2EventFrame` schema
-  (never raw adapter routing/delivery metadata) with the projection cursor as
-  the SSE `id`; the browser resumes via `Last-Event-ID` (preferred over
-  `?after_cursor=`).
+- `stream_events` (the compatibility per-thread SSE) and `session_websocket`
+  (the ticket-authenticated, read-only, multiplexing session socket) share
+  **one** `ProductStreamDriver` and **one** browser codec
+  (`src/webui_v2/session_events/`): each typed `ProductStreamEventEnvelope`
+  is rendered into the redacted `WebChatV2EventFrame` schema (never raw
+  adapter routing/delivery metadata) with the projection cursor as the SSE
+  `id` / session-frame `cursor`. SSE resumes via `Last-Event-ID` (preferred
+  over `?after_cursor=`); every session-socket subscription resumes from its
+  own `after_cursor` — there is no session-wide cursor, and the `rc:`
+  run-completion cursor namespace can never resume a thread selector.
+- The session socket is an event transport, not a command bus: its client
+  vocabulary is `subscribe` / `unsubscribe` / `ping` only, it never dispatches
+  `ProductSurface::invoke` or an operation id, and every product mutation
+  (including the run-completion intent/acknowledge/thread-read operations)
+  stays on authenticated HTTP. Upgrades authenticate with a single-use,
+  15-second ticket minted over bearer HTTP (`session_websocket_ticket`) and
+  bound to the exact caller; the long-lived bearer never appears in a
+  WebSocket URL, and same-origin is enforced before upgrade. Inbound frames
+  are bounded at 8 KiB at both the transport (`max_message_size`) and the
+  protocol parser; at most 16 logical subscriptions per socket.
 - Both transports share **one** `SseCapacity` budget keyed by `(tenant, user)`
   (default 3 concurrent; override via `WebUiV2State::with_sse_concurrency_limit`)
-  — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
-  `429` with `retryable: true`.
+  — a caller cannot bypass the cap by mixing SSE and the session socket.
+  Exhaustion returns `429` with `retryable: true`.
 - The SPA consumes SSE through `event-source-plus`, which owns event framing,
   `Last-Event-ID`, fetch, and cancellation over `fetch`/`ReadableStream`.
   IronClaw owns one reconnect coordinator across transport failures, stream
@@ -332,8 +347,9 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   subscription/drain await is `timeout`-bounded, so a back-pressuring client or
   a stalled facade cannot pin a slot past the budget. Slots are RAII
   (`SseSlot`), released on disconnect / expiry / error. Regressions locked by
-  `stream_events_ws_shares_capacity_with_sse_streams` and
-  `stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime`.
+  `session_websocket_shares_capacity_with_sse_streams`,
+  `session_websocket_releases_slot_on_peer_close`, and
+  `stream_events_releases_slot_when_service_drain_stalls_past_max_lifetime`.
 - `capability_activity` / `capability_display_preview` frames carry only
   bounded, secret-redacted input/output *summaries* (host paths rejected, URLs
   stripped, byte-bounded) — never raw args/results. Full output stays behind the

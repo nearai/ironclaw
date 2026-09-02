@@ -100,7 +100,7 @@ assertions) and `tests/e2e/AGENTS.md` (pytest fixtures, Playwright, mock LLM).
 | Providers (Google/Slack/GitHub contracts) | — | — | ✓ | ✓ |
 | Coverage/meta gates | — | 2 | ✓ | ✓ |
 
-Totals: **61** group scenarios · **63** flat integration bins (56 in
+Totals: **61** group scenarios · **64** flat integration bins (57 in
 `tests/integration/`, 7 in `tests/integration/auth/`) · **39** top-level Rust bins ·
 **103** Python scenario files (**889** test functions) registered in the active
 Reborn coverage map below. Section 6 separately inventories retained and legacy
@@ -221,7 +221,7 @@ ones speak MTProto over a raw socket with no injectable seam.
 
 ---
 
-## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (63)
+## 4. Flat integration bins — `tests/integration/*.rs` and `tests/integration/auth/*.rs` (64)
 
 One thread, whole real turn. Grouped by what the user experiences.
 
@@ -231,6 +231,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A plain message gets a persisted reply through the whole real stack | `greeting.rs` |
 | Stopping a running turn actually stops it (Cancelled, not Completed) | `cancel.rs` |
 | A completed turn streams over one real session-WebSocket subscription and ends with the exact durable finalized reply the HTTP timeline serves; two logical subscriptions on one socket deliver their own threads independently | `session_events.rs` |
+| A completed user turn, observed on the real process journal through the production run-completion observer, becomes exactly one durable unread run-completion notice for its owner; a second turn extends the owner's monotonic sequence | `run_completion_notifications.rs` |
 | Typing again while the assistant is working queues the message and it gets picked up mid-run | `steering.rs` |
 | A flaky model provider is retried and recovered from, with typed errors | `model_recovery.rs` |
 | A cumulative compaction barrier supersedes earlier summaries and raw covered history in the model prompt while every original row remains durable | `model_recovery.rs::cumulative_compaction_barrier_replaces_earlier_summaries_and_raw_history` |
@@ -343,7 +344,7 @@ One thread, whole real turn. Grouped by what the user experiences.
 | A canonical 10-tool-call agent turn's database write volume is measured and reported (for tracking, not gated) on both libSQL and Postgres, and custom-actor group threads are rejected from canonical durable milestones | `db_write_canonical.rs` |
 | A downloaded run artifact carries per-iteration model-call timing evidence for a completed run, and still carries durable per-message timestamps (with an explicit `run_not_resident` reason) when the process-local timing buffer was evicted or the process restarted | `run_artifact_timings.rs` |
 
-One of the 62 registered bins, `delivery_user_journeys.rs`, holds the explicit
+One of the 64 registered bins, `delivery_user_journeys.rs`, holds the explicit
 channel-delivery journeys (two-lane model):
 
 | A user can… | Scenario |

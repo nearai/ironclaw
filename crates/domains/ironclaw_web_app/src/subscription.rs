@@ -241,6 +241,55 @@ impl PushSubscriptionRecord {
     }
 }
 
+/// Longest accepted opaque browser-instance correlation id (the product
+/// contract's opaque-id bound). A longer or empty value is dropped as
+/// uncorrelated rather than failing the registration: correlation is
+/// optional, key material is not.
+pub const MAX_BROWSER_INSTANCE_ID_BYTES: usize = 128;
+
+/// The channel-opaque half of a host-owned delivery registration, as the
+/// browser enrolls it: the subscription keys, an optional user agent, and
+/// the optional opaque browser-instance correlation id (2026-08-13 design
+/// §6.1).
+///
+/// This is the one place the document grammar is interpreted. The delivery
+/// adapter reads it to build the vendor record it sends with, and the host's
+/// enrollment probe reads it to correlate a browser profile — through the
+/// same parser, so the two can never disagree about what a document means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistrationDocument {
+    pub keys: PushSubscriptionKeys,
+    pub user_agent: Option<String>,
+    /// Present on registrations enrolled after instance correlation
+    /// shipped; absent (uncorrelated) on older records and on values outside
+    /// the opaque-id bound.
+    pub browser_instance_id: Option<String>,
+}
+
+impl RegistrationDocument {
+    pub fn parse(document: &str) -> Result<Self, WebAppError> {
+        #[derive(Deserialize)]
+        struct WireDocument {
+            keys: UncheckedPushSubscriptionKeys,
+            #[serde(default)]
+            user_agent: Option<String>,
+            #[serde(default)]
+            browser_instance_id: Option<String>,
+        }
+        let wire: WireDocument =
+            serde_json::from_str(document).map_err(|error| WebAppError::InvalidSubscription {
+                reason: format!("registration document is not a push subscription: {error}"),
+            })?;
+        Ok(Self {
+            keys: PushSubscriptionKeys::try_from(wire.keys)?,
+            user_agent: wire.user_agent,
+            browser_instance_id: wire
+                .browser_instance_id
+                .filter(|id| !id.is_empty() && id.len() <= MAX_BROWSER_INSTANCE_ID_BYTES),
+        })
+    }
+}
+
 fn sanitize_user_agent(raw: String) -> String {
     let cleaned: String = raw
         .chars()
@@ -367,5 +416,56 @@ mod tests {
         let agent = record.user_agent.expect("agent kept");
         assert!(!agent.contains('\n'));
         assert!(agent.len() <= MAX_USER_AGENT_BYTES);
+    }
+
+    fn document_with(extra: &str) -> String {
+        let keys = sample_keys();
+        format!(
+            r#"{{"keys":{{"p256dh":"{}","auth":"{}"}}{extra}}}"#,
+            keys.p256dh, keys.auth
+        )
+    }
+
+    #[test]
+    fn registration_document_parses_keys_agent_and_correlation_id() {
+        let parsed = RegistrationDocument::parse(&document_with(
+            r#","user_agent":"Browser/1","browser_instance_id":"rbi-1""#,
+        ))
+        .expect("correlated document parses");
+        assert_eq!(parsed.keys, sample_keys());
+        assert_eq!(parsed.user_agent.as_deref(), Some("Browser/1"));
+        assert_eq!(parsed.browser_instance_id.as_deref(), Some("rbi-1"));
+
+        // Records enrolled before instance correlation carry no id and
+        // still parse (the keys are what delivery needs).
+        let legacy = RegistrationDocument::parse(&document_with("")).expect("legacy parses");
+        assert_eq!(legacy.browser_instance_id, None);
+        assert_eq!(legacy.user_agent, None);
+    }
+
+    #[test]
+    fn registration_document_drops_out_of_bound_correlation_ids() {
+        let empty = RegistrationDocument::parse(&document_with(r#","browser_instance_id":"""#))
+            .expect("empty id is tolerated");
+        assert_eq!(empty.browser_instance_id, None, "empty ids never correlate");
+        let oversized = RegistrationDocument::parse(&document_with(&format!(
+            r#","browser_instance_id":"{}""#,
+            "x".repeat(MAX_BROWSER_INSTANCE_ID_BYTES + 1)
+        )))
+        .expect("oversized id is tolerated");
+        assert_eq!(oversized.browser_instance_id, None);
+    }
+
+    #[test]
+    fn registration_document_rejects_non_subscriptions() {
+        assert!(RegistrationDocument::parse("not json").is_err());
+        assert!(
+            RegistrationDocument::parse(r#"{"browser_instance_id":"rbi-1"}"#).is_err(),
+            "a document without keys is not a push subscription"
+        );
+        assert!(
+            RegistrationDocument::parse(r#"{"keys":{"p256dh":"short","auth":"short"}}"#).is_err(),
+            "malformed keys fail the document, never silently pass"
+        );
     }
 }

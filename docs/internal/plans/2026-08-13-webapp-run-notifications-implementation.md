@@ -1,5 +1,21 @@
 # Web-app run-completion notifications — implementation plan
 
+> **Status (2026-09-01): executed.** This plan was carried out by
+> nearai/ironclaw#8010; it is retained as the pre-implementation execution
+> record, and the checkboxes below are left as authored rather than
+> retro-ticked. The PR body's *Test Strategy* and *Genuine risks* sections
+> are the record of what shipped. Known deviations and deferrals:
+>
+> - Same-browser live-stream arbitration ships page-owned (BroadcastChannel
+>   + profile-local ledger) rather than service-worker-owned; the worker owns
+>   push dedupe, display, click routing, and tag clearing. See the
+>   implementation note under design §5.1.
+> - Browser E2E for the service-worker surfaces (§15) is deferred to a
+>   follow-up suite; `frontend/src/lib/service-worker.test.ts` drives the
+>   worker's handlers against a scripted scope in the meantime.
+> - The `coverage-floor.toml` recapture and the multi-replica Postgres
+>   ticket leg are follow-ups.
+>
 > **For agentic workers:** execute tasks in order; every task ends with its
 > named checks green before the next begins. Steps use checkbox (`- [ ]`)
 > syntax for tracking.

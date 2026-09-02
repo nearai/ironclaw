@@ -1,20 +1,28 @@
 //! The durable notification coordinator (2026-08-13 design §5.4–§5.6).
 //!
 //! One bounded worker per process: at startup it performs one bounded
-//! reconciliation over pending, expired-grant, and push-owned records, then
-//! sleeps until the earliest `closes_at`/`expires_at` or an explicit wake
-//! from a notice/intent/acknowledgement write. There is no steady interval
-//! scan and no client polling.
+//! reconciliation over the owners the durable due registry names, scanning
+//! their pending and expired-grant records, then sleeps until the earliest
+//! `closes_at`/`expires_at` or an explicit wake from a
+//! notice/intent/acknowledgement write. There is no steady interval scan
+//! and no client polling.
 //!
 //! Decision order at a closed intent window (§6.1): a read notice settles;
 //! the best-ranked intent wins one grant; with no eligible intent the
 //! notice falls to the push facade (Phase 3) or settles `NoExternalTarget`.
 //! Grants expire into exactly one re-arbitration before fallback.
 //!
+//! `PushOwned` is terminal for this worker by design (§5.3): push ownership
+//! is claimed by CAS before the single egress attempt, and no re-drive can
+//! prove that attempt never left the process, so a notice whose owner
+//! crashed mid-push stays in-app unread (badge + next-open replay) rather
+//! than risking a duplicate OS notification on every crash loop.
+//!
 //! Logging is `debug!` only — background tasks never write `info!`/`warn!`
 //! (REPL rule). No log field carries titles, payloads, endpoints, or
 //! navigation.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -171,6 +179,11 @@ impl RunCompletionCoordinator {
         };
 
         let mut saturated = false;
+        // `local_os` validation resolves owner-level facts (target selection,
+        // enrollment) that cannot change within one pass: memoize per
+        // browser profile so a backlog of notices with the same intents
+        // costs one probe per browser, not one per intent.
+        let mut local_os_verdicts: HashMap<String, bool> = HashMap::new();
         let pending = self
             .services
             .notices
@@ -193,7 +206,8 @@ impl RunCompletionCoordinator {
                 observe(closes_at);
                 continue;
             }
-            self.arbitrate(owner, &notice, now).await?;
+            self.arbitrate(owner, &notice, now, &mut local_os_verdicts)
+                .await?;
         }
 
         let granted = self
@@ -269,24 +283,35 @@ impl RunCompletionCoordinator {
     }
 
     /// Rank the collected intents and issue at most one grant (§5.6).
+    /// `local_os_verdicts` memoizes the validation policy's answer per
+    /// browser profile for the duration of one owner pass.
     async fn arbitrate(
         &self,
         owner: &RunCompletionOwner,
         notice: &RunCompletionNotice,
         now: DateTime<Utc>,
+        local_os_verdicts: &mut HashMap<String, bool>,
     ) -> Result<(), RunCompletionStoreError> {
         let mut best: Option<&CompletionIntentRecord> = None;
         for intent in &notice.intents {
             if intent.intent == RunCompletionIntentKind::Unavailable {
                 continue;
             }
-            if intent.intent == RunCompletionIntentKind::LocalOs
-                && !self
-                    .local_os_policy
-                    .allows_local_os(owner, &intent.browser_instance_id)
-                    .await
-            {
-                continue;
+            if intent.intent == RunCompletionIntentKind::LocalOs {
+                let allowed = match local_os_verdicts.get(&intent.browser_instance_id) {
+                    Some(allowed) => *allowed,
+                    None => {
+                        let allowed = self
+                            .local_os_policy
+                            .allows_local_os(owner, &intent.browser_instance_id)
+                            .await;
+                        local_os_verdicts.insert(intent.browser_instance_id.clone(), allowed);
+                        allowed
+                    }
+                };
+                if !allowed {
+                    continue;
+                }
             }
             best = Some(match best {
                 None => intent,
@@ -404,12 +429,19 @@ pub const COORDINATOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 impl RunCompletionCoordinatorHandle {
     pub async fn shutdown(self, timeout: Duration) {
         let _ = self.cancel.send(true);
-        let handle = self.handle;
-        if tokio::time::timeout(timeout, handle).await.is_err() {
+        let mut handle = self.handle;
+        if tokio::time::timeout(timeout, &mut handle).await.is_err() {
+            // The budget elapsed with the worker still inside a backend
+            // call. Abort it rather than drop the handle: a dropped handle
+            // detaches the task, and a detached coordinator would keep
+            // holding services and processing work after the runtime that
+            // owned it has shut down.
             tracing::debug!(
                 target: "ironclaw::reborn::run_completions",
-                "coordinator did not stop within its shutdown budget",
+                "coordinator did not stop within its shutdown budget; aborting",
             );
+            handle.abort();
+            let _ = handle.await;
         }
     }
 }

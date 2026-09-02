@@ -6,6 +6,12 @@
 //! subscribe, replay comes from `list_after` (durable), then live events
 //! ride a bounded per-owner broadcast; a lagged subscriber rebases from the
 //! bounded unread snapshot rather than blocking completion commits.
+//!
+//! Channels exist only while an owner has a connected subscriber: publishing
+//! to an owner nobody is listening to creates nothing, and an entry whose
+//! last receiver dropped is evicted on the next publish, so the map is
+//! bounded by connected owners rather than by every owner that ever
+//! received a notice.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,6 +30,10 @@ use super::store::{RunCompletionNotices, RunCompletionOwner, RunCompletionStoreE
 /// Bounded per-owner live buffer. A subscriber that falls further behind
 /// receives a lag signal and rebases from the durable snapshot.
 const OWNER_CHANNEL_CAPACITY: usize = 64;
+
+/// Bounded scan when joining a thread's unread count onto its notice events;
+/// the wire field is two digits anyway.
+const UNREAD_COUNT_SCAN_LIMIT: usize = 99;
 
 /// One live item on an owner's stream: the event plus its sequence member.
 #[derive(Debug, Clone)]
@@ -53,15 +63,26 @@ impl RunCompletionStreamHub {
         )
     }
 
-    fn sender(&self, owner: &RunCompletionOwner) -> broadcast::Sender<SequencedCompletionEvent> {
+    /// Deliver one live item to the owner's connected subscribers, if any.
+    ///
+    /// The receiver-count check and the eviction happen under the same lock
+    /// `subscribe` registers under, so a subscriber racing this publish is
+    /// either counted (and receives the item) or registers on a fresh
+    /// channel afterwards — never on an entry this call just removed.
+    fn publish(&self, owner: &RunCompletionOwner, item: SequencedCompletionEvent) {
         let mut senders = self
             .senders
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        senders
-            .entry(Self::owner_key(owner))
-            .or_insert_with(|| broadcast::channel(OWNER_CHANNEL_CAPACITY).0)
-            .clone()
+        let key = Self::owner_key(owner);
+        let Some(sender) = senders.get(&key) else {
+            return;
+        };
+        if sender.receiver_count() == 0 {
+            senders.remove(&key);
+            return;
+        }
+        let _ = sender.send(item);
     }
 
     /// Subscribe to one owner's completion stream: durable replay after
@@ -81,7 +102,16 @@ impl RunCompletionStreamHub {
         ),
         RunCompletionStoreError,
     > {
-        let receiver = self.sender(owner).subscribe();
+        let receiver = {
+            let mut senders = self
+                .senders
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            senders
+                .entry(Self::owner_key(owner))
+                .or_insert_with(|| broadcast::channel(OWNER_CHANNEL_CAPACITY).0)
+                .subscribe()
+        };
         let replayed = self
             .notices
             .list_after(owner, after_sequence, replay_limit)
@@ -99,72 +129,59 @@ impl RunCompletionStreamHub {
         Ok(self.project_batch(owner, &unread).await)
     }
 
-    /// Project a batch of notices, querying each distinct thread's unread
-    /// count once — the count is identical for every notice of a thread, and
-    /// per-notice queries would make a 250-notice replay issue 250 ordered
-    /// index scans.
+    /// Project a batch of notices into wire events, querying each distinct
+    /// thread's unread count once — the count is identical for every notice
+    /// of a thread, and per-notice queries would make a 250-notice batch
+    /// issue 250 ordered index scans.
+    pub(crate) async fn notice_events(
+        &self,
+        owner: &RunCompletionOwner,
+        notices: &[RunCompletionNotice],
+    ) -> Vec<RunCompletionNoticeEvent> {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        let mut events = Vec::with_capacity(notices.len());
+        for notice in notices {
+            let unread_count = match counts.get(notice.thread_id.as_str()) {
+                Some(count) => *count,
+                None => {
+                    let count = self.unread_count_for_thread(owner, notice).await;
+                    counts.insert(notice.thread_id.as_str(), count);
+                    count
+                }
+            };
+            events.push(notice_event_with_count(notice, unread_count));
+        }
+        events
+    }
+
     async fn project_batch(
         &self,
         owner: &RunCompletionOwner,
         notices: &[RunCompletionNotice],
     ) -> Vec<SequencedCompletionEvent> {
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut events = Vec::with_capacity(notices.len());
-        for notice in notices {
-            let unread_count = match counts.get(&notice.thread_id) {
-                Some(count) => *count,
-                None => {
-                    let count = match self
-                        .notices
-                        .unread_for_thread(owner, &notice.thread_id, 99)
-                        .await
-                    {
-                        Ok(thread_notices) => thread_notices.len(),
-                        Err(error) => {
-                            // silent-ok: grouped-copy count only; logged.
-                            tracing::debug!(
-                                target: "ironclaw::reborn::run_completions",
-                                %error,
-                                "per-thread unread count unavailable; using notice-local floor",
-                            );
-                            usize::from(!notice.is_read())
-                        }
-                    };
-                    counts.insert(notice.thread_id.clone(), count);
-                    count
-                }
-            };
-            events.push(SequencedCompletionEvent {
+        self.notice_events(owner, notices)
+            .await
+            .into_iter()
+            .zip(notices)
+            .map(|(event, notice)| SequencedCompletionEvent {
                 sequence: notice.sequence,
-                event: RunCompletionStreamEvent::Notice(RunCompletionNoticeEvent {
-                    schema: RUN_COMPLETION_NOTICE_SCHEMA.to_string(),
-                    sequence: notice.sequence.to_string(),
-                    notice_id: notice.notice_id.clone(),
-                    run_id: notice.run_id.clone(),
-                    thread_id: notice.thread_id.clone(),
-                    thread_tag: notice.thread_tag.clone(),
-                    completed_at: notice.completed_at.to_rfc3339(),
-                    read: notice.is_read(),
-                    unread_count_for_thread: u16::try_from(unread_count).unwrap_or(u16::MAX),
-                }),
-            });
-        }
-        events
+                event: RunCompletionStreamEvent::Notice(event),
+            })
+            .collect()
     }
 
-    /// Project one durable notice into its wire event, joining the bounded
-    /// per-thread unread count.
-    pub async fn notice_event(
+    /// The bounded per-thread unread count joined onto a notice's events.
+    async fn unread_count_for_thread(
         &self,
         owner: &RunCompletionOwner,
         notice: &RunCompletionNotice,
-    ) -> RunCompletionNoticeEvent {
-        let unread_count = match self
+    ) -> usize {
+        match self
             .notices
-            .unread_for_thread(owner, &notice.thread_id, 99)
+            .unread_for_thread(owner, &notice.thread_id, UNREAD_COUNT_SCAN_LIMIT)
             .await
         {
-            Ok(notices) => notices.len(),
+            Ok(thread_notices) => thread_notices.len(),
             Err(error) => {
                 // silent-ok: the count only feeds grouped badge copy; the
                 // notice itself still delivers. Logged so a wrong badge has
@@ -176,27 +193,30 @@ impl RunCompletionStreamHub {
                 );
                 usize::from(!notice.is_read())
             }
-        };
-        RunCompletionNoticeEvent {
-            schema: RUN_COMPLETION_NOTICE_SCHEMA.to_string(),
-            sequence: notice.sequence.to_string(),
-            notice_id: notice.notice_id.clone(),
-            run_id: notice.run_id.clone(),
-            thread_id: notice.thread_id.clone(),
-            thread_tag: notice.thread_tag.clone(),
-            completed_at: notice.completed_at.to_rfc3339(),
-            read: notice.is_read(),
-            unread_count_for_thread: u16::try_from(unread_count).unwrap_or(u16::MAX),
         }
+    }
+
+    /// Project one durable notice into its wire event, joining the bounded
+    /// per-thread unread count.
+    pub async fn notice_event(
+        &self,
+        owner: &RunCompletionOwner,
+        notice: &RunCompletionNotice,
+    ) -> RunCompletionNoticeEvent {
+        let unread_count = self.unread_count_for_thread(owner, notice).await;
+        notice_event_with_count(notice, unread_count)
     }
 
     /// Wake connected pages after a notice write (create or replay).
     pub async fn notice_written(&self, owner: &RunCompletionOwner, notice: &RunCompletionNotice) {
         let event = self.notice_event(owner, notice).await;
-        let _ = self.sender(owner).send(SequencedCompletionEvent {
-            sequence: notice.sequence,
-            event: RunCompletionStreamEvent::Notice(event),
-        });
+        self.publish(
+            owner,
+            SequencedCompletionEvent {
+                sequence: notice.sequence,
+                event: RunCompletionStreamEvent::Notice(event),
+            },
+        );
     }
 
     /// Publish a grant to every connected page; only the named worker
@@ -222,19 +242,22 @@ impl RunCompletionStreamHub {
             // Web Push is never presented through a browser grant.
             CompletionSurface::WebAppPush => return,
         };
-        let _ = self.sender(owner).send(SequencedCompletionEvent {
-            sequence: notice.sequence,
-            event: RunCompletionStreamEvent::Grant(RunCompletionGrantEvent {
-                schema: RUN_COMPLETION_GRANT_SCHEMA.to_string(),
-                sequence: notice.sequence.to_string(),
-                notice_id: notice.notice_id.clone(),
-                grant_id: grant_id.clone(),
-                browser_instance_id: browser_instance_id.clone(),
-                state_revision: *state_revision,
-                surface,
-                expires_at: expires_at.to_rfc3339(),
-            }),
-        });
+        self.publish(
+            owner,
+            SequencedCompletionEvent {
+                sequence: notice.sequence,
+                event: RunCompletionStreamEvent::Grant(RunCompletionGrantEvent {
+                    schema: RUN_COMPLETION_GRANT_SCHEMA.to_string(),
+                    sequence: notice.sequence.to_string(),
+                    notice_id: notice.notice_id.clone(),
+                    grant_id: grant_id.clone(),
+                    browser_instance_id: browser_instance_id.clone(),
+                    state_revision: *state_revision,
+                    surface,
+                    expires_at: expires_at.to_rfc3339(),
+                }),
+            },
+        );
     }
 
     /// Publish a clear after a durable read transition (§9.3).
@@ -243,17 +266,37 @@ impl RunCompletionStreamHub {
             super::records::CompletionReadState::Read { read_at, .. } => read_at.to_rfc3339(),
             super::records::CompletionReadState::Unread => return,
         };
-        let _ = self.sender(owner).send(SequencedCompletionEvent {
-            sequence: notice.sequence,
-            event: RunCompletionStreamEvent::Clear(RunCompletionClearEvent {
-                schema: RUN_COMPLETION_CLEAR_SCHEMA.to_string(),
-                sequence: notice.sequence.to_string(),
-                notice_id: notice.notice_id.clone(),
-                thread_id: notice.thread_id.clone(),
-                thread_tag: notice.thread_tag.clone(),
-                read_at,
-            }),
-        });
+        self.publish(
+            owner,
+            SequencedCompletionEvent {
+                sequence: notice.sequence,
+                event: RunCompletionStreamEvent::Clear(RunCompletionClearEvent {
+                    schema: RUN_COMPLETION_CLEAR_SCHEMA.to_string(),
+                    sequence: notice.sequence.to_string(),
+                    notice_id: notice.notice_id.clone(),
+                    thread_id: notice.thread_id.clone(),
+                    thread_tag: notice.thread_tag.clone(),
+                    read_at,
+                }),
+            },
+        );
+    }
+}
+
+fn notice_event_with_count(
+    notice: &RunCompletionNotice,
+    unread_count: usize,
+) -> RunCompletionNoticeEvent {
+    RunCompletionNoticeEvent {
+        schema: RUN_COMPLETION_NOTICE_SCHEMA.to_string(),
+        sequence: notice.sequence.to_string(),
+        notice_id: notice.notice_id.clone(),
+        run_id: notice.run_id.clone(),
+        thread_id: notice.thread_id.clone(),
+        thread_tag: notice.thread_tag.clone(),
+        completed_at: notice.completed_at.to_rfc3339(),
+        read: notice.is_read(),
+        unread_count_for_thread: u16::try_from(unread_count).unwrap_or(u16::MAX),
     }
 }
 
@@ -323,6 +366,11 @@ mod tests {
             tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
             user_id: UserId::new("user-alpha").expect("user"),
         }
+    }
+
+    /// Owners currently holding a live channel (the eviction contract).
+    fn channel_count(hub: &RunCompletionStreamHub) -> usize {
+        hub.senders.lock().expect("hub senders").len()
     }
 
     fn granted_notice(surface: CompletionSurface) -> RunCompletionNotice {
@@ -426,5 +474,38 @@ mod tests {
             }
             other => panic!("expected a clear event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn channels_exist_only_while_an_owner_has_a_subscriber() {
+        let (hub, store) = hub();
+        let owner = owner();
+        seed(&store).await;
+
+        // Publishing to an owner nobody listens to creates no channel: the
+        // map is bounded by connected owners, not by notified owners.
+        hub.publish_grant(&owner, &granted_notice(CompletionSurface::InApp));
+        assert_eq!(channel_count(&hub), 0, "no subscriber, no channel");
+
+        let (_replay, receiver) = hub.subscribe(&owner, None, 10).await.expect("subscribe");
+        assert_eq!(channel_count(&hub), 1);
+        drop(receiver);
+
+        // The last receiver is gone: the next publish evicts the entry
+        // instead of leaving it resident for the process lifetime.
+        hub.publish_grant(&owner, &granted_notice(CompletionSurface::InApp));
+        assert_eq!(
+            channel_count(&hub),
+            0,
+            "evicted after the last receiver dropped"
+        );
+
+        // A fresh subscriber lands on a fresh channel and receives again.
+        let (_replay, mut receiver) = hub.subscribe(&owner, None, 10).await.expect("subscribe");
+        hub.publish_grant(&owner, &granted_notice(CompletionSurface::InApp));
+        assert!(matches!(
+            receiver.recv().await.expect("grant delivered").event,
+            RunCompletionStreamEvent::Grant(_)
+        ));
     }
 }

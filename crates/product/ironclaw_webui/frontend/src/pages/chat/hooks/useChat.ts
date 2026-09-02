@@ -185,6 +185,19 @@ export function useChat(threadId) {
     setMessages,
   } = useHistory(threadId, { getPendingMessages, setPendingMessages });
 
+  // Run-completion read evidence (§9.3): the focused thread view has
+  // confirmed its finalized replies only once history for THIS thread is
+  // loaded into state. Announce that point to the notification client so a
+  // `thread_read` can never fire from route presence alone. Lazy import
+  // keeps the notification module out of the chat bundle; failures never
+  // affect chat rendering.
+  React.useEffect(() => {
+    if (!threadId || historyLoading || messagesThreadId !== threadId) return;
+    import("../../../lib/run-completions/client")
+      .then((runCompletions) => runCompletions.reportThreadHistoryRendered(threadId))
+      .catch(() => undefined);
+  }, [threadId, historyLoading, messagesThreadId]);
+
   const [isProcessing, setIsProcessingState] = React.useState(false);
   const isProcessingRef = React.useRef(isProcessing);
   const setIsProcessing = React.useCallback((next) => {

@@ -440,7 +440,24 @@ mod tests {
         assert!(!capabilities.gate_prompts);
         assert!(!capabilities.auth_prompts);
         assert!(!capabilities.notifications);
+        assert!(
+            !capabilities.run_completions,
+            "completion pushes are opt-in per provider; the default must fail closed"
+        );
         assert!(capabilities.modalities.is_empty());
+    }
+
+    #[test]
+    fn delivery_target_capabilities_deserialize_defaults_run_completions_to_false() {
+        // Capability payloads persisted before `run_completions` existed must
+        // decode with it false, so an old web-app catalog entry never becomes
+        // a completion-push target by accident.
+        let decoded: DeliveryTargetCapabilities = from_str(
+            r#"{"final_replies":true,"progress":false,"gate_prompts":true,"auth_prompts":true,"notifications":true,"modalities":[]}"#,
+        )
+        .expect("deserialize legacy capabilities without run_completions");
+        assert!(!decoded.run_completions);
+        assert!(decoded.notifications);
     }
 
     #[test]

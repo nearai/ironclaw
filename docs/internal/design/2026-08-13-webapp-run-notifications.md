@@ -264,6 +264,21 @@ than the platform provides.
 
 The composition root wires these owners. It contains no completion policy.
 
+> **Implementation note (2026-09-01, nearai/ironclaw#8010).** The shipped
+> implementation splits the *Tab state reporter* / *Presentation arbiter*
+> rows differently from the table above: SPA tabs broadcast their state over
+> `BroadcastChannel` and each tab derives the same profile-level intent from
+> the merged reports (`frontend/src/lib/run-completions/coordination.ts`),
+> submitting it over the authenticated HTTP session it already holds; the
+> service worker owns push dedupe (IndexedDB test-and-set by notice id),
+> notification display, click routing, and tag clearing (`public/sw.js`).
+> The reason is §5.5's own constraint — the worker never receives session
+> credentials, so every intent, acknowledgement, and thread-read mutation
+> must originate from a page anyway — and the server remains the only
+> cross-profile arbiter either way (one current intent per notice and
+> browser profile). Moving live-stream arbitration into the worker remains
+> an open follow-up decision, not a silent drop.
+
 ### 5.2 Durable source and observer
 
 Current `main` already has a replaying `ProcessJournalCommitObserver` mechanism

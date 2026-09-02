@@ -5520,3 +5520,302 @@ async fn notify_user_isolates_one_failing_target_and_still_delivers_the_rest() {
         "exactly the healthy channel received a delivery"
     );
 }
+
+// ─── §6.1/§7.9: run-completion push fallback over the shared delivery core ─
+//
+// `RunCompletionExternalDelivery` is the production `CompletionPushFallback`
+// and `LocalOsIntentPolicy`. It is driven here through those public ports over
+// the SAME `RunDeliveryServices` bundle the notify_user fan-out uses, so the
+// capability filter, the push-ownership CAS, the typed part, the outbound
+// at-most-once reservation, and the enrollment correlation are all asserted at
+// the caller seam rather than inferred from the helpers.
+
+use ironclaw_assistant::run_completions::coordinator::{
+    CompletionPushFallback, LocalOsIntentPolicy,
+};
+use ironclaw_assistant::run_completions::push::{
+    RunCompletionExternalDelivery, WebAppEnrollmentProbe, WebAppEnrollmentSnapshot,
+};
+use ironclaw_assistant::run_completions::records::{CompletionDeliveryState, RunCompletionNotice};
+use ironclaw_assistant::run_completions::store::{
+    NewRunCompletionNotice, NoticeCreateOutcome, RUN_NOTICES_MOUNT_ALIAS, RunCompletionNoticeStore,
+    RunCompletionNotices, RunCompletionOwner,
+};
+
+/// The notification catalog with exactly one entry advertising
+/// `run_completions` (the web-app provider's shape); every other capability
+/// matches the ordinary notification catalog.
+struct CompletionCapableCatalog {
+    inner: StaticTargetCatalog,
+    capable_binding_ref: Option<&'static str>,
+}
+
+#[async_trait]
+impl OutboundDeliveryTargetProvider for CompletionCapableCatalog {
+    async fn list_outbound_delivery_targets(
+        &self,
+        scope: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
+        let mut entries = self.inner.list_outbound_delivery_targets(scope).await?;
+        for entry in &mut entries {
+            entry.capabilities.run_completions =
+                Some(entry.destination.as_str()) == self.capable_binding_ref;
+        }
+        Ok(entries)
+    }
+}
+
+struct ScriptedEnrollment(WebAppEnrollmentSnapshot);
+
+#[async_trait]
+impl WebAppEnrollmentProbe for ScriptedEnrollment {
+    async fn enrollment(
+        &self,
+        _owner: &RunCompletionOwner,
+    ) -> Result<WebAppEnrollmentSnapshot, String> {
+        Ok(self.0.clone())
+    }
+}
+
+fn completion_notice_store() -> Arc<dyn RunCompletionNotices> {
+    Arc::new(RunCompletionNoticeStore::new(Arc::new(
+        ScopedFilesystem::new(
+            Arc::new(InMemoryBackend::new()),
+            |scope: &ironclaw_host_api::resource::ResourceScope| {
+                MountView::new(vec![
+                    MountGrant::new(
+                        MountAlias::new(RUN_NOTICES_MOUNT_ALIAS)?,
+                        VirtualPath::new(format!(
+                            "/tenants/{}/users/{}/run-notices",
+                            scope.tenant_id, scope.user_id
+                        ))?,
+                        MountPermissions::read_write_list_delete(),
+                    ),
+                    MountGrant::new(
+                        MountAlias::new("/tenant-shared")?,
+                        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id))?,
+                        MountPermissions::read_write(),
+                    ),
+                ])
+            },
+        ),
+    )))
+}
+
+fn completion_owner() -> RunCompletionOwner {
+    RunCompletionOwner {
+        tenant_id: tenant(),
+        user_id: user(),
+    }
+}
+
+async fn pending_completion_notice(store: &dyn RunCompletionNotices) -> RunCompletionNotice {
+    match store
+        .create_notice(
+            &completion_owner(),
+            NewRunCompletionNotice {
+                notice_id: "rcn-push".to_string(),
+                run_id: TurnRunId::new().to_string(),
+                thread_id: "thread-a".to_string(),
+                agent_id: Some(agent().as_str().to_string()),
+                project_id: None,
+                thread_tag: "rct-thread-a".to_string(),
+                terminal_projection_ref: "run-completion/rcn-push".to_string(),
+                completed_at: Utc::now(),
+                arbitration_closes_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("pending notice")
+    {
+        NoticeCreateOutcome::Created(notice) | NoticeCreateOutcome::AlreadyRecorded(notice) => {
+            notice
+        }
+    }
+}
+
+/// The production push facade over the notify_user services, with the stored
+/// notification set seeded and `capable_binding_ref` the one channel that
+/// advertises run completions.
+async fn completion_delivery(
+    catalog: Vec<TestNotificationTarget>,
+    capable_binding_ref: Option<&'static str>,
+    enrollment: WebAppEnrollmentSnapshot,
+    notices: Arc<dyn RunCompletionNotices>,
+) -> (RunCompletionExternalDelivery, Arc<RecordingChannelAdapter>) {
+    let fixture = notify_user_fixture(catalog.clone(), None);
+    seed_notification_targets(&fixture.store, &catalog).await;
+    let adapter = Arc::clone(&fixture.adapter);
+    let mut services = fixture.services;
+    services.delivery_targets = Arc::new(CompletionCapableCatalog {
+        inner: StaticTargetCatalog { targets: catalog },
+        capable_binding_ref,
+    });
+    let delivery = RunCompletionExternalDelivery::new(
+        services,
+        notices,
+        Arc::new(fixture.codecs.clone()),
+        Arc::new(ScriptedEnrollment(enrollment)),
+    );
+    (delivery, adapter)
+}
+
+#[tokio::test]
+async fn run_completion_push_claims_ownership_and_delivers_the_typed_part_to_the_capable_target() {
+    // Two stored channels; only the SECOND advertises run completions, so the
+    // capability filter — not catalog order — must pick it.
+    let notices = completion_notice_store();
+    let notice = pending_completion_notice(notices.as_ref()).await;
+    let (delivery, adapter) = completion_delivery(
+        vec![DM_TARGET, LATE_ACTIVATED_TARGET],
+        Some(LATE_ACTIVATED_TARGET.binding_ref),
+        WebAppEnrollmentSnapshot::default(),
+        Arc::clone(&notices),
+    )
+    .await;
+
+    let handled = delivery
+        .attempt_push(&completion_owner(), &notice)
+        .await
+        .expect("push attempt");
+    assert!(
+        handled,
+        "a capable target means the fallback owns the notice"
+    );
+    let owned = notices
+        .get(&completion_owner(), &notice.notice_id)
+        .await
+        .expect("get")
+        .expect("notice exists");
+    assert!(
+        matches!(owned.delivery, CompletionDeliveryState::PushOwned { .. }),
+        "ownership is claimed by CAS before any egress: {:?}",
+        owned.delivery
+    );
+
+    let envelopes = adapter.envelopes();
+    assert_eq!(envelopes.len(), 1, "exactly one coordinated egress");
+    let envelope = &envelopes[0];
+    assert_eq!(
+        envelope.target.conversation,
+        ExternalConversationRef::new(
+            Some("space-1"),
+            LATE_ACTIVATED_TARGET.conversation_id,
+            None,
+            None
+        )
+        .expect("conversation ref"),
+        "the capability-filtered channel carries the push, never the first stored one"
+    );
+    assert_eq!(envelope.parts.len(), 1, "the typed fact travels alone");
+    match &envelope.parts[0] {
+        OutboundPart::RunCompletion(view) => {
+            assert_eq!(view.notice_id, notice.notice_id);
+            assert_eq!(view.thread_id.as_str(), "thread-a");
+            assert_eq!(view.opaque_thread_tag, "rct-thread-a");
+            assert_eq!(view.unread_count_for_thread, 1);
+        }
+        other => panic!("expected the typed completion fact, got {other:?}"),
+    }
+
+    // Re-driving an owned notice (a crash-loop or a duplicate wake) must not
+    // push twice: the claim is idempotent for the same delivery identity and
+    // the outbound reservation refuses a second attempt on the same
+    // projection.
+    let again = delivery
+        .attempt_push(&completion_owner(), &owned)
+        .await
+        .expect("second attempt");
+    assert!(again, "the fallback still owns the notice");
+    assert_eq!(
+        adapter.envelopes().len(),
+        1,
+        "push ownership plus the outbound reservation are exactly-once"
+    );
+}
+
+#[tokio::test]
+async fn run_completion_push_stands_down_without_a_capable_target() {
+    let notices = completion_notice_store();
+    let notice = pending_completion_notice(notices.as_ref()).await;
+    let (delivery, adapter) = completion_delivery(
+        vec![DM_TARGET, LATE_ACTIVATED_TARGET],
+        None,
+        WebAppEnrollmentSnapshot::default(),
+        Arc::clone(&notices),
+    )
+    .await;
+
+    let handled = delivery
+        .attempt_push(&completion_owner(), &notice)
+        .await
+        .expect("push attempt");
+    assert!(
+        !handled,
+        "no run-completion target: the coordinator settles in-app"
+    );
+    let untouched = notices
+        .get(&completion_owner(), &notice.notice_id)
+        .await
+        .expect("get")
+        .expect("notice exists");
+    assert!(
+        matches!(
+            untouched.delivery,
+            CompletionDeliveryState::PendingArbitration { .. }
+        ),
+        "nothing is claimed when nothing can be pushed: {:?}",
+        untouched.delivery
+    );
+    assert!(adapter.envelopes().is_empty(), "no egress without a target");
+}
+
+#[tokio::test]
+async fn local_os_intents_need_a_selected_target_and_a_correlated_or_legacy_enrollment() {
+    let notices = completion_notice_store();
+    let correlated = WebAppEnrollmentSnapshot {
+        instance_ids: vec!["rbi-1".to_string()],
+        uncorrelated: 0,
+    };
+    let (selected, _) = completion_delivery(
+        vec![DM_TARGET],
+        Some(DM_TARGET.binding_ref),
+        correlated.clone(),
+        Arc::clone(&notices),
+    )
+    .await;
+    assert!(
+        selected.allows_local_os(&completion_owner(), "rbi-1").await,
+        "Selected + Enrolled for this exact browser profile"
+    );
+    assert!(
+        !selected.allows_local_os(&completion_owner(), "rbi-2").await,
+        "a correlated profile set never matches another browser by count alone"
+    );
+
+    let (legacy_only, _) = completion_delivery(
+        vec![DM_TARGET],
+        Some(DM_TARGET.binding_ref),
+        WebAppEnrollmentSnapshot {
+            instance_ids: Vec::new(),
+            uncorrelated: 1,
+        },
+        Arc::clone(&notices),
+    )
+    .await;
+    assert!(
+        legacy_only
+            .allows_local_os(&completion_owner(), "rbi-anything")
+            .await,
+        "registrations that predate correlation degrade to profile-level presence"
+    );
+
+    let (unselected, _) =
+        completion_delivery(vec![DM_TARGET], None, correlated, Arc::clone(&notices)).await;
+    assert!(
+        !unselected
+            .allows_local_os(&completion_owner(), "rbi-1")
+            .await,
+        "enrollment without a selected run-completion target never grants local_os"
+    );
+}

@@ -48,6 +48,12 @@ export function useRunCompletions({ enabled = true, activeThreadId = null } = {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
 
+  // Route presence and badge changes only *offer* thread-read evidence: the
+  // client issues `thread_read` solely for a thread whose history the chat
+  // view has confirmed rendered (`reportThreadHistoryRendered` from useChat),
+  // so a freshly opened route cannot settle notices before its reply is on
+  // screen (§9.3). The badge-count dependency re-offers after the boot
+  // rebase populates the cache while the confirmed thread is on screen.
   React.useEffect(() => {
     if (!enabled) return;
     const module = clientRef.current;

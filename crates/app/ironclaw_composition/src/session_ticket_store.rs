@@ -113,18 +113,26 @@ impl SessionSocketTicketStore for SecretStoreSessionSocketTicketStore {
                 );
                 unavailable("ticket write failed")
             })?;
-        let lease = self
-            .secrets
-            .lease_once(&self.scope, &handle)
-            .await
-            .map_err(|error| {
+        let lease = match self.secrets.lease_once(&self.scope, &handle).await {
+            Ok(lease) => lease,
+            Err(error) => {
                 tracing::debug!(
                     target: "ironclaw::reborn::session_tickets",
                     error = %error,
                     "session socket ticket lease failed",
                 );
-                unavailable("ticket lease failed")
-            })?;
+                // A secret nobody can ever lease is dead weight: remove it
+                // now rather than leaving it for expiry.
+                if let Err(cleanup_error) = self.secrets.delete(&self.scope, &handle).await {
+                    tracing::debug!(
+                        target: "ironclaw::reborn::session_tickets",
+                        error = %cleanup_error,
+                        "unleasable session socket ticket cleanup failed",
+                    );
+                }
+                return Err(unavailable("ticket lease failed"));
+            }
+        };
         Ok(lease.id.to_string())
     }
 

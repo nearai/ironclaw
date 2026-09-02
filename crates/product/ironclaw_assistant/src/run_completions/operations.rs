@@ -42,7 +42,10 @@ fn bounded_opaque_id(field: &'static str, value: &str) -> Result<(), ProductSurf
     Ok(())
 }
 
-fn surface_error(error: RunCompletionStoreError) -> ProductSurfaceError {
+/// The one translation from store failures to the public surface error
+/// contract, shared by the HTTP operations and the `RunCompletions` stream
+/// selector so the two can never drift.
+pub(crate) fn surface_error(error: RunCompletionStoreError) -> ProductSurfaceError {
     match error {
         RunCompletionStoreError::NotFound => ProductSurfaceError::not_found(),
         RunCompletionStoreError::Invalid { .. } => {
@@ -245,37 +248,51 @@ pub async fn thread_read(
         )
     })?;
     let owner = owner_of(&caller);
-    let unread = services
-        .notices
-        .unread_for_thread(
-            &owner,
-            &request.thread_id,
-            RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT,
-        )
-        .await
-        .map_err(surface_error)?;
     let mut settled = Vec::new();
-    for notice in unread {
-        // Advance only through notices at or below the rendered sequence;
-        // later completions the view has not proven remain unread (§7.8).
-        if notice.sequence > through_sequence {
-            continue;
-        }
-        let read = services
+    // The unread-per-thread query is oldest-first and bounded; a settled
+    // notice leaves the unread partition, so re-querying pages through the
+    // backlog until a page is short or every remaining unread notice is
+    // newer than the evidence. Bounded so one request cannot drain an
+    // unbounded backlog.
+    for _ in 0..MAX_THREAD_READ_PAGES {
+        let unread = services
             .notices
-            .mark_read(
+            .unread_for_thread(
                 &owner,
-                &notice.notice_id,
-                CompletionReadEvidence::FocusedThreadVisit {
-                    browser_instance_id: request.browser_instance_id.clone(),
-                },
-                Utc::now(),
+                &request.thread_id,
+                RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT,
             )
             .await
             .map_err(surface_error)?;
-        services.hub.publish_clear(&owner, &read);
-        services.settle_inbox_row(&owner, &read.run_id).await;
-        settled.push(read.notice_id);
+        let page_len = unread.len();
+        let mut settled_this_page = 0;
+        for notice in unread {
+            // Advance only through notices at or below the rendered
+            // sequence; later completions the view has not proven remain
+            // unread (§7.8).
+            if notice.sequence > through_sequence {
+                continue;
+            }
+            let read = services
+                .notices
+                .mark_read(
+                    &owner,
+                    &notice.notice_id,
+                    CompletionReadEvidence::FocusedThreadVisit {
+                        browser_instance_id: request.browser_instance_id.clone(),
+                    },
+                    Utc::now(),
+                )
+                .await
+                .map_err(surface_error)?;
+            services.hub.publish_clear(&owner, &read);
+            services.settle_inbox_row(&owner, &read.run_id).await;
+            settled.push(read.notice_id);
+            settled_this_page += 1;
+        }
+        if page_len < RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT || settled_this_page == 0 {
+            break;
+        }
     }
     if !settled.is_empty() {
         services.wake_owner(&owner);
@@ -284,6 +301,11 @@ pub async fn thread_read(
         settled_notice_ids: settled,
     })
 }
+
+/// Upper bound on unread pages one `thread_read` drains (pages are
+/// [`RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT`] wide): a thread with more unread
+/// completions than this settles across successive focused visits.
+const MAX_THREAD_READ_PAGES: usize = 16;
 
 /// `webui.run-completions.unread.v1`
 pub async fn unread_view(
@@ -296,10 +318,9 @@ pub async fn unread_view(
         .unread_snapshot(&owner)
         .await
         .map_err(surface_error)?;
-    let mut notices = Vec::with_capacity(unread.len());
-    for notice in &unread {
-        notices.push(services.hub.notice_event(&owner, notice).await);
-    }
+    // Batch projection: one unread-count query per distinct thread, not one
+    // per notice, so a full 250-notice snapshot never costs 250 index scans.
+    let notices = services.hub.notice_events(&owner, &unread).await;
     // The owner's stream head, not the unread maximum: resuming from an
     // unread-only maximum would replay newer already-read notices, and an
     // empty snapshot would reset the subscription to origin.
@@ -312,4 +333,191 @@ pub async fn unread_view(
         notices,
         resume_sequence: resume_sequence.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_completions::store::{
+        NewRunCompletionNotice, RunCompletionNoticeStore, RunCompletionNotices,
+    };
+    use crate::run_completions::stream::RunCompletionStreamHub;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::ids::{TenantId, UserId};
+    use ironclaw_host_api::mount::{MountGrant, MountPermissions, MountView};
+    use ironclaw_host_api::path::{MountAlias, VirtualPath};
+    use ironclaw_host_api::resource::ResourceScope;
+    use ironclaw_product_contracts::surface::ProductSurfaceErrorCode;
+
+    fn services() -> Arc<RunCompletionSurfaceServices> {
+        let store = Arc::new(RunCompletionNoticeStore::new(Arc::new(
+            ScopedFilesystem::new(Arc::new(InMemoryBackend::new()), |scope: &ResourceScope| {
+                MountView::new(vec![
+                    MountGrant::new(
+                        MountAlias::new(crate::run_completions::store::RUN_NOTICES_MOUNT_ALIAS)?,
+                        VirtualPath::new(format!(
+                            "/tenants/{}/users/{}/run-notices",
+                            scope.tenant_id, scope.user_id
+                        ))?,
+                        MountPermissions::read_write_list_delete(),
+                    ),
+                    MountGrant::new(
+                        MountAlias::new("/tenant-shared")?,
+                        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id))?,
+                        MountPermissions::read_write(),
+                    ),
+                ])
+            }),
+        ))) as Arc<dyn RunCompletionNotices>;
+        let hub = Arc::new(RunCompletionStreamHub::new(Arc::clone(&store)));
+        Arc::new(RunCompletionSurfaceServices::new(store, hub))
+    }
+
+    fn caller(user: &str) -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            UserId::new(user).expect("user"),
+            None,
+            None,
+        )
+    }
+
+    async fn seed(
+        services: &RunCompletionSurfaceServices,
+        user: &str,
+        suffix: &str,
+        thread: &str,
+    ) -> RunCompletionNotice {
+        let owner = owner_of(&caller(user));
+        match services
+            .notices
+            .create_notice(
+                &owner,
+                NewRunCompletionNotice {
+                    notice_id: format!("rcn-{suffix}"),
+                    run_id: format!("run-{suffix}"),
+                    thread_id: thread.to_string(),
+                    agent_id: Some("agent-alpha".to_string()),
+                    project_id: None,
+                    thread_tag: format!("rct-{thread}"),
+                    terminal_projection_ref: format!("run-completion/rcn-{suffix}"),
+                    completed_at: Utc::now(),
+                    arbitration_closes_at: Utc::now() + ChronoDuration::seconds(1),
+                },
+            )
+            .await
+            .expect("create notice")
+        {
+            crate::run_completions::store::NoticeCreateOutcome::Created(notice)
+            | crate::run_completions::store::NoticeCreateOutcome::AlreadyRecorded(notice) => notice,
+        }
+    }
+
+    #[tokio::test]
+    async fn foreign_notices_collapse_to_not_found() {
+        let services = services();
+        let notice = seed(&services, "user-owner", "owned", "thread-a").await;
+        // Another user naming a real notice id learns nothing: not that it
+        // exists, not whose it is.
+        let error = submit_intent(
+            &services,
+            caller("user-other"),
+            RunCompletionIntentRequest {
+                notice_id: notice.notice_id.clone(),
+                browser_instance_id: "rbi-1".to_string(),
+                tab_id: "rtb-1".to_string(),
+                state_revision: 1,
+                focus_epoch: 0,
+                intent: RunCompletionIntentKind::InApp,
+            },
+        )
+        .await
+        .expect_err("a foreign notice is not found");
+        assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+        let error = acknowledge(
+            &services,
+            caller("user-other"),
+            RunCompletionAcknowledgeRequest {
+                notice_id: notice.notice_id,
+                grant_id: "rcg-1".to_string(),
+                state_revision: 1,
+                outcome: RunCompletionAcknowledgeOutcome::Presented,
+            },
+        )
+        .await
+        .expect_err("a foreign acknowledgement is not found");
+        assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn thread_read_settles_every_unread_notice_through_the_rendered_sequence() {
+        let services = services();
+        // One more than a single unread page, all in one thread, plus one
+        // notice in another thread that must stay untouched.
+        let backlog = RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT + 1;
+        let mut newest = 0;
+        for index in 0..backlog {
+            let notice = seed(&services, "user-a", &format!("t-{index}"), "thread-a").await;
+            newest = newest.max(notice.sequence);
+        }
+        let other = seed(&services, "user-a", "elsewhere", "thread-b").await;
+
+        let response = thread_read(
+            &services,
+            caller("user-a"),
+            RunCompletionThreadReadRequest {
+                thread_id: "thread-a".to_string(),
+                through_sequence: newest.to_string(),
+                browser_instance_id: "rbi-1".to_string(),
+            },
+        )
+        .await
+        .expect("thread read");
+        assert_eq!(
+            response.settled_notice_ids.len(),
+            backlog,
+            "a focused visit through the newest sequence drains past one page"
+        );
+        let owner = owner_of(&caller("user-a"));
+        let remaining = services
+            .notices
+            .unread_snapshot(&owner)
+            .await
+            .expect("snapshot");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].notice_id, other.notice_id,
+            "other threads stay unread"
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_read_never_settles_past_the_rendered_sequence() {
+        let services = services();
+        let older = seed(&services, "user-a", "older", "thread-a").await;
+        let newer = seed(&services, "user-a", "newer", "thread-a").await;
+        let response = thread_read(
+            &services,
+            caller("user-a"),
+            RunCompletionThreadReadRequest {
+                thread_id: "thread-a".to_string(),
+                through_sequence: older.sequence.to_string(),
+                browser_instance_id: "rbi-1".to_string(),
+            },
+        )
+        .await
+        .expect("thread read");
+        assert_eq!(response.settled_notice_ids, vec![older.notice_id]);
+        let owner = owner_of(&caller("user-a"));
+        let remaining = services
+            .notices
+            .unread_snapshot(&owner)
+            .await
+            .expect("snapshot");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].notice_id, newer.notice_id,
+            "a completion the view has not rendered stays unread"
+        );
+    }
 }

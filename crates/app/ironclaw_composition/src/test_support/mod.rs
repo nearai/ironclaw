@@ -204,6 +204,20 @@ pub use trigger_materializer::materialize_trigger_prompt_for_test;
 #[cfg(feature = "test-support")]
 pub use user_profile::build_user_profile_source_for_test;
 
+/// The production run-completion journal observer over a caller-supplied
+/// ingest, so an integration test can register it on the REAL process
+/// journal, complete a turn through the production workflow, and assert the
+/// durable notice at the store seam (2026-08-13 design §5.2). Returned as an
+/// opaque implementor: the adapter type stays crate-private, and the caller
+/// wraps and coerces it where it subscribes, so this seam adds no dispatch
+/// site to composition.
+#[cfg(feature = "test-support")]
+pub fn run_completion_journal_observer_for_test(
+    ingest: std::sync::Arc<ironclaw_assistant::run_completions::ingest::RunCompletionIngest>,
+) -> impl ironclaw_processes::ProcessJournalCommitObserver + 'static {
+    crate::run_completion_observer::RunCompletionJournalObserver::new(ingest)
+}
+
 /// Expose the production skill mount views so a test can compare the read and write sides.
 ///
 /// They must resolve `/skills` to the same tree. When they did not, `skill_install` wrote to the

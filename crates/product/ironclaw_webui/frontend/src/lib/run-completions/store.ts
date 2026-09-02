@@ -6,14 +6,7 @@
 // response, not local dismissal).
 
 import type { RunCompletionNotice } from "./protocol";
-
-// Inlined rather than imported so the eager /chat closure carries only this
-// module (the hook needs the badge cache at boot); the full wire protocol
-// stays in the lazily imported orchestrator graph.
-function compareSequences(a: string, b: string): number {
-  if (a.length !== b.length) return a.length - b.length;
-  return a < b ? -1 : a > b ? 1 : 0;
-}
+import { compareSequences } from "./sequence";
 
 // §5.4: the UI cache retains at most 250 active notices; eviction only
 // affects cache acceleration because the durable projection remains

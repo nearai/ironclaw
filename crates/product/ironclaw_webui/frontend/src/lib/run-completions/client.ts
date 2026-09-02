@@ -66,6 +66,21 @@ let stopCoordinationFn: (() => void) | null = null;
 let options: OrchestratorOptions | null = null;
 let watchingGrants = new Map<string, RunCompletionGrant>();
 let started = false;
+// The thread whose history the focused view has confirmed rendered (§9.3):
+// `thread_read` evidence is issued only for this thread, never from route
+// presence alone, so a notice cannot be settled before its reply is on
+// screen.
+let historyRenderedThreadId: string | null = null;
+// Consecutive non-retryable subscription failures since the last delivered
+// event. Bounds the rebase-then-resubscribe recovery so a persistently
+// rejected selector degrades to snapshot-only instead of looping.
+let terminalSubscriptionFailures = 0;
+const MAX_TERMINAL_RESUBSCRIBES = 3;
+// Set while the shared socket is reconnecting; the first `open` afterwards
+// rebases the badge cache from the durable snapshot (§7.6), because clears
+// and grants that fired during the gap ride the notice's own sequence and are
+// not replayed by the resumed subscription.
+let transportReconnecting = false;
 
 export function startRunCompletions(opts: OrchestratorOptions): () => void {
   if (started) {
@@ -86,6 +101,9 @@ export function stopRunCompletions() {
   stopCoordinationFn?.();
   stopCoordinationFn = null;
   watchingGrants = new Map();
+  historyRenderedThreadId = null;
+  terminalSubscriptionFailures = 0;
+  transportReconnecting = false;
   // The badge cache is per-signed-in-owner state: clear it so a following
   // sign-in never briefly renders the previous account's notices, and so a
   // stale boot()/rebase() resolving after stop repopulates nothing visible
@@ -136,6 +154,7 @@ function subscribeStream(fromSequence: string) {
     { kind: "run_completions" },
     {
       onEvent: ({ body }) => {
+        terminalSubscriptionFailures = 0;
         const event = parseRunCompletionEvent(body);
         if (!event) return;
         if (event.type === "notice") {
@@ -149,14 +168,31 @@ function subscribeStream(fromSequence: string) {
         }
       },
       onError: (error) => {
-        if (!error.retryable) {
-          // Cursor unusable (e.g. beyond retention): rebase from the
-          // durable snapshot; the client resubscribes from the new cursor.
+        if (error.retryable) return;
+        // The shared client dropped this registration (a non-retryable
+        // selector failure is terminal for that subscription, e.g. a cursor
+        // beyond retention). Rebase from the durable snapshot and register
+        // a fresh subscription from its head — bounded, so a selector the
+        // server keeps rejecting degrades to snapshot-only.
+        terminalSubscriptionFailures += 1;
+        if (terminalSubscriptionFailures > MAX_TERMINAL_RESUBSCRIBES) return;
+        void rebase()
+          .then((resume) => subscribeStream(resume))
+          .catch(() => undefined);
+      },
+      onStatus: (status) => {
+        if (status === "reconnecting") {
+          transportReconnecting = true;
+        } else if (status === "open" && transportReconnecting) {
+          transportReconnecting = false;
           void rebase().catch(() => undefined);
         }
       },
     },
-    { idPrefix: "rc" },
+    // Resume strictly after the snapshot's head (`rc:` cursor namespace):
+    // the snapshot already seeded everything at or before it, so the
+    // replay carries only what happened since.
+    { idPrefix: "rc", fromCursor: `rc:${fromSequence}` },
   );
 }
 
@@ -313,7 +349,24 @@ async function closeOsNotificationsByTag(tag: string) {
 
 /** The chat route announces which thread is on screen. */
 export function reportActiveThread(threadId: string | null) {
+  if (threadId !== historyRenderedThreadId) {
+    // A different (or no) thread is on screen: its history is not yet
+    // confirmed rendered, so thread-read evidence waits for that signal.
+    historyRenderedThreadId = null;
+  }
   setRouteThread(threadId);
+}
+
+/**
+ * The focused thread view finished loading its history for `threadId`
+ * (§9.3: "a focused thread view confirms finalized replies through
+ * sequence N"). Unlocks thread-read evidence for that thread and settles
+ * whatever is already unread for it.
+ */
+export function reportThreadHistoryRendered(threadId: string) {
+  if (!threadId) return;
+  historyRenderedThreadId = threadId;
+  reportThreadViewed(threadId);
 }
 
 /**
@@ -360,6 +413,10 @@ export function reportReplyRendered(runId: string) {
  */
 export function reportThreadViewed(threadId: string) {
   if (!threadId) return;
+  // Display is not read (§9.3): route presence or a badge change alone never
+  // settles a notice — only a focused view whose history for THIS thread has
+  // been confirmed rendered.
+  if (historyRenderedThreadId !== threadId) return;
   if (typeof document !== "undefined") {
     if (document.visibilityState !== "visible" || !document.hasFocus()) return;
   }

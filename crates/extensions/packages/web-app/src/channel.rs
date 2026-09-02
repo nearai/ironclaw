@@ -35,7 +35,7 @@ use ironclaw_extension_contracts::tool_adapter::{
 use ironclaw_host_api::action::NetworkMethod;
 use ironclaw_host_api::ids::SecretHandle;
 use ironclaw_web_app::{
-    DEFAULT_TTL_SECONDS, PushEndpoint, PushSubscriptionKeys, PushSubscriptionRecord, PushUrgency,
+    DEFAULT_TTL_SECONDS, PushEndpoint, PushSubscriptionRecord, PushUrgency, RegistrationDocument,
     WEB_APP_VAPID_CREDENTIAL_HANDLE, WebAppError, WebAppNotificationPayload, build_push_request,
 };
 
@@ -72,37 +72,20 @@ impl WebAppChannelAdapter {
 
 /// One registration parsed into the vendor record this half sends with.
 ///
-/// This is where the opaque half of a registration is interpreted, and the
-/// only place it ever is (design §8: "everything else validates where it is
-/// used"). A malformed document fails **this** registration — not the
-/// delivery, and not the other registrations — and is reported for pruning on
-/// the same path an expired endpoint takes.
+/// The opaque half of a registration is interpreted by the web-app domain's
+/// [`RegistrationDocument`] grammar — the one owner the host's enrollment
+/// probe reads through as well (design §8: "everything else validates where
+/// it is used"). A malformed document fails **this** registration — not the
+/// delivery, and not the other registrations — and is reported for pruning
+/// on the same path an expired endpoint takes.
 fn parse_registration(
     registration: &DeliveryRegistration,
 ) -> Result<PushSubscriptionRecord, WebAppError> {
-    #[derive(serde::Deserialize)]
-    struct RegistrationDocument {
-        keys: RegistrationKeys,
-        #[serde(default)]
-        user_agent: Option<String>,
-    }
-    #[derive(serde::Deserialize)]
-    struct RegistrationKeys {
-        p256dh: String,
-        auth: String,
-    }
-
     let endpoint = PushEndpoint::new(registration.endpoint.clone())?;
-    let document: RegistrationDocument =
-        serde_json::from_str(&registration.document).map_err(|error| {
-            WebAppError::InvalidSubscription {
-                reason: format!("registration document is not a push subscription: {error}"),
-            }
-        })?;
-    let keys = PushSubscriptionKeys::new(document.keys.p256dh, document.keys.auth)?;
+    let document = RegistrationDocument::parse(&registration.document)?;
     Ok(PushSubscriptionRecord::new(
         endpoint,
-        keys,
+        document.keys,
         document.user_agent,
         registration.created_at.clone(),
     ))

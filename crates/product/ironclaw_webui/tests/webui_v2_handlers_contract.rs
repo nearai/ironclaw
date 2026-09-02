@@ -144,6 +144,11 @@ use ironclaw_product_contracts::product_wire::{
     RebornSuggestionDismissResponse, RebornSuggestionGenerationStatus,
     RebornSuggestionStartResponse, RebornSuggestionsResponse,
 };
+use ironclaw_product_contracts::run_completions::{
+    RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID, RUN_COMPLETION_INTENT_COMMAND_ID,
+    RUN_COMPLETION_THREAD_READ_COMMAND_ID, RUN_COMPLETION_UNREAD_VIEW,
+    RunCompletionMutationResponse, RunCompletionUnreadResponse,
+};
 use ironclaw_product_contracts::suggestions::{
     SUGGESTION_DISMISS_COMMAND_ID, SUGGESTION_START_COMMAND_ID, SUGGESTIONS_GENERATE_COMMAND_ID,
     SUGGESTIONS_LIST_VIEW,
@@ -940,6 +945,14 @@ impl StubServices {
     ) -> Result<RebornViewPage, ProductSurfaceError> {
         self.view_queries.lock().expect("lock").push(query.clone());
         match query.view_id.as_str() {
+            id if id == RUN_COMPLETION_UNREAD_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RunCompletionUnreadResponse {
+                    notices: Vec::new(),
+                    resume_sequence: "42".to_string(),
+                })
+                .expect("unread payload"),
+                next_cursor: None,
+            }),
             id if id == RUN_ARTIFACT_VIEW.id => {
                 let request: RebornRunArtifactRequest =
                     serde_json::from_value(query.params).expect("artifact params");
@@ -1992,6 +2005,27 @@ impl ProductSurface for StubServices {
         ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse,
         ProductSurfaceError,
     > {
+        if matches!(
+            request.operation_id.as_str(),
+            RUN_COMPLETION_INTENT_COMMAND_ID
+                | RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID
+                | RUN_COMPLETION_THREAD_READ_COMMAND_ID
+        ) {
+            // Typed run-completion mutations: record the dispatched operation
+            // and echo one settled id in the wire response shape.
+            self.invoke_calls.lock().expect("lock").push((
+                request.operation_id,
+                request.input,
+                request.activity_id,
+            ));
+            let output = serde_json::to_value(RunCompletionMutationResponse {
+                settled_notice_ids: vec!["rcn-settled".to_string()],
+            })
+            .map_err(ProductSurfaceError::internal_from)?;
+            return Ok(
+                ironclaw_product_contracts::surface::ProductSurfaceInvokeResponse { output },
+            );
+        }
         if matches!(
             request.operation_id.as_str(),
             NOTIFICATIONS_MARK_READ_COMMAND_ID
@@ -3361,6 +3395,116 @@ async fn list_threads_forwards_needs_approval_filter() {
         Some("thread-active")
     );
     assert!(calls[0].needs_approval);
+}
+
+/// The four run-completion routes (2026-08-13 design §7.8) are thin typed
+/// dispatchers: each POST maps to exactly its frozen operation id with the
+/// typed request forwarded intact, the GET maps to the unread view, and a
+/// body that does not satisfy the typed request never reaches the surface.
+#[tokio::test]
+async fn run_completion_routes_dispatch_typed_operations() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for (path, body, operation_id, echoed) in [
+        (
+            "/api/webchat/v2/run-completions/intent",
+            r#"{"notice_id":"rcn-1","browser_instance_id":"rbi-1","tab_id":"rtb-1","state_revision":7,"focus_epoch":2,"intent":"in_app"}"#,
+            RUN_COMPLETION_INTENT_COMMAND_ID,
+            ("intent", serde_json::json!("in_app")),
+        ),
+        (
+            "/api/webchat/v2/run-completions/acknowledge",
+            r#"{"notice_id":"rcn-1","grant_id":"rcg-1","state_revision":8,"outcome":"presented"}"#,
+            RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID,
+            ("grant_id", serde_json::json!("rcg-1")),
+        ),
+        (
+            "/api/webchat/v2/run-completions/thread-read",
+            r#"{"thread_id":"thread-1","through_sequence":"12","browser_instance_id":"rbi-1"}"#,
+            RUN_COMPLETION_THREAD_READ_COMMAND_ID,
+            ("through_sequence", serde_json::json!("12")),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("run-completion mutation");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let json = read_json(response).await;
+        assert_eq!(
+            json["settled_notice_ids"],
+            serde_json::json!(["rcn-settled"]),
+            "{path}: the typed mutation response reaches the wire unchanged"
+        );
+        let (dispatched, input, _) = services
+            .invoke_calls
+            .lock()
+            .expect("lock")
+            .last()
+            .cloned()
+            .expect("run-completion invoke recorded");
+        assert_eq!(dispatched.as_str(), operation_id, "{path}");
+        assert_eq!(
+            input[echoed.0], echoed.1,
+            "{path}: typed request forwarded intact"
+        );
+
+        // A body missing the typed request's fields is rejected at the
+        // route, never dispatched.
+        let before = services.invoke_calls.lock().expect("lock").len();
+        let rejected = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"notice_id":"rcn-1"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("malformed run-completion mutation");
+        assert!(
+            rejected.status().is_client_error(),
+            "{path}: malformed body must be a client error, got {}",
+            rejected.status()
+        );
+        assert_eq!(
+            services.invoke_calls.lock().expect("lock").len(),
+            before,
+            "{path}: a malformed body never reaches the product surface"
+        );
+    }
+
+    let unread = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/run-completions/unread")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("unread view");
+    assert_eq!(unread.status(), StatusCode::OK);
+    let json = read_json(unread).await;
+    assert_eq!(json["resume_sequence"], "42");
+    assert_eq!(json["notices"], serde_json::json!([]));
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(
+        queries.last().expect("unread query").view_id.as_str(),
+        RUN_COMPLETION_UNREAD_VIEW.id
+    );
 }
 
 #[tokio::test]

@@ -5854,12 +5854,23 @@ fn run_completion_cursor(sequence: u64) -> String {
 }
 
 fn parse_run_completion_cursor(cursor: &str) -> Result<u64, ProductSurfaceError> {
-    cursor
-        .strip_prefix(RUN_COMPLETION_CURSOR_PREFIX)
-        .and_then(|raw| raw.parse::<u64>().ok())
-        .ok_or_else(|| {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
-        })
+    let rejected =
+        || ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false);
+    let Some(raw) = cursor.strip_prefix(RUN_COMPLETION_CURSOR_PREFIX) else {
+        tracing::debug!(
+            target: "ironclaw::reborn::run_completions",
+            "run completion cursor rejected: missing the `rc:` namespace prefix",
+        );
+        return Err(rejected());
+    };
+    raw.parse::<u64>().map_err(|error| {
+        tracing::debug!(
+            target: "ironclaw::reborn::run_completions",
+            %error,
+            "run completion cursor rejected: sequence is not a u64",
+        );
+        rejected()
+    })
 }
 
 enum DecodedStreamRequest {
@@ -5867,28 +5878,9 @@ enum DecodedStreamRequest {
     RunCompletions { after_sequence: Option<u64> },
 }
 
-fn run_completion_store_error(
-    error: crate::run_completions::store::RunCompletionStoreError,
-) -> ProductSurfaceError {
-    use crate::run_completions::store::RunCompletionStoreError as StoreError;
-    match error {
-        StoreError::NotFound => ProductSurfaceError::not_found(),
-        StoreError::Invalid { .. } => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::InvalidRequest, 400, false)
-        }
-        StoreError::Conflict { .. } => {
-            ProductSurfaceError::from_status(ProductSurfaceErrorCode::Conflict, 409, true)
-        }
-        StoreError::Unavailable { reason } => {
-            tracing::debug!(
-                target: "ironclaw::reborn::run_completions",
-                %reason,
-                "run completion store unavailable",
-            );
-            ProductSurfaceError::unavailable(true)
-        }
-    }
-}
+/// Store failures map through the operations module's one translation so
+/// the stream selector and the HTTP operations share an error contract.
+use crate::run_completions::operations::surface_error as run_completion_store_error;
 
 fn run_completion_stream_envelope(
     item: &crate::run_completions::stream::SequencedCompletionEvent,

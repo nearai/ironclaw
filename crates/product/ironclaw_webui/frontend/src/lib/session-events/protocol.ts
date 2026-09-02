@@ -6,7 +6,12 @@
 
 export const SESSION_EVENT_SCHEMA = "webui.session_event.v1";
 
-export type SessionSelector = { kind: "thread"; thread_id: string } | { kind: string };
+// Mirrors the closed `ProductStreamSelector` vocabulary in
+// `ironclaw_product_contracts::surface`: a selector the server cannot admit
+// must not be representable here.
+export type SessionSelector =
+  | { kind: "thread"; thread_id: string }
+  | { kind: "run_completions" };
 
 export type SessionServerFrame = {
   schema?: string;

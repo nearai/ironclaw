@@ -122,9 +122,3 @@ export function noticeFromWire(value: unknown): RunCompletionNotice | null {
         : 1,
   };
 }
-
-/** Numeric compare for opaque decimal sequence strings (u64 range). */
-export function compareSequences(a: string, b: string): number {
-  if (a.length !== b.length) return a.length - b.length;
-  return a < b ? -1 : a > b ? 1 : 0;
-}

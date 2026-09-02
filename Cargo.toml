@@ -515,6 +515,10 @@ name = "reborn_integration_session_events"
 path = "tests/integration/session_events.rs"
 
 [[test]]
+name = "reborn_integration_run_completion_notifications"
+path = "tests/integration/run_completion_notifications.rs"
+
+[[test]]
 name = "reborn_integration_webui_v2_router_smoke"
 path = "tests/integration/webui_v2_router_smoke.rs"
 

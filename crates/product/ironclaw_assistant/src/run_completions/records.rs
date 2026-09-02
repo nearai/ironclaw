@@ -18,12 +18,24 @@ const NOTICE_ID_PURPOSE: &str = "web-app-run-completion/v1";
 /// Purpose separator for the OS-notification collapse tag (§7.10).
 const THREAD_TAG_PURPOSE: &str = "web-app-run-completion-collapse/v1";
 
+/// Identity prefix length taken from the hex digest: 160 bits, well past
+/// any collision concern for one owner's runs, and short enough to stay
+/// inside the 128-byte opaque-id bound with its purpose prefix.
+const DIGEST_PREFIX_LEN: usize = 40;
+
+/// The bounded identity prefix of a digest. `sha256_hex` is ASCII so the
+/// byte index is a char boundary today; `get` keeps this a fallible slice
+/// rather than a panic path should the digest encoding ever change.
+fn digest_prefix(digest: &str) -> &str {
+    digest.get(..DIGEST_PREFIX_LEN).unwrap_or(digest)
+}
+
 /// Derive the stable, purpose-separated notice id for one owner + run.
 /// Deterministic so duplicate journal delivery rewrites nothing.
 pub fn notice_id_for(tenant_id: &str, user_id: &str, run_id: &str) -> String {
     let input = format!("{NOTICE_ID_PURPOSE}\u{1f}{tenant_id}\u{1f}{user_id}\u{1f}{run_id}");
     let digest = sha256_hex(input.as_bytes());
-    format!("rcn-{}", &digest[..40])
+    format!("rcn-{}", digest_prefix(&digest))
 }
 
 /// Derive the bounded, purpose-separated OS collapse tag for one owner +
@@ -31,7 +43,7 @@ pub fn notice_id_for(tenant_id: &str, user_id: &str, run_id: &str) -> String {
 pub fn thread_tag_for(tenant_id: &str, user_id: &str, thread_id: &str) -> String {
     let input = format!("{THREAD_TAG_PURPOSE}\u{1f}{tenant_id}\u{1f}{user_id}\u{1f}{thread_id}");
     let digest = sha256_hex(input.as_bytes());
-    format!("rct-{}", &digest[..40])
+    format!("rct-{}", digest_prefix(&digest))
 }
 
 /// Presentation surfaces a notice can settle through (§5.3).

@@ -53,6 +53,10 @@ const peerStates = new Map<string, TabNotificationState>();
 const observedRunIds: string[] = [];
 let currentRoute: TabNotificationState["route"] = { kind: "other" };
 let started = false;
+// Per-tab claim ledger for environments without shared storage: claim key →
+// claim time, pruned by the same TTL as the localStorage ledger and released
+// with the notice so a long-lived tab never accumulates claims unbounded.
+const localClaims = new Map<string, number>();
 
 function nowMs(): number {
   return Date.now();
@@ -164,9 +168,17 @@ function liveStates(): TabNotificationState[] {
   const deadline = nowMs() - TAB_STATE_TTL_MS;
   const local = localState();
   peerStates.set(local.tabId, local);
-  return Array.from(peerStates.values()).filter(
-    (state) => state.reportedAt >= deadline,
-  );
+  const live: TabNotificationState[] = [];
+  for (const [peerTabId, state] of peerStates) {
+    if (state.reportedAt >= deadline) {
+      live.push(state);
+    } else {
+      // A silently closed tab (no `pagehide` reached us) ages out here, so
+      // repeated open/close cycles cannot grow the map.
+      peerStates.delete(peerTabId);
+    }
+  }
+  return live;
 }
 
 export type ProfileIntentDecision = {
@@ -247,13 +259,20 @@ export function claimOnce(key: string): boolean {
   } catch (_) {
     // No shared storage: fall back to per-tab claims. The server's
     // idempotent operations absorb the duplicates.
+    const deadline = nowMs() - LEDGER_TTL_MS;
+    for (const [key, stamp] of localClaims) {
+      if (stamp < deadline) localClaims.delete(key);
+    }
     if (localClaims.has(fullKey)) return false;
-    localClaims.add(fullKey);
+    localClaims.set(fullKey, nowMs());
     return true;
   }
 }
 
 export function releaseClaimsFor(noticeId: string) {
+  for (const key of Array.from(localClaims.keys())) {
+    if (key.includes(noticeId)) localClaims.delete(key);
+  }
   try {
     const doomed: string[] = [];
     for (let index = 0; index < window.localStorage.length; index += 1) {
@@ -283,8 +302,6 @@ function pruneLedger() {
     // Best-effort bound.
   }
 }
-
-const localClaims = new Set<string>();
 
 export function resetCoordinationForTests() {
   peerStates.clear();
