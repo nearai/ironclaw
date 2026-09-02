@@ -1850,9 +1850,9 @@ async def test_reborn_v2_model_capability_tags_persist_after_policy_reload(
 
         selector = page.locator(SEL_V2["settings_model_selector"])
         await expect(
-            selector.get_by_role("button").locator("[data-capability='text']")
+            selector.get_by_role("combobox").locator("[data-capability='text']")
         ).to_have_attribute("title", "Text")
-        await selector.get_by_role("button").click()
+        await selector.get_by_role("combobox").click()
         vision_option = page.get_by_role("option").filter(has_text=vision_model)
         await expect(
             vision_option.locator("[data-capability='image-input']")
@@ -1919,11 +1919,11 @@ async def _choose_model_preference(
     await expect(page.get_by_role("button", name="Add provider")).to_have_count(0)
     await expect(page.locator(SEL_V2["settings_model_policy_editor"])).to_have_count(0)
     selector = page.locator(SEL_V2["settings_model_selector"])
-    button = selector.get_by_role("button")
-    await expect(button).to_be_enabled(timeout=15000)
-    await button.click()
+    combobox = selector.get_by_role("combobox")
+    await expect(combobox).to_be_enabled(timeout=15000)
+    await combobox.click()
     await page.get_by_role("option", name=selected_model, exact=True).click()
-    await expect(button).to_contain_text(selected_model)
+    await expect(combobox).to_contain_text(selected_model)
     description = page.get_by_text(
         "Used for future messages in all conversations.", exact=True
     )
@@ -1972,11 +1972,11 @@ async def _assert_model_preference_permissions(
         "/settings/inference",
         SEL_V2["settings_model_selector"],
     )
-    button = default_page.locator(SEL_V2["settings_model_selector"]).get_by_role(
-        "button"
+    combobox = default_page.locator(SEL_V2["settings_model_selector"]).get_by_role(
+        "combobox"
     )
-    await expect(button).to_contain_text("mock-model")
-    await expect(button).not_to_contain_text(selected_model)
+    await expect(combobox).to_contain_text("mock-model")
+    await expect(combobox).not_to_contain_text(selected_model)
 
 
 async def _send_model_preference_turn(
@@ -2107,7 +2107,9 @@ async def test_reborn_v2_settings_model_preference_reaches_provider(
             SEL_V2["settings_model_selector"],
         )
         await expect(
-            selected_page.locator(SEL_V2["settings_model_selector"]).get_by_role("button")
+            selected_page.locator(SEL_V2["settings_model_selector"]).get_by_role(
+                "combobox"
+            )
         ).to_contain_text(selected_model)
 
 
@@ -3637,7 +3639,7 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
     ).to_contain_text("run-ui")
 
     level_filter = reborn_v2_page.locator(SEL_V2["logs_level_filter"])
-    level_trigger = level_filter.get_by_role("button")
+    level_trigger = level_filter.get_by_role("combobox")
     await expect(level_trigger).to_have_attribute("aria-haspopup", "listbox")
     await expect(level_filter.locator("select")).to_have_count(0)
     await reborn_v2_page.locator(SEL_V2["logs_target_filter"]).fill("ironclaw::ui")
