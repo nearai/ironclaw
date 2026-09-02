@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -35,7 +34,7 @@ function walk(node, visit, seen = new Set()) {
 
 test("AuthGenericCard never promises settings without an actionable settings route", () => {
   const translationKeys = [];
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     useT: () => (key) => {
       translationKeys.push(key);

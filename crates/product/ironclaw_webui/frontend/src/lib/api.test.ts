@@ -1,6 +1,10 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { afterEach, test } from "vitest";
+import {
+  createMemoryStorage,
+  replaceBrowserGlobal,
+} from "../test-support/browser-mocks";
+import type { DynamicTestValue } from "../test-support/dynamic-test-types";
 
 import {
   attachmentUrl,
@@ -28,6 +32,17 @@ import {
 const originalFetch = globalThis.fetch;
 const originalSessionStorage = globalThis.sessionStorage;
 
+function installSessionToken(token: string) {
+  replaceBrowserGlobal(
+    "sessionStorage",
+    createMemoryStorage(token ? { ironclaw_token: token } : {}),
+  );
+}
+
+function installWindowOrigin(origin: string) {
+  replaceBrowserGlobal("window", { location: { origin } });
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   globalThis.sessionStorage = originalSessionStorage;
@@ -44,7 +59,7 @@ function withCryptoGlobal(replacement, run) {
     if (prior) {
       Object.defineProperty(globalThis, "crypto", prior);
     } else {
-      delete globalThis.crypto;
+      Reflect.deleteProperty(globalThis, "crypto");
     }
   };
   try {
@@ -71,12 +86,8 @@ function withCryptoGlobal(replacement, run) {
 
 test("listAutomations reads through the v2 automations route", async () => {
   const calls = [];
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
-  globalThis.window = { location: { origin: "http://localhost" } };
+  installSessionToken("token-1");
+  installWindowOrigin("http://localhost");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ automations: [] }), {
@@ -101,12 +112,8 @@ test("eventStreamRequest keeps the bearer out of the stream URL", () => {
   );
   const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
   try {
-    globalThis.sessionStorage = {
-      getItem: () => "token-1",
-      setItem: () => {},
-      removeItem: () => {},
-    };
-    globalThis.window = { location: { origin: "http://localhost" } };
+    installSessionToken("token-1");
+    installWindowOrigin("http://localhost");
 
     const request = eventStreamRequest({
       threadId: "thread/needs encoding",
@@ -134,11 +141,7 @@ function restoreGlobal(name, descriptor) {
 }
 
 test("listAutomations propagates api errors from the automations route", async () => {
-  globalThis.sessionStorage = {
-    getItem: () => "",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("");
   globalThis.fetch = async () =>
     new Response("temporarily unavailable", {
       status: 503,
@@ -146,7 +149,7 @@ test("listAutomations propagates api errors from the automations route", async (
       headers: { "content-type": "text/plain" },
     });
 
-  await assert.rejects(listAutomations({ limit: 50 }), (error) => {
+  await assert.rejects(listAutomations({ limit: 50 }), (error: DynamicTestValue) => {
     assert.equal(error.name, "ApiError");
     assert.equal(error.status, 503);
     assert.equal(error.statusText, "Service Unavailable");
@@ -158,12 +161,8 @@ test("listAutomations propagates api errors from the automations route", async (
 test("log queries forward abort signals to both caller and operator endpoints", async () => {
   const calls = [];
   const controller = new AbortController();
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
-  globalThis.window = { location: { origin: "http://localhost" } };
+  installSessionToken("token-1");
+  installWindowOrigin("http://localhost");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ logs: { entries: [] } }), {
@@ -185,11 +184,7 @@ test("log queries forward abort signals to both caller and operator endpoints", 
 test("listThreads passes pagination and candidate-thread filters", async () => {
   const calls = [];
   const controller = new AbortController();
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("token-1");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ threads: [] }), {
@@ -215,11 +210,7 @@ test("listThreads passes pagination and candidate-thread filters", async () => {
 
 test("automation mutations use encoded v2 automation routes", async () => {
   const calls = [];
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("token-1");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ updated: true }), {
@@ -269,11 +260,7 @@ test("automation mutations use encoded v2 automation routes", async () => {
 
 test("setupExtension includes a client action id", async () => {
   const calls = [];
-  globalThis.sessionStorage = {
-    getItem: () => "",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ success: true }), {
@@ -305,11 +292,7 @@ test("setupExtension serializes a generated client action id", async () => {
     configurable: true,
     writable: true,
   });
-  globalThis.sessionStorage = {
-    getItem: () => "",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ success: true }), {
@@ -341,11 +324,7 @@ test("setupExtension serializes a generated client action id", async () => {
 
 test("setNotificationChannels posts the full-replace target_ids body with no other wire fields", async () => {
   const calls = [];
-  globalThis.sessionStorage = {
-    getItem: () => "",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ channels: [] }), {
@@ -366,11 +345,7 @@ test("setNotificationChannels posts the full-replace target_ids body with no oth
 
 test("setNotificationChannels rejects an omitted targetIds instead of posting a destructive clear-all", async () => {
   let fetchCalled = false;
-  globalThis.sessionStorage = {
-    getItem: () => "",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("");
   globalThis.fetch = async () => {
     fetchCalled = true;
     throw new Error("fetch should not be called");
@@ -397,11 +372,7 @@ test("setNotificationChannels rejects an omitted targetIds instead of posting a 
 
 test("setNotificationChannels sends an explicit empty array as the intentional clear-all", async () => {
   const calls = [];
-  globalThis.sessionStorage = {
-    getItem: () => "",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ channels: [] }), {
@@ -421,11 +392,7 @@ test("setNotificationChannels sends an explicit empty array as the intentional c
 
 test("automation state mutations reject before fetch when automation id is missing", async () => {
   let fetchCalled = false;
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("token-1");
   globalThis.fetch = async () => {
     fetchCalled = true;
     throw new Error("fetch should not be called");
@@ -445,11 +412,7 @@ test("automation state mutations reject before fetch when automation id is missi
 
 test("deleteThread sends DELETE to the encoded thread route", async () => {
   const calls = [];
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("token-1");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(
@@ -476,11 +439,7 @@ test("deleteThread sends DELETE to the encoded thread route", async () => {
 
 test("deleteThread rejects before fetch when thread id is missing", async () => {
   let fetchCalled = false;
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("token-1");
   globalThis.fetch = async () => {
     fetchCalled = true;
     throw new Error("fetch should not be called");
@@ -510,12 +469,8 @@ test("attachmentUrl fails fast when a part is missing", () => {
 // The SPA's CSP is `img-src 'self' data:`, so a blob URL was refused and the
 // thumbnail never rendered. Reverting to `URL.createObjectURL` would throw here.
 test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", async () => {
-  globalThis.window = { location: { origin: "https://app.test" } };
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installWindowOrigin("https://app.test");
+  installSessionToken("token-1");
   globalThis.fetch = async () =>
     new Response(new Uint8Array([1, 2, 3, 4]), {
       status: 200,
@@ -529,18 +484,21 @@ test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", asy
   globalThis.URL.createObjectURL = () => {
     throw new Error("blob: URLs violate the SPA CSP img-src 'self' data:");
   };
-  globalThis.FileReader = class {
+  replaceBrowserGlobal("FileReader", class FakeFileReader {
+    result = "";
+    onload: (() => void) | null = null;
+
     readAsDataURL() {
       this.result = "data:image/png;base64,AQIDBA==";
       if (this.onload) this.onload();
     }
-  };
+  });
 
   try {
     const url = await fetchAttachmentDataUrl(
       attachmentUrl({ threadId: "t1", messageId: "m1", attachmentId: "a1" }),
     );
-    assert.ok(url.startsWith("data:"), `expected a data URL, got ${url}`);
+    assert.ok(typeof url === "string" && url.startsWith("data:"), `expected a data URL, got ${url}`);
   } finally {
     globalThis.URL.createObjectURL = priorCreateObjectURL;
   }
@@ -549,12 +507,8 @@ test("fetchAttachmentDataUrl returns a data URL and never mints a blob URL", asy
 // The bearer is a critical sink: an off-origin attachment URL must be rejected
 // before the token is attached.
 test("fetchAttachmentBlob rejects an off-origin URL before sending the bearer", async () => {
-  globalThis.window = { location: { origin: "https://app.test" } };
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installWindowOrigin("https://app.test");
+  installSessionToken("token-1");
   let fetchCalled = false;
   globalThis.fetch = async () => {
     fetchCalled = true;
@@ -563,7 +517,7 @@ test("fetchAttachmentBlob rejects an off-origin URL before sending the bearer", 
 
   await assert.rejects(
     fetchAttachmentBlob("https://evil.example/steal"),
-    (error) => error.name === "ApiError" && error.status === 400,
+    (error: DynamicTestValue) => error.name === "ApiError" && error.status === 400,
   );
   assert.equal(fetchCalled, false);
 });
@@ -615,11 +569,7 @@ test("clientActionId falls back when global crypto is null", () => {
 
 test("getNotificationSetupStatus reads the channel's generic status route", async () => {
   const calls = [];
-  globalThis.sessionStorage = {
-    getItem: () => "",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(
@@ -649,11 +599,7 @@ test("getNotificationSetupStatus reads the channel's generic status route", asyn
 
 test("enableNotificationSetup posts the channel-opaque payload to the enable route", async () => {
   const calls = [];
-  globalThis.sessionStorage = {
-    getItem: () => "",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ enabled: true }), {
@@ -691,11 +637,7 @@ test("enableNotificationSetup posts the channel-opaque payload to the enable rou
 
 test("disableNotificationSetup posts the channel-opaque payload to the disable route", async () => {
   const calls = [];
-  globalThis.sessionStorage = {
-    getItem: () => "",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  installSessionToken("");
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return new Response(JSON.stringify({ enabled: false }), {

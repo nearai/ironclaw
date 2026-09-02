@@ -1,6 +1,6 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { beforeEach, test, vi } from "vitest";
+import type { DynamicTestOptions } from "../test-support/dynamic-test-types";
 
 vi.mock("./api", () => ({
   apiFetch: vi.fn(async () => ({})),
@@ -14,12 +14,15 @@ import {
   submitDeviceLinkInput,
 } from "./device-link-api";
 
+const apiFetchMock = vi.mocked(apiFetch);
+
 beforeEach(() => {
-  apiFetch.mockClear();
+  apiFetchMock.mockClear();
 });
 
 function sentBody() {
-  return JSON.parse(apiFetch.mock.calls.at(-1)[1].body);
+  const options: DynamicTestOptions = apiFetchMock.mock.calls.at(-1)[1];
+  return JSON.parse(options.body);
 }
 
 // The regression: the chat auth-gate card renders from a gate model that has

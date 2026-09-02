@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
@@ -75,7 +74,7 @@ function createHarness({ startResponses = [], pollResponses = [], submitResponse
     return value;
   };
 
-  const context = {
+  const context: vm.Context = {
     Button: "button",
     LinkPayloadPanel() {},
     globalThis: {},
@@ -293,11 +292,15 @@ test("DeviceLinkPanel renders the awaiting-vendor step and paces polling from th
 });
 
 test("DeviceLinkPanel renders each input step with the affordance its kind requires", async () => {
-  for (const [kind, expected] of [
+  const cases: Array<[
+    string,
+    { type: string; autoComplete: string },
+  ]> = [
     [DEVICE_LINK_INPUT_KINDS.identifier, { type: "tel", autoComplete: "tel" }],
     [DEVICE_LINK_INPUT_KINDS.code, { type: "text", autoComplete: "one-time-code" }],
     [DEVICE_LINK_INPUT_KINDS.password, { type: "password", autoComplete: "current-password" }],
-  ]) {
+  ];
+  for (const [kind, expected] of cases) {
     const frame = alternateOffered({
       step: DEVICE_LINK_STEPS.inputRequired,
       input_kind: kind,
@@ -827,7 +830,7 @@ test("DeviceLinkPanel offers 'start again' on a restartable failure and refuses 
           restartable: true,
         }),
       ),
-      response(wireFrame({ qr_payload: "scheme://login?token=RETRY" }, { flowId: "flow-2" })),
+      response(wireFrame({ qr_payload: "scheme://login?token=RETRY" }), { flowId: "flow-2" }),
     ],
   });
 

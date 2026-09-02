@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -30,7 +29,7 @@ function loadI18n() {
   const stateSetters = [];
   let stateIndex = 0;
 
-  const context = {
+  const context: vm.Context = {
     __dynamicImport: () => {
       throw new Error("locale loader was not overridden in this test");
     },

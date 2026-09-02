@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
@@ -31,7 +30,7 @@ globalThis.__testExports = {
 }
 
 function loadThreadCache() {
-  const context = { Array, Date, String, globalThis: {} };
+  const context: vm.Context = { Array, Date, String, globalThis: {} };
   vm.runInNewContext(threadCacheSourceForTest(), context);
   return context.globalThis.__testExports;
 }

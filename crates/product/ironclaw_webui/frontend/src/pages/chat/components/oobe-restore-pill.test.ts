@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
@@ -14,7 +13,7 @@ function pillSourceForTest() {
 }
 
 function renderPill(props) {
-  const context = { Icon() {}, globalThis: {}, useT: () => (key) => key };
+  const context: vm.Context = { Icon() {}, globalThis: {}, useT: () => (key) => key };
   vm.runInNewContext(pillSourceForTest(), context);
   return context.globalThis.__testExports.OobeRestorePill(props);
 }

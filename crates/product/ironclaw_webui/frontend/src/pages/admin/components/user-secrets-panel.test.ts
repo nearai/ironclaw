@@ -1,6 +1,7 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
 
@@ -26,7 +27,7 @@ function collectScalars(root) {
   return scalars;
 }
 
-function findByTestId(root, testId, handle) {
+function findByTestId(root, testId, handle = undefined) {
   let found = null;
   visit(root, (node) => {
     if (found || typeof node !== "object" || node.props?.["data-testid"] !== testId) return;
@@ -36,7 +37,7 @@ function findByTestId(root, testId, handle) {
   return found;
 }
 
-function createHarness(overrides = {}) {
+function createHarness(overrides: DynamicTestOptions = {}) {
   const state = [];
   let cursor = 0;
   const calls = { put: [], delete: [], resetPut: 0, resetDelete: 0 };
@@ -53,7 +54,7 @@ function createHarness(overrides = {}) {
       ];
     },
   };
-  const translate = (key, params = {}) => {
+  const translate = (key, params: DynamicTestOptions = {}) => {
     if (params.handle) return `${key}:${params.handle}`;
     if (params.message) return `${key}:${params.message}`;
     return key;

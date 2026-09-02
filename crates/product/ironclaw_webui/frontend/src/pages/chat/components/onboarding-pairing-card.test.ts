@@ -1,10 +1,13 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
+import type {
+  DynamicTestOptions,
+  VmComponentProps,
+} from "../../../test-support/dynamic-test-types";
 
 function sourceForTest() {
   const source = readFileSync(new URL("./onboarding-pairing-card.tsx", import.meta.url), "utf8");
@@ -35,7 +38,7 @@ function findComponent(node, component) {
 }
 
 function componentProps(node, component) {
-  const props = {};
+  const props: VmComponentProps = {};
   const start = node.values.indexOf(component);
   for (let index = start + 1; index < node.values.length; index += 1) {
     const name = node.strings[index]?.match(/([A-Za-z][A-Za-z0-9]*)=\s*$/)?.[1];
@@ -44,7 +47,7 @@ function componentProps(node, component) {
   return props;
 }
 
-function tForTest(key, params = {}) {
+function tForTest(key, params: DynamicTestOptions = {}) {
   const values = {
     "common.dismiss": "Dismiss",
     "connection.connecting": "Connecting...",
@@ -61,7 +64,7 @@ function renderCard(props, stateValues = []) {
   let stateIndex = 0;
   const updates = [];
   function OnboardingDeviceLinkPanel() {}
-  const context = {
+  const context: vm.Context = {
     Button() {},
     OnboardingDeviceLinkPanel,
     PairingWebCodePanel() {},

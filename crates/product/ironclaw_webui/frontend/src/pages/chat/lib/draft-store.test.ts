@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Unit tests for the per-conversation composer draft store.
 //
 // Run with Node's built-in test runner (no extra deps):
@@ -11,6 +10,10 @@ import assert from "node:assert/strict";
 import { beforeEach, test } from "vitest";
 import { setAuthScope } from "../../../lib/auth-scope";
 import {
+  createMemoryStorage,
+  replaceBrowserGlobal,
+} from "../../../test-support/browser-mocks";
+import {
   NEW_DRAFT_KEY,
   clearAllDrafts,
   clearDraft,
@@ -22,19 +25,9 @@ import {
 // inside each function, so installing it on the global before the calls is
 // enough (the module never touches storage at import time).
 function installStorage() {
-  const map = new Map();
-  globalThis.window = {
-    localStorage: {
-      getItem: (k) => (map.has(k) ? map.get(k) : null),
-      setItem: (k, v) => map.set(k, String(v)),
-      removeItem: (k) => map.delete(k),
-      get length() {
-        return map.size;
-      },
-      key: (i) => [...map.keys()][i] ?? null,
-    },
-  };
-  return map;
+  const storage = createMemoryStorage();
+  replaceBrowserGlobal("window", { localStorage: storage });
+  return storage;
 }
 
 beforeEach(() => {
@@ -115,19 +108,17 @@ test("clearAllDrafts removes every draft but leaves unrelated keys", () => {
 });
 
 test("storage failures are swallowed (best-effort persistence)", () => {
-  globalThis.window = {
-    localStorage: {
-      getItem: () => {
-        throw new Error("quota / private mode");
-      },
-      setItem: () => {
-        throw new Error("quota / private mode");
-      },
-      removeItem: () => {
-        throw new Error("quota / private mode");
-      },
-    },
+  const storage = createMemoryStorage();
+  storage.getItem = () => {
+    throw new Error("quota / private mode");
   };
+  storage.setItem = () => {
+    throw new Error("quota / private mode");
+  };
+  storage.removeItem = () => {
+    throw new Error("quota / private mode");
+  };
+  replaceBrowserGlobal("window", { localStorage: storage });
   assert.doesNotThrow(() => setDraft("thread-1", "x"));
   assert.equal(getDraft("thread-1"), "");
   assert.doesNotThrow(() => clearDraft("thread-1"));

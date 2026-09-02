@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-// @ts-nocheck
 import assert from "node:assert/strict";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";

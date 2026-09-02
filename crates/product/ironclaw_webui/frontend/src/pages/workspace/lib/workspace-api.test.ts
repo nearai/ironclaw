@@ -1,7 +1,11 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
+import {
+  createMemoryStorage,
+  replaceBrowserGlobal,
+} from "../../../test-support/browser-mocks";
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 import { listWorkspace, readWorkspaceFile } from "./workspace-api";
 
 // `/fs/*` is caller-scoped server-side: the authenticated caller's tenant/user
@@ -33,12 +37,11 @@ function installFetch(handler) {
   const originalWindow = globalThis.window;
   const calls = [];
 
-  globalThis.window = { location: { origin: "http://localhost" } };
-  globalThis.sessionStorage = {
-    getItem: () => "token-1",
-    setItem: () => {},
-    removeItem: () => {},
-  };
+  replaceBrowserGlobal("window", { location: { origin: "http://localhost" } });
+  replaceBrowserGlobal(
+    "sessionStorage",
+    createMemoryStorage({ ironclaw_token: "token-1" }),
+  );
   globalThis.fetch = async (path, options) => {
     calls.push({ path, options });
     return handler(path, options);
@@ -199,7 +202,7 @@ test("workspace file preview reads through the mount-relative path", async () =>
   });
 
   try {
-    const response = await readWorkspaceFile("workspace/mine.txt", {
+    const response: DynamicTestOptions = await readWorkspaceFile("workspace/mine.txt", {
       currentUser: CURRENT_USER,
       requireScopedWorkspace: true,
     });
@@ -348,7 +351,7 @@ test("memory file preview reads through the collapsed mount-relative path", asyn
   });
 
   try {
-    const response = await readWorkspaceFile("memory/hello.md", {
+    const response: DynamicTestOptions = await readWorkspaceFile("memory/hello.md", {
       currentUser: CURRENT_USER,
       requireScopedWorkspace: true,
     });
@@ -511,7 +514,7 @@ test("thread-scoped file reads use the same authorized content endpoint", async 
   });
 
   try {
-    const result = await readWorkspaceFile("workspace/report.txt", {
+    const result: DynamicTestOptions = await readWorkspaceFile("workspace/report.txt", {
       threadId: "thread-project-beta",
     });
 

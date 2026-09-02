@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 const COPY = {
   "automations.detail.currentRun": "Current run",
@@ -125,7 +126,9 @@ function automation() {
   };
 }
 
-function createHarness({ onRenameAutomation = () => {} } = {}) {
+function createHarness({
+  onRenameAutomation = () => {},
+}: DynamicTestOptions = {}) {
   const hookValues = [];
   const effectDeps = [];
   let hookCursor = 0;
@@ -170,7 +173,7 @@ function createHarness({ onRenameAutomation = () => {} } = {}) {
     },
   };
 
-  const context = {
+  const context: vm.Context = {
     globalThis: {},
     Button,
     ConfirmDialog,
@@ -332,7 +335,9 @@ test("AutomationDetailPanel deletes only after confirming the shared dialog", ()
 test("AutomationDetailPanel submits a trimmed rename from the inline editor", () => {
   const calls = [];
   const harness = createHarness({
-    onRenameAutomation: (payload) => calls.push(payload),
+    onRenameAutomation: (payload) => {
+      calls.push(payload);
+    },
   });
 
   let rendered = harness.render();
@@ -365,7 +370,9 @@ test("AutomationDetailPanel submits a trimmed rename from the inline editor", ()
 test("AutomationDetailPanel keeps the editor open and reports blank names", () => {
   const calls = [];
   const harness = createHarness({
-    onRenameAutomation: (payload) => calls.push(payload),
+    onRenameAutomation: (payload) => {
+      calls.push(payload);
+    },
   });
 
   let rendered = harness.render();

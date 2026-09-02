@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Unit tests for the composer's attachment staging helpers.
 //
 //   pnpm test -- pages/chat/lib/attachments.test.ts
@@ -9,6 +8,8 @@
 
 import assert from "node:assert/strict";
 import { beforeAll as before, test } from "vitest";
+
+import { replaceBrowserGlobal } from "../../../test-support/browser-mocks";
 
 import {
   attachmentKindFromMime,
@@ -21,14 +22,18 @@ import {
 } from "./attachments";
 
 before(() => {
-  globalThis.FileReader = class {
+  class FakeFileReader {
+    result: string | ArrayBuffer | null = null;
+    onload: (() => void) | null = null;
+
     readAsDataURL(file) {
       queueMicrotask(() => {
         this.result = file.__dataUrl;
         if (this.onload) this.onload();
       });
     }
-  };
+  }
+  replaceBrowserGlobal("FileReader", FakeFileReader);
 });
 
 // A fake `File` carrying its own data URL so the stubbed reader is

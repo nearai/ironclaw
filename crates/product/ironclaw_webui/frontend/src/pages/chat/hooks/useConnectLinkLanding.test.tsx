@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-// @ts-nocheck
 //
 // #7681: `?connect=<extension>` lands an OAuth-strategy channel's smart
 // connect link on `/chat`. This pins the landing half: the param is detected
@@ -45,7 +44,24 @@ import "../lib/connect-link-flow";
 import { useConnectLinkLanding } from "./useConnectLinkLanding";
 
 function fakePopup() {
-  return { closed: false, opener: null, location: { href: "about:blank" } };
+  return {
+    closed: false,
+    opener: null,
+    location: { href: "about:blank" },
+    close() {
+      this.closed = true;
+    },
+  };
+}
+
+function installWindowOpen(result) {
+  const open = vi.fn((_url?: string | URL, _target?: string, _features?: string) => result);
+  Object.defineProperty(window, "open", {
+    configurable: true,
+    value: open,
+    writable: true,
+  });
+  return open;
 }
 
 async function flush() {
@@ -128,7 +144,7 @@ test("no connect param means no landing state", async () => {
 
 test("starting the connect flow drives setup, oauth start, and popup in order", async () => {
   const popup = fakePopup();
-  window.open = vi.fn(() => popup);
+  const open = installWindowOpen(popup);
   api.installExtension.mockResolvedValue({ success: true });
   api.fetchExtensionSetup.mockResolvedValue({
     secrets: [{ name: "slack_oauth", setup: { kind: "oauth" } }],
@@ -146,7 +162,7 @@ test("starting the connect flow drives setup, oauth start, and popup in order", 
     await latest.startConnectLinkOAuth();
   });
 
-  assert.equal(window.open.mock.calls[0][0], "about:blank");
+  assert.equal(open.mock.calls[0][0], "about:blank");
   // Install must precede setup: the backend fails `oauth/start` closed for an
   // extension absent from the caller's inventory, which is the normal state
   // for someone arriving from a channel nudge (#7681 manual verification).
@@ -168,7 +184,7 @@ test("starting the connect flow drives setup, oauth start, and popup in order", 
 // forever — observed live before this backstop existed.
 async function startFlow() {
   const popup = fakePopup();
-  window.open = vi.fn(() => popup);
+  installWindowOpen(popup);
   api.installExtension.mockResolvedValue({ success: true });
   api.fetchExtensionSetup.mockResolvedValue({
     secrets: [{ name: "slack_oauth", setup: { kind: "oauth" } }],
@@ -338,7 +354,7 @@ test("an abandoned flow times out and stops polling", async () => {
 });
 
 test("a blocked popup fails the connect click before any install", async () => {
-  window.open = vi.fn(() => null);
+  installWindowOpen(null);
   renderAt("/chat?connect=slack");
   await flush();
 
@@ -357,7 +373,7 @@ test("a blocked popup fails the connect click before any install", async () => {
 // follow backend evidence).
 test("an install the backend rejects stops before setup and oauth start", async () => {
   const popup = fakePopup();
-  window.open = vi.fn(() => popup);
+  installWindowOpen(popup);
   popup.close = () => {
     popup.closed = true;
   };
@@ -376,7 +392,7 @@ test("an install the backend rejects stops before setup and oauth start", async 
 
 test("a failed install closes the placeholder popup instead of leaking it", async () => {
   const popup = fakePopup();
-  window.open = vi.fn(() => popup);
+  installWindowOpen(popup);
   popup.close = () => {
     popup.closed = true;
   };

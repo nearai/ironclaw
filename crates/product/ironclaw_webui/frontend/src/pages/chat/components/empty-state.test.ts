@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import vm from "node:vm";
@@ -7,6 +6,7 @@ import {
   componentSourceForTest,
   findComponent,
 } from "../../../lib/vm-component-harness";
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 // Same vm-harness convention as chat-input.test.ts (shared plumbing lives in
 // lib/vm-component-harness.ts): read the real source, strip imports, rename
@@ -25,7 +25,7 @@ function emptyStateSourceForTest() {
 function renderEmptyState({
   drawerState = "open",
   ...props
-} = {}) {
+}: DynamicTestOptions = {}) {
   const components = {
     Icon() {},
     ChatInput() {},
@@ -39,7 +39,7 @@ function renderEmptyState({
   const lazyComponents = [components.SuggestedTaskSurface, components.OobeRestorePill];
   let lazyIndex = 0;
   const requestedKeys = [];
-  const context = {
+  const context: vm.Context = {
     ...components,
     globalThis: {},
     useT: () => (key) => {

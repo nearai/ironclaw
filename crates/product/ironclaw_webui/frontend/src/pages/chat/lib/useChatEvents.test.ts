@@ -1,8 +1,9 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
+
+import type { DynamicTestOptions } from "../../../test-support/dynamic-test-types";
 
 import {
   isTerminalToolStatus,
@@ -55,7 +56,7 @@ const ENGLISH_FAILURE_COPY = {
     "The chat stream hit a retryable error: {detail}.",
 };
 
-function testTranslator(copy = ENGLISH_FAILURE_COPY) {
+function testTranslator(copy: Record<string, string> = ENGLISH_FAILURE_COPY) {
   return (key, params = {}) =>
     (copy[key] || key).replace(/\{(\w+)\}/g, (match, name) =>
       Object.hasOwn(params, name) ? String(params[name]) : match,
@@ -99,7 +100,7 @@ function createUseChatEventsHarness({
   onStreamError = () => {},
   publishProductInspectorEnvelope = () => {},
   t: selectedTranslator = t,
-} = {}) {
+}: DynamicTestOptions = {}) {
   let threadId = "thread-1";
   let messages = [];
   let pendingGate = null;
@@ -150,7 +151,7 @@ function createUseChatEventsHarness({
       cleanup: typeof cleanup === "function" ? cleanup : null,
     };
   }
-  const context = {
+  const context: vm.Context = {
     AMBIGUOUS_RUN_ID,
     Date: DateImpl,
     createErrorChatMessage,

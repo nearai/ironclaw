@@ -1,4 +1,3 @@
-// @ts-nocheck
 // @vitest-environment happy-dom
 //
 // Two harnesses here on purpose. The sidebar test only needs to see which

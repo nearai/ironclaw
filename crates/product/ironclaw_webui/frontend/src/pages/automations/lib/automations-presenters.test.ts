@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
@@ -82,7 +81,7 @@ const t = (key, params = {}) =>
 // (U+202F) depending on the ICU build; normalize so assertions are stable.
 const norm = (value) =>
   typeof value === "string" ? value.replace(/[\u202f\u00a0]/g, " ") : value;
-const scheduleLabel = (cron, timezone, locale = "en") =>
+const scheduleLabel = (cron, timezone = undefined, locale = "en") =>
   norm(scheduleLabelRaw(cron, timezone, t, locale));
 // Date labels are browser-local by design (production must never render UTC),
 // so the calendar date a fixture instant renders as depends on the machine
@@ -91,7 +90,7 @@ const scheduleLabel = (cron, timezone, locale = "en") =>
 // derive the expected label from that instant with the same formatter the
 // presenter uses, instead of hard-coding a date that only holds near UTC.
 const dateLabel = (iso) => {
-  const label = formatAutomationDate(iso, null, "en");
+  const label = formatAutomationDate(iso, null, "en", undefined);
   assert.ok(label, `fixture timestamp must be parseable: ${iso}`);
   return label;
 };
