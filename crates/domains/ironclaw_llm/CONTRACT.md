@@ -361,8 +361,13 @@ Both Anthropic transports emit explicit `cache_control` breakpoints when
   1h automatic marker is an API error (TTL conflict on the last block).
 
 All markers within a request share one TTL, satisfying Anthropic's
-longer-TTL-first ordering rule. Models without cache support (claude-2 era)
-downgrade to `none` via `supports_prompt_cache`. Wire shape is pinned by
+longer-TTL-first ordering rule. `supports_prompt_cache` is a **denylist**:
+every Claude model supports caching except the documented-unsupported
+`claude-2*` and `claude-instant*` families, so a new model family (e.g.
+`claude-fable-5-1`) caches by default without needing an allowlist update.
+Downgrade-to-`none` decisions and their `tracing::warn!` go through the
+single `effective_cache_retention` chokepoint, shared by `with_cache_retention`
+and both transports' construction paths. Wire shape is pinned by
 capture-server tests in both files.
 
 ## rig_adapter.rs Details
