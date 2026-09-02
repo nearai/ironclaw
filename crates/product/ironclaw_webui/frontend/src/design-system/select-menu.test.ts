@@ -254,14 +254,18 @@ test("SelectMenu renders a closed custom trigger with the selected label", () =>
   assert.match(collectTemplateText(rendered), /aria-haspopup="listbox"/);
   assert.equal(firstValueAfter(rendered, "aria-expanded="), "false");
   assert.equal(collectObjects(rendered).some((value) => "aria-owns" in value), false);
-  assert.equal(collectObjects(rendered).some((value) => "aria-controls" in value), false);
+  assert.match(
+    firstObjectWith(rendered, "aria-controls")["aria-controls"],
+    /^v2-select-menu-\d+-listbox$/,
+  );
   assert.equal(
     collectObjects(rendered).some((value) => "aria-activedescendant" in value),
     false
   );
   assert.ok(collectScalars(rendered).includes("Follow global"));
   assert.doesNotMatch(collectTemplateText(rendered), /<select/);
-  assert.doesNotMatch(collectTemplateText(rendered), /role="listbox"/);
+  assert.match(collectTemplateText(rendered), /role="listbox"/);
+  assert.match(collectTemplateText(rendered), /hidden="true"/);
 });
 
 test("SelectMenu renders a generic option adornment in the trigger and listbox", () => {

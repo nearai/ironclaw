@@ -7,22 +7,19 @@ refactor.
 
 ## Decompose the capability execution stage
 
-Status: structural follow-up; validated as the next cleanup target but excluded
-from the first bounded campaign.
+Status: completed by the structural follow-up.
 
-`executor/capabilities.rs` remains a roughly 2,900-line hotspot that combines
-the `CapabilityStage` facade with admission, invocation, resume, batch,
-checkpoint, result-recording, and failure mechanics. The first campaign keeps
-one canonical `CapabilityStage` and changes none of these execution paths.
+`executor/capabilities.rs` now retains the single `CapabilityStage::process`
+path and its cross-mechanic orchestration. One private dispatch owner contains
+the mutually recursive outcome/recovery state machine; acyclic leaf modules own
+batch scheduling, resume reconstruction, result records, outcome persistence,
+failure normalization, and recovery terminals. No additional executor stage or
+dispatch path was added.
 
-Follow-up: retain `CapabilityStage` as the single pipeline stage and extract
-cohesive private mechanics behind it, following the existing thin-stage pattern
-used by `PromptStage`. Fresh calls and approval, authentication, and external
-tool resumes must continue to enter the same `CapabilityStage::process` path;
-do not add another dispatcher, stage, strategy axis, or execution mode. Plan
-the work as bounded move-only slices with caller-level equivalence coverage for
-ordering, gates, checkpoints, budgets, cancellation, progress events, and
-result recording.
+Invariant: fresh calls and approval, authentication, and external-tool resumes
+continue to enter the same `CapabilityStage::process` path. Future cleanup must
+extend the private mechanic owners rather than add another dispatcher, stage,
+strategy axis, or execution mode.
 
 ## Stale reply-completion signals can nudge a later capability turn
 

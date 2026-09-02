@@ -77,7 +77,7 @@ pub struct LoopExecutionState {
     pub recent_call_signatures: BoundedRing<CapabilityCallSignature, 8>,
     /// (signature, output_digest) trail for completed calls whose result
     /// carried a digest. Populated by `append_completed_capability_result`
-    /// (executor/capabilities.rs); read by
+    /// (executor/capability_outcomes.rs); read by
     /// `DefaultStopConditionStrategy::should_stop_after_observed_turn`
     /// (strategies/stop.rs) to detect a call whose OUTPUT repeats, not just
     /// its signature. `#[serde(default)]` for rolling-upgrade/rollback: a

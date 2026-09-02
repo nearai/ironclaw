@@ -625,32 +625,6 @@ pub(super) fn gate_tool_result_summary(kind: GateKind, outcome: &'static str) ->
     format!("{gate} gate {outcome}")
 }
 
-pub(super) fn clear_matching_pending_auth_resume(
-    state: &mut LoopExecutionState,
-    call: &CapabilityCallCandidate,
-) {
-    if state
-        .pending_auth_resume
-        .as_ref()
-        .is_some_and(|resume| resume.activity_id == call.activity_id)
-    {
-        state.pending_auth_resume = None;
-    }
-}
-
-pub(super) fn clear_matching_pending_external_tool_resume(
-    state: &mut LoopExecutionState,
-    call: &CapabilityCallCandidate,
-) {
-    if state
-        .pending_external_tool_resume
-        .as_ref()
-        .is_some_and(|resume| resume.activity_id == call.activity_id)
-    {
-        state.pending_external_tool_resume = None;
-    }
-}
-
 /// Reconstruct the parked external-tool call on resume.
 ///
 /// Re-registers the provider tool call (via the stored replay) so the host's

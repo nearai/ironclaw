@@ -2079,6 +2079,26 @@ impl RebornIntegrationHarness {
         .await
     }
 
+    /// Deny a blocked client-tool gate without submitting an output. The
+    /// typed precondition drives the same coordinator resume path as the
+    /// product external-tool surface and prevents parked-call redispatch.
+    pub async fn deny_external_tool_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &TurnGateRef,
+    ) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:external_tool-") {
+            return Err(format!("expected an external-tool gate ref, got {gate_ref:?}").into());
+        }
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::BlockedExternalToolGate,
+        )
+        .await
+    }
+
     /// Resolve a blocked AUTH gate the "user submitted credentials" way
     /// (C-JOURNEY convergence seam): seed a real GitHub credential account
     /// (`seed_github_credential_account`) so the parked capability's next

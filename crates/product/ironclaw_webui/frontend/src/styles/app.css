@@ -77,13 +77,13 @@
 
   /* Semantic colours */
   --v2-positive-soft: rgba(32, 210, 154, 0.13);
-  --v2-positive-text: #087a5d;
+  --v2-positive-text: #077457;
   --v2-warning-soft:  rgba(245, 193, 91, 0.18);
   --v2-warning-text:  #8b5b00;
   --v2-danger-soft:   rgba(255, 100, 128, 0.12);
   --v2-danger-text:   #b42342;
   --v2-info-soft:     rgba(76, 167, 230, 0.12);
-  --v2-info-text:     #146fae;
+  --v2-info-text:     var(--v2-accent-text);
 
   background: var(--v2-canvas);
 }

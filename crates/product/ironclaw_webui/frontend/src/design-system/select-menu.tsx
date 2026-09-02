@@ -286,7 +286,7 @@ export function SelectMenu({
   const optionsKey = optionsIdentity(visibleOptions);
   const rootPassthroughProps = safeRootProps(rest);
   const buttonListboxProps = {
-    ...(open ? { "aria-controls": listboxId } : {}),
+    "aria-controls": listboxId,
     ...(activeOptionId && !searchable
       ? { "aria-activedescendant": activeOptionId }
       : {}),
@@ -417,6 +417,7 @@ export function SelectMenu({
       <button
         ref={buttonRef}
         type="button"
+        role={searchable ? undefined : "combobox"}
         aria-haspopup="listbox"
         aria-expanded={open ? "true" : "false"}
         aria-label={effectiveAriaLabel}
@@ -463,6 +464,8 @@ export function SelectMenu({
           {selectedOption.accessibleDescription}
         </span>
       )}
+
+      {!open && <div id={listboxId} role="listbox" hidden />}
 
       {open && (
         <div

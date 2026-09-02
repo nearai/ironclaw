@@ -2,6 +2,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
+import { InlineNotice } from "../../../design-system/inline-notice";
+import { Input } from "../../../design-system/input";
 import { SkeletonList } from "../../../design-system/skeleton";
 import React from "react";
 import { useT } from "../../../lib/i18n";
@@ -338,9 +340,9 @@ export function ConfigureModal({
         returnFocusTo={returnFocusTo}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <p className="text-sm text-red-200">
+        <InlineNotice tone="danger" role="alert">
           {t("extensions.loadFailed")} {error.message}
-        </p>
+        </InlineNotice>
       </ModalShell>
     );
   }
@@ -375,9 +377,9 @@ export function ConfigureModal({
           ))}
         </fieldset>
         {hostedMcpAuthMutation.error && (
-          <div className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+          <InlineNotice className="mt-4" tone="danger" role="alert">
             {hostedMcpAuthMutation.error.message}
-          </div>
+          </InlineNotice>
         )}
         <div className="mt-6 flex items-center justify-end gap-3">
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
@@ -402,9 +404,9 @@ export function ConfigureModal({
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
         <SetupReadiness phase={phase} blockers={readinessBlockers} />
-        <p className="text-sm text-iron-300">
+        <InlineNotice tone="info" role="status">
           {t("extensions.noConfigRequired")}
-        </p>
+        </InlineNotice>
       </ModalShell>
     );
   }
@@ -481,9 +483,10 @@ export function ConfigureModal({
                   )
                 : (
               <>
-              <input
+              <Input
                 id={`extension-secret-${secret.name}`}
                 type="password"
+                size="sm"
                 placeholder={secret.provided
                   ? t("extensions.keepSecretPlaceholder")
                   : ""}
@@ -496,7 +499,6 @@ export function ConfigureModal({
                   }));
                 }}
                 onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                className="h-10 w-full rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
               />
               {secret.auto_generate &&
               !secret.provided &&
@@ -520,46 +522,36 @@ export function ConfigureModal({
       )}
       {isActive &&
       (
-        <div
-          className="mt-4 rounded-md border border-mint/20 bg-mint/10 px-3 py-2 text-xs text-mint"
-        >
+        <InlineNotice className="mt-4" tone="success" role="status">
           {t("extensions.activeConfigured")}
-        </div>
+        </InlineNotice>
       )}
       {submitMutation.error &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <InlineNotice className="mt-4" tone="danger" role="alert">
           {submitMutation.error.message}
-        </div>
+        </InlineNotice>
       )}
       {oauthMutation.error &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <InlineNotice className="mt-4" tone="danger" role="alert">
           {oauthMutation.error.message}
-        </div>
+        </InlineNotice>
       )}
       {!oauthMutation.error &&
       oauthMutation.authError &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <InlineNotice className="mt-4" tone="danger" role="alert">
           {oauthMutation.authError}
-        </div>
+        </InlineNotice>
       )}
       {!oauthMutation.error &&
       !oauthMutation.authError &&
       popupBlockedError &&
       (
-        <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
-        >
+        <InlineNotice className="mt-4" tone="danger" role="alert">
           {popupBlockedError}
-        </div>
+        </InlineNotice>
       )}
 
       <div className="mt-6 flex items-center justify-end gap-3">
@@ -585,24 +577,26 @@ function SetupReadiness({ phase, blockers = [] }) {
   return (
     <div className="mb-4 space-y-2">
       {phase && (
-        <p className="text-xs text-iron-400">
+        <InlineNotice
+          tone={phase === "active" ? "success" : "info"}
+          role="status"
+        >
           {t("extensions.setupPhaseLabel")} {t(setupPhaseKey(phase))}
-        </p>
+        </InlineNotice>
       )}
       {blockers.length > 0 && (
-        <div
-          role="status"
-          className="rounded-md border border-amber-300/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100"
-        >
-          <p className="font-medium">{t("extensions.configurationRequired")}</p>
-          <ul className="mt-1 list-disc space-y-1 pl-4">
-            {blockers.map((blocker, index) => (
-              <li key={`${blocker?.kind || "unknown"}-${index}`}>
-                {t(setupBlockerKey(blocker?.kind))}
-              </li>
-            ))}
-          </ul>
-        </div>
+        <InlineNotice tone="warning" role="status">
+          <>
+            <p className="font-medium">{t("extensions.configurationRequired")}</p>
+            <ul className="mt-1 list-disc space-y-1 pl-4">
+              {blockers.map((blocker, index) => (
+                <li key={`${blocker?.kind || "unknown"}-${index}`}>
+                  {t(setupBlockerKey(blocker?.kind))}
+                </li>
+              ))}
+            </ul>
+          </>
+        </InlineNotice>
       )}
     </div>
   );
@@ -612,12 +606,9 @@ function AdminSetupFieldsNotice({ required }) {
   const t = useT();
   if (!required) return null;
   return (
-    <div
-      role="status"
-      className="mb-4 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs text-iron-300"
-    >
+    <InlineNotice className="mb-4" tone="info" role="status">
       {t("extensions.setupFieldsAdminRequired")}
-    </div>
+    </InlineNotice>
   );
 }
 

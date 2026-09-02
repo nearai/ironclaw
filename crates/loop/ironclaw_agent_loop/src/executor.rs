@@ -6,7 +6,14 @@ mod assistant_reply;
 mod budget;
 mod canonical;
 mod capabilities;
+mod capability_batch;
+mod capability_dispatch;
+mod capability_failure;
 mod capability_helpers;
+mod capability_outcomes;
+mod capability_records;
+mod capability_recovery;
+mod capability_resume;
 mod checkpoint;
 mod exit_helpers;
 mod failure_explanation;
@@ -29,13 +36,16 @@ use capability_helpers::{
     CapabilitySurfaceIndex, append_capability_error_ref, append_capability_result_ref,
     append_capability_safe_summary_ref, apply_capability_filter,
     capability_invocation_from_auth_resume_candidate, capability_invocation_from_candidate,
-    capability_is_visible, clear_matching_pending_auth_resume,
-    clear_matching_pending_external_tool_resume, gate_tool_result_summary,
-    model_visible_capability_failure_observation, pending_approval_resume_candidate,
-    pending_auth_resume_candidate, pending_external_tool_resume_candidate, push_completed_result,
+    capability_is_visible, gate_tool_result_summary, model_visible_capability_failure_observation,
+    pending_approval_resume_candidate, pending_auth_resume_candidate,
+    pending_external_tool_resume_candidate, push_completed_result,
 };
 #[cfg(test)]
 use capability_helpers::{sanitize_result_ref_suffix, synthetic_provider_error_result_ref};
+use capability_resume::{
+    approval_resume_from_gate, auth_resume_from_gate, clear_matching_pending_approval_resume,
+    clear_matching_pending_auth_resume, clear_matching_pending_external_tool_resume,
+};
 use checkpoint::CheckpointStage;
 use exit_helpers::{
     FailedExitDetails, cancelled_exit, cancelled_exit_with_reason, cancelled_reason_from_signal,
