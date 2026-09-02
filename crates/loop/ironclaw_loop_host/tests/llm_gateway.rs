@@ -3174,6 +3174,15 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_deref(), Some("host-selected-model"));
+    assert_eq!(
+        requests[0]
+            .metadata
+            .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
+            .map(String::as_str),
+        Some(fixture.run_context.thread_id.as_str()),
+        "the real ThreadBackedLoopModelPort::stream_model construction site \
+         must carry the resolved thread id through as request metadata"
+    );
     assert!(requests[0].messages.iter().any(|message| {
         message
             .content

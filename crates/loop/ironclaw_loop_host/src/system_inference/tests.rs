@@ -287,6 +287,7 @@ async fn dispatches_direct_gateway_request_without_prompt_materialization() {
     assert_eq!(request.resolved_model_route, context.resolved_model_route);
     assert_eq!(request.run_id, context.run_id);
     assert_eq!(request.turn_id, context.turn_id);
+    assert_eq!(request.thread_id, Some(context.thread_id.clone()));
     assert_eq!(request.surface_version, None);
     assert_eq!(request.messages.len(), 2);
     assert_eq!(
