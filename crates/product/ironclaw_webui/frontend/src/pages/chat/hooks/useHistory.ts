@@ -7,6 +7,7 @@ import {
   REQUEST_FAILURE_ID_PREFIX,
   STREAM_FAILURE_ID_PREFIX,
   isRunFailureMessageId,
+  isRunStoppedMessageId,
 } from "../lib/message-types";
 import {
   carryFinalAssistantOrderFlags,
@@ -822,8 +823,7 @@ function isRunStoppedMessage(message) {
   return (
     message?.role === "system" &&
     message?.runStatus === "cancelled" &&
-    typeof message?.id === "string" &&
-    message.id.startsWith("stopped-")
+    isRunStoppedMessageId(message?.id)
   );
 }
 

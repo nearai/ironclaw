@@ -35,7 +35,9 @@ import {
   createErrorChatMessage,
   isErrorChatMessage,
   isRunFailureMessageId,
+  isRunStoppedMessageId,
   RUN_FAILURE_ID_PREFIX,
+  RUN_STOPPED_ID_PREFIX,
   STREAM_FAILURE_ID_PREFIX,
   UNKNOWN_RUN_FAILURE_ID,
 } from "./message-types";
@@ -90,7 +92,7 @@ function useChatEventsSourceForTest() {
         ),
     );
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { useChatEvents };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { useChatEvents, appendRunStoppedMessage };`;
 }
 
 function createUseChatEventsHarness({
@@ -173,12 +175,14 @@ function createUseChatEventsHarness({
     ensureGateToolActivity,
     isErrorChatMessage,
     isRunFailureMessageId,
+    isRunStoppedMessageId,
     isTerminalToolStatus,
     isFinalAssistantForRun,
     mergeRunIdCandidate,
     publishProductInspectorEnvelope,
     replaceAssistantReplyForRun,
     RUN_FAILURE_ID_PREFIX,
+    RUN_STOPPED_ID_PREFIX,
     STREAM_FAILURE_ID_PREFIX,
     toolCardFromActivity,
     toolCardFromPreview,
@@ -260,6 +264,20 @@ function createUseChatEventsHarness({
     },
     markLocallyStopped(runId) {
       runTrackingRef.current.locallyStoppedRuns.current.add(runId);
+    },
+    // Mirror `useChat.cancelRun` once the cancel request is acknowledged:
+    // fence the run, replace its live draft with the stopped notice, and
+    // clear the local run state — the terminal projection still owns settling.
+    stopRunLocally(runId) {
+      runTrackingRef.current.locallyStoppedRuns.current.add(runId);
+      context.globalThis.__testExports.appendRunStoppedMessage(
+        hookProps().setMessages,
+        { runId, t: selectedTranslator },
+      );
+      pendingGate = null;
+      isProcessing = false;
+      activeRun = null;
+      activeRunRef.current = null;
     },
     replaceMessages(next) {
       messages = next;
@@ -3089,6 +3107,355 @@ test("useChatEvents: a locally stopped run ignores buffered live frames until te
   assert.deepEqual(harness.settledRuns, [
     { runId: "run-1", success: false },
   ]);
+});
+
+test("useChatEvents: a locally stopped run that completes anyway retracts the stopped notice and converges its answer", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "The answer" } },
+        ],
+      },
+    },
+  });
+  harness.stopRunLocally("run-1");
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    [`${RUN_STOPPED_ID_PREFIX}run-1`],
+    "the stop acknowledgement replaces the live draft with the notice",
+  );
+
+  // The cancel lost the race: the backend finished the run before honouring
+  // it. The "Stopped" claim is now false and the fence would swallow the
+  // finalized answer, so the terminal status must retract both.
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "completed" } },
+          {
+            text: {
+              id: "durable-message-1",
+              run_id: "run-1",
+              body: "The answer is 42.",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  const assistant = harness.messages.filter((m) => m.role === "assistant");
+  assert.equal(assistant.length, 1, "exactly one assistant message");
+  assert.equal(assistant[0].id, "msg-durable-message-1");
+  assert.equal(assistant[0].content, "The answer is 42.");
+  assert.equal(assistant[0].isFinalReply, true);
+  assert.equal(
+    harness.messages.some((message) => isRunStoppedMessageId(message.id)),
+    false,
+    "a run that completed is not presented as stopped",
+  );
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-1", success: true }]);
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+});
+
+test("useChatEvents: finalized text converges only its own run's live bubble when two runs stream in one thread", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "draft one" } },
+        ],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { text: { id: "text:run-2", run_id: "run-2", body: "draft two" } },
+        ],
+      },
+    },
+  });
+  const runOneBubble = plain(harness.messages[0]);
+  assert.equal(runOneBubble.id, "text-text:run-1");
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "completed" } },
+          {
+            text: {
+              id: "durable-2",
+              run_id: "run-2",
+              body: "answer two",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["text-text:run-1", "msg-durable-2"],
+    "finalizing run-2 converges only run-2's bubble",
+  );
+  assert.deepEqual(
+    plain(harness.messages[0]),
+    runOneBubble,
+    "run-1's live bubble is untouched by run-2's finalization",
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "completed" } },
+          {
+            text: {
+              id: "durable-1",
+              run_id: "run-1",
+              body: "answer one",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, content, isFinalReply }) => ({
+      id,
+      content,
+      isFinalReply,
+    })),
+    [
+      { id: "msg-durable-1", content: "answer one", isFinalReply: true },
+      { id: "msg-durable-2", content: "answer two", isFinalReply: true },
+    ],
+    "two finalized messages total, one per run, in stream order",
+  );
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-2", success: true },
+    { runId: "run-1", success: true },
+  ]);
+});
+
+test("useChatEvents: a reasoning item republished under the same id is replaced in place", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-1", status: "running" } },
+          { thinking: { id: "run-1:1", run_id: "run-1", body: "Let me" } },
+          { text: { id: "text:run-1", run_id: "run-1", body: "draft" } },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["thinking-run-1:1", "text-text:run-1"],
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            thinking: {
+              id: "run-1:1",
+              run_id: "run-1",
+              body: "Let me think about this more carefully.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 2, "republishing never appends");
+  assert.deepEqual(
+    Array.from(harness.messages, (message) => message.id),
+    ["thinking-run-1:1", "text-text:run-1"],
+    "the reasoning bubble keeps its original position",
+  );
+  assert.equal(harness.messages[0].role, "thinking");
+  assert.equal(
+    harness.messages[0].content,
+    "Let me think about this more carefully.",
+  );
+});
+
+test("useChatEvents: a run started after a local stop streams normally", () => {
+  const harness = createUseChatEventsHarness();
+  harness.markLocallyStopped("run-1");
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { text: { id: "text:run-2", run_id: "run-2", body: "draft two" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "running",
+  });
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, content, isStreaming }) => ({
+      id,
+      content,
+      isStreaming,
+    })),
+    [{ id: "text-text:run-2", content: "draft two", isStreaming: true }],
+  );
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "completed" } },
+          {
+            text: {
+              id: "durable-2",
+              run_id: "run-2",
+              body: "answer two",
+              finalized: true,
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, content, isFinalReply }) => ({
+      id,
+      content,
+      isFinalReply,
+    })),
+    [{ id: "msg-durable-2", content: "answer two", isFinalReply: true }],
+  );
+  assert.equal(
+    harness.messages.some((message) => isRunStoppedMessageId(message.id)),
+    false,
+    "the fence on run-1 never produces a stopped notice for run-2",
+  );
+  assert.deepEqual(harness.settledRuns, [{ runId: "run-2", success: true }]);
+  assert.equal(harness.isProcessing, false);
+});
+
+test("useChatEvents: the local-stop fence drops every typed live frame for the stopped run", () => {
+  const runId = "run-1";
+  // The `gate` frame carries the approval prompt (gateKind "approval").
+  const harness = createUseChatEventsHarness({
+    gateFromEvent: () => ({ kind: "gate", runId, gateRef: "gate:approval" }),
+  });
+  harness.markLocallyStopped(runId);
+
+  const capability = {
+    invocation_id: "invocation-1",
+    turn_run_id: runId,
+    thread_id: "thread-1",
+    capability_id: "builtin.http",
+    updated_at: "2026-06-03T11:44:43Z",
+  };
+  const typedFrames = [
+    {
+      type: "accepted",
+      frame: { ack: { run_id: runId, thread_id: "thread-1", status: "queued" } },
+    },
+    {
+      type: "running",
+      frame: { progress: { turn_run_id: runId, kind: "typing" } },
+    },
+    {
+      type: "capability_activity",
+      frame: { activity: { ...capability, status: "started" } },
+    },
+    {
+      type: "capability_display_preview",
+      frame: { preview: { ...capability, status: "completed", title: "http" } },
+    },
+    {
+      type: "gate",
+      frame: { prompt: { turn_run_id: runId, gate_ref: "gate:approval" } },
+    },
+    {
+      type: "final_reply",
+      frame: { reply: { turn_run_id: runId, text: "late answer" } },
+    },
+  ];
+  for (const envelope of typedFrames) {
+    harness.handleEvent(envelope);
+    assert.deepEqual(
+      harness.messages,
+      [],
+      `a fenced ${envelope.type} frame produces no message`,
+    );
+    assert.equal(
+      harness.isProcessing,
+      false,
+      `a fenced ${envelope.type} frame never resumes processing`,
+    );
+    assert.equal(harness.pendingGate, null);
+    assert.equal(harness.activeRun, null);
+  }
+  assert.deepEqual(harness.settledRuns, []);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: runId, status: "cancelled" } }],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.settledRuns, [{ runId, success: false }]);
+  assert.deepEqual(
+    plain(harness.messages).map(({ id, role, content }) => ({
+      id,
+      role,
+      content,
+    })),
+    [{ id: `${RUN_STOPPED_ID_PREFIX}${runId}`, role: "system", content: "Stopped" }],
+    "the terminal cancellation appends exactly one stopped notice",
+  );
 });
 
 test("useChatEvents: typed cancellation replaces the unfinished draft with a stopped notice", () => {
