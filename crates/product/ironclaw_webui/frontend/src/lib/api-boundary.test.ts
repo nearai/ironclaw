@@ -56,20 +56,6 @@ test("thread and run routes reject missing path identifiers before URL construct
   assert.equal(fetchCalled, false);
 });
 
-test("apiFetch rejects non-object JSON instead of leaking an any response", async () => {
-  setSessionStorage();
-  globalThis.fetch = async () =>
-    new Response(JSON.stringify(["unexpected"]), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-
-  await assert.rejects(
-    apiFetch("/api/webchat/v2/session"),
-    TypeError,
-  );
-});
-
 test("apiFetch accepts a JSON record with an own constructor field", async () => {
   setSessionStorage();
   globalThis.fetch = async () =>

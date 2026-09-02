@@ -159,10 +159,10 @@ export function describeApiError({
   return statusText || "Request failed";
 }
 
-export async function apiFetch(
+export async function apiFetch<T = ApiRecord>(
   path: string | URL,
   options: RequestInit = {},
-): Promise<ApiRecord> {
+): Promise<T> {
   const token = readStoredToken();
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json");
@@ -193,12 +193,10 @@ export async function apiFetch(
     );
   }
 
-  if (response.status === 204) return {};
-  const payload: unknown = await response.json();
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-    throw new TypeError("invalid API response");
-  }
-  return payload as ApiRecord;
+  const contentType = response.headers.get("content-type") || "";
+  return (contentType.includes("application/json")
+    ? await response.json()
+    : await response.text()) as T;
 }
 
 // --- Threads ---
@@ -211,6 +209,11 @@ export async function apiFetch(
 let sessionChannelExtensionId = "";
 
 export interface SessionResponse extends ApiRecord {
+  tenant_id: string;
+  user_id: string;
+  capabilities: ApiRecord;
+  features: ApiRecord;
+  attachments: ApiRecord;
   session_channel_extension_id?: string | null;
 }
 
@@ -227,7 +230,7 @@ export function getSessionChannelExtensionId() {
 }
 
 export async function fetchSession(): Promise<SessionResponse> {
-  const session = await apiFetch(`${V2_BASE}/session`) as SessionResponse;
+  const session = await apiFetch<SessionResponse>(`${V2_BASE}/session`);
   setSessionChannelExtensionId(session?.session_channel_extension_id);
   return session;
 }
@@ -265,10 +268,10 @@ export async function createThread({
   // The backend authorizes the caller's access to this project before scoping
   // the new thread to it; the body only proposes it.
   if (projectId) body.project_id = projectId;
-  return apiFetch(`${V2_BASE}/threads`, {
+  return apiFetch<CreateThreadResponse>(`${V2_BASE}/threads`, {
     method: "POST",
     body: JSON.stringify(body),
-  }) as Promise<CreateThreadResponse>;
+  });
 }
 
 export interface ListThreadsOptions {
@@ -291,7 +294,7 @@ export async function listThreads({
   if (cursor) url.searchParams.set("cursor", cursor);
   if (projectId) url.searchParams.set("project_id", projectId);
   if (candidateThreadId) url.searchParams.set("candidate_thread_id", candidateThreadId);
-  return apiFetch(url.pathname + url.search, { signal }) as Promise<ThreadListResponse>;
+  return apiFetch<ThreadListResponse>(url.pathname + url.search, { signal });
 }
 
 type ThreadOptions = { threadId?: string };
@@ -329,7 +332,7 @@ export async function listNotifications({
   const url = new URL(`${V2_BASE}/notifications`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
-  return apiFetch(url.pathname + url.search, { signal }) as Promise<NotificationListResponse>;
+  return apiFetch<NotificationListResponse>(url.pathname + url.search, { signal });
 }
 
 export function markNotificationRead(notificationId: string) {
@@ -748,10 +751,12 @@ export function sendMessage({
 
 // --- Product commands ---
 
-export function listChatCommands() {
-  return apiFetch(`${V2_BASE}/commands`) as Promise<
-    ApiRecord & { commands: ApiRecord[] }
-  >;
+export interface ChatCommandListResponse extends ApiRecord {
+  commands: ApiRecord[];
+}
+
+export function listChatCommands(): Promise<ChatCommandListResponse> {
+  return apiFetch<ChatCommandListResponse>(`${V2_BASE}/commands`);
 }
 
 export async function executeChatCommand({
