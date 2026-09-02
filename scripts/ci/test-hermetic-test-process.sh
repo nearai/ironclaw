@@ -206,6 +206,60 @@ if [[ "${parallel_cargo_home_count}" != "1" ]]; then
   exit 1
 fi
 
+# The stable Cargo home is shared by consecutive invocations, so state one
+# guarded command leaves there must not reach the next: Cargo configuration
+# and credential files are scrubbed on entry.
+RUNNER_TEMP="${probe_dir}" "${runner}" -- bash -c '
+  set -euo pipefail
+  printf "[net]\nretry = 99\n" > "${CARGO_HOME}/config.toml"
+  printf "[registry]\ntoken = \"poison\"\n" > "${CARGO_HOME}/credentials.toml"
+  : > "${CARGO_HOME}/config"
+  : > "${CARGO_HOME}/credentials"
+'
+poison_output="$(
+  RUNNER_TEMP="${probe_dir}" "${runner}" -- bash -c '
+    for host_cargo_file in config config.toml credentials credentials.toml; do
+      if [[ -e "${CARGO_HOME}/${host_cargo_file}" ]]; then
+        echo "poisoned:${host_cargo_file}"
+      fi
+    done
+    echo "checked"
+  '
+)"
+if [[ "${poison_output}" != "checked" ]]; then
+  echo "Cargo state written by one hermetic invocation reached the next: ${poison_output}" >&2
+  exit 1
+fi
+
+# The host-home guard compares canonical paths: a symlink to the host Cargo
+# home, a `..` spelling of it, and an ancestor of it must all be refused.
+fake_host_cargo_home="${probe_dir}/host-cargo-home"
+mkdir -p "${fake_host_cargo_home}/registry" "${fake_host_cargo_home}/git" "${fake_host_cargo_home}/nested"
+ln -s "${fake_host_cargo_home}" "${probe_dir}/host-cargo-home-link"
+for bad_cargo_home in \
+  "${probe_dir}/host-cargo-home-link" \
+  "${fake_host_cargo_home}/nested/../../host-cargo-home" \
+  "${probe_dir}"
+do
+  set +e
+  guard_output="$(
+    CARGO_HOME="${fake_host_cargo_home}" \
+      IRONCLAW_HERMETIC_CARGO_HOME="${bad_cargo_home}" \
+      "${runner}" -- true 2>&1
+  )"
+  guard_status=$?
+  set -e
+  if [[ "${guard_status}" -ne 2 || "${guard_output}" != *"must not be (or contain) the host Cargo home"* ]]; then
+    echo "hermetic Cargo home guard accepted a path equivalent to the host Cargo home: ${bad_cargo_home} (status ${guard_status})" >&2
+    printf '%s\n' "${guard_output}" >&2
+    exit 1
+  fi
+done
+if [[ -e "${fake_host_cargo_home}/config.toml" || ! -d "${fake_host_cargo_home}/registry" ]]; then
+  echo "the rejected host Cargo home was modified" >&2
+  exit 1
+fi
+
 # The behavioral form of the same guard: a second invocation must compile
 # nothing. Builds the smallest workspace crate, so a cold run costs seconds.
 # The pre-build outside the boundary fetches its handful of dependencies;

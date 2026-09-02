@@ -86,11 +86,31 @@ original_cargo_home="${CARGO_HOME:-${original_home:+${original_home}/.cargo}}"
 # pins both halves. Override with IRONCLAW_HERMETIC_CARGO_HOME for a
 # differently placed (never the host's own) Cargo home.
 sanitized_cargo_home="${IRONCLAW_HERMETIC_CARGO_HOME:-${temp_parent%/}/ironclaw-hermetic-cargo-home}"
-if [[ -n "${original_cargo_home}" && "${sanitized_cargo_home}" == "${original_cargo_home}" ]]; then
-  echo "IRONCLAW_HERMETIC_CARGO_HOME must not be the host Cargo home: ${sanitized_cargo_home}" >&2
-  exit 2
-fi
 mkdir -p "${sanitized_cargo_home}"
+# Compare canonical paths: a symlink or a `..` spelling of the host Cargo home
+# must be rejected just like the literal path, or the guarded command would
+# read host Cargo configuration and credentials through it. The sanitized
+# home may not be an ancestor of the host home either (the scrub below would
+# then delete host files).
+canonical_dir() {
+  (cd "$1" 2>/dev/null && pwd -P) || printf '%s\n' "$1"
+}
+sanitized_cargo_home_real="$(canonical_dir "${sanitized_cargo_home}")"
+if [[ -n "${original_cargo_home}" ]]; then
+  original_cargo_home_real="$(canonical_dir "${original_cargo_home}")"
+  if [[ "${sanitized_cargo_home_real}" == "${original_cargo_home_real}" \
+    || "${original_cargo_home_real}" == "${sanitized_cargo_home_real}"/* ]]; then
+    echo "IRONCLAW_HERMETIC_CARGO_HOME must not be (or contain) the host Cargo home: ${sanitized_cargo_home} resolves to ${sanitized_cargo_home_real}" >&2
+    exit 2
+  fi
+fi
+# The stable home is shared by consecutive invocations, so anything a guarded
+# command could leave behind that Cargo would read next time is removed up
+# front: configuration and credential files never exist here. Only the two
+# cache links below and Cargo's own lock/cache-tracker files may persist.
+for host_cargo_state in config config.toml credentials credentials.toml; do
+  rm -f "${sanitized_cargo_home_real}/${host_cargo_state}"
+done
 for cargo_cache in registry git; do
   source_cache="${original_cargo_home:+${original_cargo_home}/${cargo_cache}}"
   cache_link="${sanitized_cargo_home}/${cargo_cache}"

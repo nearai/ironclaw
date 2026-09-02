@@ -41,7 +41,11 @@ configuration. That home is one stable path per host rather than a fresh
 directory per invocation: cargo hashes each registry crate's absolute source
 path into its fingerprint, so a per-invocation home invalidated the whole
 dependency closure between one guarded command and the next and left every
-restored CI build cache stale. The resolved Rust sysroot is placed directly on
+restored CI build cache stale. Because that home outlives an invocation, the
+runner removes any Cargo configuration or credential file from it on entry
+(only the two cache links and Cargo's own lock and cache-tracker files may
+persist) and refuses an `IRONCLAW_HERMETIC_CARGO_HOME` that resolves to, or
+contains, the host Cargo home. The resolved Rust sysroot is placed directly on
 `PATH` without exporting the host Rustup home. Compiler output remains in the
 repository's explicit `target/` build directory so prebuilt E2E binaries and
 incremental CI artifacts keep their documented paths, and so a `target/`

@@ -163,8 +163,13 @@ jobs:
           # The same hermetic stable+mold build as every guarded Tests (Reborn)
           # lane, so the four groups share that workflow's `reborn-hermetic`
           # lineage instead of minting four 1.3-1.5 GB per-group entries.
+          # Restore-only: a shared key is written once per lockfile by the
+          # first job to finish, so only the jobs that build the complete
+          # integration-test closure (root partitions and QA replay in
+          # reborn-tests.yml) may save it; a small group finishing first would
+          # otherwise pin a partial dependency set.
           shared-key: reborn-hermetic
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          save-if: false
 
       - name: Run deterministic Reborn Rust gate
         env:

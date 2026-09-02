@@ -22,7 +22,10 @@ repository limit. Two plain lineages exist. `reborn-hermetic` is every lane
 that builds inside `scripts/ci/run-hermetic-test-process.sh` (crate buckets,
 root partitions, the integration batch, QA replay, the Rust Reborn E2E
 groups): pinned stable toolchain, mold, and a stable hermetic Cargo home, so
-one entry is fresh for all of them. `reborn-direct` is the lanes that run
+one entry is fresh for all of them. A shared key is written once per lockfile
+by the first job to finish, so only the push run's root partitions and QA
+replay, which build the same complete integration-test closure, save it;
+every other job restores. `reborn-direct` is the lanes that run
 cargo against the host Cargo home (the sandbox Docker tests, which save it,
 and the merge-queue mutation gate, which restores it). The instrumented
 coverage lanes on `main` keep their separate `-cov-llvm21` lineages.

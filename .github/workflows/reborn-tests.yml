@@ -401,8 +401,11 @@ jobs:
           # builds inside scripts/ci/run-hermetic-test-process.sh (crate
           # buckets, root partitions, integration batch, QA replay, the Rust
           # Reborn E2E groups): same toolchain, same RUSTFLAGS, same stable
-          # hermetic Cargo home, so one entry serves all of them. The push
-          # run's root/QA/E2E jobs save it; every other event restores it.
+          # hermetic Cargo home, so one entry serves all of them. Only the
+          # push run's root partitions and QA replay save it: a shared key is
+          # written once per lockfile by the first job to finish, and those
+          # jobs build the same complete integration-test closure, so whichever
+          # wins saves the same content. Everything else restores.
           shared-key: ${{ needs.changes.outputs.run_coverage == 'true' && 'reborn-tests-crates-cov-llvm21' || 'reborn-hermetic' }}
           # Saved from pushes to main only; pull-request and merge-queue runs
           # restore. A merge_group save lands on the queue entry's own
@@ -644,7 +647,7 @@ jobs:
           # only run different test partitions), and that build is the same
           # hermetic stable+mold build every other guarded lane makes, so they
           # share the one `reborn-hermetic` lineage (see crate-tests above).
-          # These push-run jobs are among the ones that save it.
+          # These push-run jobs (and QA replay) are the lineage's producers.
           shared-key: reborn-hermetic
           # Saved from pushes to main only; pull-request and merge-queue runs
           # restore. A merge_group save lands on the queue entry's own
