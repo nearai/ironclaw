@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Browser-side push enrollment for the deployment's session channel — the
 // channel this SPA itself fronts, learned from `GET /session` (never a
 // hardcoded channel name).
@@ -24,7 +23,13 @@ import {
 // automations-page hook keeps one import site for the device-push surface.
 export { registerServiceWorker } from "./register-sw";
 
-function pushSupported() {
+export type DevicePushState =
+  | { state: "unsupported" }
+  | { state: "permission-denied" }
+  | { state: "not-enrolled" }
+  | { state: "enrolled"; endpoint: string; accountMatch: boolean | null };
+
+function pushSupported(): boolean {
   return (
     typeof navigator !== "undefined" &&
     "serviceWorker" in navigator &&
@@ -34,7 +39,7 @@ function pushSupported() {
   );
 }
 
-async function pushRegistration() {
+async function pushRegistration(): Promise<ServiceWorkerRegistration | null> {
   // Deliberately `getRegistration()`, never `serviceWorker.ready`: `ready`
   // resolves only once SOME registration activates and never rejects, so
   // after a failed boot registration (non-secure origin, /sw.js 404,
@@ -59,7 +64,7 @@ async function pushRegistration() {
  * without the backend ever echoing full endpoint capability URLs. Returns
  * null when WebCrypto is unavailable (push itself requires a secure context,
  * so this is effectively test-environment-only). */
-export async function endpointDigestHex(endpoint) {
+export async function endpointDigestHex(endpoint: unknown): Promise<string | null> {
   if (typeof endpoint !== "string" || !endpoint) return null;
   const subtle = globalThis.crypto && globalThis.crypto.subtle;
   if (!subtle) return null;
@@ -92,7 +97,9 @@ export async function endpointDigestHex(endpoint) {
  * Callers must only offer a local unsubscribe when `accountMatch === true`;
  * anything else risks severing another account's enrollment.
  */
-export async function getDevicePushState({ accountEndpointDigests = null } = {}) {
+export async function getDevicePushState({
+  accountEndpointDigests = null,
+}: { accountEndpointDigests?: readonly string[] | null } = {}): Promise<DevicePushState> {
   if (!pushSupported()) return { state: "unsupported" };
   if (Notification.permission === "denied") return { state: "permission-denied" };
   try {
@@ -119,7 +126,7 @@ export async function getDevicePushState({ accountEndpointDigests = null } = {})
 
 /** Decode an unpadded base64url VAPID public key into the byte array
  * `pushManager.subscribe` expects. */
-export function urlBase64ToUint8Array(base64String) {
+export function urlBase64ToUint8Array(base64String: unknown): Uint8Array<ArrayBuffer> {
   if (typeof base64String !== "string" || !base64String) {
     throw new Error("a base64url key is required");
   }
@@ -133,7 +140,9 @@ export function urlBase64ToUint8Array(base64String) {
   return output;
 }
 
-function subscriptionKeys(subscription) {
+function subscriptionKeys(
+  subscription: PushSubscription,
+): { p256dh: string; auth: string } {
   const json = subscription.toJSON ? subscription.toJSON() : {};
   const keys = json.keys || {};
   if (!keys.p256dh || !keys.auth) {
@@ -149,7 +158,9 @@ function subscriptionKeys(subscription) {
  * subscription enrolled by a different account: the existing subscription is
  * reused as-is and registered under the current caller — never unsubscribed,
  * so the other account's enrollment is left intact. */
-export async function enrollThisBrowser({ vapidPublicKey } = {}) {
+export async function enrollThisBrowser({
+  vapidPublicKey,
+}: { vapidPublicKey?: string } = {}): Promise<DevicePushState> {
   if (!vapidPublicKey) {
     throw new Error("vapidPublicKey is required");
   }
@@ -203,7 +214,7 @@ export async function enrollThisBrowser({ vapidPublicKey } = {}) {
  * account (`accountMatch === true` from [`getDevicePushState`]): the
  * push subscription is browser-global, so unsubscribing it on behalf of the
  * wrong account would silently break the owning account's notifications. */
-export async function unenrollThisBrowser() {
+export async function unenrollThisBrowser(): Promise<DevicePushState> {
   if (!pushSupported()) return { state: "unsupported" };
   const registration = await pushRegistration();
   if (!registration) return { state: "unsupported" };

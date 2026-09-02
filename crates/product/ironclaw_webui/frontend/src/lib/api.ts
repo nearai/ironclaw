@@ -1,4 +1,3 @@
-// @ts-nocheck
 // WebChat v2 ingress client.
 //
 // Every function in this module targets a `/api/webchat/v2/*` route
@@ -17,8 +16,36 @@
 const TOKEN_KEY = "ironclaw_token";
 const V2_BASE = "/api/webchat/v2";
 
+function encodePathSegment(value: unknown): string {
+  return encodeURIComponent(String(value));
+}
+
+type ApiErrorPayload = {
+  error?: unknown;
+  field?: unknown;
+  kind?: unknown;
+  validation_code?: unknown;
+};
+
+export interface ApiErrorOptions {
+  status?: number;
+  statusText?: string;
+  body?: string;
+  headers?: Headers;
+  payload?: unknown;
+}
+
 export class ApiError extends Error {
-  constructor(message, { status, statusText, body, headers, payload } = {}) {
+  status?: number;
+  statusText?: string;
+  body?: string;
+  headers?: Headers;
+  payload?: unknown;
+
+  constructor(
+    message: string,
+    { status, statusText, body, headers, payload }: ApiErrorOptions = {},
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
@@ -35,7 +62,7 @@ export function readStoredToken() {
   return sessionStorage.getItem(TOKEN_KEY) || "";
 }
 
-export function storeToken(token) {
+export function storeToken(token: string) {
   if (token) {
     sessionStorage.setItem(TOKEN_KEY, token);
   } else {
@@ -64,7 +91,7 @@ export function clientActionId() {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function parseErrorBody(response) {
+async function parseErrorBody(response: Response) {
   const text = await response.text().catch(() => "");
   if (!text) return { text: "", payload: undefined };
   const contentType = response.headers.get("content-type") || "";
@@ -80,7 +107,7 @@ async function parseErrorBody(response) {
 
 // Turn a snake_case / kebab-case wire token into a readable phrase, e.g.
 // `service_unavailable` -> "Service unavailable".
-function humanizeErrorToken(token) {
+function humanizeErrorToken(token: unknown) {
   return String(token)
     .replace(/[_-]+/g, " ")
     .trim()
@@ -96,16 +123,21 @@ function humanizeErrorToken(token) {
 // error message means a dialog shows `{"error":"...","kind":"..."}`, which reads
 // as "no error" to a user. Humanize the most specific token instead, and only
 // fall back to a non-JSON body when it is short enough to be a real message.
-export function describeApiError({ payload, body, statusText } = {}) {
+export function describeApiError({
+  payload,
+  body,
+  statusText,
+}: Pick<ApiErrorOptions, "payload" | "body" | "statusText"> = {}) {
   if (payload && typeof payload === "object") {
-    if (payload.validation_code) {
-      const base = humanizeErrorToken(payload.validation_code);
-      return payload.field ? `${base} (${payload.field})` : base;
+    const errorPayload = payload as ApiErrorPayload;
+    if (errorPayload.validation_code) {
+      const base = humanizeErrorToken(errorPayload.validation_code);
+      return errorPayload.field ? `${base} (${String(errorPayload.field)})` : base;
     }
-    const code = payload.kind || payload.error;
+    const code = errorPayload.kind || errorPayload.error;
     if (code) {
       const base = humanizeErrorToken(code);
-      return payload.field ? `${base} (${payload.field})` : base;
+      return errorPayload.field ? `${base} (${String(errorPayload.field)})` : base;
     }
   }
   const trimmed = (body || "").trim();
@@ -120,7 +152,7 @@ export function describeApiError({ payload, body, statusText } = {}) {
   return statusText || "Request failed";
 }
 
-export async function apiFetch(path, options = {}) {
+export async function apiFetch(path: string | URL, options: RequestInit = {}) {
   const token = readStoredToken();
   const headers = new Headers(options.headers || {});
   headers.set("Accept", "application/json");
@@ -166,7 +198,7 @@ export async function apiFetch(path, options = {}) {
 // clear error rather than guessing a channel.
 let sessionChannelExtensionId = "";
 
-export function setSessionChannelExtensionId(extensionId) {
+export function setSessionChannelExtensionId(extensionId: string | null | undefined) {
   sessionChannelExtensionId = extensionId || "";
 }
 
@@ -184,8 +216,22 @@ export async function fetchSession() {
   return session;
 }
 
-export function createThread({ clientActionId: clientId, requestedThreadId, projectId } = {}) {
-  const body = { client_action_id: clientId || clientActionId() };
+export interface CreateThreadOptions {
+  clientActionId?: string;
+  requestedThreadId?: string;
+  projectId?: string;
+}
+
+export function createThread({
+  clientActionId: clientId,
+  requestedThreadId,
+  projectId,
+}: CreateThreadOptions = {}) {
+  const body: {
+    client_action_id: string;
+    requested_thread_id?: string;
+    project_id?: string;
+  } = { client_action_id: clientId || clientActionId() };
   if (requestedThreadId) body.requested_thread_id = requestedThreadId;
   // The backend authorizes the caller's access to this project before scoping
   // the new thread to it; the body only proposes it.
@@ -196,13 +242,21 @@ export function createThread({ clientActionId: clientId, requestedThreadId, proj
   });
 }
 
+export interface ListThreadsOptions {
+  limit?: number;
+  cursor?: string;
+  projectId?: string;
+  candidateThreadId?: string;
+  signal?: AbortSignal;
+}
+
 export function listThreads({
   limit,
   cursor,
   projectId,
   candidateThreadId,
   signal,
-} = {}) {
+}: ListThreadsOptions = {}) {
   const url = new URL(`${V2_BASE}/threads`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
@@ -211,7 +265,11 @@ export function listThreads({
   return apiFetch(url.pathname + url.search, { signal });
 }
 
-export function deleteThread({ threadId } = {}) {
+type ThreadOptions = { threadId?: string };
+type AutomationOptions = { automationId?: string };
+type ProjectOptions = { projectId?: string };
+
+export function deleteThread({ threadId }: ThreadOptions = {}) {
   if (!threadId) {
     return Promise.reject(new Error("threadId is required"));
   }
@@ -222,14 +280,24 @@ export function deleteThread({ threadId } = {}) {
 
 // --- Notification inbox ---
 
-export function listNotifications({ limit, cursor, signal } = {}) {
+interface PaginatedRequestOptions {
+  limit?: number;
+  cursor?: string;
+  signal?: AbortSignal;
+}
+
+export function listNotifications({
+  limit,
+  cursor,
+  signal,
+}: PaginatedRequestOptions = {}) {
   const url = new URL(`${V2_BASE}/notifications`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
   return apiFetch(url.pathname + url.search, { signal });
 }
 
-export function markNotificationRead(notificationId) {
+export function markNotificationRead(notificationId: string) {
   if (!notificationId) return Promise.reject(new Error("notificationId is required"));
   return apiFetch(
     `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/read`,
@@ -241,7 +309,7 @@ export function markAllNotificationsRead() {
   return apiFetch(`${V2_BASE}/notifications/read-all`, { method: "POST" });
 }
 
-export function archiveNotification(notificationId) {
+export function archiveNotification(notificationId: string) {
   if (!notificationId) return Promise.reject(new Error("notificationId is required"));
   return apiFetch(
     `${V2_BASE}/notifications/${encodeURIComponent(notificationId)}/archive`,
@@ -251,13 +319,17 @@ export function archiveNotification(notificationId) {
 
 // --- Project filesystem (download / navigation) ---
 
-function projectFilesBase(threadId) {
+function projectFilesBase(threadId: string) {
   return `${V2_BASE}/threads/${encodeURIComponent(threadId)}/files`;
 }
 
 // List a directory under the thread's project workspace. `path` defaults to the
 // workspace root server-side when omitted.
-export function listProjectFiles({ threadId, path } = {}) {
+interface ProjectFileOptions extends ThreadOptions {
+  path?: string;
+}
+
+export function listProjectFiles({ threadId, path }: ProjectFileOptions = {}) {
   if (!threadId) return Promise.reject(new Error("threadId is required"));
   const url = new URL(projectFilesBase(threadId), window.location.origin);
   if (path) url.searchParams.set("path", path);
@@ -265,7 +337,7 @@ export function listProjectFiles({ threadId, path } = {}) {
 }
 
 // Metadata for a single project path (used to show a chip's size/icon).
-export function statProjectFile({ threadId, path } = {}) {
+export function statProjectFile({ threadId, path }: ProjectFileOptions = {}) {
   if (!threadId || !path) {
     return Promise.reject(new Error("threadId and path are required"));
   }
@@ -277,7 +349,7 @@ export function statProjectFile({ threadId, path } = {}) {
 // Same-origin relative URL for a project file's bytes. Feeds the shared
 // `fetchAttachmentBlob` (which attaches the bearer) so the project workspace
 // browser can reuse the attachment preview modal.
-export function projectFileContentUrl({ threadId, path } = {}) {
+export function projectFileContentUrl({ threadId, path }: ProjectFileOptions = {}) {
   if (!threadId || !path) {
     throw new Error("projectFileContentUrl requires threadId and path");
   }
@@ -288,7 +360,17 @@ export function projectFileContentUrl({ threadId, path } = {}) {
 
 // --- Automations ---
 
-export function listAutomations({ limit, runLimit, includeCompleted } = {}) {
+interface ListAutomationsOptions {
+  limit?: number;
+  runLimit?: number;
+  includeCompleted?: boolean;
+}
+
+export function listAutomations({
+  limit,
+  runLimit,
+  includeCompleted,
+}: ListAutomationsOptions = {}) {
   const params = new URLSearchParams();
   if (limit != null) params.set("limit", String(limit));
   if (runLimit != null) params.set("run_limit", String(runLimit));
@@ -297,7 +379,7 @@ export function listAutomations({ limit, runLimit, includeCompleted } = {}) {
   return apiFetch(`${V2_BASE}/automations${query ? `?${query}` : ""}`);
 }
 
-export function pauseAutomation({ automationId } = {}) {
+export function pauseAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
     return Promise.reject(new Error("automationId is required"));
   }
@@ -306,7 +388,7 @@ export function pauseAutomation({ automationId } = {}) {
   });
 }
 
-export function runAutomation({ automationId } = {}) {
+export function runAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
     return Promise.reject(new Error("automationId is required"));
   }
@@ -315,7 +397,7 @@ export function runAutomation({ automationId } = {}) {
   });
 }
 
-export function resumeAutomation({ automationId } = {}) {
+export function resumeAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
     return Promise.reject(new Error("automationId is required"));
   }
@@ -324,7 +406,10 @@ export function resumeAutomation({ automationId } = {}) {
   });
 }
 
-export function renameAutomation({ automationId, name } = {}) {
+export function renameAutomation({
+  automationId,
+  name,
+}: AutomationOptions & { name?: string } = {}) {
   if (!automationId) {
     return Promise.reject(new Error("automationId is required"));
   }
@@ -337,7 +422,7 @@ export function renameAutomation({ automationId, name } = {}) {
   });
 }
 
-export function deleteAutomation({ automationId } = {}) {
+export function deleteAutomation({ automationId }: AutomationOptions = {}) {
   if (!automationId) {
     return Promise.reject(new Error("automationId is required"));
   }
@@ -350,19 +435,34 @@ export function deleteAutomation({ automationId } = {}) {
 
 const PROJECTS_BASE = `${V2_BASE}/projects`;
 
-function projectPath(projectId) {
+function projectPath(projectId: string) {
   return `${PROJECTS_BASE}/${encodeURIComponent(projectId)}`;
 }
 
-export function listProjects({ limit } = {}) {
+export function listProjects({ limit }: { limit?: number } = {}) {
   const url = new URL(PROJECTS_BASE, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   return apiFetch(url.pathname + url.search);
 }
 
-export function createProject({ name, description, icon, color, metadata } = {}) {
+export interface ProjectMutationOptions extends ProjectOptions {
+  name?: string;
+  description?: string | null;
+  icon?: string | null;
+  color?: string | null;
+  metadata?: Record<string, unknown> | null;
+  state?: string | null;
+}
+
+export function createProject({
+  name,
+  description,
+  icon,
+  color,
+  metadata,
+}: ProjectMutationOptions = {}) {
   if (!name) return Promise.reject(new Error("name is required"));
-  const body = { name };
+  const body: Omit<ProjectMutationOptions, "projectId" | "state"> = { name };
   if (description != null) body.description = description;
   if (icon != null) body.icon = icon;
   if (color != null) body.color = color;
@@ -370,14 +470,22 @@ export function createProject({ name, description, icon, color, metadata } = {})
   return apiFetch(PROJECTS_BASE, { method: "POST", body: JSON.stringify(body) });
 }
 
-export function getProject({ projectId } = {}) {
+export function getProject({ projectId }: ProjectOptions = {}) {
   if (!projectId) return Promise.reject(new Error("projectId is required"));
   return apiFetch(projectPath(projectId));
 }
 
-export function updateProject({ projectId, name, description, icon, color, metadata, state } = {}) {
+export function updateProject({
+  projectId,
+  name,
+  description,
+  icon,
+  color,
+  metadata,
+  state,
+}: ProjectMutationOptions = {}) {
   if (!projectId) return Promise.reject(new Error("projectId is required"));
-  const body = {};
+  const body: Omit<ProjectMutationOptions, "projectId"> = {};
   if (name != null) body.name = name;
   if (description != null) body.description = description;
   if (icon != null) body.icon = icon;
@@ -387,17 +495,26 @@ export function updateProject({ projectId, name, description, icon, color, metad
   return apiFetch(projectPath(projectId), { method: "POST", body: JSON.stringify(body) });
 }
 
-export function deleteProject({ projectId } = {}) {
+export function deleteProject({ projectId }: ProjectOptions = {}) {
   if (!projectId) return Promise.reject(new Error("projectId is required"));
   return apiFetch(projectPath(projectId), { method: "DELETE" });
 }
 
-export function listProjectMembers({ projectId } = {}) {
+export function listProjectMembers({ projectId }: ProjectOptions = {}) {
   if (!projectId) return Promise.reject(new Error("projectId is required"));
   return apiFetch(`${projectPath(projectId)}/members`);
 }
 
-export function addProjectMember({ projectId, userId, role } = {}) {
+interface ProjectMemberOptions extends ProjectOptions {
+  userId?: string;
+  role?: string;
+}
+
+export function addProjectMember({
+  projectId,
+  userId,
+  role,
+}: ProjectMemberOptions = {}) {
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
@@ -408,7 +525,11 @@ export function addProjectMember({ projectId, userId, role } = {}) {
   });
 }
 
-export function updateProjectMemberRole({ projectId, userId, role } = {}) {
+export function updateProjectMemberRole({
+  projectId,
+  userId,
+  role,
+}: ProjectMemberOptions = {}) {
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
@@ -419,7 +540,7 @@ export function updateProjectMemberRole({ projectId, userId, role } = {}) {
   });
 }
 
-export function removeProjectMember({ projectId, userId } = {}) {
+export function removeProjectMember({ projectId, userId }: ProjectMemberOptions = {}) {
   if (!projectId || !userId) {
     return Promise.reject(new Error("projectId and userId are required"));
   }
@@ -448,7 +569,9 @@ export function getNotificationChannels() {
 // *intentional* full replace. A caller that forgot the argument would wipe
 // every stored notification channel. Fail fast instead, the way the other
 // mutations here reject a missing required argument.
-export function setNotificationChannels({ targetIds } = {}) {
+export function setNotificationChannels({
+  targetIds,
+}: { targetIds?: unknown } = {}) {
   if (!Array.isArray(targetIds)) {
     return Promise.reject(
       new TypeError("targetIds must be an array of target ids (pass [] to clear)"),
@@ -466,7 +589,14 @@ export function setNotificationChannels({ targetIds } = {}) {
 // The `payload` bodies and the status `detail` are channel-opaque documents
 // only the channel's own client interprets — nothing here names a channel.
 
-export function getNotificationSetupStatus({ extensionId } = {}) {
+interface NotificationSetupOptions {
+  extensionId?: string;
+  payload?: unknown;
+}
+
+export function getNotificationSetupStatus({
+  extensionId,
+}: NotificationSetupOptions = {}) {
   if (!extensionId) {
     return Promise.reject(new Error("extensionId is required"));
   }
@@ -475,7 +605,10 @@ export function getNotificationSetupStatus({ extensionId } = {}) {
   );
 }
 
-export function enableNotificationSetup({ extensionId, payload } = {}) {
+export function enableNotificationSetup({
+  extensionId,
+  payload,
+}: NotificationSetupOptions = {}) {
   if (!extensionId) {
     return Promise.reject(new Error("extensionId is required"));
   }
@@ -488,7 +621,10 @@ export function enableNotificationSetup({ extensionId, payload } = {}) {
   );
 }
 
-export function disableNotificationSetup({ extensionId, payload } = {}) {
+export function disableNotificationSetup({
+  extensionId,
+  payload,
+}: NotificationSetupOptions = {}) {
   if (!extensionId) {
     return Promise.reject(new Error("extensionId is required"));
   }
@@ -502,6 +638,19 @@ export function disableNotificationSetup({ extensionId, payload } = {}) {
 }
 
 // --- Operator logs ---
+
+export interface LogQueryOptions extends PaginatedRequestOptions {
+  level?: string;
+  target?: string;
+  threadId?: string;
+  runId?: string;
+  turnId?: string;
+  toolCallId?: string;
+  toolName?: string;
+  source?: string;
+  tail?: boolean;
+  follow?: boolean;
+}
 
 export function queryLogs({
   limit,
@@ -517,7 +666,7 @@ export function queryLogs({
   tail,
   follow,
   signal,
-} = {}) {
+}: LogQueryOptions = {}) {
   const url = new URL(`${V2_BASE}/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
@@ -548,7 +697,7 @@ export function queryOperatorLogs({
   tail,
   follow,
   signal,
-} = {}) {
+}: LogQueryOptions = {}) {
   const url = new URL(`${V2_BASE}/operator/logs`, window.location.origin);
   if (limit != null) url.searchParams.set("limit", String(limit));
   if (cursor) url.searchParams.set("cursor", cursor);
@@ -570,18 +719,36 @@ export function queryOperatorLogs({
 // `attachments` is an array of `ProductInboundAttachment`
 // (`{ mime_type, filename, data_base64 }`). Omitted from the body when
 // empty so a text-only send keeps the original wire shape.
+export interface ProductInboundAttachment {
+  mime_type: string;
+  filename?: string | null;
+  data_base64: string;
+}
+
+export interface SendMessageOptions {
+  threadId: string;
+  content: string;
+  attachments?: ProductInboundAttachment[];
+  clientActionId?: string;
+}
+
 export function sendMessage({
   threadId,
   content,
   attachments = [],
   clientActionId: clientId,
-}) {
+}: SendMessageOptions) {
   if (!sessionChannelExtensionId) {
     return Promise.reject(
       new Error("no session channel is configured for this deployment"),
     );
   }
-  const body = {
+  const body: {
+    client_action_id: string;
+    thread_id: string;
+    content: string;
+    attachments?: ProductInboundAttachment[];
+  } = {
     client_action_id: clientId || clientActionId(),
     thread_id: threadId,
     content,
@@ -604,7 +771,10 @@ export function listChatCommands() {
   return apiFetch(`${V2_BASE}/commands`);
 }
 
-export function executeChatCommand({ threadId, text }) {
+export function executeChatCommand({
+  threadId,
+  text,
+}: { threadId?: string | null; text: string }) {
   return apiFetch(
     `${V2_BASE}/threads/${encodeURIComponent(threadId ?? "")}/commands`,
     {
@@ -616,9 +786,13 @@ export function executeChatCommand({ threadId, text }) {
 
 // --- Timeline ---
 
-export function fetchTimeline({ threadId, limit, cursor } = {}) {
+export function fetchTimeline({
+  threadId,
+  limit,
+  cursor,
+}: ThreadOptions & Omit<PaginatedRequestOptions, "signal"> = {}) {
   const url = new URL(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/timeline`,
+    `${V2_BASE}/threads/${encodePathSegment(threadId)}/timeline`,
     window.location.origin,
   );
   if (limit != null) url.searchParams.set("limit", String(limit));
@@ -626,7 +800,11 @@ export function fetchTimeline({ threadId, limit, cursor } = {}) {
   return apiFetch(url.pathname + url.search);
 }
 
-export function fetchRunArtifact({ threadId, runId } = {}) {
+interface RunOptions extends ThreadOptions {
+  runId?: string;
+}
+
+export function fetchRunArtifact({ threadId, runId }: RunOptions = {}) {
   if (!threadId || !runId) {
     return Promise.reject(new Error("threadId and runId are required"));
   }
@@ -635,7 +813,7 @@ export function fetchRunArtifact({ threadId, runId } = {}) {
   );
 }
 
-export function fetchThreadArtifact({ threadId } = {}) {
+export function fetchThreadArtifact({ threadId }: ThreadOptions = {}) {
   if (!threadId) {
     return Promise.reject(new Error("threadId is required"));
   }
@@ -649,7 +827,16 @@ export function fetchThreadArtifact({ threadId } = {}) {
 // Fails fast on a missing part rather than building a path with the literal
 // "undefined" — this URL feeds `fetchAttachmentBlob`, which attaches the bearer,
 // so an unintended path must never be requested.
-export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
+interface AttachmentOptions extends ThreadOptions {
+  messageId?: string;
+  attachmentId?: string;
+}
+
+export function attachmentUrl({
+  threadId,
+  messageId,
+  attachmentId,
+}: AttachmentOptions = {}) {
   if (!threadId || !messageId || !attachmentId) {
     throw new Error("attachmentUrl requires threadId, messageId, and attachmentId");
   }
@@ -666,7 +853,7 @@ export function attachmentUrl({ threadId, messageId, attachmentId } = {}) {
 // caller picks the CSP-appropriate representation (data URL for images/media,
 // blob URL for PDF frames, text for text). Throws on a non-OK response so the
 // caller can fall back to a placeholder.
-export async function fetchAttachmentBlob(path) {
+export async function fetchAttachmentBlob(path: string | URL) {
   // The bearer is a critical sink: never attach it to an off-origin URL. The
   // caller always passes a relative same-origin path (`attachmentUrl(...)`);
   // reject anything that resolves cross-origin before sending the token.
@@ -699,10 +886,16 @@ export async function fetchAttachmentBlob(path) {
 // Read a `Blob` into a `data:` URL. Used for images and media, whose CSP
 // directives (`img-src`/`media-src 'self' data:`) allow data URLs but not
 // `blob:` — and a data URL needs no `revokeObjectURL` lifecycle.
-export function blobToDataUrl(blob) {
-  return new Promise((resolve, reject) => {
+export function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("attachment data URL was not a string"));
+      }
+    };
     reader.onerror = () => reject(reader.error || new Error("attachment read failed"));
     reader.readAsDataURL(blob);
   });
@@ -710,15 +903,18 @@ export function blobToDataUrl(blob) {
 
 // Convenience: fetch an attachment's bytes and return a `data:` URL for an
 // `<img>` thumbnail. CSP-safe (`img-src 'self' data:`); never a `blob:` URL.
-export async function fetchAttachmentDataUrl(path) {
+export async function fetchAttachmentDataUrl(path: string | URL) {
   return blobToDataUrl(await fetchAttachmentBlob(path));
 }
 
 // --- Streaming (SSE) ---
 
-export function eventStreamRequest({ threadId, connectionId } = {}) {
+export function eventStreamRequest({
+  threadId,
+  connectionId,
+}: ThreadOptions & { connectionId?: string } = {}) {
   const url = new URL(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/events`,
+    `${V2_BASE}/threads/${encodePathSegment(threadId)}/events`,
     window.location.origin,
   );
   if (connectionId) url.searchParams.set("connection_id", connectionId);
@@ -739,10 +935,10 @@ export function eventStreamRequest({ threadId, connectionId } = {}) {
 // browser sends Origin automatically; the bearer travels via the
 // `?token=` URL parameter (the WS handshake API in browsers has no
 // way to set a custom request header).
-export function openEventSocket({ threadId } = {}) {
+export function openEventSocket({ threadId }: ThreadOptions = {}) {
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = new URL(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/ws`,
+    `${V2_BASE}/threads/${encodePathSegment(threadId)}/ws`,
     window.location.origin,
   );
   url.protocol = scheme;
@@ -758,11 +954,13 @@ export function cancelRun({
   runId,
   reason,
   clientActionId: clientId,
-} = {}) {
-  const body = { client_action_id: clientId || clientActionId() };
+}: RunOptions & { reason?: string; clientActionId?: string } = {}) {
+  const body: { client_action_id: string; reason?: string } = {
+    client_action_id: clientId || clientActionId(),
+  };
   if (reason) body.reason = reason;
   return apiFetch(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/cancel`,
+    `${V2_BASE}/threads/${encodePathSegment(threadId)}/runs/${encodePathSegment(runId)}/cancel`,
     {
       method: "POST",
       body: JSON.stringify(body),
@@ -784,15 +982,27 @@ export function resolveGate({
   credentialRef,
   clientActionId: clientId,
   signal,
+}: RunOptions & {
+  gateRef?: string;
+  resolution?: "approved" | "declined" | "credential_provided";
+  always?: boolean;
+  credentialRef?: string;
+  clientActionId?: string;
+  signal?: AbortSignal;
 } = {}) {
-  const body = {
+  const body: {
+    client_action_id: string;
+    resolution?: "approved" | "declined" | "credential_provided";
+    always?: boolean;
+    credential_ref?: string;
+  } = {
     client_action_id: clientId || clientActionId(),
     resolution,
   };
   if (always != null) body.always = always;
   if (credentialRef) body.credential_ref = credentialRef;
   return apiFetch(
-    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateRef)}/resolve`,
+    `${V2_BASE}/threads/${encodePathSegment(threadId)}/runs/${encodePathSegment(runId)}/gates/${encodePathSegment(gateRef)}/resolve`,
     {
       method: "POST",
       signal,
@@ -811,6 +1021,12 @@ export function submitManualToken({
   runId,
   gateRef,
   signal,
+}: RunOptions & {
+  provider?: string;
+  accountLabel?: string;
+  token?: string;
+  gateRef?: string;
+  signal?: AbortSignal;
 } = {}) {
   return apiFetch("/api/reborn/product-auth/manual-token/submit", {
     method: "POST",
@@ -829,10 +1045,18 @@ export function submitManualToken({
 // --- Extension setup ---
 
 export function setupExtension(
-  extensionName,
-  { action, payload, clientActionId: clientId } = {},
+  extensionName: string,
+  {
+    action,
+    payload,
+    clientActionId: clientId,
+  }: { action?: string; payload?: unknown; clientActionId?: string } = {},
 ) {
-  const body = { client_action_id: clientId || clientActionId() };
+  const body: {
+    client_action_id: string;
+    action?: string;
+    payload?: unknown;
+  } = { client_action_id: clientId || clientActionId() };
   if (action) body.action = action;
   if (payload !== undefined) body.payload = payload;
   return apiFetch(
@@ -901,7 +1125,7 @@ export async function fetchAuthProviders() {
   }
 }
 
-export async function exchangeLoginTicket(ticket) {
+export async function exchangeLoginTicket(ticket: string) {
   const response = await fetch("/auth/session/exchange", {
     method: "POST",
     headers: {

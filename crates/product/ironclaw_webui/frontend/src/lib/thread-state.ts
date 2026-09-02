@@ -1,4 +1,3 @@
-// @ts-nocheck
 /* Per-thread state store.
  *
  * A thread is in one of a small, named set of states at any time. The
@@ -40,6 +39,9 @@ export const THREAD_STATE = Object.freeze({
   FAILED: "failed",
 });
 
+export type ThreadState = (typeof THREAD_STATE)[keyof typeof THREAD_STATE];
+type ThreadStateSubscriber = (states: Map<string, ThreadState>) => void;
+
 /* Only the "user must act" subset survives page refresh.
  *
  * RUNNING is intentionally excluded: across a page lifetime the run almost
@@ -52,7 +54,7 @@ export const THREAD_STATE = Object.freeze({
  *
  * FAILED is not yet populated by any writer but is grouped with
  * NEEDS_ATTENTION for symmetry when it lands. */
-const PERSISTED_STATES = new Set([
+const PERSISTED_STATES = new Set<ThreadState>([
   THREAD_STATE.NEEDS_ATTENTION,
   THREAD_STATE.FAILED,
 ]);
@@ -60,23 +62,22 @@ const STORAGE_KEY = "ironclaw:v2-thread-attention";
 
 // ── Module state (declared before the functions that mutate it) ────────
 
-const subscribers = new Set();
-/** @type {Map<string, string>} */
-const states = new Map();
+const subscribers = new Set<ThreadStateSubscriber>();
+const states = new Map<string, ThreadState>();
 
 // ── Storage helpers ────────────────────────────────────────────────────
 
-function readPersisted() {
+function readPersisted(): Array<[string, ThreadState]> {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
-      (entry) =>
+      (entry): entry is [string, ThreadState] =>
         Array.isArray(entry) &&
         typeof entry[0] === "string" &&
-        PERSISTED_STATES.has(entry[1])
+        PERSISTED_STATES.has(entry[1] as ThreadState),
     );
   } catch (_) {
     // Private mode, quota, or invalid JSON — persistence is best-effort.
@@ -85,7 +86,7 @@ function readPersisted() {
 }
 
 function writePersisted() {
-  const persisted = [];
+  const persisted: Array<[string, ThreadState]> = [];
   for (const [id, state] of states) {
     if (PERSISTED_STATES.has(state)) persisted.push([id, state]);
   }
@@ -131,23 +132,28 @@ function emit() {
  * Writes to localStorage only when the persisted subset (NEEDS_ATTENTION,
  * FAILED) actually changes — RUNNING transitions never touch storage.
  */
-export function setThreadState(threadId, state) {
+export function setThreadState(
+  threadId: string,
+  state: ThreadState | null | undefined,
+): void {
   if (!threadId) return;
   const prevState = states.get(threadId);
   if (state == null) {
     if (!states.delete(threadId)) return;
-    if (PERSISTED_STATES.has(prevState)) writePersisted();
+    if (prevState && PERSISTED_STATES.has(prevState)) writePersisted();
     emit();
     return;
   }
   if (prevState === state) return;
   states.set(threadId, state);
-  if (PERSISTED_STATES.has(state) || PERSISTED_STATES.has(prevState)) writePersisted();
+  if (PERSISTED_STATES.has(state) || (prevState && PERSISTED_STATES.has(prevState))) {
+    writePersisted();
+  }
   emit();
 }
 
 /** Convenience: clear the state of a thread (back to implicit idle). */
-export function clearThreadState(threadId) {
+export function clearThreadState(threadId: string): void {
   setThreadState(threadId, null);
 }
 
@@ -157,7 +163,7 @@ export function getThreadStates() {
 }
 
 /** Subscribe to state-map changes. Returns an unsubscribe fn. */
-export function subscribeThreadStates(listener) {
+export function subscribeThreadStates(listener: ThreadStateSubscriber): () => void {
   subscribers.add(listener);
   return () => {
     subscribers.delete(listener);

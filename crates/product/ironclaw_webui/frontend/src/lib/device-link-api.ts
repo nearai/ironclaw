@@ -1,6 +1,34 @@
-// @ts-nocheck
 import { apiFetch } from "./api";
 import { channelSetupError } from "./channel-setup-api";
+import type {
+  DeviceLinkInputKind,
+  DeviceLinkMode,
+  DeviceLinkPromptWire,
+} from "./device-link-frame";
+
+export type AuthFlowStatus =
+  | "pending"
+  | "awaiting_user"
+  | "awaiting_vendor"
+  | "callback_received"
+  | "completing"
+  | "completed"
+  | "failed"
+  | "expired"
+  | "canceled";
+
+export interface DeviceLinkFlowResponse {
+  flow_id: string;
+  status: AuthFlowStatus;
+  invocation_id?: string;
+  device_link?: DeviceLinkPromptWire | null;
+}
+
+interface DeviceLinkScope {
+  flowId: string;
+  invocationId?: string;
+  signal?: AbortSignal;
+}
 
 // Device-link flow routes (PROPOSAL §4, §8.12). They sit next to the OAuth
 // flow routes because a device link is the same kind of object: a durable,
@@ -42,8 +70,8 @@ import { channelSetupError } from "./channel-setup-api";
 //     abandoned link leaves an orphan authorization on the user's account
 //     (PROPOSAL §4.3). Nothing existing does that.
 // The generic flow-status route (shared with OAuth — same record type).
-export function deviceLinkStatusPath(flowId) {
-  return `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(flowId)}/status`;
+export function deviceLinkStatusPath(flowId: unknown) {
+  return `/api/reborn/product-auth/oauth/flow/${encodeURIComponent(String(flowId))}/status`;
 }
 
 // Drop optional identifiers the caller does not have.
@@ -58,13 +86,15 @@ export function deviceLinkStatusPath(flowId) {
 // Required fields (`provider`, `extension_name`) are deliberately NOT filtered:
 // blank ones must reach the host and be rejected, not silently vanish into a
 // request that means something else.
-function withoutBlankIds(body) {
-  const kept = {};
-  for (const [key, value] of Object.entries(body)) {
-    if (value === undefined || value === null || value === "") continue;
-    kept[key] = value;
-  }
-  return kept;
+function withoutBlankIds(
+  body: Record<string, string | number | null | undefined>,
+): Record<string, string | number> {
+  return Object.fromEntries(
+    Object.entries(body).filter(
+      (entry): entry is [string, string | number] =>
+        entry[1] !== undefined && entry[1] !== null && entry[1] !== "",
+    ),
+  );
 }
 
 // Device-link specific — see the header.
@@ -90,7 +120,17 @@ export function startDeviceLink({
   invocationId,
   resumeFlowId,
   signal,
-} = {}) {
+}: {
+  provider: string;
+  extensionName: string;
+  mode?: DeviceLinkMode;
+  threadId?: string;
+  runId?: string;
+  gateRef?: string;
+  invocationId?: string;
+  resumeFlowId?: string;
+  signal?: AbortSignal;
+}): Promise<DeviceLinkFlowResponse> {
   return apiFetch(START_PATH, {
     method: "POST",
     signal,
@@ -106,7 +146,7 @@ export function startDeviceLink({
         resume_flow_id: resumeFlowId,
       }),
     }),
-  });
+  }) as Promise<DeviceLinkFlowResponse>;
 }
 
 // -> { flow_id, status, device_link }
@@ -115,7 +155,11 @@ export function startDeviceLink({
 // accepted. Safe to call while the card is awaiting user input — the adapter's
 // poll is contractually a pure read on that side, and the host serializes it
 // against a submission in flight.
-export function pollDeviceLink({ flowId, invocationId, signal } = {}) {
+export function pollDeviceLink({
+  flowId,
+  invocationId,
+  signal,
+}: DeviceLinkScope): Promise<DeviceLinkFlowResponse> {
   return apiFetch(POLL_PATH, {
     method: "POST",
     signal,
@@ -123,16 +167,22 @@ export function pollDeviceLink({ flowId, invocationId, signal } = {}) {
       flow_id: flowId,
       ...withoutBlankIds({ invocation_id: invocationId }),
     }),
-  });
+  }) as Promise<DeviceLinkFlowResponse>;
 }
 
 // -> { flow_id, status, device_link }; a pure READ of the durable flow, for a
 // card that is re-rendering and wants to hydrate without advancing anything.
-export function readDeviceLinkFlow({ flowId, invocationId, signal } = {}) {
+export function readDeviceLinkFlow({
+  flowId,
+  invocationId,
+  signal,
+}: DeviceLinkScope): Promise<DeviceLinkFlowResponse> {
   const query = invocationId
     ? `?invocation_id=${encodeURIComponent(invocationId)}`
     : "";
-  return apiFetch(`${deviceLinkStatusPath(flowId)}${query}`, { signal });
+  return apiFetch(`${deviceLinkStatusPath(flowId)}${query}`, {
+    signal,
+  }) as Promise<DeviceLinkFlowResponse>;
 }
 
 // -> { flow_id, status, device_link }
@@ -147,7 +197,11 @@ export function submitDeviceLinkInput({
   value,
   invocationId,
   signal,
-} = {}) {
+}: DeviceLinkScope & {
+  revision: number;
+  kind: DeviceLinkInputKind;
+  value: string;
+}): Promise<DeviceLinkFlowResponse> {
   return apiFetch(INPUT_PATH, {
     method: "POST",
     signal,
@@ -158,12 +212,16 @@ export function submitDeviceLinkInput({
       value,
       ...withoutBlankIds({ invocation_id: invocationId }),
     }),
-  });
+  }) as Promise<DeviceLinkFlowResponse>;
 }
 
 // -> { flow_id, status }; abandons the flow so the vendor side is logged out
 // rather than left as an orphan authorization (PROPOSAL §4.3).
-export function cancelDeviceLink({ flowId, invocationId, signal } = {}) {
+export function cancelDeviceLink({
+  flowId,
+  invocationId,
+  signal,
+}: DeviceLinkScope): Promise<DeviceLinkFlowResponse> {
   return apiFetch(CANCEL_PATH, {
     method: "POST",
     signal,
@@ -171,7 +229,7 @@ export function cancelDeviceLink({ flowId, invocationId, signal } = {}) {
       flow_id: flowId,
       ...withoutBlankIds({ invocation_id: invocationId }),
     }),
-  });
+  }) as Promise<DeviceLinkFlowResponse>;
 }
 
 export const deviceLinkError = channelSetupError;
