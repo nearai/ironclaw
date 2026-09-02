@@ -85,6 +85,8 @@ pub enum Fault {
     TransportAfterAccept { method: SlackWebApiMethod },
     /// The transport fails before the request reaches the provider.
     TransportBeforeAccept { method: SlackWebApiMethod },
+    /// The host's egress policy refuses the request before the network.
+    EgressDenied { method: SlackWebApiMethod },
     /// `{"ok":false,"error":"<error>"}` with HTTP 200.
     SlackError {
         method: SlackWebApiMethod,
@@ -106,6 +108,7 @@ impl Fault {
             | Self::ServerError { method }
             | Self::TransportAfterAccept { method }
             | Self::TransportBeforeAccept { method }
+            | Self::EgressDenied { method }
             | Self::SlackError { method, .. }
             | Self::InvalidBody { method }
             | Self::BareOk { method } => *method,
@@ -302,6 +305,9 @@ impl RestrictedEgress for FakeSlackAgentApi {
             }
             Some(Fault::TransportBeforeAccept { .. }) => {
                 return Err(transport_error("connection refused before write"));
+            }
+            Some(Fault::EgressDenied { .. }) => {
+                return Err(RestrictedEgressError::PolicyDenied);
             }
             Some(Fault::SlackError { error, .. }) => return Ok(slack_error(error)),
             Some(Fault::TransportAfterAccept { .. }) => {

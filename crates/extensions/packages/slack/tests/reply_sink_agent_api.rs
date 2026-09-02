@@ -1434,6 +1434,40 @@ async fn a_lost_narration_append_followed_by_a_reset_retracts_the_stale_stream()
     );
 }
 
+/// Only Slack's own refusal is tolerated. A retraction the host's egress
+/// policy denies before the network never reached Slack: that is a
+/// deployment fault to surface, so the reply fails loudly and no fresh
+/// stream opens beside a message that is still there.
+#[tokio::test]
+async fn an_egress_denied_retraction_fails_the_reply_instead_of_opening_a_fresh_stream() {
+    let mut harness = Harness::dm();
+    harness.append("Let me look at two things first.\n\n");
+    assert_applied(&harness.reconcile(ReplyReconcilePoint::Opened).await);
+
+    assert!(harness.document.reset_answer());
+    harness
+        .document
+        .activity_started(item("act-0"), text("Search Slack"), None);
+    harness.fake.inject(Fault::EgressDenied {
+        method: SlackWebApiMethod::ChatDelete,
+    });
+    let report = harness.reconcile(ReplyReconcilePoint::Progress).await;
+    assert!(
+        matches!(report.outcome, ReplySinkOutcome::Permanent { .. }),
+        "an egress denial is not a slack refusal, got {:?}",
+        report.outcome
+    );
+    assert!(harness.fake.deleted().is_empty());
+    assert_eq!(
+        harness
+            .fake
+            .bodies(SlackWebApiMethod::ChatStartStream)
+            .len(),
+        1,
+        "no fresh stream opens beside a message that is still there"
+    );
+}
+
 // ── No conventional fallback ─────────────────────────────────────────────
 
 #[tokio::test]

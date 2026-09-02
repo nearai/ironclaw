@@ -56,7 +56,9 @@ mod agent_api;
 mod checkpoint;
 mod plan;
 
-use agent_api::{SlackAgentApi, SlackApiFailure, outcome_for_failure, outcome_for_part};
+use agent_api::{
+    SlackAgentApi, SlackApiFailure, outcome_for_failure, outcome_for_part, outcome_for_slack_error,
+};
 use checkpoint::{
     SlackAppliedState, SlackReplyCheckpoint, SlackSessionStatus, SlackStreamState,
     SlackTerminalState, char_prefix, delta_landed_after, encode_checkpoint, load_checkpoint,
@@ -606,10 +608,13 @@ impl Reconciler<'_> {
     /// never stands beside text the document no longer shows. A message
     /// already gone is the retraction this wanted, which also makes a lost
     /// answer plainly retryable rather than ambiguous: the retry finds the
-    /// message deleted or deletes it. A Slack refusal (a workspace that
-    /// forbids the delete) leaves the stale message and is logged, because
-    /// the fresh stream still carries the answer and failing the reply over
-    /// it would be worse.
+    /// message deleted or deletes it. A refusal Slack itself answers and
+    /// will never lift (a workspace that forbids the delete) leaves the
+    /// stale message and is logged, because the fresh stream still carries
+    /// the answer and failing the reply over it would be worse. Everything
+    /// else — rate limits, transport loss, auth, and any failure that is not
+    /// Slack's own answer (a host egress denial, a request that could not be
+    /// built) — keeps its usual outcome.
     async fn retract_message(&mut self, stream: &SlackStreamState) -> Result<(), ReplySinkOutcome> {
         let body = json!({ "channel": stream.channel, "ts": stream.ts });
         let failure = match self.api.post(SlackWebApiMethod::ChatDelete, body).await {
@@ -617,27 +622,32 @@ impl Reconciler<'_> {
             Err(SlackApiFailure::Rejected { error, .. }) if error == "message_not_found" => {
                 return Ok(());
             }
+            Err(SlackApiFailure::Rejected { error, retry_after }) => {
+                return match outcome_for_slack_error(
+                    SlackWebApiMethod::ChatDelete,
+                    &error,
+                    retry_after,
+                ) {
+                    // silent-ok: a refusal Slack will never lift
+                    // (`cant_delete_message`, a compliance export hold) leaves
+                    // the stale message behind; the fresh stream still carries
+                    // the answer, and failing the reply over a leftover
+                    // message would be the greater harm.
+                    ReplySinkOutcome::Permanent { reason } => {
+                        tracing::debug!(
+                            channel = %stream.channel,
+                            ts = %stream.ts,
+                            reason = %reason,
+                            "slack refused to retract the stale stream's message; leaving it"
+                        );
+                        Ok(())
+                    }
+                    outcome => Err(outcome),
+                };
+            }
             Err(failure) => failure,
         };
-        // Rate limits, transport, and auth failures keep their usual
-        // outcomes (the retry deletes, or the reply stops); only a refusal
-        // Slack will never lift leaves the stale message behind.
-        match outcome_for_failure(SlackWebApiMethod::ChatDelete, failure) {
-            // silent-ok: a refusal Slack will never lift (`cant_delete_message`,
-            // a compliance export hold) leaves the stale message behind; the
-            // fresh stream still carries the answer, and failing the reply
-            // over a leftover message would be the greater harm.
-            ReplySinkOutcome::Permanent { reason } => {
-                tracing::debug!(
-                    channel = %stream.channel,
-                    ts = %stream.ts,
-                    reason = %reason,
-                    "slack refused to retract the stale stream's message; leaving it"
-                );
-                Ok(())
-            }
-            outcome => Err(outcome),
-        }
+        Err(outcome_for_failure(SlackWebApiMethod::ChatDelete, failure))
     }
 
     /// Reconcile the session status to what the document implies (attention

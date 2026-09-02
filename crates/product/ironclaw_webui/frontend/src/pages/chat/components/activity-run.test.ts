@@ -220,4 +220,10 @@ test("ActivityRun renders a narration phase as a settled note inside the run", (
     true,
     "narration renders as a note like reasoning does",
   );
+  assert.ok(
+    item.strings.join("").includes('kind="narration"'),
+    `the note is a narration note: ${item.strings.join("|")}`,
+  );
+  assert.ok(containsScalar(item, "Let me look."), "the note carries the narration text");
+  assert.ok(!containsScalar(item, true), "narration is settled text, never streaming");
 });

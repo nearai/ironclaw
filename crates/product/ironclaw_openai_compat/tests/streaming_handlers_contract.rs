@@ -197,6 +197,68 @@ async fn chat_stream_ignores_a_late_republish_of_a_closed_phase() {
     );
 }
 
+/// The Responses lane through the same calls: each delta, then
+/// `response.output_text.done` and `response.completed` carrying the
+/// accumulated text with exactly one separator.
+#[tokio::test]
+async fn responses_stream_carries_each_answer_call_as_a_paragraph_of_one_message() {
+    let streamer = Arc::new(QueuedStreamer::new());
+    streamer.push_response(vec![
+        projection_phase_envelope(
+            "resp-1",
+            "text:run-1:1",
+            "Let me look at the long thing.",
+            false,
+        ),
+        projection_phase_envelope("resp-2", "text:run-1:1", "Let me look", true),
+        projection_phase_envelope("resp-3", "text:run-1:2", "Here you go.", false),
+        run_status_envelope("resp-4", "completed"),
+    ]);
+    let router = router(streamer);
+
+    let response = router
+        .oneshot(post_json(
+            "/v1/responses",
+            json!({"model": "gpt-reborn", "stream": true, "input": "look"}),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let raw = response_body(response).await;
+    assert!(!raw.contains("event: error"), "raw SSE: {raw}");
+    let events = raw
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+        .collect::<Vec<_>>();
+    let deltas = events
+        .iter()
+        .filter(|event| event["type"] == "response.output_text.delta")
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deltas,
+        ["Let me look at the long thing.", "\n\nHere you go."],
+        "raw SSE: {raw}"
+    );
+    let accumulated = "Let me look at the long thing.\n\nHere you go.";
+    let done = events
+        .iter()
+        .find(|event| event["type"] == "response.output_text.done")
+        .expect("output_text.done");
+    assert_eq!(done["text"].as_str(), Some(accumulated), "raw SSE: {raw}");
+    let completed = events
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .expect("response.completed");
+    assert!(
+        completed
+            .to_string()
+            .contains(&accumulated.replace('\n', "\\n")),
+        "response.completed carries the accumulated text: {completed}"
+    );
+}
+
 /// Drive one streamed chat completion and return its content deltas in
 /// order, asserting the stream ended cleanly.
 async fn chat_delta_contents(streamer: Arc<QueuedStreamer>) -> Vec<String> {
