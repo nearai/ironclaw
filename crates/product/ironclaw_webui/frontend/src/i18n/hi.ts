@@ -57,10 +57,6 @@ registerPack("hi", {
   "notifications.pageLimit": "इससे पुरानी सूचनाएँ यहाँ नहीं दिखाई जाती हैं।",
   "notifications.allCaughtUp": "सब देख लिया गया",
   "notifications.unreadCount": "{count} नई",
-  "runCompletions.toastOne": "एक एजेंट रन पूरा हुआ। उत्तर देखने के लिए थ्रेड खोलें।",
-  "runCompletions.toastMany": "एक थ्रेड में {count} एजेंट रन पूरे हुए।",
-  "runCompletions.listItemOne": "एजेंट रन पूरा — उत्तर तैयार",
-  "runCompletions.listItemMany": "{count} रन पूरे — उत्तर तैयार",
   "notifications.unread": "अपठित",
   "notifications.markAllRead": "सभी को पढ़ा हुआ चिह्नित करें",
   "notifications.resolved": "हल हो गया",
@@ -86,6 +82,11 @@ registerPack("hi", {
   "notifications.approval.title": "अनुमोदन आवश्यक",
   "notifications.approval.detail": "आपकी मंज़ूरी चाहिए",
   "notifications.approval.untitled": "बिना शीर्षक थ्रेड",
+  // Run completions
+  "runCompletions.toastOne": "एक एजेंट रन पूरा हुआ। उत्तर देखने के लिए थ्रेड खोलें।",
+  "runCompletions.toastMany": "एक थ्रेड में {count} एजेंट रन पूरे हुए।",
+  "runCompletions.listItemOne": "एजेंट रन पूरा — उत्तर तैयार",
+  "runCompletions.listItemMany": "{count} रन पूरे — उत्तर तैयार",
 
   // Status
   "status.online": "ऑनलाइन",

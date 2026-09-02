@@ -84,7 +84,7 @@ references were verified against this branch (`90a75faa0`).
 | Session-socket ticket port | `ironclaw_product_contracts::session_transport` (new module) | `OperatorSecretValueStore` precedent: webui consumes, composition implements the shared adapter; in-memory adapter lives in webui host-auth |
 | Shared stream driver + browser codec + session WS protocol | `ironclaw_webui::webui_v2::session_events` (new module) + `handlers/session_events.rs` | charter map gains a `session-events` sub-owner row |
 | Notice store, ingest, user stream hub, coordinator, push facade | `ironclaw_assistant::run_completions` (new module tree) | proposal §5.1 assigns all four to `ironclaw_assistant`; composition constructs them (`DeliveryCoordinator` precedent) |
-| Journal observer adapter | `ironclaw_composition` (new `run_completion_observer.rs`) | maps `ProcessJournalCommit` → assistant ingest port; keeps kernel dep out of assistant; §13 seam |
+| Journal observer adapter | `ironclaw_assistant::run_completions::observer` | maps `ProcessJournalCommit` → the ingest port beside the other product journal observers (`run_outcome_observer`, `suggestions_observer`); composition only constructs and subscribes it; §13 seam |
 | `/run-notices` per-user mount alias | `ironclaw_composition::lib::PER_USER_ALIASES` + storage-placement §4 row | rides the CAS-capable `/tenants` plane; no new physical mount |
 | `OutboundPart::RunCompletion` + `RunCompletionNoticeView` + renderer | `ironclaw_extension_contracts` (`channel_adapter.rs` + new `run_completion.rs`) | `AuthPrompt` boxed-view precedent |
 | `OutboundPushKind::RunCompletion`, `RunNotificationEventKind::RunCompleted`, `DeliveryTargetCapabilities.run_completions` | `ironclaw_outbound` | `notifications` capability triad precedent |
@@ -212,7 +212,7 @@ pub enum RunCompletionStreamEvent {
 Operation IDs + descriptors (constants here, behavior in assistant):
 `webui.run_completion.intent.v1`, `webui.run_completion.acknowledge.v1`,
 `webui.run_completion.thread_read.v1` (capabilities) and
-`webui.run-completions.unread.v1` (view). Input DTOs carry the §7.8 shapes
+`webui.run_completion.unread.v1` (view). Input DTOs carry the §7.8 shapes
 with byte bounds on every opaque ID (≤128 B) and `observedRunIds`-style lists
 capped at 128; intents capped at 32 per notice server-side.
 
@@ -347,7 +347,7 @@ point `WebChatV2EventFrame::from_stream_event(cursor, payload)`).
 
 **Files:** `crates/contracts/ironclaw_product_contracts/src/session_transport.rs`
 (new), `crates/product/ironclaw_webui/src/session_socket_tickets.rs` (new;
-in-memory adapter), `crates/app/ironclaw_composition/src/session_ticket_store.rs`
+in-memory adapter), `crates/app/ironclaw_composition/src/session_socket_ticket_store.rs`
 (new; secret-store adapter),
 `crates/product/ironclaw_webui/src/webui_v2/handlers/session_events.rs` (new
 handlers), `descriptors.rs` (+2 routes),

@@ -25,6 +25,7 @@ import {
 import { sessionEventClient } from "../session-events/client";
 import { isSessionEventsAdvertised } from "../session-events/transport-flag";
 import { toast } from "../toast";
+import { observedThroughSequence, resumeCursorFor } from "./evidence";
 import { browserInstanceId, currentStateRevision, tabId } from "./ids";
 import {
   claimOnce,
@@ -36,6 +37,7 @@ import {
   setRouteThread,
   startCoordination,
 } from "./coordination";
+import { compareSequences } from "./sequence";
 import {
   type RunCompletionGrant,
   type RunCompletionNotice,
@@ -46,7 +48,6 @@ import {
   applyClear,
   applyNotice,
   applySettled,
-  maxSequenceForThread,
   noticeForRun,
   rebaseFromSnapshot,
   resetRunCompletionStore,
@@ -76,6 +77,14 @@ let historyRenderedThreadId: string | null = null;
 // rejected selector degrades to snapshot-only instead of looping.
 let terminalSubscriptionFailures = 0;
 const MAX_TERMINAL_RESUBSCRIBES = 3;
+// Bounded tolerance between the revision a grant was issued against and the
+// profile's current revision: focus churn during the arbitration window is
+// normal; a large gap means the grant no longer describes this browser.
+const STALE_REVISION_TOLERANCE = 64;
+// The `thread_read` evidence currently in flight (`<thread>:<sequence>`), so a
+// badge change while the request is outstanding cannot re-fire the same
+// drain and race its own settlement.
+let threadReadInFlight: string | null = null;
 // Set while the shared socket is reconnecting; the first `open` afterwards
 // rebases the badge cache from the durable snapshot (§7.6), because clears
 // and grants that fired during the gap ride the notice's own sequence and are
@@ -102,6 +111,7 @@ export function stopRunCompletions() {
   stopCoordinationFn = null;
   watchingGrants = new Map();
   historyRenderedThreadId = null;
+  threadReadInFlight = null;
   terminalSubscriptionFailures = 0;
   transportReconnecting = false;
   // The badge cache is per-signed-in-owner state: clear it so a following
@@ -163,7 +173,7 @@ function subscribeStream(fromSequence: string) {
           void handleGrant(event.grant);
         } else {
           applyClear(event.clear.notice_id, event.clear.sequence);
-          releaseClaimsFor(event.clear.notice_id);
+          releaseClaimsFor([event.clear.notice_id]);
           void closeOsNotificationsByTag(event.clear.thread_tag);
         }
       },
@@ -192,7 +202,7 @@ function subscribeStream(fromSequence: string) {
     // Resume strictly after the snapshot's head (`rc:` cursor namespace):
     // the snapshot already seeded everything at or before it, so the
     // replay carries only what happened since.
-    { idPrefix: "rc", fromCursor: `rc:${fromSequence}` },
+    { idPrefix: "rc", fromCursor: resumeCursorFor(fromSequence) },
   );
 }
 
@@ -228,6 +238,12 @@ async function handleGrant(grant: RunCompletionGrant) {
   // state moved past the revision the grant was issued against.
   if (grant.state_revision < currentStateRevision() - STALE_REVISION_TOLERANCE) {
     await acknowledge(grant, "stale_state");
+    return;
+  }
+  if (grant.surface === "in_app" && !pageIsVisible()) {
+    // §5.6: an in-app grant is presented by a tab the user can see. A hidden
+    // tab leaves the claim to a visible one; if none claims before the grant
+    // expires, arbitration regresses and falls back.
     return;
   }
   const applyKey = `grant:${grant.grant_id}`;
@@ -268,11 +284,6 @@ async function handleGrant(grant: RunCompletionGrant) {
   }
 }
 
-// Bounded tolerance between the revision a grant was issued against and the
-// profile's current revision: focus churn during the arbitration window is
-// normal; a large gap means the grant no longer describes this browser.
-const STALE_REVISION_TOLERANCE = 64;
-
 function noticeById(noticeId: string): RunCompletionNotice | null {
   for (const notice of runCompletionSnapshot().notices) {
     if (notice.notice_id === noticeId) return notice;
@@ -280,10 +291,20 @@ function noticeById(noticeId: string): RunCompletionNotice | null {
   return null;
 }
 
+function pageIsVisible(): boolean {
+  return typeof document === "undefined" || document.visibilityState === "visible";
+}
+
+/**
+ * Acknowledge a grant. Resolves to the notice ids the server settled on
+ * this evidence (`null` when the acknowledgement was lost or rejected), so
+ * a caller that needs read evidence can tell a settled lease from one the
+ * server had already expired or re-granted.
+ */
 async function acknowledge(
   grant: RunCompletionGrant,
   outcome: "reply_rendered" | "presented" | "stale_state" | "effect_failed",
-) {
+): Promise<string[] | null> {
   try {
     const response = await acknowledgeRunCompletion({
       noticeId: grant.notice_id,
@@ -291,12 +312,17 @@ async function acknowledge(
       stateRevision: currentStateRevision(),
       outcome,
     });
-    if (Array.isArray(response?.settled_notice_ids) && outcome === "reply_rendered") {
-      applySettled(response.settled_notice_ids);
+    const settled = Array.isArray(response?.settled_notice_ids)
+      ? response.settled_notice_ids
+      : null;
+    if (settled && outcome === "reply_rendered") {
+      applySettled(settled);
     }
+    return settled;
   } catch (_) {
     // A lost acknowledgement may duplicate presentation later but cannot
     // silently lose the notice (§5.6).
+    return null;
   }
 }
 
@@ -317,9 +343,13 @@ async function showOsNotification(
     const threadPath = notice
       ? `/chat/${encodeURIComponent(notice.thread_id)}`
       : "/";
+    // Fixed, localized copy only (the same strings as the in-app toast): OS
+    // surfaces never carry generated content.
+    const body =
+      options?.inAppMessage(notice?.unread_count_for_thread ?? 1) ??
+      "An agent run finished.";
     await registration.showNotification("IronClaw", {
-      // Fixed copy only: OS surfaces never carry generated content.
-      body: "An agent run finished.",
+      body,
       tag: notice?.thread_tag || undefined,
       data: { url: threadPath },
       icon: "/assets/web-app-manifest-192x192.png",
@@ -363,8 +393,11 @@ export function reportActiveThread(threadId: string | null) {
  * sequence N"). Unlocks thread-read evidence for that thread and settles
  * whatever is already unread for it.
  */
-export function reportThreadHistoryRendered(threadId: string) {
+export function reportThreadHistoryRendered(threadId: string, renderedRunIds: string[] = []) {
   if (!threadId) return;
+  // The replies in the loaded history are rendered evidence, exactly like a
+  // live finalization: they bound how far `thread_read` may advance.
+  for (const runId of renderedRunIds) recordObservedRun(runId);
   historyRenderedThreadId = threadId;
   reportThreadViewed(threadId);
 }
@@ -385,11 +418,19 @@ export function reportReplyRendered(runId: string) {
   const lease = watchingGrants.get(notice.notice_id);
   if (lease) {
     watchingGrants.delete(notice.notice_id);
-    void acknowledge(lease, "reply_rendered").then(() => {
-      applyClear(notice.notice_id);
+    void acknowledge(lease, "reply_rendered").then((settled) => {
+      if (settled?.includes(notice.notice_id)) return;
+      // The lease had already expired or been re-granted (the server
+      // answers 409 and mints no read evidence): fall back to the
+      // reply-observed intent, which carries this browser's own identity.
+      submitReplyObserved(notice);
     });
     return;
   }
+  submitReplyObserved(notice);
+}
+
+function submitReplyObserved(notice: RunCompletionNotice) {
   void submitRunCompletionIntent({
     noticeId: notice.notice_id,
     browserInstanceId: browserInstanceId(),
@@ -420,9 +461,17 @@ export function reportThreadViewed(threadId: string) {
   if (typeof document !== "undefined") {
     if (document.visibilityState !== "visible" || !document.hasFocus()) return;
   }
-  const throughSequence = maxSequenceForThread(threadId);
+  // Advance only through completions whose reply this tab has rendered
+  // (history load or live finalization); a notice that arrived for the
+  // open thread while its reply is still in flight stays unread.
+  const throughSequence = observedThroughSequence(threadId);
   if (!throughSequence) return;
-  const settledLocally = unreadForThread(threadId).map((notice) => notice.notice_id);
+  const inFlightKey = `${threadId}:${throughSequence}`;
+  if (threadReadInFlight === inFlightKey) return;
+  threadReadInFlight = inFlightKey;
+  const settledLocally = unreadForThread(threadId)
+    .filter((notice) => compareSequences(notice.sequence, throughSequence) <= 0)
+    .map((notice) => notice.notice_id);
   void reportRunCompletionThreadRead({
     threadId,
     throughSequence,
@@ -433,7 +482,10 @@ export function reportThreadViewed(threadId: string) {
         ? response.settled_notice_ids
         : settledLocally;
       applySettled(settled);
-      for (const noticeId of settled) releaseClaimsFor(noticeId);
+      releaseClaimsFor(settled);
     })
-    .catch(() => undefined);
+    .catch(() => undefined)
+    .finally(() => {
+      if (threadReadInFlight === inFlightKey) threadReadInFlight = null;
+    });
 }

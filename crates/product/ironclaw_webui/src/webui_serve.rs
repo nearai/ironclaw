@@ -277,10 +277,12 @@ pub struct WebuiServeConfig {
     /// Single-use session-socket ticket store, selected by host composition
     /// for the deployment shape: the bounded in-memory adapter for
     /// single-process deployments, a shared CAS-backed adapter when replicas
-    /// share durable storage. `None` disables the session WebSocket
-    /// capability entirely (fail closed): the mint route answers 503, the
-    /// upgrade cannot authenticate, and `GET /session` does not advertise
-    /// `features.session_events`, so browsers keep using compatibility SSE.
+    /// share durable storage. The `ironclaw` binary always wires one; `None`
+    /// (a library embedder or test that wires none) disables the session
+    /// WebSocket capability entirely (fail closed): the mint route answers
+    /// 503, the upgrade cannot authenticate, and `GET /session` does not
+    /// advertise `features.session_events`, so browsers keep using
+    /// compatibility SSE.
     pub(crate) session_socket_tickets:
         Option<Arc<dyn ironclaw_product_contracts::session_transport::SessionSocketTicketStore>>,
 }

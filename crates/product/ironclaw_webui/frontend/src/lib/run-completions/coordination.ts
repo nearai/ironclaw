@@ -30,7 +30,7 @@ const KEEPALIVE_INTERVAL_MS = 8_000;
 const MAX_OBSERVED_RUN_IDS = 128;
 // Presentation/submission ledger entries expire so storage stays bounded.
 const LEDGER_TTL_MS = 6 * 60 * 60 * 1000;
-const LEDGER_PREFIX = "ironclaw.rc.ledger.";
+const LEDGER_PREFIX = "ironclaw:run-completions:ledger:";
 
 export type TabNotificationState = {
   tabId: string;
@@ -269,15 +269,22 @@ export function claimOnce(key: string): boolean {
   }
 }
 
-export function releaseClaimsFor(noticeId: string) {
+/**
+ * Drop every ledger claim for the settled notices in one storage pass: a
+ * thread visit can settle hundreds of notices at once, and each release
+ * would otherwise walk the whole ledger again.
+ */
+export function releaseClaimsFor(noticeIds: string[]) {
+  if (noticeIds.length === 0) return;
+  const mentions = (key: string) => noticeIds.some((noticeId) => key.includes(noticeId));
   for (const key of Array.from(localClaims.keys())) {
-    if (key.includes(noticeId)) localClaims.delete(key);
+    if (mentions(key)) localClaims.delete(key);
   }
   try {
     const doomed: string[] = [];
     for (let index = 0; index < window.localStorage.length; index += 1) {
       const key = window.localStorage.key(index);
-      if (key?.startsWith(LEDGER_PREFIX) && key.includes(noticeId)) {
+      if (key?.startsWith(LEDGER_PREFIX) && mentions(key)) {
         doomed.push(key);
       }
     }

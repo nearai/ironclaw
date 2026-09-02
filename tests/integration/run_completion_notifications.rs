@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use ironclaw_assistant::run_completions::RunCompletionSurfaceServices;
 use ironclaw_assistant::run_completions::ingest::RunCompletionIngest;
+use ironclaw_assistant::run_completions::observer::RunCompletionJournalObserver;
 use ironclaw_assistant::run_completions::records::{CompletionDeliveryState, RunCompletionNotice};
 use ironclaw_assistant::run_completions::store::{
     RUN_NOTICES_MOUNT_ALIAS, RunCompletionNoticeStore, RunCompletionNotices, RunCompletionOwner,
@@ -58,7 +59,11 @@ fn notice_services() -> Arc<RunCompletionSurfaceServices> {
         }),
     ))) as Arc<dyn RunCompletionNotices>;
     let hub = Arc::new(RunCompletionStreamHub::new(Arc::clone(&store)));
-    Arc::new(RunCompletionSurfaceServices::new(store, hub))
+    Arc::new(RunCompletionSurfaceServices::new(
+        store,
+        hub,
+        Arc::new(ironclaw_notifications::NoopNotificationInboxStore),
+    ))
 }
 
 /// Observer delivery is durable and asynchronous (cursor-tracked, retried),
@@ -107,11 +112,9 @@ async fn completed_user_turn_creates_one_unread_notice_through_the_real_journal_
     // harness's turn runtime commits to — exactly composition's wiring.
     h._shared
         .process_system
-        .subscribe_process_observer(Arc::new(
-            ironclaw_composition::test_support::run_completion_journal_observer_for_test(
-                Arc::clone(&ingest),
-            ),
-        ))
+        .subscribe_process_observer(Arc::new(RunCompletionJournalObserver::new(Arc::clone(
+            &ingest,
+        ))))
         .expect("observer registers");
     let owner = RunCompletionOwner {
         tenant_id: h.binding.tenant_id.clone(),

@@ -23,14 +23,12 @@ use ironclaw_threads::{
 };
 
 use super::RunCompletionSurfaceServices;
+use super::TRACE_TARGET;
+use super::coordinator::ARBITRATION_WINDOW_MS;
 use super::records::{notice_id_for, thread_tag_for};
 use super::store::{
     NewRunCompletionNotice, NoticeCreateOutcome, RunCompletionOwner, RunCompletionStoreError,
 };
-
-/// P0 arbitration intent-collection window (§5.4): a host constant, not a
-/// user-facing knob.
-pub const ARBITRATION_WINDOW_MS: i64 = 1_000;
 
 /// One already-filtered terminal completion observed on the process journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +60,25 @@ pub enum CompletionIngestOutcome {
 pub struct CompletionIngestError {
     pub retryable: bool,
     pub reason: String,
+}
+
+/// The retry contract in one place: only a backend outage (`Unavailable`)
+/// holds the journal observer's cursor for replay. A shape rejection cannot
+/// heal by replay, so it advances with a sanitized anomaly rather than
+/// wedging the shared cursor.
+impl From<RunCompletionStoreError> for CompletionIngestError {
+    fn from(error: RunCompletionStoreError) -> Self {
+        match error {
+            RunCompletionStoreError::Unavailable { reason } => Self {
+                retryable: true,
+                reason,
+            },
+            other => Self {
+                retryable: false,
+                reason: other.to_string(),
+            },
+        }
+    }
 }
 
 /// Product-side completion ingest. Composition adapts the process-journal
@@ -149,7 +166,7 @@ impl RunCompletionIngest {
         if finalized.is_none() {
             self.anomalies.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(
-                target: "ironclaw::reborn::run_completions",
+                target: TRACE_TARGET,
                 run_id = %observation.run_id,
                 "completed run resolved to no finalized assistant reply; \
                  recording anomaly and advancing without a notice",
@@ -175,23 +192,7 @@ impl RunCompletionIngest {
         // due registry BEFORE the notice write, so a crash between the two
         // leaves at worst one extra empty scan, never an unscanned notice.
         // Registry overflow fails retryably and holds the observer cursor.
-        self.services
-            .notices
-            .mark_owner_due(&owner)
-            .await
-            .map_err(|error| match error {
-                RunCompletionStoreError::Unavailable { reason } => CompletionIngestError {
-                    retryable: true,
-                    reason,
-                },
-                // A shape rejection cannot heal by replay; advancing with a
-                // sanitized anomaly beats wedging the shared cursor, same as
-                // `create_notice` below.
-                other => CompletionIngestError {
-                    retryable: false,
-                    reason: other.to_string(),
-                },
-            })?;
+        self.services.notices.mark_owner_due(&owner).await?;
         let closes_at = Utc::now() + ChronoDuration::milliseconds(ARBITRATION_WINDOW_MS);
         let outcome = self
             .services
@@ -218,17 +219,7 @@ impl RunCompletionIngest {
                     arbitration_closes_at: closes_at,
                 },
             )
-            .await
-            .map_err(|error| match error {
-                RunCompletionStoreError::Unavailable { reason } => CompletionIngestError {
-                    retryable: true,
-                    reason,
-                },
-                other => CompletionIngestError {
-                    retryable: false,
-                    reason: other.to_string(),
-                },
-            })?;
+            .await?;
         match outcome {
             NoticeCreateOutcome::Created(notice) => {
                 self.services.hub.notice_written(&owner, &notice).await;
@@ -283,7 +274,11 @@ mod tests {
             }),
         ))) as Arc<dyn RunCompletionNotices>;
         let hub = Arc::new(RunCompletionStreamHub::new(Arc::clone(&store)));
-        Arc::new(RunCompletionSurfaceServices::new(store, hub))
+        Arc::new(RunCompletionSurfaceServices::new(
+            store,
+            hub,
+            Arc::new(ironclaw_notifications::NoopNotificationInboxStore),
+        ))
     }
 
     fn scope(thread_id: &ThreadId) -> TurnScope {

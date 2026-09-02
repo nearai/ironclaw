@@ -81,31 +81,43 @@ export function useRunCompletions({ enabled = true, activeThreadId = null } = {}
     return () => window.removeEventListener("focus", onFocus);
   }, [enabled, activeThreadId]);
 
+  // Rows share the inbox row shape (`lib/notifications.ts`) so the merged
+  // bell list sorts, partitions, and formats every row the same way.
   const messages = React.useMemo(
     () =>
-      snapshot.notices.map((notice) => ({
-        id: `run-completion:${notice.notice_id}`,
-        runId: notice.run_id,
-        href: `/chat/${encodeURIComponent(notice.thread_id)}`,
-        // The panel renders title/body/timeLabel; completion rows carry the
-        // fixed generic copy only (no generated content).
-        title:
-          notice.unread_count_for_thread > 1
-            ? t("runCompletions.listItemMany", {
-                count: notice.unread_count_for_thread,
+      snapshot.notices.map((notice) => {
+        const completedAt = notice.completed_at ? Date.parse(notice.completed_at) : NaN;
+        const timestamp = Number.isFinite(completedAt) ? completedAt : null;
+        return {
+          id: `run-completion:${notice.notice_id}`,
+          type: "run_completion",
+          icon: "bell",
+          // The panel renders title/body/timeLabel; completion rows carry
+          // the fixed generic copy only (no generated content).
+          title:
+            notice.unread_count_for_thread > 1
+              ? t("runCompletions.listItemMany", {
+                  count: notice.unread_count_for_thread,
+                })
+              : t("runCompletions.listItemOne"),
+          body: t("runCompletions.toastOne"),
+          detail: null,
+          timeLabel: timestamp
+            ? new Date(timestamp).toLocaleString([], {
+                month: "short",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
               })
-            : t("runCompletions.listItemOne"),
-        body: t("runCompletions.toastOne"),
-        timeLabel: notice.completed_at
-          ? new Date(notice.completed_at).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })
-          : null,
-        read: false,
-        timestamp: notice.completed_at || null,
-        kind: "run-completion",
-      })),
+            : "",
+          timestamp,
+          href: `/chat/${encodeURIComponent(notice.thread_id)}`,
+          threadId: notice.thread_id,
+          turnRunId: notice.run_id,
+          read: false,
+          resolved: false,
+        };
+      }),
     [snapshot.notices, t],
   );
 

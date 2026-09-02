@@ -20,10 +20,15 @@ use ironclaw_product_contracts::surface::{
     ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceValidationCode,
 };
 
-use super::RunCompletionSurfaceServices;
-use super::ingest::ARBITRATION_WINDOW_MS;
+use super::coordinator::ARBITRATION_WINDOW_MS;
 use super::records::{CompletionIntentRecord, CompletionReadEvidence, RunCompletionNotice};
 use super::store::{RunCompletionOwner, RunCompletionStoreError};
+use super::{RunCompletionSurfaceServices, TRACE_TARGET};
+
+/// Bounded number of unread pages one `thread_read` request drains
+/// (`RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT` notices each), so a single request
+/// cannot settle an unbounded backlog.
+const MAX_THREAD_READ_PAGES: usize = 16;
 
 fn owner_of(caller: &ProductSurfaceCaller) -> RunCompletionOwner {
     RunCompletionOwner {
@@ -45,6 +50,26 @@ fn bounded_opaque_id(field: &'static str, value: &str) -> Result<(), ProductSurf
 /// The one translation from store failures to the public surface error
 /// contract, shared by the HTTP operations and the `RunCompletions` stream
 /// selector so the two can never drift.
+/// Settle one notice on read evidence: the durable read transition, the
+/// live clear frame, and the Inbox read bridge, in that order. Read is the
+/// only thing that clears surfaces (design principle 3), so every read path
+/// funnels through here rather than repeating the sequence.
+async fn settle_read(
+    services: &Arc<RunCompletionSurfaceServices>,
+    owner: &RunCompletionOwner,
+    notice_id: &str,
+    evidence: CompletionReadEvidence,
+) -> Result<RunCompletionNotice, ProductSurfaceError> {
+    let read = services
+        .notices
+        .mark_read(owner, notice_id, evidence, Utc::now())
+        .await
+        .map_err(surface_error)?;
+    services.hub.publish_clear(owner, &read);
+    services.settle_inbox_row(owner, &read.run_id).await;
+    Ok(read)
+}
+
 pub(crate) fn surface_error(error: RunCompletionStoreError) -> ProductSurfaceError {
     match error {
         RunCompletionStoreError::NotFound => ProductSurfaceError::not_found(),
@@ -58,7 +83,7 @@ pub(crate) fn surface_error(error: RunCompletionStoreError) -> ProductSurfaceErr
         ),
         RunCompletionStoreError::Unavailable { reason } => {
             tracing::debug!(
-                target: "ironclaw::reborn::run_completions",
+                target: TRACE_TARGET,
                 %reason,
                 "run completion store unavailable",
             );
@@ -101,20 +126,15 @@ pub async fn submit_intent(
     if request.intent == RunCompletionIntentKind::ReplyObserved {
         // Exact reply-render evidence settles the notice without any
         // presentation (§6.1 row 1).
-        let read = services
-            .notices
-            .mark_read(
-                &owner,
-                &request.notice_id,
-                CompletionReadEvidence::ReplyRendered {
-                    browser_instance_id: request.browser_instance_id.clone(),
-                },
-                Utc::now(),
-            )
-            .await
-            .map_err(surface_error)?;
-        services.hub.publish_clear(&owner, &read);
-        services.settle_inbox_row(&owner, &read.run_id).await;
+        let read = settle_read(
+            services,
+            &owner,
+            &request.notice_id,
+            CompletionReadEvidence::ReplyRendered {
+                browser_instance_id: request.browser_instance_id.clone(),
+            },
+        )
+        .await?;
         services.wake_owner(&owner);
         return Ok(RunCompletionMutationResponse {
             settled_notice_ids: vec![read.notice_id],
@@ -165,20 +185,15 @@ pub async fn acknowledge(
                     true,
                 ));
             };
-            let read = services
-                .notices
-                .mark_read(
-                    &owner,
-                    &request.notice_id,
-                    CompletionReadEvidence::ReplyRendered {
-                        browser_instance_id,
-                    },
-                    Utc::now(),
-                )
-                .await
-                .map_err(surface_error)?;
-            services.hub.publish_clear(&owner, &read);
-            services.settle_inbox_row(&owner, &read.run_id).await;
+            let read = settle_read(
+                services,
+                &owner,
+                &request.notice_id,
+                CompletionReadEvidence::ReplyRendered {
+                    browser_instance_id,
+                },
+            )
+            .await?;
             services.wake_owner(&owner);
             Ok(RunCompletionMutationResponse {
                 settled_notice_ids: vec![read.notice_id],
@@ -201,7 +216,7 @@ pub async fn acknowledge(
             // loop owns the fallback decision after that.
             services.record_stale_grant();
             tracing::debug!(
-                target: "ironclaw::reborn::run_completions",
+                target: TRACE_TARGET,
                 outcome = ?request.outcome,
                 stale_grants = services.stale_grant_count(),
                 "grant regressed by browser acknowledgement",
@@ -241,7 +256,9 @@ pub async fn thread_read(
 ) -> Result<RunCompletionMutationResponse, ProductSurfaceError> {
     bounded_opaque_id("thread_id", &request.thread_id)?;
     bounded_opaque_id("browser_instance_id", &request.browser_instance_id)?;
-    let through_sequence: u64 = request.through_sequence.parse().map_err(|_| {
+    let through_sequence: u64 = request.through_sequence.parse().map_err(|error| {
+        // Sanitized for the client; cause retained server-side.
+        tracing::debug!(target: TRACE_TARGET, %error, "through_sequence rejected");
         ProductSurfaceError::validation(
             "through_sequence",
             ProductSurfaceValidationCode::InvalidValue,
@@ -273,20 +290,15 @@ pub async fn thread_read(
             if notice.sequence > through_sequence {
                 continue;
             }
-            let read = services
-                .notices
-                .mark_read(
-                    &owner,
-                    &notice.notice_id,
-                    CompletionReadEvidence::FocusedThreadVisit {
-                        browser_instance_id: request.browser_instance_id.clone(),
-                    },
-                    Utc::now(),
-                )
-                .await
-                .map_err(surface_error)?;
-            services.hub.publish_clear(&owner, &read);
-            services.settle_inbox_row(&owner, &read.run_id).await;
+            let read = settle_read(
+                services,
+                &owner,
+                &notice.notice_id,
+                CompletionReadEvidence::FocusedThreadVisit {
+                    browser_instance_id: request.browser_instance_id.clone(),
+                },
+            )
+            .await?;
             settled.push(read.notice_id);
             settled_this_page += 1;
         }
@@ -302,12 +314,7 @@ pub async fn thread_read(
     })
 }
 
-/// Upper bound on unread pages one `thread_read` drains (pages are
-/// [`RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT`] wide): a thread with more unread
-/// completions than this settles across successive focused visits.
-const MAX_THREAD_READ_PAGES: usize = 16;
-
-/// `webui.run-completions.unread.v1`
+/// `webui.run_completion.unread.v1`
 pub async fn unread_view(
     services: &Arc<RunCompletionSurfaceServices>,
     caller: ProductSurfaceCaller,
@@ -370,7 +377,11 @@ mod tests {
             }),
         ))) as Arc<dyn RunCompletionNotices>;
         let hub = Arc::new(RunCompletionStreamHub::new(Arc::clone(&store)));
-        Arc::new(RunCompletionSurfaceServices::new(store, hub))
+        Arc::new(RunCompletionSurfaceServices::new(
+            store,
+            hub,
+            Arc::new(ironclaw_notifications::NoopNotificationInboxStore),
+        ))
     }
 
     fn caller(user: &str) -> ProductSurfaceCaller {

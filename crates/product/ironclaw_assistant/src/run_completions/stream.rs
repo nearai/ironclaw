@@ -9,9 +9,9 @@
 //!
 //! Channels exist only while an owner has a connected subscriber: publishing
 //! to an owner nobody is listening to creates nothing, and an entry whose
-//! last receiver dropped is evicted on the next publish, so the map is
-//! bounded by connected owners rather than by every owner that ever
-//! received a notice.
+//! last receiver dropped is evicted on the next publish or the next
+//! subscribe sweep, so the map is bounded by owners with a live subscriber
+//! rather than by every owner that ever connected or received a notice.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,14 +26,11 @@ use tokio::sync::broadcast;
 
 use super::records::{CompletionDeliveryState, CompletionSurface, RunCompletionNotice};
 use super::store::{RunCompletionNotices, RunCompletionOwner, RunCompletionStoreError};
+use super::{TRACE_TARGET, UNREAD_COUNT_SCAN_LIMIT};
 
 /// Bounded per-owner live buffer. A subscriber that falls further behind
 /// receives a lag signal and rebases from the durable snapshot.
 const OWNER_CHANNEL_CAPACITY: usize = 64;
-
-/// Bounded scan when joining a thread's unread count onto its notice events;
-/// the wire field is two digits anyway.
-const UNREAD_COUNT_SCAN_LIMIT: usize = 99;
 
 /// One live item on an owner's stream: the event plus its sequence member.
 #[derive(Debug, Clone)]
@@ -42,9 +39,10 @@ pub struct SequencedCompletionEvent {
     pub event: RunCompletionStreamEvent,
 }
 
+/// Per-owner live fan-out over the durable notice store (§7.6).
 pub struct RunCompletionStreamHub {
     notices: Arc<dyn RunCompletionNotices>,
-    senders: Mutex<HashMap<String, broadcast::Sender<SequencedCompletionEvent>>>,
+    senders: Mutex<HashMap<RunCompletionOwner, broadcast::Sender<SequencedCompletionEvent>>>,
 }
 
 impl RunCompletionStreamHub {
@@ -53,14 +51,6 @@ impl RunCompletionStreamHub {
             notices,
             senders: Mutex::new(HashMap::new()),
         }
-    }
-
-    fn owner_key(owner: &RunCompletionOwner) -> String {
-        format!(
-            "{}\u{1f}{}",
-            owner.tenant_id.as_str(),
-            owner.user_id.as_str()
-        )
     }
 
     /// Deliver one live item to the owner's connected subscribers, if any.
@@ -74,15 +64,23 @@ impl RunCompletionStreamHub {
             .senders
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let key = Self::owner_key(owner);
-        let Some(sender) = senders.get(&key) else {
+        let Some(sender) = senders.get(owner) else {
             return;
         };
         if sender.receiver_count() == 0 {
-            senders.remove(&key);
+            senders.remove(owner);
             return;
         }
         let _ = sender.send(item);
+    }
+
+    /// Whether any page is currently subscribed to the owner's stream.
+    fn has_subscribers(&self, owner: &RunCompletionOwner) -> bool {
+        self.senders
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(owner)
+            .is_some_and(|sender| sender.receiver_count() > 0)
     }
 
     /// Subscribe to one owner's completion stream: durable replay after
@@ -107,8 +105,12 @@ impl RunCompletionStreamHub {
                 .senders
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Sweep entries whose last receiver dropped without a later
+            // publish, so the map stays bounded by owners with a live
+            // subscriber rather than by every owner that ever connected.
+            senders.retain(|_, sender| sender.receiver_count() > 0);
             senders
-                .entry(Self::owner_key(owner))
+                .entry(owner.clone())
                 .or_insert_with(|| broadcast::channel(OWNER_CHANNEL_CAPACITY).0)
                 .subscribe()
         };
@@ -170,30 +172,16 @@ impl RunCompletionStreamHub {
             .collect()
     }
 
-    /// The bounded per-thread unread count joined onto a notice's events.
+    /// The bounded per-thread unread count joined onto a notice's events,
+    /// falling back to the notice-local floor when the store cannot answer.
     async fn unread_count_for_thread(
         &self,
         owner: &RunCompletionOwner,
         notice: &RunCompletionNotice,
     ) -> usize {
-        match self
-            .notices
-            .unread_for_thread(owner, &notice.thread_id, UNREAD_COUNT_SCAN_LIMIT)
+        unread_count_for_thread(self.notices.as_ref(), owner, &notice.thread_id)
             .await
-        {
-            Ok(thread_notices) => thread_notices.len(),
-            Err(error) => {
-                // silent-ok: the count only feeds grouped badge copy; the
-                // notice itself still delivers. Logged so a wrong badge has
-                // a server-side trace.
-                tracing::debug!(
-                    target: "ironclaw::reborn::run_completions",
-                    %error,
-                    "per-thread unread count unavailable; using notice-local floor",
-                );
-                usize::from(!notice.is_read())
-            }
-        }
+            .unwrap_or(usize::from(!notice.is_read()))
     }
 
     /// Project one durable notice into its wire event, joining the bounded
@@ -207,8 +195,13 @@ impl RunCompletionStreamHub {
         notice_event_with_count(notice, unread_count)
     }
 
-    /// Wake connected pages after a notice write (create or replay).
+    /// Wake connected pages after a notice write (create or replay). The
+    /// per-thread count is queried only when a page is actually listening;
+    /// a completion nobody is watching costs no extra store query.
     pub async fn notice_written(&self, owner: &RunCompletionOwner, notice: &RunCompletionNotice) {
+        if !self.has_subscribers(owner) {
+            return;
+        }
         let event = self.notice_event(owner, notice).await;
         self.publish(
             owner,
@@ -280,6 +273,35 @@ impl RunCompletionStreamHub {
                 }),
             },
         );
+    }
+}
+
+/// One bounded ordered-index scan for a thread's unread count (capped at
+/// `UNREAD_COUNT_SCAN_LIMIT`), shared by the stream badge and the push copy so
+/// both surfaces report the same number. `None` when the store cannot
+/// answer; callers apply their own floor because the count only shapes
+/// grouped copy and must never block the notice itself.
+pub(super) async fn unread_count_for_thread(
+    notices: &dyn RunCompletionNotices,
+    owner: &RunCompletionOwner,
+    thread_id: &str,
+) -> Option<usize> {
+    match notices
+        .unread_for_thread(owner, thread_id, UNREAD_COUNT_SCAN_LIMIT)
+        .await
+    {
+        Ok(unread) => Some(unread.len()),
+        Err(error) => {
+            // silent-ok: the count only feeds grouped badge/push copy; the
+            // notice itself still delivers. Logged so a wrong badge has a
+            // server-side trace.
+            tracing::debug!(
+                target: TRACE_TARGET,
+                %error,
+                "per-thread unread count unavailable; caller applies its floor",
+            );
+            None
+        }
     }
 }
 

@@ -344,10 +344,14 @@ use ironclaw_product_contracts::notification_setup::{
     NOTIFICATION_SETUP_DISABLE_COMMAND_ID, NOTIFICATION_SETUP_ENABLE_COMMAND_ID,
     NOTIFICATION_SETUP_STATUS_VIEW,
 };
-pub(crate) use ironclaw_product_contracts::run_completions::{
+use ironclaw_product_contracts::run_completions::{
     RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID, RUN_COMPLETION_INTENT_COMMAND_ID,
     RUN_COMPLETION_THREAD_READ_COMMAND_ID,
 };
+// Store failures map through the run-completions operations module's one
+// translation so the stream selector and the HTTP operations share an error
+// contract.
+use crate::run_completions::operations::surface_error as run_completion_surface_error;
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), ProductSurfaceError> + Send + Sync;
@@ -2518,6 +2522,7 @@ pub struct RebornServices<
     project_service: Option<Arc<dyn ProjectService>>,
     inbound_attachment_reader: Option<Arc<dyn InboundAttachmentReader>>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
+    // arch-exempt: optional_arc, production always wires it; optional only so the many `RebornServices` test assemblies that never touch run completions need no notice store (same shape as the sibling optional product services), plan #5985
     run_completions: Option<Arc<crate::run_completions::RunCompletionSurfaceServices>>,
     lifecycle_service: Arc<dyn LifecycleProductService>,
     automation_service: Arc<dyn AutomationProductService>,
@@ -5815,11 +5820,7 @@ fn decode_product_surface_stream_request(
             let after_cursor = match request.after_cursor {
                 Some(cursor) => Some(ProjectionCursor::new(cursor).map_err(|error| {
                     // Sanitized for the client; cause retained server-side.
-                    tracing::debug!(
-                        target: "ironclaw::reborn::product_surface",
-                        %error,
-                        "thread stream cursor rejected",
-                    );
+                    tracing::debug!(%error, "thread stream cursor rejected");
                     ProductSurfaceError::from_status(
                         ProductSurfaceErrorCode::InvalidRequest,
                         400,
@@ -5878,10 +5879,6 @@ enum DecodedStreamRequest {
     RunCompletions { after_sequence: Option<u64> },
 }
 
-/// Store failures map through the operations module's one translation so
-/// the stream selector and the HTTP operations share an error contract.
-use crate::run_completions::operations::surface_error as run_completion_store_error;
-
 fn run_completion_stream_envelope(
     item: &crate::run_completions::stream::SequencedCompletionEvent,
 ) -> Result<ironclaw_product_contracts::surface::ProductStreamEventEnvelope, ProductSurfaceError> {
@@ -5925,7 +5922,7 @@ where
             ironclaw_product_contracts::run_completions::RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT,
         )
         .await
-        .map_err(run_completion_store_error)?;
+        .map_err(run_completion_surface_error)?;
     let events = replay
         .iter()
         .map(run_completion_stream_envelope)
@@ -5991,7 +5988,7 @@ where
                                     }
                                 })
                         }
-                        Err(error) => Err(run_completion_store_error(error)),
+                        Err(error) => Err(run_completion_surface_error(error)),
                     };
                     let stop = response.is_err();
                     permit.send(response);

@@ -175,27 +175,21 @@ self.addEventListener("push", (event) => {
   const payload = payloadFromEvent(event);
   event.waitUntil(
     (async () => {
-      if (payload.kind === "run_completion") {
-        // §9.2 exact dedupe: one presentation per notice id per profile.
-        const fresh = await claimNotice(payload.noticeId);
-        if (!fresh) return;
-        // Same-tag notifications replace each other; grouped copy uses the
-        // capped count and generic plural wording (fixed copy only).
-        const body =
-          payload.unreadCount && payload.unreadCount > 1
-            ? `${payload.unreadCount} agent runs finished.`
-            : payload.body;
-        await self.registration.showNotification(payload.title, {
-          body,
-          tag: payload.tag,
-          data: { url: payload.url },
-          icon: "/assets/web-app-manifest-192x192.png",
-          badge: "/assets/web-app-manifest-192x192.png",
-        });
+      // §9.2 exact dedupe for run completions: one presentation per notice
+      // id per profile. Generic v1 payloads carry no notice id and always
+      // present.
+      if (payload.kind === "run_completion" && !(await claimNotice(payload.noticeId))) {
         return;
       }
+      // Same-tag notifications replace each other; grouped run-completion
+      // copy uses the capped count and generic plural wording (fixed copy
+      // only, never generated content).
+      const body =
+        payload.kind === "run_completion" && payload.unreadCount && payload.unreadCount > 1
+          ? `${payload.unreadCount} agent runs finished.`
+          : payload.body;
       await self.registration.showNotification(payload.title, {
-        body: payload.body,
+        body,
         tag: payload.tag,
         data: { url: payload.url },
         icon: "/assets/web-app-manifest-192x192.png",

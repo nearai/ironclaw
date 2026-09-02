@@ -8994,6 +8994,111 @@ async fn session_websocket_multiplexes_subscriptions_and_isolates_failures() {
     serve_handle.abort();
 }
 
+/// A resume token the server never issued (anything but the JSON-quoted
+/// cursor the codec hands out) fails the admission attempt with a typed
+/// `subscription_error` and never reaches the surface: silently resuming
+/// from the origin would replay the whole history. The properly quoted
+/// token is admitted and echoed back as the resume cursor.
+#[tokio::test]
+async fn session_websocket_rejects_resume_cursors_it_never_issued() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    // A raw, unquoted token is not something the server ever handed out.
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat", "thread-x", Some("cursor:raw")).into(),
+    ))
+    .await
+    .expect("send malformed-cursor subscribe");
+    let rejected = next_session_frame(&mut ws).await;
+    assert_eq!(rejected["type"], "subscription_error");
+    assert_eq!(rejected["subscription_id"], "chat");
+    assert_eq!(rejected["error"], "invalid_request");
+    assert_eq!(rejected["retryable"], false);
+    assert!(
+        services
+            .stream_events_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "a rejected cursor never opens a stream on the surface",
+    );
+
+    // The quoted form the codec emits is admitted and echoed as the resume
+    // cursor; the socket survived the rejection.
+    let quoted = serde_json::to_string("cursor:raw").expect("quoted token");
+    ws.send(WsMessage::Text(
+        session_subscribe_frame("chat", "thread-x", Some(&quoted)).into(),
+    ))
+    .await
+    .expect("send quoted-cursor subscribe");
+    let subscribed = next_session_frame(&mut ws).await;
+    assert_eq!(subscribed["type"], "subscribed");
+    assert_eq!(subscribed["subscription_id"], "chat");
+    assert_eq!(subscribed["cursor"], Value::String(quoted));
+
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+}
+
+/// Subscribe frames are budgeted per socket: every admission attempt costs
+/// authorization plus a replay on the backend, so a client that re-sends
+/// `subscribe` faster than any legitimate page (32 per 10-second window,
+/// `MAX_SUBSCRIBES_PER_WINDOW`) trips a typed protocol error and the socket
+/// closes — the concurrent-subscription cap alone does not bound the rate,
+/// because re-subscribing an existing id replaces rather than adds.
+#[tokio::test]
+async fn session_websocket_bounds_subscribe_frames_per_window() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let mut ws = connect_session_socket(addr).await;
+    for _ in 0..33 {
+        ws.send(WsMessage::Text(
+            session_subscribe_frame("chat", "thread-x", None).into(),
+        ))
+        .await
+        .expect("send subscribe");
+    }
+    let mut violation = None;
+    for _ in 0..80 {
+        let frame = next_session_frame(&mut ws).await;
+        if frame["type"] == "protocol_error" {
+            violation = Some(frame);
+            break;
+        }
+        assert_eq!(
+            frame["type"], "subscribed",
+            "only admissions precede the violation"
+        );
+    }
+    let violation = violation.expect("the 33rd subscribe in one window closes the socket");
+    assert_eq!(violation["violation"], "too_many_subscribe_frames");
+
+    serve_handle.abort();
+}
+
 /// Every product mutation stays on authenticated HTTP: mutation-shaped
 /// frames (operation IDs, turn submissions, gate resolutions) are protocol
 /// violations that close the socket, and the handler never reaches

@@ -19,7 +19,7 @@ const chatState = vi.hoisted(() => ({
   pendingOnboarding: null,
   busyGateNotice: null,
   suggestions: [],
-  sseStatus: "open",
+  eventsStatus: "open",
   historyLoading: false,
   historyLoadError: null,
   hasMore: false,

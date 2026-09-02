@@ -154,8 +154,9 @@ const LOGIN_GZIP_BUDGET = 180_000;
 // in the eager `en.ts` fallback pack. Everything deferrable is deferred:
 // the orchestrator, wire protocol, tab coordination, and HTTP mutations
 // all live behind dynamic imports (client.ts graph), and the chat hot path
-// only gains a lazy-import stub for read evidence. The store's sequence
-// compare was inlined so the protocol module stays out of the eager graph.
+// only gains a lazy-import stub for read evidence. The sequence comparator
+// lives in the dependency-free `lib/run-completions/sequence.ts` so the store
+// can use it without pulling `protocol.ts` into the eager graph.
 // Measured on the rebased tree (main's inbox bell + device-link + OOBE
 // weight underneath): 224.8 KB gzip. 226.0 KB retains about 1.2 KB of
 // explicit headroom.

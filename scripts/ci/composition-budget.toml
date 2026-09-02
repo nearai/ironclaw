@@ -299,18 +299,19 @@ observed_date = "2026-08-08"
 # dependencies. Measured on the merged tree with
 # `bash scripts/ci/check-composition-budget.sh --print`, not padded.
 # Re-seeded 42935 -> 43568 on 2026-08-31 for the session-transport +
-# run-completion notifications branch (rebased onto main). The delta is
-# service-graph assembly and the two deployment adapters composition's
-# charter reserves for it: the storage-shape-selected shared session-socket
-# ticket store over the one-shot secret-lease protocol, the run-completion
-# journal-commit observer (durable cursor -> product ingest port), the notice
-# store/stream-hub/coordinator construction + spawn/shutdown wiring, the
-# web-app enrollment probe over the host-owned delivery registrations, and
-# the push-facade selection with fail-closed defaults. Notification behavior
-# itself lives in ironclaw_assistant::run_completions. Measured on this tree
-# with `bash scripts/ci/check-composition-budget.sh --print`, not padded; the
-# mirrored COMPOSITION_ABSOLUTE_SRC_LOC moves in this commit.
-loc_ceiling = 43568
+# run-completion notifications branch (rebased onto main), then lowered to
+# 43455 on 2026-09-02 once the run-completion journal-commit observer moved
+# to ironclaw_assistant beside the other product journal observers. The
+# remaining delta is service-graph assembly and the deployment adapters
+# composition's charter reserves for it: the storage-shape-selected shared
+# session-socket ticket store over the one-shot secret-lease protocol, the
+# notice store/stream-hub/coordinator construction + spawn/shutdown wiring,
+# the web-app enrollment probe over the host-owned delivery registrations,
+# and the push-facade selection with fail-closed defaults. Notification
+# behavior itself lives in ironclaw_assistant::run_completions. Measured on
+# this tree with `bash scripts/ci/check-composition-budget.sh --print`, not
+# padded; the mirrored COMPOSITION_ABSOLUTE_SRC_LOC moves with it.
+loc_ceiling = 43455
 # Working slack for in-flight PRs. Deliberately small: the inflow this gate
 # exists to catch was +619 lines, and a tolerance that would have absorbed it
 # is a gate that constrains nothing. A change adding more than this to
@@ -321,8 +322,8 @@ loc_tolerance = 150
 loc_nudge_slack = 200
 # Informational — observed when this file was last updated. Not consulted for
 # the pass/fail decision.
-loc_observed = 43568
-loc_observed_date = "2026-08-31"
+loc_observed = 43455
+loc_observed_date = "2026-09-02"
 
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the

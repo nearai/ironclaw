@@ -43,6 +43,7 @@ import {
   uiStatusFromRecordStatus,
 } from "./message-status";
 import { buildOptimisticMessage } from "./optimistic-message";
+import { isFinalAssistantMessage } from "./stream-order-memory";
 import {
   channelConnectionContinuationMessage,
   connectionEventMatchesOnboarding,
@@ -140,6 +141,7 @@ function runUseChatSource(context) {
     RECORD_STATUS,
     uiStatusFromRecordStatus,
     buildOptimisticMessage,
+    isFinalAssistantMessage,
   });
   if (!context.subscribeChannelConnected) {
     context.subscribeChannelConnected = subscribeChannelConnected;
@@ -313,7 +315,7 @@ test("useChat: disconnected SSE rewrites an active driver_unavailable error", ()
   runUseChatSource(context);
   const chat = context.globalThis.__testExports.useChat(threadId);
 
-  assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.equal(chat.eventsStatus, CONNECTION_STATUS.DISCONNECTED);
   assert.equal(renderedMessages.length, 1);
   assert.equal(
     renderedMessages[0].content,
@@ -394,7 +396,7 @@ test("useChat: disconnected SSE surfaces connection error before run id is known
   runUseChatSource(context);
   const chat = context.globalThis.__testExports.useChat(threadId);
 
-  assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.equal(chat.eventsStatus, CONNECTION_STATUS.DISCONNECTED);
   assert.equal(renderedMessages.length, 2);
   assert.equal(renderedMessages[0].content, historicalFailure);
   assert.equal(renderedMessages[1].id, "err-connection-lost");
@@ -469,7 +471,7 @@ test("useChat: disconnected SSE ignores a stale active run after processing ende
   runUseChatSource(context);
   const chat = context.globalThis.__testExports.useChat(threadId);
 
-  assert.equal(chat.sseStatus, CONNECTION_STATUS.DISCONNECTED);
+  assert.equal(chat.eventsStatus, CONNECTION_STATUS.DISCONNECTED);
   assert.deepEqual(renderedMessages, []);
   assert.equal(stateUpdatesFor(setCalls, STATE_SLOT.isProcessing).length, 0);
   assert.equal(stateUpdatesFor(setCalls, STATE_SLOT.activeRun).length, 0);

@@ -21,7 +21,8 @@ use ironclaw_host_api::ids::{InvocationId, TenantId, UserId};
 use ironclaw_host_api::path::ScopedPath;
 use ironclaw_host_api::resource::ResourceScope;
 use ironclaw_product_contracts::run_completions::{
-    RUN_COMPLETION_MAX_INTENTS_PER_NOTICE, RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT,
+    RUN_COMPLETION_MAX_INTENTS_PER_NOTICE, RUN_COMPLETION_OPAQUE_ID_MAX_BYTES,
+    RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT,
 };
 
 use super::records::{
@@ -62,7 +63,7 @@ const NOTICE_ID_KEY: &str = "notice_id";
 /// The identity every operation is scoped to: the notice owner. Both halves
 /// come from the authenticated caller or the run's own scope — never from a
 /// browser payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RunCompletionOwner {
     pub tenant_id: TenantId,
     pub user_id: UserId,
@@ -186,7 +187,7 @@ where
 
     fn notice_path(notice_id: &str) -> Result<ScopedPath, RunCompletionStoreError> {
         if notice_id.is_empty()
-            || notice_id.len() > 128
+            || notice_id.len() > RUN_COMPLETION_OPAQUE_ID_MAX_BYTES
             || !notice_id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
@@ -417,208 +418,6 @@ where
         Ok(())
     }
 
-    /// Record `owner` as having potentially due coordinator work (§5.4).
-    /// Idempotent; bounded by [`MAX_DUE_OWNERS`] with a retryable failure on
-    /// overflow so the observer cursor holds rather than losing recovery
-    /// state.
-    pub async fn mark_owner_due(
-        &self,
-        owner: &RunCompletionOwner,
-    ) -> Result<(), RunCompletionStoreError> {
-        let user = owner.user_id.as_str().to_string();
-        self.update_due_owners(owner, "due-owners mark", move |mut owners| {
-            match owners.binary_search(&user) {
-                Ok(_) => Ok(owners),
-                Err(position) => {
-                    if owners.len() >= MAX_DUE_OWNERS {
-                        return Err(RunCompletionStoreError::Unavailable {
-                            reason: "due-owner registry is full; retry after settlement"
-                                .to_string(),
-                        });
-                    }
-                    owners.insert(position, user.clone());
-                    Ok(owners)
-                }
-            }
-        })
-        .await
-    }
-
-    /// Remove `owner` from the due registry after a scan found no work.
-    /// A lost removal is harmless (one extra empty scan later).
-    pub async fn clear_owner_due(
-        &self,
-        owner: &RunCompletionOwner,
-    ) -> Result<(), RunCompletionStoreError> {
-        let user = owner.user_id.as_str().to_string();
-        self.update_due_owners(owner, "due-owners clear", move |mut owners| {
-            if let Ok(position) = owners.binary_search(&user) {
-                owners.remove(position);
-            }
-            Ok(owners)
-        })
-        .await
-    }
-
-    /// The owners with potentially due work in `scope_owner`'s tenant (§5.4
-    /// boot reconciliation). `scope_owner` supplies only the tenant half of
-    /// the registry address.
-    pub async fn due_owners(
-        &self,
-        scope_owner: &RunCompletionOwner,
-    ) -> Result<Vec<RunCompletionOwner>, RunCompletionStoreError> {
-        let scope = scope_owner.resource_scope();
-        let path = Self::due_owners_path()?;
-        let Some(entry) = self
-            .filesystem
-            .get(&scope, &path)
-            .await
-            .map_err(|error| RunCompletionStoreError::backend("due-owners read", error))?
-        else {
-            return Ok(Vec::new());
-        };
-        let document: DueOwnersDocument = serde_json::from_slice(&entry.entry.body)
-            .map_err(|error| RunCompletionStoreError::backend("due-owners decode", error))?;
-        let mut owners = Vec::with_capacity(document.owners.len());
-        for user in document.owners {
-            let Ok(user_id) = UserId::new(user) else {
-                // A malformed persisted id cannot be scanned; skip rather
-                // than wedge boot recovery on one bad row.
-                continue;
-            };
-            owners.push(RunCompletionOwner {
-                tenant_id: scope_owner.tenant_id.clone(),
-                user_id,
-            });
-        }
-        Ok(owners)
-    }
-
-    /// The owner's current stream head: the greatest allocated sequence, or
-    /// 0 when no notice was ever created. The unread view returns this as
-    /// `resume_sequence` so a subscription resumes strictly after everything
-    /// the snapshot could have reflected — an unread-only maximum would
-    /// replay newer already-read notices, and an empty snapshot would reset
-    /// to origin.
-    pub async fn head_sequence(
-        &self,
-        owner: &RunCompletionOwner,
-    ) -> Result<u64, RunCompletionStoreError> {
-        let scope = owner.resource_scope();
-        let path = Self::sequence_path()?;
-        let Some(entry) = self
-            .filesystem
-            .get(&scope, &path)
-            .await
-            .map_err(|error| RunCompletionStoreError::backend("sequence read", error))?
-        else {
-            return Ok(0);
-        };
-        let document: SequenceDocument = serde_json::from_slice(&entry.entry.body)
-            .map_err(|error| RunCompletionStoreError::backend("sequence decode", error))?;
-        Ok(document.next.saturating_sub(1))
-    }
-
-    /// Idempotently create one notice. Duplicate journal delivery (or a
-    /// racing replica) observes the existing record and rewrites nothing.
-    pub async fn create_notice(
-        &self,
-        owner: &RunCompletionOwner,
-        new_notice: NewRunCompletionNotice,
-    ) -> Result<NoticeCreateOutcome, RunCompletionStoreError> {
-        self.ensure_indexes(owner).await?;
-        let scope = owner.resource_scope();
-        let path = Self::notice_path(&new_notice.notice_id)?;
-        if let Some(existing) = self
-            .filesystem
-            .get(&scope, &path)
-            .await
-            .map_err(|error| RunCompletionStoreError::backend("notice read", error))?
-        {
-            return Ok(NoticeCreateOutcome::AlreadyRecorded(Self::decode(
-                &existing.entry.body,
-            )?));
-        }
-        let sequence = self.allocate_sequence(owner).await?;
-        let now = Utc::now();
-        let notice = RunCompletionNotice {
-            version: RUN_COMPLETION_NOTICE_VERSION,
-            notice_id: new_notice.notice_id,
-            sequence,
-            tenant_id: owner.tenant_id.as_str().to_string(),
-            owner_user_id: owner.user_id.as_str().to_string(),
-            run_id: new_notice.run_id,
-            thread_id: new_notice.thread_id,
-            agent_id: new_notice.agent_id,
-            project_id: new_notice.project_id,
-            thread_tag: new_notice.thread_tag,
-            terminal_projection_ref: new_notice.terminal_projection_ref,
-            completed_at: new_notice.completed_at,
-            delivery: CompletionDeliveryState::PendingArbitration {
-                closes_at: new_notice.arbitration_closes_at,
-                grants_issued: 0,
-            },
-            read: CompletionReadState::Unread,
-            intents: Vec::new(),
-            created_at: now,
-            updated_at: now,
-        };
-        let entry = Self::notice_entry(owner, &notice)?;
-        match self
-            .filesystem
-            .put(
-                &scope,
-                &path,
-                entry,
-                ironclaw_filesystem::CasExpectation::Absent,
-            )
-            .await
-        {
-            Ok(_) => Ok(NoticeCreateOutcome::Created(notice)),
-            Err(ironclaw_filesystem::FilesystemError::VersionMismatch { .. }) => {
-                // A racing writer created it first; observe their record.
-                let existing = self
-                    .filesystem
-                    .get(&scope, &path)
-                    .await
-                    .map_err(|error| RunCompletionStoreError::backend("notice reread", error))?
-                    .ok_or(RunCompletionStoreError::Unavailable {
-                        reason: "notice vanished between conflicting create and reread".to_string(),
-                    })?;
-                Ok(NoticeCreateOutcome::AlreadyRecorded(Self::decode(
-                    &existing.entry.body,
-                )?))
-            }
-            Err(error) => Err(RunCompletionStoreError::backend("notice create", error)),
-        }
-    }
-
-    pub async fn get(
-        &self,
-        owner: &RunCompletionOwner,
-        notice_id: &str,
-    ) -> Result<Option<RunCompletionNotice>, RunCompletionStoreError> {
-        let scope = owner.resource_scope();
-        let path = Self::notice_path(notice_id)?;
-        let Some(versioned) = self
-            .filesystem
-            .get(&scope, &path)
-            .await
-            .map_err(|error| RunCompletionStoreError::backend("notice read", error))?
-        else {
-            return Ok(None);
-        };
-        let notice = Self::decode(&versioned.entry.body)?;
-        // The path already partitions by owner; the field check is a
-        // defense-in-depth guard against cross-scope row confusion.
-        if notice.tenant_id != owner.tenant_id.as_str()
-            || notice.owner_user_id != owner.user_id.as_str()
-        {
-            return Ok(None);
-        }
-        Ok(Some(notice))
-    }
-
     /// One bounded CAS state transition. `apply` sees the current record and
     /// either produces the updated record, `Ok(None)` for an idempotent
     /// no-op (the caller re-reads the result), or a typed error.
@@ -659,252 +458,6 @@ where
         .await
         .map_err(flatten_cas_error("notice transition"))?;
         Ok(result)
-    }
-
-    /// Record (or replace) one browser profile's intent, bounded per §5.4.
-    pub async fn record_intent(
-        &self,
-        owner: &RunCompletionOwner,
-        notice_id: &str,
-        intent: CompletionIntentRecord,
-    ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| {
-                if notice.is_read() {
-                    // Read settles arbitration; late intents are ignored
-                    // idempotently rather than rejected.
-                    return Ok((notice, ()));
-                }
-                // §5.6: the newest state revision per browser profile wins. A
-                // delayed report carrying an OLDER revision than the stored
-                // intent must not replace it, or stale focus state could
-                // drive the grant.
-                if notice.intents.iter().any(|existing| {
-                    existing.browser_instance_id == intent.browser_instance_id
-                        && existing.state_revision > intent.state_revision
-                }) {
-                    return Ok((notice, ()));
-                }
-                notice
-                    .intents
-                    .retain(|existing| existing.browser_instance_id != intent.browser_instance_id);
-                if notice.intents.len() >= RUN_COMPLETION_MAX_INTENTS_PER_NOTICE {
-                    return Err(RunCompletionStoreError::Invalid {
-                        reason: "intent budget for this notice is exhausted",
-                    });
-                }
-                notice.intents.push(intent.clone());
-                Ok((notice, ()))
-            })
-            .await?;
-        Ok(notice)
-    }
-
-    /// Mark the notice read with evidence. Settles pending/granted delivery
-    /// (§5.3: a read transition prevents future presentation but never
-    /// deletes the completion fact).
-    pub async fn mark_read(
-        &self,
-        owner: &RunCompletionOwner,
-        notice_id: &str,
-        evidence: CompletionReadEvidence,
-        read_at: DateTime<Utc>,
-    ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| {
-                if notice.is_read() {
-                    return Ok((notice, ()));
-                }
-                notice.read = CompletionReadState::Read {
-                    read_at,
-                    evidence: evidence.clone(),
-                };
-                if matches!(
-                    notice.delivery,
-                    CompletionDeliveryState::PendingArbitration { .. }
-                        | CompletionDeliveryState::Granted { .. }
-                ) {
-                    notice.delivery = CompletionDeliveryState::NoExternalTarget {
-                        settled_at: read_at,
-                    };
-                }
-                Ok((notice, ()))
-            })
-            .await?;
-        Ok(notice)
-    }
-
-    /// Pending → Granted (§5.3). Fails `Conflict` from any other state so
-    /// racing coordinators observe exactly one issued grant.
-    pub async fn issue_grant(
-        &self,
-        owner: &RunCompletionOwner,
-        notice_id: &str,
-        grant: NewGrant,
-    ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        let NewGrant {
-            grant_id,
-            browser_instance_id,
-            surface,
-            state_revision,
-            expires_at,
-        } = grant;
-        let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| {
-                let grants_issued = match &notice.delivery {
-                    CompletionDeliveryState::PendingArbitration { grants_issued, .. } => {
-                        *grants_issued
-                    }
-                    CompletionDeliveryState::Granted { grants_issued, .. } => *grants_issued,
-                    _ => {
-                        return Err(RunCompletionStoreError::Conflict {
-                            reason: "grant requires a pending notice",
-                        });
-                    }
-                };
-                if notice.is_read() {
-                    return Err(RunCompletionStoreError::Conflict {
-                        reason: "notice already read",
-                    });
-                }
-                if matches!(notice.delivery, CompletionDeliveryState::Granted { .. }) {
-                    return Err(RunCompletionStoreError::Conflict {
-                        reason: "a grant is already outstanding",
-                    });
-                }
-                notice.delivery = CompletionDeliveryState::Granted {
-                    grant_id: grant_id.clone(),
-                    browser_instance_id: browser_instance_id.clone(),
-                    surface,
-                    state_revision,
-                    expires_at,
-                    grants_issued: grants_issued.saturating_add(1),
-                };
-                Ok((notice, ()))
-            })
-            .await?;
-        Ok(notice)
-    }
-
-    /// Granted → Presented on a matching acknowledgement (§5.3).
-    pub async fn acknowledge_presented(
-        &self,
-        owner: &RunCompletionOwner,
-        notice_id: &str,
-        grant_id: &str,
-        presented_at: DateTime<Utc>,
-    ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| match &notice.delivery {
-                CompletionDeliveryState::Granted {
-                    grant_id: outstanding,
-                    surface,
-                    ..
-                } if outstanding == grant_id => {
-                    notice.delivery = CompletionDeliveryState::Presented {
-                        surface: *surface,
-                        presented_at,
-                    };
-                    Ok((notice, ()))
-                }
-                CompletionDeliveryState::Presented { .. } => Ok((notice, ())),
-                _ => Err(RunCompletionStoreError::Conflict {
-                    reason: "acknowledgement does not match the outstanding grant",
-                }),
-            })
-            .await?;
-        Ok(notice)
-    }
-
-    /// Granted → PendingArbitration after grant expiry or a stale-state
-    /// rejection; carries the re-arbitration deadline (§5.4).
-    pub async fn regress_expired_grant(
-        &self,
-        owner: &RunCompletionOwner,
-        notice_id: &str,
-        grant_id: &str,
-        closes_at: DateTime<Utc>,
-    ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| match &notice.delivery {
-                CompletionDeliveryState::Granted {
-                    grant_id: outstanding,
-                    grants_issued,
-                    ..
-                } if outstanding == grant_id => {
-                    let grants_issued = *grants_issued;
-                    notice.delivery = CompletionDeliveryState::PendingArbitration {
-                        closes_at,
-                        grants_issued,
-                    };
-                    Ok((notice, ()))
-                }
-                CompletionDeliveryState::PendingArbitration { .. } => Ok((notice, ())),
-                _ => Err(RunCompletionStoreError::Conflict {
-                    reason: "grant regression does not match the outstanding grant",
-                }),
-            })
-            .await?;
-        Ok(notice)
-    }
-
-    /// Pending → PushOwned. Only one replica can win this CAS (§5.3).
-    pub async fn claim_push(
-        &self,
-        owner: &RunCompletionOwner,
-        notice_id: &str,
-        delivery_id: &str,
-        claimed_at: DateTime<Utc>,
-    ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| {
-                if notice.is_read() {
-                    return Err(RunCompletionStoreError::Conflict {
-                        reason: "notice already read",
-                    });
-                }
-                match &notice.delivery {
-                    CompletionDeliveryState::PendingArbitration { .. } => {
-                        notice.delivery = CompletionDeliveryState::PushOwned {
-                            delivery_id: delivery_id.to_string(),
-                            claimed_at,
-                        };
-                        Ok((notice, ()))
-                    }
-                    CompletionDeliveryState::PushOwned {
-                        delivery_id: existing,
-                        ..
-                    } if existing == delivery_id => Ok((notice, ())),
-                    _ => Err(RunCompletionStoreError::Conflict {
-                        reason: "push ownership requires a pending notice",
-                    }),
-                }
-            })
-            .await?;
-        Ok(notice)
-    }
-
-    /// Pending → NoExternalTarget when no browser responded and no push
-    /// target exists (§5.3).
-    pub async fn settle_no_target(
-        &self,
-        owner: &RunCompletionOwner,
-        notice_id: &str,
-        settled_at: DateTime<Utc>,
-    ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        let (notice, ()) = self
-            .transition(owner, notice_id, move |mut notice| match &notice.delivery {
-                CompletionDeliveryState::PendingArbitration { .. } => {
-                    notice.delivery = CompletionDeliveryState::NoExternalTarget { settled_at };
-                    Ok((notice, ()))
-                }
-                CompletionDeliveryState::NoExternalTarget { .. } => Ok((notice, ())),
-                _ => Err(RunCompletionStoreError::Conflict {
-                    reason: "no-target settlement requires a pending notice",
-                }),
-            })
-            .await?;
-        Ok(notice)
     }
 
     async fn query_partition(
@@ -951,77 +504,6 @@ where
         rows.into_iter()
             .map(|row| Self::decode(&row.entry.body))
             .collect()
-    }
-
-    /// Replay: every notice after `sequence`, oldest first, bounded.
-    pub async fn list_after(
-        &self,
-        owner: &RunCompletionOwner,
-        after_sequence: Option<u64>,
-        limit: usize,
-    ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
-        self.query_partition(
-            owner,
-            ORDER_INDEX,
-            OWNER_KEY,
-            owner.owner_key(),
-            after_sequence,
-            limit,
-        )
-        .await
-    }
-
-    /// The bounded unread snapshot (§5.4): oldest first, at most 250.
-    pub async fn unread_snapshot(
-        &self,
-        owner: &RunCompletionOwner,
-    ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
-        self.query_partition(
-            owner,
-            UNREAD_INDEX,
-            UNREAD_PARTITION_KEY,
-            Self::unread_partition(owner, true),
-            None,
-            RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT,
-        )
-        .await
-    }
-
-    /// Unread notices for one thread, oldest first, bounded.
-    pub async fn unread_for_thread(
-        &self,
-        owner: &RunCompletionOwner,
-        thread_id: &str,
-        limit: usize,
-    ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
-        self.query_partition(
-            owner,
-            THREAD_INDEX,
-            THREAD_PARTITION_KEY,
-            Self::thread_partition(owner, thread_id, true),
-            None,
-            limit,
-        )
-        .await
-    }
-
-    /// Boot reconciliation scan: notices in one delivery state, oldest
-    /// first, bounded by the active workload (non-terminal states only).
-    pub async fn in_delivery_state(
-        &self,
-        owner: &RunCompletionOwner,
-        state: CompletionDeliveryStateKind,
-        limit: usize,
-    ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
-        self.query_partition(
-            owner,
-            STATE_INDEX,
-            STATE_PARTITION_KEY,
-            Self::state_partition(owner, state),
-            None,
-            limit,
-        )
-        .await
     }
 }
 
@@ -1153,12 +635,189 @@ impl<F> RunCompletionNotices for RunCompletionNoticeStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
+    /// Record `owner` as having potentially due coordinator work (§5.4).
+    /// Idempotent; bounded by [`MAX_DUE_OWNERS`] with a retryable failure on
+    /// overflow so the observer cursor holds rather than losing recovery
+    /// state.
+    async fn mark_owner_due(
+        &self,
+        owner: &RunCompletionOwner,
+    ) -> Result<(), RunCompletionStoreError> {
+        let user = owner.user_id.as_str().to_string();
+        self.update_due_owners(owner, "due-owners mark", move |mut owners| {
+            match owners.binary_search(&user) {
+                Ok(_) => Ok(owners),
+                Err(position) => {
+                    if owners.len() >= MAX_DUE_OWNERS {
+                        return Err(RunCompletionStoreError::Unavailable {
+                            reason: "due-owner registry is full; retry after settlement"
+                                .to_string(),
+                        });
+                    }
+                    owners.insert(position, user.clone());
+                    Ok(owners)
+                }
+            }
+        })
+        .await
+    }
+
+    /// Remove `owner` from the due registry after a scan found no work.
+    /// A lost removal is harmless (one extra empty scan later).
+    async fn clear_owner_due(
+        &self,
+        owner: &RunCompletionOwner,
+    ) -> Result<(), RunCompletionStoreError> {
+        let user = owner.user_id.as_str().to_string();
+        self.update_due_owners(owner, "due-owners clear", move |mut owners| {
+            if let Ok(position) = owners.binary_search(&user) {
+                owners.remove(position);
+            }
+            Ok(owners)
+        })
+        .await
+    }
+
+    /// The owners with potentially due work in `scope_owner`'s tenant (§5.4
+    /// boot reconciliation). `scope_owner` supplies only the tenant half of
+    /// the registry address.
+    async fn due_owners(
+        &self,
+        scope_owner: &RunCompletionOwner,
+    ) -> Result<Vec<RunCompletionOwner>, RunCompletionStoreError> {
+        let scope = scope_owner.resource_scope();
+        let path = Self::due_owners_path()?;
+        let Some(entry) = self
+            .filesystem
+            .get(&scope, &path)
+            .await
+            .map_err(|error| RunCompletionStoreError::backend("due-owners read", error))?
+        else {
+            return Ok(Vec::new());
+        };
+        let document: DueOwnersDocument = serde_json::from_slice(&entry.entry.body)
+            .map_err(|error| RunCompletionStoreError::backend("due-owners decode", error))?;
+        let mut owners = Vec::with_capacity(document.owners.len());
+        for user in document.owners {
+            let user_id = match UserId::new(user) {
+                Ok(user_id) => user_id,
+                Err(error) => {
+                    // silent-ok: a malformed persisted id cannot be scanned;
+                    // skip rather than wedge boot recovery on one bad row,
+                    // logged so the row stays traceable.
+                    tracing::debug!(
+                        target: super::TRACE_TARGET,
+                        %error,
+                        "due-owner registry entry has a malformed user id; skipping",
+                    );
+                    continue;
+                }
+            };
+            owners.push(RunCompletionOwner {
+                tenant_id: scope_owner.tenant_id.clone(),
+                user_id,
+            });
+        }
+        Ok(owners)
+    }
+
+    /// The owner's current stream head: the greatest allocated sequence, or
+    /// 0 when no notice was ever created. The unread view returns this as
+    /// `resume_sequence` so a subscription resumes strictly after everything
+    /// the snapshot could have reflected — an unread-only maximum would
+    /// replay newer already-read notices, and an empty snapshot would reset
+    /// to origin.
+    async fn head_sequence(
+        &self,
+        owner: &RunCompletionOwner,
+    ) -> Result<u64, RunCompletionStoreError> {
+        let scope = owner.resource_scope();
+        let path = Self::sequence_path()?;
+        let Some(entry) = self
+            .filesystem
+            .get(&scope, &path)
+            .await
+            .map_err(|error| RunCompletionStoreError::backend("sequence read", error))?
+        else {
+            return Ok(0);
+        };
+        let document: SequenceDocument = serde_json::from_slice(&entry.entry.body)
+            .map_err(|error| RunCompletionStoreError::backend("sequence decode", error))?;
+        Ok(document.next.saturating_sub(1))
+    }
+
+    /// Idempotently create one notice. Duplicate journal delivery (or a
+    /// racing replica) observes the existing record and rewrites nothing.
     async fn create_notice(
         &self,
         owner: &RunCompletionOwner,
         new_notice: NewRunCompletionNotice,
     ) -> Result<NoticeCreateOutcome, RunCompletionStoreError> {
-        RunCompletionNoticeStore::create_notice(self, owner, new_notice).await
+        self.ensure_indexes(owner).await?;
+        let scope = owner.resource_scope();
+        let path = Self::notice_path(&new_notice.notice_id)?;
+        if let Some(existing) = self
+            .filesystem
+            .get(&scope, &path)
+            .await
+            .map_err(|error| RunCompletionStoreError::backend("notice read", error))?
+        {
+            return Ok(NoticeCreateOutcome::AlreadyRecorded(Self::decode(
+                &existing.entry.body,
+            )?));
+        }
+        let sequence = self.allocate_sequence(owner).await?;
+        let now = Utc::now();
+        let notice = RunCompletionNotice {
+            version: RUN_COMPLETION_NOTICE_VERSION,
+            notice_id: new_notice.notice_id,
+            sequence,
+            tenant_id: owner.tenant_id.as_str().to_string(),
+            owner_user_id: owner.user_id.as_str().to_string(),
+            run_id: new_notice.run_id,
+            thread_id: new_notice.thread_id,
+            agent_id: new_notice.agent_id,
+            project_id: new_notice.project_id,
+            thread_tag: new_notice.thread_tag,
+            terminal_projection_ref: new_notice.terminal_projection_ref,
+            completed_at: new_notice.completed_at,
+            delivery: CompletionDeliveryState::PendingArbitration {
+                closes_at: new_notice.arbitration_closes_at,
+                grants_issued: 0,
+            },
+            read: CompletionReadState::Unread,
+            intents: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let entry = Self::notice_entry(owner, &notice)?;
+        match self
+            .filesystem
+            .put(
+                &scope,
+                &path,
+                entry,
+                ironclaw_filesystem::CasExpectation::Absent,
+            )
+            .await
+        {
+            Ok(_) => Ok(NoticeCreateOutcome::Created(notice)),
+            Err(ironclaw_filesystem::FilesystemError::VersionMismatch { .. }) => {
+                // A racing writer created it first; observe their record.
+                let existing = self
+                    .filesystem
+                    .get(&scope, &path)
+                    .await
+                    .map_err(|error| RunCompletionStoreError::backend("notice reread", error))?
+                    .ok_or(RunCompletionStoreError::Unavailable {
+                        reason: "notice vanished between conflicting create and reread".to_string(),
+                    })?;
+                Ok(NoticeCreateOutcome::AlreadyRecorded(Self::decode(
+                    &existing.entry.body,
+                )?))
+            }
+            Err(error) => Err(RunCompletionStoreError::backend("notice create", error)),
+        }
     }
 
     async fn get(
@@ -1166,18 +825,69 @@ where
         owner: &RunCompletionOwner,
         notice_id: &str,
     ) -> Result<Option<RunCompletionNotice>, RunCompletionStoreError> {
-        RunCompletionNoticeStore::get(self, owner, notice_id).await
+        let scope = owner.resource_scope();
+        let path = Self::notice_path(notice_id)?;
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope, &path)
+            .await
+            .map_err(|error| RunCompletionStoreError::backend("notice read", error))?
+        else {
+            return Ok(None);
+        };
+        let notice = Self::decode(&versioned.entry.body)?;
+        // The path already partitions by owner; the field check is a
+        // defense-in-depth guard against cross-scope row confusion.
+        if notice.tenant_id != owner.tenant_id.as_str()
+            || notice.owner_user_id != owner.user_id.as_str()
+        {
+            return Ok(None);
+        }
+        Ok(Some(notice))
     }
 
+    /// Record (or replace) one browser profile's intent, bounded per §5.4.
     async fn record_intent(
         &self,
         owner: &RunCompletionOwner,
         notice_id: &str,
         intent: CompletionIntentRecord,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        RunCompletionNoticeStore::record_intent(self, owner, notice_id, intent).await
+        let (notice, ()) = self
+            .transition(owner, notice_id, move |mut notice| {
+                if notice.is_read() {
+                    // Read settles arbitration; late intents are ignored
+                    // idempotently rather than rejected.
+                    return Ok((notice, ()));
+                }
+                // §5.6: the newest state revision per browser profile wins. A
+                // delayed report carrying an OLDER revision than the stored
+                // intent must not replace it, or stale focus state could
+                // drive the grant.
+                if notice.intents.iter().any(|existing| {
+                    existing.browser_instance_id == intent.browser_instance_id
+                        && existing.state_revision > intent.state_revision
+                }) {
+                    return Ok((notice, ()));
+                }
+                notice
+                    .intents
+                    .retain(|existing| existing.browser_instance_id != intent.browser_instance_id);
+                if notice.intents.len() >= RUN_COMPLETION_MAX_INTENTS_PER_NOTICE {
+                    return Err(RunCompletionStoreError::Invalid {
+                        reason: "intent budget for this notice is exhausted",
+                    });
+                }
+                notice.intents.push(intent.clone());
+                Ok((notice, ()))
+            })
+            .await?;
+        Ok(notice)
     }
 
+    /// Mark the notice read with evidence. Settles pending/granted delivery
+    /// (§5.3: a read transition prevents future presentation but never
+    /// deletes the completion fact).
     async fn mark_read(
         &self,
         owner: &RunCompletionOwner,
@@ -1185,18 +895,83 @@ where
         evidence: CompletionReadEvidence,
         read_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        RunCompletionNoticeStore::mark_read(self, owner, notice_id, evidence, read_at).await
+        let (notice, ()) = self
+            .transition(owner, notice_id, move |mut notice| {
+                if notice.is_read() {
+                    return Ok((notice, ()));
+                }
+                notice.read = CompletionReadState::Read {
+                    read_at,
+                    evidence: evidence.clone(),
+                };
+                if matches!(
+                    notice.delivery,
+                    CompletionDeliveryState::PendingArbitration { .. }
+                        | CompletionDeliveryState::Granted { .. }
+                ) {
+                    notice.delivery = CompletionDeliveryState::NoExternalTarget {
+                        settled_at: read_at,
+                    };
+                }
+                Ok((notice, ()))
+            })
+            .await?;
+        Ok(notice)
     }
 
+    /// Pending → Granted (§5.3). Fails `Conflict` from any other state so
+    /// racing coordinators observe exactly one issued grant.
     async fn issue_grant(
         &self,
         owner: &RunCompletionOwner,
         notice_id: &str,
         grant: NewGrant,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        RunCompletionNoticeStore::issue_grant(self, owner, notice_id, grant).await
+        let NewGrant {
+            grant_id,
+            browser_instance_id,
+            surface,
+            state_revision,
+            expires_at,
+        } = grant;
+        let (notice, ()) = self
+            .transition(owner, notice_id, move |mut notice| {
+                let grants_issued = match &notice.delivery {
+                    CompletionDeliveryState::PendingArbitration { grants_issued, .. } => {
+                        *grants_issued
+                    }
+                    CompletionDeliveryState::Granted { grants_issued, .. } => *grants_issued,
+                    _ => {
+                        return Err(RunCompletionStoreError::Conflict {
+                            reason: "grant requires a pending notice",
+                        });
+                    }
+                };
+                if notice.is_read() {
+                    return Err(RunCompletionStoreError::Conflict {
+                        reason: "notice already read",
+                    });
+                }
+                if matches!(notice.delivery, CompletionDeliveryState::Granted { .. }) {
+                    return Err(RunCompletionStoreError::Conflict {
+                        reason: "a grant is already outstanding",
+                    });
+                }
+                notice.delivery = CompletionDeliveryState::Granted {
+                    grant_id: grant_id.clone(),
+                    browser_instance_id: browser_instance_id.clone(),
+                    surface,
+                    state_revision,
+                    expires_at,
+                    grants_issued: grants_issued.saturating_add(1),
+                };
+                Ok((notice, ()))
+            })
+            .await?;
+        Ok(notice)
     }
 
+    /// Granted → Presented on a matching acknowledgement (§5.3).
     async fn acknowledge_presented(
         &self,
         owner: &RunCompletionOwner,
@@ -1204,16 +979,30 @@ where
         grant_id: &str,
         presented_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        RunCompletionNoticeStore::acknowledge_presented(
-            self,
-            owner,
-            notice_id,
-            grant_id,
-            presented_at,
-        )
-        .await
+        let (notice, ()) = self
+            .transition(owner, notice_id, move |mut notice| match &notice.delivery {
+                CompletionDeliveryState::Granted {
+                    grant_id: outstanding,
+                    surface,
+                    ..
+                } if outstanding == grant_id => {
+                    notice.delivery = CompletionDeliveryState::Presented {
+                        surface: *surface,
+                        presented_at,
+                    };
+                    Ok((notice, ()))
+                }
+                CompletionDeliveryState::Presented { .. } => Ok((notice, ())),
+                _ => Err(RunCompletionStoreError::Conflict {
+                    reason: "acknowledgement does not match the outstanding grant",
+                }),
+            })
+            .await?;
+        Ok(notice)
     }
 
+    /// Granted → PendingArbitration after grant expiry or a stale-state
+    /// rejection; carries the re-arbitration deadline (§5.4).
     async fn regress_expired_grant(
         &self,
         owner: &RunCompletionOwner,
@@ -1221,10 +1010,32 @@ where
         grant_id: &str,
         closes_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        RunCompletionNoticeStore::regress_expired_grant(self, owner, notice_id, grant_id, closes_at)
-            .await
+        let (notice, ()) = self
+            .transition(owner, notice_id, move |mut notice| match &notice.delivery {
+                CompletionDeliveryState::Granted {
+                    grant_id: outstanding,
+                    grants_issued,
+                    ..
+                } if outstanding == grant_id => {
+                    let grants_issued = *grants_issued;
+                    notice.delivery = CompletionDeliveryState::PendingArbitration {
+                        closes_at,
+                        grants_issued,
+                    };
+                    Ok((notice, ()))
+                }
+                CompletionDeliveryState::PendingArbitration { .. } => Ok((notice, ())),
+                _ => Err(RunCompletionStoreError::Conflict {
+                    reason: "grant regression does not match the outstanding grant",
+                }),
+            })
+            .await?;
+        Ok(notice)
     }
 
+    /// Pending → PushOwned. Only one replica can win this CAS (§5.3): every
+    /// caller passes the same deterministic delivery id, so an already-owned
+    /// record conflicts for a second claimer instead of letting it push too.
     async fn claim_push(
         &self,
         owner: &RunCompletionOwner,
@@ -1232,78 +1043,122 @@ where
         delivery_id: &str,
         claimed_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        RunCompletionNoticeStore::claim_push(self, owner, notice_id, delivery_id, claimed_at).await
+        let (notice, ()) = self
+            .transition(owner, notice_id, move |mut notice| {
+                if notice.is_read() {
+                    return Err(RunCompletionStoreError::Conflict {
+                        reason: "notice already read",
+                    });
+                }
+                match &notice.delivery {
+                    CompletionDeliveryState::PendingArbitration { .. } => {
+                        notice.delivery = CompletionDeliveryState::PushOwned {
+                            delivery_id: delivery_id.to_string(),
+                            claimed_at,
+                        };
+                        Ok((notice, ()))
+                    }
+                    _ => Err(RunCompletionStoreError::Conflict {
+                        reason: "push ownership requires a pending notice",
+                    }),
+                }
+            })
+            .await?;
+        Ok(notice)
     }
 
+    /// Pending → NoExternalTarget when no browser responded and no push
+    /// target exists (§5.3).
     async fn settle_no_target(
         &self,
         owner: &RunCompletionOwner,
         notice_id: &str,
         settled_at: DateTime<Utc>,
     ) -> Result<RunCompletionNotice, RunCompletionStoreError> {
-        RunCompletionNoticeStore::settle_no_target(self, owner, notice_id, settled_at).await
+        let (notice, ()) = self
+            .transition(owner, notice_id, move |mut notice| match &notice.delivery {
+                CompletionDeliveryState::PendingArbitration { .. } => {
+                    notice.delivery = CompletionDeliveryState::NoExternalTarget { settled_at };
+                    Ok((notice, ()))
+                }
+                CompletionDeliveryState::NoExternalTarget { .. } => Ok((notice, ())),
+                _ => Err(RunCompletionStoreError::Conflict {
+                    reason: "no-target settlement requires a pending notice",
+                }),
+            })
+            .await?;
+        Ok(notice)
     }
 
+    /// Replay: every notice after `sequence`, oldest first, bounded.
     async fn list_after(
         &self,
         owner: &RunCompletionOwner,
         after_sequence: Option<u64>,
         limit: usize,
     ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
-        RunCompletionNoticeStore::list_after(self, owner, after_sequence, limit).await
+        self.query_partition(
+            owner,
+            ORDER_INDEX,
+            OWNER_KEY,
+            owner.owner_key(),
+            after_sequence,
+            limit,
+        )
+        .await
     }
 
+    /// The bounded unread snapshot (§5.4): oldest first, at most 250.
     async fn unread_snapshot(
         &self,
         owner: &RunCompletionOwner,
     ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
-        RunCompletionNoticeStore::unread_snapshot(self, owner).await
+        self.query_partition(
+            owner,
+            UNREAD_INDEX,
+            UNREAD_PARTITION_KEY,
+            Self::unread_partition(owner, true),
+            None,
+            RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT,
+        )
+        .await
     }
 
+    /// Unread notices for one thread, oldest first, bounded.
     async fn unread_for_thread(
         &self,
         owner: &RunCompletionOwner,
         thread_id: &str,
         limit: usize,
     ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
-        RunCompletionNoticeStore::unread_for_thread(self, owner, thread_id, limit).await
+        self.query_partition(
+            owner,
+            THREAD_INDEX,
+            THREAD_PARTITION_KEY,
+            Self::thread_partition(owner, thread_id, true),
+            None,
+            limit,
+        )
+        .await
     }
 
+    /// Boot reconciliation scan: notices in one delivery state, oldest
+    /// first, bounded by the active workload (non-terminal states only).
     async fn in_delivery_state(
         &self,
         owner: &RunCompletionOwner,
         state: CompletionDeliveryStateKind,
         limit: usize,
     ) -> Result<Vec<RunCompletionNotice>, RunCompletionStoreError> {
-        RunCompletionNoticeStore::in_delivery_state(self, owner, state, limit).await
-    }
-
-    async fn mark_owner_due(
-        &self,
-        owner: &RunCompletionOwner,
-    ) -> Result<(), RunCompletionStoreError> {
-        RunCompletionNoticeStore::mark_owner_due(self, owner).await
-    }
-
-    async fn clear_owner_due(
-        &self,
-        owner: &RunCompletionOwner,
-    ) -> Result<(), RunCompletionStoreError> {
-        RunCompletionNoticeStore::clear_owner_due(self, owner).await
-    }
-
-    async fn due_owners(
-        &self,
-        scope_owner: &RunCompletionOwner,
-    ) -> Result<Vec<RunCompletionOwner>, RunCompletionStoreError> {
-        RunCompletionNoticeStore::due_owners(self, scope_owner).await
-    }
-
-    async fn head_sequence(
-        &self,
-        owner: &RunCompletionOwner,
-    ) -> Result<u64, RunCompletionStoreError> {
-        RunCompletionNoticeStore::head_sequence(self, owner).await
+        self.query_partition(
+            owner,
+            STATE_INDEX,
+            STATE_PARTITION_KEY,
+            Self::state_partition(owner, state),
+            None,
+            limit,
+        )
+        .await
     }
 }
 

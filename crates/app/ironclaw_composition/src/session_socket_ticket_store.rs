@@ -141,11 +141,9 @@ impl SessionSocketTicketStore for SecretStoreSessionSocketTicketStore {
         nonce: &str,
     ) -> Result<Option<SessionSocketTicket>, SessionSocketTicketStoreError> {
         // The nonce is the lease id (a UUID); anything else is unknown.
-        let lease_id: SecretLeaseId =
-            match serde_json::from_value(serde_json::Value::String(nonce.to_string())) {
-                Ok(lease_id) => lease_id,
-                Err(_) => return Ok(None),
-            };
+        let Ok(lease_id) = nonce.parse::<SecretLeaseId>() else {
+            return Ok(None);
+        };
         let material = match self.secrets.consume(&self.scope, lease_id).await {
             Ok(material) => material,
             // One-shot outcomes and expiry all replay as "not authenticated";
@@ -178,8 +176,12 @@ impl SessionSocketTicketStore for SecretStoreSessionSocketTicketStore {
                 return Ok(None);
             }
         };
-        // The lease was the single-use gate; the secret row is now spent
-        // transport state. Best-effort cleanup — expiry reaps stragglers.
+        // The lease was the single-use gate; both rows are now spent
+        // transport state, and every socket connect mints one, so reclaim
+        // them here rather than accumulate a permanent row per connect.
+        // Best-effort: a failed cleanup leaves only an inert consumed lease
+        // (the ticket cannot be replayed), and tickets that were minted but
+        // never consumed are the residue a periodic sweep would reap.
         if let Ok(handle) = SecretHandle::new(&stored.handle)
             && let Err(error) = self.secrets.delete(&self.scope, &handle).await
         {
@@ -187,6 +189,13 @@ impl SessionSocketTicketStore for SecretStoreSessionSocketTicketStore {
                 target: "ironclaw::reborn::session_tickets",
                 error = %error,
                 "consumed session socket ticket cleanup failed",
+            );
+        }
+        if let Err(error) = self.secrets.delete_lease(&self.scope, lease_id).await {
+            tracing::debug!(
+                target: "ironclaw::reborn::session_tickets",
+                error = %error,
+                "consumed session socket ticket lease cleanup failed",
             );
         }
         Ok(Some(stored.ticket))

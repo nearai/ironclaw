@@ -122,7 +122,7 @@ export function Chat({
     pendingOnboarding,
     busyGateNotice,
     suggestions,
-    sseStatus,
+    eventsStatus,
     historyLoading,
     historyLoadError,
     hasMore,
@@ -144,8 +144,8 @@ export function Chat({
   const chatCommands = useChatCommands();
 
   React.useEffect(() => {
-    onConnectionStatusChange?.(sseStatus);
-  }, [onConnectionStatusChange, sseStatus]);
+    onConnectionStatusChange?.(eventsStatus);
+  }, [onConnectionStatusChange, eventsStatus]);
 
   const activeThread = React.useMemo(
     () => threads.find((thread) => thread.id === activeThreadId) || null,

@@ -21,6 +21,16 @@ pub(crate) const MAX_SUBSCRIPTION_ID_BYTES: usize = 64;
 /// Hard bound on concurrently active logical subscriptions per socket.
 pub(crate) const MAX_ACTIVE_SUBSCRIPTIONS: usize = 16;
 
+/// Per-socket admission budget for `subscribe` frames: every subscribe
+/// re-runs authorization plus a projection replay on the backend, so an
+/// authenticated socket may not turn a 100-byte frame into unbounded work.
+/// The legitimate client sends a handful per boot plus one per thread
+/// navigation; exceeding this is a protocol violation that closes the socket.
+pub(crate) const MAX_SUBSCRIBES_PER_WINDOW: u32 = 32;
+
+/// The sliding window `MAX_SUBSCRIBES_PER_WINDOW` is counted over.
+pub(crate) const SUBSCRIBE_BUDGET_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Bounded queue depth of undelivered event batches per logical subscription.
 pub(crate) const SUBSCRIPTION_QUEUE_BATCHES: usize = 16;
 
@@ -55,6 +65,7 @@ pub(crate) enum SessionProtocolViolation {
     SubscriptionIdTooLong,
     CursorTooLong,
     TooManySubscriptions,
+    TooManySubscribeFrames,
     BinaryFrameUnsupported,
 }
 
@@ -69,7 +80,7 @@ pub(crate) fn parse_client_frame(
         // Cause retained server-side (never the frame text — client
         // input); the client only learns the sanitized violation.
         tracing::debug!(
-            target: "ironclaw_webui_v2::session_socket",
+            target: "ironclaw_webui_v2::session_websocket",
             error = %error,
             "malformed session frame",
         );

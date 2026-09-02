@@ -10,8 +10,10 @@
 //! Multi-replica deployments must NOT use this adapter — a ticket minted on
 //! one replica would be unknown to the replica receiving the upgrade, and
 //! replay protection would only hold per process. Composition wires the
-//! shared one-shot adapter for those shapes; when neither is available the
-//! session WebSocket capability is not advertised at all.
+//! shared one-shot adapter for those shapes and the `ironclaw` binary wires
+//! this one for every single-process shape; a serve configuration that
+//! wires no store at all (a library embedder, a test) does not advertise
+//! the session WebSocket capability.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

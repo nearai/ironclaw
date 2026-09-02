@@ -382,7 +382,7 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(WEBUI_V2_PATTERN_STREAM_EVENTS, get(handlers::stream_events))
         .route(
             WEBUI_V2_PATTERN_SESSION_WEBSOCKET_TICKET,
-            post(handlers::mint_session_socket_ticket),
+            post(handlers::session_websocket_ticket),
         )
         .route(
             WEBUI_V2_PATTERN_SESSION_WEBSOCKET,

@@ -31,15 +31,34 @@ use ironclaw_product_contracts::run_completions::RunCompletionIntentKind;
 use tokio::sync::{Notify, watch};
 
 use super::RunCompletionSurfaceServices;
-use super::ingest::ARBITRATION_WINDOW_MS;
+use super::TRACE_TARGET;
 use super::records::{
     CompletionDeliveryState, CompletionDeliveryStateKind, CompletionIntentRecord,
     CompletionSurface, RunCompletionNotice,
 };
 use super::store::{RunCompletionOwner, RunCompletionStoreError};
 
+/// P0 arbitration intent-collection window (§5.4): a host constant, not a
+/// user setting. Ingest stamps the first `closes_at` with it; every
+/// regression to pending reopens a window of the same length.
+pub const ARBITRATION_WINDOW_MS: i64 = 1_000;
+
 /// Presentation-grant acknowledgement timeout (§5.4).
 pub const GRANT_ACK_TIMEOUT_MS: i64 = 2_000;
+
+/// Grants a notice may spend before arbitration falls back (§5.4): the
+/// first grant plus exactly one re-arbitration, whether the first grant
+/// expired unacknowledged or a browser regressed it.
+const MAX_GRANTS_PER_NOTICE: u32 = 2;
+
+/// Ceiling on the per-owner retry backoff after a failed pass. Backoff
+/// doubles from one arbitration window so an unhealthy backend is not
+/// re-queried every second for every tracked owner.
+const MAX_OWNER_RETRY_BACKOFF_MS: i64 = 60_000;
+
+/// Join budget for [`RunCompletionCoordinatorHandle::shutdown`] at runtime
+/// shutdown.
+pub const COORDINATOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bounded per-tick scan of each non-terminal state partition. Bounded by
 /// the active workload, not history: terminal states are never scanned.
@@ -49,9 +68,11 @@ const DUE_SCAN_LIMIT: usize = 250;
 /// missed wake; ordinary operation is timer + wake driven.
 const IDLE_FALLBACK: Duration = Duration::from_secs(60);
 
-/// Push fallback decision port. Phase 1 wires the always-`NoTarget`
-/// implementation; Phase 3 replaces it with the authorized web-app push
-/// facade. Deciding here keeps the coordinator free of outbound vocabulary.
+/// Push fallback decision port: the no-presenter path of arbitration.
+/// Production wires `push::RunCompletionExternalDelivery` (claims push
+/// ownership and delivers the typed part through the ordinary outbound
+/// chain); [`NoPushFallback`] is the fail-closed default when no delivery
+/// coordinator is assembled. Deciding here keeps the coordinator free of outbound vocabulary.
 #[async_trait::async_trait]
 pub trait CompletionPushFallback: Send + Sync {
     /// Attempt push ownership + delivery for one pending notice. Returns
@@ -65,8 +86,9 @@ pub trait CompletionPushFallback: Send + Sync {
     ) -> Result<bool, RunCompletionStoreError>;
 }
 
-/// Phase 1: external completion delivery is disabled by design (§14 Phase 1
-/// step 6); every no-presenter notice settles in-app-unread.
+/// Fail-closed push default for deployments without a delivery coordinator
+/// (no channel-host cone): external completion delivery is off, and every
+/// no-presenter notice settles in-app-unread.
 pub struct NoPushFallback;
 
 #[async_trait::async_trait]
@@ -83,13 +105,16 @@ impl CompletionPushFallback for NoPushFallback {
 /// Validation port for `local_os` intents (§7.8): the server checks the
 /// caller's live web-app target selection and the browser instance's
 /// host-owned enrollment; client claims cannot mint permission or a target.
-/// Phase 1 rejects every `local_os` intent (OS presentation ships in
-/// Phase 2 alongside enrollment correlation).
+/// Production wires `push::RunCompletionExternalDelivery` (Selected +
+/// Enrolled); [`DenyLocalOsIntents`] is the fail-closed default when no
+/// delivery coordinator is assembled.
 #[async_trait::async_trait]
 pub trait LocalOsIntentPolicy: Send + Sync {
     async fn allows_local_os(&self, owner: &RunCompletionOwner, browser_instance_id: &str) -> bool;
 }
 
+/// Fail-closed default: no browser profile may win a `local_os` grant.
+/// Wired when no delivery coordinator exists.
 pub struct DenyLocalOsIntents;
 
 #[async_trait::async_trait]
@@ -103,10 +128,19 @@ impl LocalOsIntentPolicy for DenyLocalOsIntents {
     }
 }
 
+/// Per-owner retry state after a failed pass: consecutive failures and the
+/// earliest next attempt.
+struct OwnerRetry {
+    failures: u32,
+    retry_at: DateTime<Utc>,
+}
+
+/// Per-process arbitration worker over one owner set (§5.4–§5.6).
 pub struct RunCompletionCoordinator {
     services: Arc<RunCompletionSurfaceServices>,
     push_fallback: Arc<dyn CompletionPushFallback>,
     local_os_policy: Arc<dyn LocalOsIntentPolicy>,
+    retries: std::sync::Mutex<HashMap<RunCompletionOwner, OwnerRetry>>,
 }
 
 impl RunCompletionCoordinator {
@@ -119,7 +153,48 @@ impl RunCompletionCoordinator {
             services,
             push_fallback,
             local_os_policy,
+            retries: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The owner's pending retry deadline, if a previous pass failed and
+    /// its backoff has not elapsed.
+    fn retry_deadline(
+        &self,
+        owner: &RunCompletionOwner,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        self.retries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(owner)
+            .map(|retry| retry.retry_at)
+            .filter(|retry_at| *retry_at > now)
+    }
+
+    /// Schedule the owner's next attempt: one arbitration window after the
+    /// first failure, doubling per consecutive failure up to the ceiling.
+    fn schedule_retry(&self, owner: &RunCompletionOwner, now: DateTime<Utc>) -> DateTime<Utc> {
+        let mut retries = self
+            .retries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let failures = retries
+            .get(owner)
+            .map_or(1, |retry| retry.failures.saturating_add(1));
+        let delay_ms = ARBITRATION_WINDOW_MS
+            .saturating_mul(1i64 << failures.saturating_sub(1).min(6))
+            .min(MAX_OWNER_RETRY_BACKOFF_MS);
+        let retry_at = now + ChronoDuration::milliseconds(delay_ms);
+        retries.insert(owner.clone(), OwnerRetry { failures, retry_at });
+        retry_at
+    }
+
+    fn clear_retry(&self, owner: &RunCompletionOwner) {
+        self.retries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(owner);
     }
 
     /// One coordinator pass over every tracked owner. Returns the earliest
@@ -134,9 +209,17 @@ impl RunCompletionCoordinator {
             });
         };
         for owner in self.services.tracked_owners() {
+            if let Some(retry_at) = self.retry_deadline(&owner, now) {
+                observe(retry_at);
+                continue;
+            }
             match self.tick_owner(&owner, now).await {
-                Ok(Some(deadline)) => observe(deadline),
+                Ok(Some(deadline)) => {
+                    self.clear_retry(&owner);
+                    observe(deadline);
+                }
                 Ok(None) => {
+                    self.clear_retry(&owner);
                     // No outstanding work: stop tracking until re-woken, and
                     // clear the durable due-registry entry (§5.4). A failed
                     // clear is harmless — one extra empty scan after the
@@ -144,19 +227,21 @@ impl RunCompletionCoordinator {
                     self.services.untrack_owner(&owner);
                     if let Err(error) = self.services.notices.clear_owner_due(&owner).await {
                         tracing::debug!(
-                            target: "ironclaw::reborn::run_completions",
+                            target: TRACE_TARGET,
                             error = %error,
                             "due-owner clear failed; boot reconciliation will rescan",
                         );
                     }
                 }
                 Err(error) => {
+                    let retry_at = self.schedule_retry(&owner, now);
                     tracing::debug!(
-                        target: "ironclaw::reborn::run_completions",
+                        target: TRACE_TARGET,
                         error = %error,
-                        "coordinator owner pass failed; will retry on next wake",
+                        %retry_at,
+                        "coordinator owner pass failed; backing off before the next pass",
                     );
-                    observe(now + ChronoDuration::milliseconds(ARBITRATION_WINDOW_MS));
+                    observe(retry_at);
                 }
             }
         }
@@ -195,7 +280,10 @@ impl RunCompletionCoordinator {
             .await?;
         saturated |= pending.len() >= DUE_SCAN_LIMIT;
         for notice in pending {
-            let CompletionDeliveryState::PendingArbitration { closes_at, .. } = notice.delivery
+            let CompletionDeliveryState::PendingArbitration {
+                closes_at,
+                grants_issued,
+            } = notice.delivery
             else {
                 continue;
             };
@@ -204,6 +292,18 @@ impl RunCompletionCoordinator {
             }
             if closes_at > now {
                 observe(closes_at);
+                continue;
+            }
+            // §5.4: exactly one re-arbitration. A record regressed by a
+            // browser acknowledgement (`stale_state` / `effect_failed`) is
+            // pending again with its grant count intact; once two grants
+            // have been spent the stored intents cannot win, so fall back
+            // instead of re-granting the same intent every window.
+            if grants_issued >= MAX_GRANTS_PER_NOTICE {
+                match self.fallback(owner, &notice, now).await {
+                    Ok(()) | Err(RunCompletionStoreError::Conflict { .. }) => {}
+                    Err(error) => return Err(error),
+                }
                 continue;
             }
             self.arbitrate(owner, &notice, now, &mut local_os_verdicts)
@@ -232,7 +332,7 @@ impl RunCompletionCoordinator {
             }
             // Grant expiry: exactly one re-arbitration before fallback
             // (§5.4). A second expiry goes straight to fallback.
-            if *grants_issued <= 1 {
+            if *grants_issued < MAX_GRANTS_PER_NOTICE {
                 let closes_at = now + ChronoDuration::milliseconds(ARBITRATION_WINDOW_MS);
                 match self
                     .services
@@ -424,8 +524,6 @@ pub struct RunCompletionCoordinatorHandle {
     handle: tokio::task::JoinHandle<()>,
 }
 
-pub const COORDINATOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-
 impl RunCompletionCoordinatorHandle {
     pub async fn shutdown(self, timeout: Duration) {
         let _ = self.cancel.send(true);
@@ -437,7 +535,7 @@ impl RunCompletionCoordinatorHandle {
             // holding services and processing work after the runtime that
             // owned it has shut down.
             tracing::debug!(
-                target: "ironclaw::reborn::run_completions",
+                target: TRACE_TARGET,
                 "coordinator did not stop within its shutdown budget; aborting",
             );
             handle.abort();
@@ -472,7 +570,7 @@ pub fn spawn_run_completion_coordinator(
                 }
                 Err(error) => {
                     tracing::debug!(
-                        target: "ironclaw::reborn::run_completions",
+                        target: TRACE_TARGET,
                         error = %error,
                         "boot due-owner reconciliation failed; continuing wake-driven",
                     );
@@ -534,7 +632,11 @@ mod tests {
             }),
         ))) as Arc<dyn RunCompletionNotices>;
         let hub = Arc::new(RunCompletionStreamHub::new(Arc::clone(&store)));
-        Arc::new(RunCompletionSurfaceServices::new(store, hub))
+        Arc::new(RunCompletionSurfaceServices::new(
+            store,
+            hub,
+            Arc::new(ironclaw_notifications::NoopNotificationInboxStore),
+        ))
     }
 
     fn owner() -> RunCompletionOwner {
@@ -804,6 +906,89 @@ mod tests {
                 CompletionDeliveryState::NoExternalTarget { .. }
             ),
             "second expiry falls back: {:?}",
+            settled.delivery
+        );
+    }
+
+    /// A grant the browser regressed (`stale_state` / `effect_failed`)
+    /// returns the record to pending with its grant count intact. §5.4 allows
+    /// exactly one re-arbitration: the second regression must fall back, not
+    /// re-grant the same stored intent every window forever.
+    #[tokio::test]
+    async fn browser_regressed_grant_re_arbitrates_once_then_falls_back() {
+        let services = services();
+        let start = Utc::now();
+        let notice = seed_notice(&services, "regress", start - ChronoDuration::seconds(2)).await;
+        services
+            .notices
+            .record_intent(
+                &owner(),
+                &notice.notice_id,
+                intent("browser-a", RunCompletionIntentKind::InApp, 5),
+            )
+            .await
+            .expect("record intent");
+        let coordinator = coordinator(&services);
+
+        let grant_id_of = |notice: &RunCompletionNotice| match &notice.delivery {
+            CompletionDeliveryState::Granted { grant_id, .. } => grant_id.clone(),
+            other => panic!("expected a grant, got {other:?}"),
+        };
+        coordinator.tick_once(start).await;
+        let first = services
+            .notices
+            .get(&owner(), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        let first_grant = grant_id_of(&first);
+
+        // The browser rejects the first grant: the same regression the
+        // `acknowledge` operation performs for `stale_state`.
+        let reopen = start + ChronoDuration::milliseconds(ARBITRATION_WINDOW_MS);
+        services
+            .notices
+            .regress_expired_grant(&owner(), &notice.notice_id, &first_grant, reopen)
+            .await
+            .expect("first regression");
+        coordinator
+            .tick_once(reopen + ChronoDuration::milliseconds(50))
+            .await;
+        let second = services
+            .notices
+            .get(&owner(), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        let second_grant = grant_id_of(&second);
+        assert_ne!(
+            second_grant, first_grant,
+            "one re-arbitration issues a fresh grant"
+        );
+
+        // The browser rejects the re-arbitrated grant too: the budget is
+        // spent, so the next pass falls back instead of granting a third time.
+        let reopen_again = reopen + ChronoDuration::milliseconds(ARBITRATION_WINDOW_MS);
+        services
+            .notices
+            .regress_expired_grant(&owner(), &notice.notice_id, &second_grant, reopen_again)
+            .await
+            .expect("second regression");
+        coordinator
+            .tick_once(reopen_again + ChronoDuration::milliseconds(50))
+            .await;
+        let settled = services
+            .notices
+            .get(&owner(), &notice.notice_id)
+            .await
+            .expect("get")
+            .expect("exists");
+        assert!(
+            matches!(
+                settled.delivery,
+                CompletionDeliveryState::NoExternalTarget { .. }
+            ),
+            "second browser regression falls back: {:?}",
             settled.delivery
         );
     }

@@ -118,13 +118,17 @@ impl WebAppNotificationPayload {
     }
 
     /// Build the §7.10 typed run-completion payload. Fixed copy only — no
-    /// generated or protected content ever rides a push. The URL is derived
-    /// from the typed thread id right here; no caller supplies a path. All
-    /// grammar rules of [`Self::new`] apply, and the extra typed fields are
-    /// bounded opaque identifiers plus a capped count.
+    /// generated or protected content ever rides a push. The deep link is
+    /// derived right here from the caller's app route prefix plus the typed
+    /// thread id (percent-encoded as one path segment); no caller supplies a
+    /// full path, and the SPA route itself is the channel package's
+    /// knowledge, not this crate's. All grammar rules of [`Self::new`] apply,
+    /// and the extra typed fields are bounded opaque identifiers plus a
+    /// capped count.
     pub fn run_completion(
         title: impl Into<String>,
         body: impl Into<String>,
+        thread_route: &str,
         thread_id: &str,
         notice_id: impl Into<String>,
         tag: impl Into<String>,
@@ -134,7 +138,7 @@ impl WebAppNotificationPayload {
         let mut payload = Self::new(
             title,
             body,
-            format!("/chat/{encoded_thread}"),
+            format!("{}/{encoded_thread}", thread_route.trim_end_matches('/')),
             Some(tag.into()),
         );
         payload.schema = Some(WEB_APP_NOTIFICATION_SCHEMA_V2.to_string());
@@ -193,11 +197,9 @@ impl WebAppNotificationPayload {
     }
 }
 
-/// Coerce a caller-supplied deep link into the app-relative form the service
-/// worker's same-origin guard expects: a single leading `/`, no scheme, no
 /// Percent-encode one path segment: unreserved bytes (RFC 3986) pass
 /// through, everything else is `%XX`-escaped. Used for the typed thread id
-/// inside `/chat/<id>` so an id can never smuggle path structure.
+/// inside the thread deep link so an id can never smuggle path structure.
 fn percent_encode_path_segment(raw: &str) -> String {
     let mut encoded = String::with_capacity(raw.len());
     for byte in raw.bytes() {
@@ -214,6 +216,8 @@ fn percent_encode_path_segment(raw: &str) -> String {
     encoded
 }
 
+/// Coerce a caller-supplied deep link into the app-relative form the service
+/// worker's same-origin guard expects: a single leading `/`, no scheme, no
 /// protocol-relative `//`, no control bytes. Anything else falls back to `/`
 /// (the app root) rather than shipping a link the SW would reject anyway.
 fn app_relative_url(raw: String) -> String {

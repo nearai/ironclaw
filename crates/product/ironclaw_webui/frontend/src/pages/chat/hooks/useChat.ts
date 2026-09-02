@@ -8,6 +8,7 @@ import {
   submitManualToken,
 } from "../../../lib/api";
 import { renderCommandResultMarkdown } from "../lib/chat-commands";
+import { isFinalAssistantMessage } from "../lib/stream-order-memory";
 import {
   completionMatchesGate,
   readLatestProductAuthOAuthCompletion,
@@ -193,9 +194,21 @@ export function useChat(threadId) {
   // affect chat rendering.
   React.useEffect(() => {
     if (!threadId || historyLoading || messagesThreadId !== threadId) return;
+    // The finalized replies actually in the rendered history are the
+    // evidence: they bound how far a thread visit may advance read state.
+    const renderedRunIds = messages
+      .filter(isFinalAssistantMessage)
+      .map((message) => message?.turnRunId)
+      .filter((runId) => typeof runId === "string");
     import("../../../lib/run-completions/client")
-      .then((runCompletions) => runCompletions.reportThreadHistoryRendered(threadId))
+      .then((runCompletions) =>
+        runCompletions.reportThreadHistoryRendered(threadId, renderedRunIds),
+      )
       .catch(() => undefined);
+    // `messages` identity churns on every stream frame; the history-loaded
+    // transition is the signal, and live finalizations report themselves
+    // through `reportReplyRendered`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, historyLoading, messagesThreadId]);
 
   const [isProcessing, setIsProcessingState] = React.useState(false);
@@ -478,7 +491,7 @@ export function useChat(threadId) {
     },
   });
 
-  const { status: sseStatus } = useThreadEvents({
+  const { status: eventsStatus } = useThreadEvents({
     threadId,
     onEvent: handleEvent,
     enabled: Boolean(threadId),
@@ -486,8 +499,8 @@ export function useChat(threadId) {
   });
 
   React.useEffect(() => {
-    connectionStatusRef.current = sseStatus;
-    if (sseStatus !== CONNECTION_STATUS.DISCONNECTED) return;
+    connectionStatusRef.current = eventsStatus;
+    if (eventsStatus !== CONNECTION_STATUS.DISCONNECTED) return;
     const wasProcessing = isProcessingRef.current;
     if (!wasProcessing) return;
     const runId = activeRunRef.current?.runId || null;
@@ -513,7 +526,7 @@ export function useChat(threadId) {
         { runId, t },
       ),
     );
-  }, [sseStatus, setMessages, setIsProcessing, setActiveRun, threadId, t]);
+  }, [eventsStatus, setMessages, setIsProcessing, setActiveRun, threadId, t]);
 
   // Accepts the composer call shape `{ attachments, threadId }`. The
   // `attachments` are staged objects from `lib/attachments.ts`
@@ -1181,7 +1194,7 @@ export function useChat(threadId) {
     pendingOnboarding: visiblePendingOnboarding,
     busyGateNotice,
     activeRun,
-    sseStatus,
+    eventsStatus,
     historyLoading,
     historyLoadError,
     hasMore,

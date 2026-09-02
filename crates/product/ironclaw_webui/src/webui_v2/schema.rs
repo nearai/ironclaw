@@ -31,9 +31,7 @@ impl WebChatV2EventFrame {
     pub fn event_name(&self) -> &'static str {
         self.event.event_name()
     }
-}
 
-impl WebChatV2EventFrame {
     /// Build the thread-event browser frame. Non-thread stream families
     /// (run completions) have their own frame vocabulary in the session
     /// codec; this constructor is only for the per-thread transports.

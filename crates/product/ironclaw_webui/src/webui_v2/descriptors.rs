@@ -1133,19 +1133,7 @@ fn session_websocket_ticket_descriptor() -> IngressRouteDescriptor {
         // Transport-auth mint, not a product command: the bearer-backed POST
         // mints a bounded single-use nonce and never reaches ProductSurface.
         // The 12/min bound doubles as the per-caller ticket admission rate.
-        IngressPolicy::new(IngressPolicyParts {
-            listener_class: ListenerClass::LocalGateway,
-            auth: bearer_required(),
-            scope_source: IngressScopeSource::AuthenticatedCaller,
-            body_limit: BodyLimitPolicy::NoBody,
-            rate_limit: rate_limit_per_caller(12, 60),
-            cors: CorsPolicy::SameOriginOnly,
-            websocket_origin: WebSocketOriginPolicy::NotApplicable,
-            streaming: StreamingMode::None,
-            audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::NoEffect,
-        })
-        .expect("session websocket ticket policy is statically valid"), // safety: all parts are crate-local constants; the LocalGateway + bearer + AuthenticatedCaller + NoBody + None-streaming combination is a permitted shape, pinned by the descriptor contract test,
+        ticket_mint_policy(rate_limit_per_caller(12, 60)),
     )
 }
 
@@ -1157,21 +1145,7 @@ fn session_websocket_descriptor() -> IngressRouteDescriptor {
         // The upgrade authenticates with the single-use ticket the caller
         // minted over bearer HTTP; the long-lived bearer never appears in
         // the WebSocket URL. Same-origin enforcement runs before upgrade.
-        IngressPolicy::new(IngressPolicyParts {
-            listener_class: ListenerClass::LocalGateway,
-            auth: IngressAuthPolicy::Required {
-                schemes: vec![IngressAuthScheme::SingleUseTicket],
-            },
-            scope_source: IngressScopeSource::AuthenticatedCaller,
-            body_limit: BodyLimitPolicy::NoBody,
-            rate_limit: stream_rate_limit(),
-            cors: CorsPolicy::SameOriginOnly,
-            websocket_origin: WebSocketOriginPolicy::SameOriginRequired,
-            streaming: StreamingMode::WebSocket,
-            audit: AuditTraceClass::StreamingSubscription,
-            effect_path: AllowedEffectPath::ProjectionOnly,
-        })
-        .expect("session websocket policy is statically valid"), // safety: all parts are crate-local constants; the LocalGateway + single-use-ticket + AuthenticatedCaller + WebSocket-streaming + same-origin-required combination is a permitted shape, pinned by the descriptor contract test,
+        ticketed_websocket_policy(stream_rate_limit()),
     )
 }
 
@@ -2298,6 +2272,44 @@ fn read_policy(
         effect_path,
     })
     .expect("webui v2 read policy must validate") // safety: streaming is either None or Sse (both permitted with bearer + AuthenticatedCaller); other parts are crate-local constants
+}
+
+/// The transport-auth mint shape: a bearer-authenticated, body-less POST
+/// that mints a single-use socket ticket and never reaches ProductSurface.
+fn ticket_mint_policy(rate_limit: RateLimitPolicy) -> IngressPolicy {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::LocalGateway,
+        auth: bearer_required(),
+        scope_source: IngressScopeSource::AuthenticatedCaller,
+        body_limit: BodyLimitPolicy::NoBody,
+        rate_limit,
+        cors: CorsPolicy::SameOriginOnly,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::UserAction,
+        effect_path: AllowedEffectPath::NoEffect,
+    })
+    .expect("webui v2 ticket mint policy must validate") // safety: all parts are crate-local constants; the LocalGateway + bearer + AuthenticatedCaller + NoBody + None-streaming combination is a permitted shape, pinned by the descriptor contract test
+}
+
+/// The ticket-authenticated WebSocket upgrade shape: single-use ticket auth,
+/// same-origin required, projection-only, sharing the SSE stream budget.
+fn ticketed_websocket_policy(rate_limit: RateLimitPolicy) -> IngressPolicy {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::LocalGateway,
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::SingleUseTicket],
+        },
+        scope_source: IngressScopeSource::AuthenticatedCaller,
+        body_limit: BodyLimitPolicy::NoBody,
+        rate_limit,
+        cors: CorsPolicy::SameOriginOnly,
+        websocket_origin: WebSocketOriginPolicy::SameOriginRequired,
+        streaming: StreamingMode::WebSocket,
+        audit: AuditTraceClass::StreamingSubscription,
+        effect_path: AllowedEffectPath::ProjectionOnly,
+    })
+    .expect("webui v2 ticketed websocket policy must validate") // safety: all parts are crate-local constants; the LocalGateway + single-use-ticket + AuthenticatedCaller + WebSocket-streaming + same-origin-required combination is a permitted shape, pinned by the descriptor contract test
 }
 
 fn bearer_required() -> IngressAuthPolicy {

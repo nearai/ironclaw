@@ -57,10 +57,6 @@ registerPack("pt-BR", {
   "notifications.pageLimit": "Notificações mais antigas não são exibidas aqui.",
   "notifications.allCaughtUp": "Tudo em dia",
   "notifications.unreadCount": "{count} novas",
-  "runCompletions.toastOne": "Uma execução do agente terminou. Abra a conversa para ver a resposta.",
-  "runCompletions.toastMany": "{count} execuções do agente terminaram em uma conversa.",
-  "runCompletions.listItemOne": "Execução do agente concluída — resposta pronta",
-  "runCompletions.listItemMany": "{count} execuções concluídas — respostas prontas",
   "notifications.unread": "Não lida",
   "notifications.markAllRead": "Marcar tudo como lido",
   "notifications.resolved": "Resolvido",
@@ -86,6 +82,11 @@ registerPack("pt-BR", {
   "notifications.approval.title": "Aprovação necessária",
   "notifications.approval.detail": "Precisa da sua aprovação",
   "notifications.approval.untitled": "Conversa sem título",
+  // Run completions
+  "runCompletions.toastOne": "Uma execução do agente terminou. Abra a conversa para ver a resposta.",
+  "runCompletions.toastMany": "{count} execuções do agente terminaram em uma conversa.",
+  "runCompletions.listItemOne": "Execução do agente concluída — resposta pronta",
+  "runCompletions.listItemMany": "{count} execuções concluídas — respostas prontas",
 
   // Status
   "status.online": "online",

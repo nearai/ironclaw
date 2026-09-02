@@ -759,6 +759,19 @@ where
         .and_then(|result| result)
     }
 
+    async fn delete_lease(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<bool, SecretStoreError> {
+        let path = lease_path(scope, lease_id)?;
+        match self.filesystem.delete(scope, &path).await {
+            Ok(()) => Ok(true),
+            Err(error) if is_not_found(&error) => Ok(false),
+            Err(error) => Err(fs_to_secret_store_error(error)),
+        }
+    }
+
     async fn revoke(
         &self,
         scope: &ResourceScope,

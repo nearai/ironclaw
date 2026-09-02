@@ -609,9 +609,10 @@ pub struct RebornRuntime {
     /// Shared single-use session-socket ticket store, present only when the
     /// deployment's storage shape shares a durable backend across replicas
     /// (mint and consume may land on different processes). `None` for
-    /// single-process shapes, whose host falls back to the WebUI's bounded
-    /// in-memory adapter; a deployment with neither leaves the session
-    /// WebSocket capability unadvertised (fail closed).
+    /// single-process shapes, where the `ironclaw` binary always substitutes
+    /// the WebUI's bounded in-memory adapter — so the shipped binary always
+    /// advertises the session socket; only a library embedder that wires no
+    /// store at all leaves the capability unadvertised (fail closed).
     pub(crate) session_socket_tickets:
         Option<Arc<dyn ironclaw_product_contracts::session_transport::SessionSocketTicketStore>>,
     /// Run-completion notification services: the durable notice store over
@@ -4715,11 +4716,11 @@ pub(crate) async fn build_runtime_with_resource_governor(
         ironclaw_assistant::run_completions::RunCompletionSurfaceServices::new(
             run_completion_notices,
             run_completion_hub,
-        )
-        // Read bridge to the durable Inbox: evidence that settles a
-        // completion notice also marks the run's `run_completed` Inbox row
-        // read, so the bell list and live surfaces agree.
-        .with_inbox(Arc::clone(&services.notification_inbox)),
+            // Read bridge to the durable Inbox: evidence that settles a
+            // completion notice also marks the run's `run_completed` Inbox
+            // row read, so the bell list and live surfaces agree.
+            Arc::clone(&services.notification_inbox),
+        ),
     );
     let run_completion_ingest = Arc::new(
         ironclaw_assistant::run_completions::ingest::RunCompletionIngest::new(
@@ -4729,7 +4730,7 @@ pub(crate) async fn build_runtime_with_resource_governor(
     );
     processes
         .subscribe_process_observer(Arc::new(
-            crate::run_completion_observer::RunCompletionJournalObserver::new(
+            ironclaw_assistant::run_completions::observer::RunCompletionJournalObserver::new(
                 run_completion_ingest,
             ),
         ))
@@ -4741,20 +4742,20 @@ pub(crate) async fn build_runtime_with_resource_governor(
     // the Web Push fallback through the ordinary outbound chain. Without a
     // delivery coordinator the Phase-1 fail-closed defaults stand: no OS
     // grants, every no-presenter notice settles in-app-unread.
-    let (run_completion_push_fallback, run_completion_local_os): (
-        Arc<dyn ironclaw_assistant::run_completions::coordinator::CompletionPushFallback>,
-        Arc<dyn ironclaw_assistant::run_completions::coordinator::LocalOsIntentPolicy>,
-    ) = match (
-        channel_workflow_factory.as_ref(),
-        channel_host_assembly.as_ref(),
-    ) {
-        (Some(workflow_factory), Some(assembly)) => {
-            match (
-                workflow_factory.run_completion_delivery_services(),
-                ironclaw_host_api::ids::ExtensionId::new(ironclaw_web_app::WEB_APP_EXTENSION_ID),
-            ) {
-                (Some(delivery_services), Ok(web_app_extension)) => {
-                    let external = Arc::new(
+    let web_app_extension = ironclaw_host_api::ids::ExtensionId::new(
+        ironclaw_web_app::WEB_APP_EXTENSION_ID,
+    )
+    .map_err(|error| RebornRuntimeError::MalformedConfig {
+        reason: format!("web-app extension id: {error}"),
+    })?;
+    let run_completion_external_delivery = channel_workflow_factory
+        .as_ref()
+        .zip(channel_host_assembly.as_ref())
+        .and_then(|(workflow_factory, assembly)| {
+            workflow_factory
+                .run_completion_delivery_services()
+                .map(|delivery_services| {
+                    Arc::new(
                         ironclaw_assistant::run_completions::push::RunCompletionExternalDelivery::new(
                             delivery_services,
                             Arc::clone(&run_completions.notices),
@@ -4765,20 +4766,18 @@ pub(crate) async fn build_runtime_with_resource_governor(
                             ),
                             Arc::new(crate::run_completion_push::RegistrationEnrollmentProbe::new(
                                 services.delivery_registrations.clone(),
-                                web_app_extension,
+                                web_app_extension.clone(),
                             )),
                         ),
-                    );
-                    (Arc::clone(&external) as _, external as _)
-                }
-                _ => (
-                    Arc::new(ironclaw_assistant::run_completions::coordinator::NoPushFallback) as _,
-                    Arc::new(ironclaw_assistant::run_completions::coordinator::DenyLocalOsIntents)
-                        as _,
-                ),
-            }
-        }
-        _ => (
+                    )
+                })
+        });
+    let (run_completion_push_fallback, run_completion_local_os): (
+        Arc<dyn ironclaw_assistant::run_completions::coordinator::CompletionPushFallback>,
+        Arc<dyn ironclaw_assistant::run_completions::coordinator::LocalOsIntentPolicy>,
+    ) = match run_completion_external_delivery {
+        Some(external) => (Arc::clone(&external) as _, external as _),
+        None => (
             Arc::new(ironclaw_assistant::run_completions::coordinator::NoPushFallback) as _,
             Arc::new(ironclaw_assistant::run_completions::coordinator::DenyLocalOsIntents) as _,
         ),
@@ -4852,9 +4851,9 @@ pub(crate) async fn build_runtime_with_resource_governor(
         session_socket_tickets: match deployment.storage_shape() {
             crate::deployment::StorageShape::HostedSingleTenantPool
             | crate::deployment::StorageShape::OperatorSupplied => Some(Arc::new(
-                crate::session_ticket_store::SecretStoreSessionSocketTicketStore::new(Arc::clone(
-                    &services.secret_store,
-                )),
+                crate::session_socket_ticket_store::SecretStoreSessionSocketTicketStore::new(
+                    Arc::clone(&services.secret_store),
+                ),
             )),
             crate::deployment::StorageShape::None
             | crate::deployment::StorageShape::LocalFilesystemRoot => None,

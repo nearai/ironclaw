@@ -9,7 +9,7 @@
 
 use ironclaw_product_contracts::surface::{ProductStreamEvent, ProductStreamEventEnvelope};
 
-use super::super::schema::{WebChatV2Event, WebChatV2EventFrame};
+use crate::webui_v2::schema::{WebChatV2Event, WebChatV2EventFrame};
 
 /// One browser-renderable event, decided once for every transport.
 pub(crate) struct BrowserFrame {
@@ -31,13 +31,17 @@ impl BrowserFrame {
         serde_json::to_string(&self.frame_body)
     }
 
-    pub(crate) fn event_body(&self) -> Result<serde_json::Value, serde_json::Error> {
-        Ok(self.event_body.clone())
+    /// The typed event body already materialized by [`browser_frame`]; no
+    /// serialization happens here.
+    pub(crate) fn event_body(&self) -> serde_json::Value {
+        self.event_body.clone()
     }
 }
 
-/// Map one typed product stream event into its browser frame. Serialization
-/// failures degrade to `None` (dropped + debug-logged by the transport).
+/// Map one typed product stream event into its browser frame. `None` means
+/// the event could not be rendered; the transports fail the stream or
+/// subscription loudly so the client resumes from its last cursor and the
+/// event is never silently skipped.
 pub(crate) fn browser_frame(envelope: ProductStreamEventEnvelope) -> Option<BrowserFrame> {
     let ProductStreamEventEnvelope { cursor, event } = envelope;
     match event {

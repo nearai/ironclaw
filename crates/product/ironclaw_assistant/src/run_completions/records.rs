@@ -23,6 +23,9 @@ const THREAD_TAG_PURPOSE: &str = "web-app-run-completion-collapse/v1";
 /// inside the 128-byte opaque-id bound with its purpose prefix.
 const DIGEST_PREFIX_LEN: usize = 40;
 
+/// Persisted record-shape version stamped on every notice.
+pub const RUN_COMPLETION_NOTICE_VERSION: u32 = 1;
+
 /// The bounded identity prefix of a digest. `sha256_hex` is ASCII so the
 /// byte index is a char boundary today; `get` keeps this a fallible slice
 /// rather than a panic path should the digest encoding ever change.
@@ -175,8 +178,9 @@ pub struct RunCompletionNotice {
     pub project_id: Option<String>,
     /// Opaque purpose-separated OS collapse tag for this owner + thread.
     pub thread_tag: String,
-    /// Reference to the completed-turn projection update that proves the
-    /// finalized reply (opaque; used for push-candidate planning).
+    /// Durable push-delivery identity for this notice
+    /// (`run-completion/<notice_id>`): the delivery id every replica passes
+    /// to the push-ownership CAS, so exactly one wins it. Opaque on the wire.
     pub terminal_projection_ref: String,
     pub completed_at: DateTime<Utc>,
     pub delivery: CompletionDeliveryState,
@@ -188,8 +192,6 @@ pub struct RunCompletionNotice {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-
-pub const RUN_COMPLETION_NOTICE_VERSION: u32 = 1;
 
 impl RunCompletionNotice {
     pub fn is_read(&self) -> bool {

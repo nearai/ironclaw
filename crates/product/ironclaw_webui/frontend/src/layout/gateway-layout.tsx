@@ -78,7 +78,7 @@ export function GatewayLayout({
         .filter(Boolean),
     );
     const completionRows = runCompletions.messages.filter(
-      (message) => !inboxRunIds.has(message.runId),
+      (message) => !inboxRunIds.has(message.turnRunId),
     );
     const completionRowIds = new Set(completionRows.map((message) => message.id));
     return {

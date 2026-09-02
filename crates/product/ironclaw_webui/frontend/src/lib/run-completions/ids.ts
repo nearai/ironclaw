@@ -3,8 +3,8 @@
 // data; both are random, minted locally, and only ever correlated
 // server-side against host-owned records.
 
-const BROWSER_INSTANCE_KEY = "ironclaw.rc.browser-instance";
-const TAB_KEY = "ironclaw.rc.tab";
+const BROWSER_INSTANCE_KEY = "ironclaw:run-completions:browser-instance";
+const TAB_KEY = "ironclaw:run-completions:tab";
 
 function randomOpaqueId(prefix: string): string {
   const bytes = new Uint8Array(16);

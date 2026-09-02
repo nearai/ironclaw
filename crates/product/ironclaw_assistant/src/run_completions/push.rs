@@ -26,9 +26,11 @@ use ironclaw_outbound::{
 };
 use ironclaw_threads::ThreadScope;
 
+use super::TRACE_TARGET;
 use super::coordinator::{CompletionPushFallback, LocalOsIntentPolicy};
 use super::records::RunCompletionNotice;
 use super::store::{RunCompletionNotices, RunCompletionOwner, RunCompletionStoreError};
+use super::stream::unread_count_for_thread;
 use crate::delivery_coordinator::{CoordinatedDeliveryOutcome, DeliveryIntent};
 use crate::model_channel_delivery::CodecChannelTargetResolver;
 use crate::notification_channel_resolution::{
@@ -40,12 +42,6 @@ use crate::run_delivery::notifications::{
     deliver_notification_parts,
 };
 
-const TRACE_TARGET: &str = "ironclaw::reborn::run_completions";
-
-/// Bounded scan when computing the grouped unread count for one thread's
-/// push copy; the wire cap is two digits anyway.
-const UNREAD_COUNT_SCAN_LIMIT: usize = 100;
-
 /// The typed run identity a push delivery is authorized under, parsed once
 /// from the durable notice before any egress work begins.
 struct CompletionRunIdentity {
@@ -55,8 +51,11 @@ struct CompletionRunIdentity {
 }
 
 /// Host-owned web-app enrollment probe (§6.1 "Enrolled"). Composition
-/// implements it over the web-app subscription store; this crate never
-/// touches push-transport records directly.
+/// implements it over the host-owned delivery registrations
+/// (`DeliveryRegistrationService`, parsed through
+/// `ironclaw_web_app::RegistrationDocument`) — the same records the delivery
+/// coordinator resolves for actual pushes; this crate never touches
+/// push-transport records directly.
 #[async_trait::async_trait]
 pub trait WebAppEnrollmentProbe: Send + Sync {
     async fn enrollment(
@@ -105,6 +104,55 @@ impl RunCompletionExternalDelivery {
     /// Resolve the owner's effective notification channels and keep the
     /// entries whose target capability includes run completions (§7.9).
     /// Structurally zero or one entry; the first wins deterministically.
+    /// The typed run identity the outbound chain authorizes against. A
+    /// durable notice that cannot name it cannot be authorized for egress,
+    /// so the fallback stands down without a push; the malformed row is
+    /// logged rather than silently skipped.
+    fn run_identity(notice: &RunCompletionNotice) -> Option<CompletionRunIdentity> {
+        let agent_id = match notice.agent_id.as_deref().map(AgentId::new) {
+            Some(Ok(agent_id)) => agent_id,
+            Some(Err(error)) => {
+                tracing::debug!(
+                    target: TRACE_TARGET,
+                    notice_id = %notice.notice_id,
+                    %error,
+                    "push fallback stands down: notice agent id is malformed",
+                );
+                return None;
+            }
+            None => return None,
+        };
+        let thread_id = match ThreadId::new(notice.thread_id.clone()) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                tracing::debug!(
+                    target: TRACE_TARGET,
+                    notice_id = %notice.notice_id,
+                    %error,
+                    "push fallback stands down: notice thread id is malformed",
+                );
+                return None;
+            }
+        };
+        let run_id = match uuid::Uuid::parse_str(&notice.run_id) {
+            Ok(run_uuid) => TurnRunId::from_uuid(run_uuid),
+            Err(error) => {
+                tracing::debug!(
+                    target: TRACE_TARGET,
+                    notice_id = %notice.notice_id,
+                    %error,
+                    "push fallback stands down: notice run id is not a uuid",
+                );
+                return None;
+            }
+        };
+        Some(CompletionRunIdentity {
+            run_id,
+            agent_id,
+            thread_id,
+        })
+    }
+
     async fn resolve_completion_target(
         &self,
         owner: &RunCompletionOwner,
@@ -254,21 +302,9 @@ impl CompletionPushFallback for RunCompletionExternalDelivery {
         };
         // The typed pieces the outbound chain needs. A notice that cannot
         // name them cannot be authorized for egress: no push target.
-        let Some(agent_id) = notice
-            .agent_id
-            .as_deref()
-            .map(AgentId::new)
-            .and_then(Result::ok)
-        else {
+        let Some(identity) = Self::run_identity(notice) else {
             return Ok(false);
         };
-        let Ok(thread_id) = ThreadId::new(notice.thread_id.clone()) else {
-            return Ok(false);
-        };
-        let Ok(run_uuid) = uuid::Uuid::parse_str(&notice.run_id) else {
-            return Ok(false);
-        };
-        let run_id = TurnRunId::from_uuid(run_uuid);
 
         // Push ownership is a CAS on the pending record (§5.3): exactly one
         // replica wins. A conflict means the notice was read or otherwise
@@ -288,40 +324,19 @@ impl CompletionPushFallback for RunCompletionExternalDelivery {
             Err(RunCompletionStoreError::Conflict { .. }) => return Ok(true),
             Err(error) => return Err(error),
         }
-        // Grouped copy count: bounded scan, floor of 1 (this notice).
-        let unread_count_for_thread = match self
-            .notices
-            .unread_for_thread(owner, &notice.thread_id, UNREAD_COUNT_SCAN_LIMIT)
-            .await
-        {
-            Ok(unread) => u16::try_from(unread.len()).unwrap_or(u16::MAX).max(1),
-            Err(error) => {
-                // silent-ok: the count only shapes grouped push copy; the
-                // push itself still goes out. Logged for the wrong-badge
-                // trace.
-                tracing::debug!(
-                    target: TRACE_TARGET,
-                    %error,
-                    "unread count unavailable for push copy; using 1",
-                );
-                1
-            }
-        };
+        // Grouped copy count: the same bounded scan the stream badge uses,
+        // floor of 1 (this notice) when the store cannot answer.
+        let unread_count_for_thread =
+            unread_count_for_thread(self.notices.as_ref(), owner, &notice.thread_id)
+                .await
+                .map(|count| u16::try_from(count).unwrap_or(u16::MAX))
+                .unwrap_or(1)
+                .max(1);
         // Ownership is durable; ordinary outbound attempt semantics decide
         // delivered/failed/unknown from here (§5.3). A late browser intent
         // cannot recall possible provider egress.
-        self.deliver_completion(
-            owner,
-            notice,
-            &target,
-            CompletionRunIdentity {
-                run_id,
-                agent_id,
-                thread_id,
-            },
-            unread_count_for_thread,
-        )
-        .await;
+        self.deliver_completion(owner, notice, &target, identity, unread_count_for_thread)
+            .await;
         Ok(true)
     }
 }

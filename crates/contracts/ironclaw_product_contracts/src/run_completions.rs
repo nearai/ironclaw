@@ -30,9 +30,11 @@ pub const RUN_COMPLETION_UNREAD_SNAPSHOT_LIMIT: usize = 250;
 /// Bound on concurrently retained browser-profile intents per notice (§5.4).
 pub const RUN_COMPLETION_MAX_INTENTS_PER_NOTICE: usize = 32;
 
-/// Schema tags stamped on the stream payloads.
+/// Schema tag stamped on [`RunCompletionNoticeEvent`].
 pub const RUN_COMPLETION_NOTICE_SCHEMA: &str = "webui.run_completion.v1";
+/// Schema tag stamped on [`RunCompletionGrantEvent`].
 pub const RUN_COMPLETION_GRANT_SCHEMA: &str = "webui.run_completion_grant.v1";
+/// Schema tag stamped on [`RunCompletionClearEvent`].
 pub const RUN_COMPLETION_CLEAR_SCHEMA: &str = "webui.run_completion_clear.v1";
 
 /// The closed run-completion logical stream vocabulary. `Notice` opens or
@@ -203,7 +205,7 @@ pub struct RunCompletionMutationResponse {
     pub settled_notice_ids: Vec<String>,
 }
 
-/// `webui.run-completions.unread.v1` params: the bounded unread/unsettled
+/// `webui.run_completion.unread.v1` params: the bounded unread/unsettled
 /// snapshot for boot recovery and stream rebase.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCompletionUnreadRequest {}
@@ -219,28 +221,33 @@ pub struct RunCompletionUnreadResponse {
     pub resume_sequence: String,
 }
 
-/// Frozen operation IDs (§7.8). The concrete descriptor constants live here
-/// with the other generic notification descriptors; behavior stays behind
-/// the product surface.
+// Frozen operation IDs (§7.8). The concrete descriptor constants live in this
+// crate beside the `notification_setup` / `notification_inbox` descriptors;
+// behavior stays behind the product surface.
+
+/// Submit one browser profile's presentation intent for a notice.
 pub const RUN_COMPLETION_INTENT_COMMAND_ID: &str = "webui.run_completion.intent.v1";
 pub const RUN_COMPLETION_INTENT_COMMAND: ProductSurfaceCommandDescriptor<
     RunCompletionIntentRequest,
     RunCompletionMutationResponse,
 > = ProductSurfaceCommandDescriptor::new(RUN_COMPLETION_INTENT_COMMAND_ID);
 
+/// Acknowledge a presentation grant: rendered, presented, or regressed.
 pub const RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID: &str = "webui.run_completion.acknowledge.v1";
 pub const RUN_COMPLETION_ACKNOWLEDGE_COMMAND: ProductSurfaceCommandDescriptor<
     RunCompletionAcknowledgeRequest,
     RunCompletionMutationResponse,
 > = ProductSurfaceCommandDescriptor::new(RUN_COMPLETION_ACKNOWLEDGE_COMMAND_ID);
 
+/// Focused-thread-visit read evidence through a completion sequence.
 pub const RUN_COMPLETION_THREAD_READ_COMMAND_ID: &str = "webui.run_completion.thread_read.v1";
 pub const RUN_COMPLETION_THREAD_READ_COMMAND: ProductSurfaceCommandDescriptor<
     RunCompletionThreadReadRequest,
     RunCompletionMutationResponse,
 > = ProductSurfaceCommandDescriptor::new(RUN_COMPLETION_THREAD_READ_COMMAND_ID);
 
-pub const RUN_COMPLETION_UNREAD_VIEW_ID: &str = "webui.run-completions.unread.v1";
+/// The bounded unread/unsettled snapshot for boot recovery and stream rebase.
+pub const RUN_COMPLETION_UNREAD_VIEW_ID: &str = "webui.run_completion.unread.v1";
 pub const RUN_COMPLETION_UNREAD_VIEW: ProductView<
     RunCompletionUnreadRequest,
     RunCompletionUnreadResponse,

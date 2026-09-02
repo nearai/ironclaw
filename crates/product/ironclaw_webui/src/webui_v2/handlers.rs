@@ -21,7 +21,7 @@ pub use run_artifact::{
     admin_list_thread_scrape_threads, get_run_artifact, get_thread_artifact,
 };
 pub use session_events::{
-    SessionSocketTicketResponse, mint_session_socket_ticket, session_websocket,
+    SessionSocketTicketResponse, session_websocket, session_websocket_ticket,
 };
 
 use std::convert::Infallible;

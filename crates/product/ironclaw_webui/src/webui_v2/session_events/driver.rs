@@ -17,7 +17,7 @@ use ironclaw_product_contracts::surface::{
     ProductSurfaceEventSubscription, ProductSurfaceStreamRequest,
 };
 
-use super::super::sse_capacity::SSE_MAX_LIFETIME;
+use crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME;
 
 /// Base interval between service polls while a drain-only stream is idle.
 pub(crate) const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);

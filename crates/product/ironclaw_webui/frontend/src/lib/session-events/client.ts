@@ -181,6 +181,12 @@ export class SessionEventClient {
     this.degraded = true;
     this.teardownSocket();
     this.setStatus("degraded");
+    // Page-lifetime decision, so leave a trace for support consoles: a
+    // browser that never gets a socket is otherwise indistinguishable from
+    // one that was never offered it. Never the ticket value.
+    console.warn(
+      "IronClaw session socket degraded to compatibility SSE after repeated connect failures",
+    );
   }
 
   private teardownSocket() {

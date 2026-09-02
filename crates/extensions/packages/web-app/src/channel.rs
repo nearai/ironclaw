@@ -42,6 +42,9 @@ use ironclaw_web_app::{
 /// Deep link a notification opens; the service worker resolves it against
 /// the app origin.
 const NOTIFICATION_URL: &str = "/automations";
+/// SPA route a run-completion push deep-links into; the typed thread id is
+/// appended as one percent-encoded segment by the payload builder.
+const RUN_COMPLETION_THREAD_ROUTE: &str = "/chat";
 const NOTIFICATION_TITLE: &str = "IronClaw";
 /// Fixed run-completion copy (design §7.10): a push payload never carries
 /// generated or protected content, only this generic sentence.
@@ -127,6 +130,7 @@ impl ChannelDelivery for WebAppChannelAdapter {
                     run_completion = Some(WebAppNotificationPayload::run_completion(
                         NOTIFICATION_TITLE,
                         RUN_COMPLETION_BODY,
+                        RUN_COMPLETION_THREAD_ROUTE,
                         view.thread_id.as_str(),
                         view.notice_id.clone(),
                         view.opaque_thread_tag.clone(),

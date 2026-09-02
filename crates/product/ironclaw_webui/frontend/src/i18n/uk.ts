@@ -57,10 +57,6 @@ registerPack("uk", {
   "notifications.pageLimit": "Давніші повідомлення тут не показуються.",
   "notifications.allCaughtUp": "Усе переглянуто",
   "notifications.unreadCount": "{count} нових",
-  "runCompletions.toastOne": "Запуск агента завершено. Відкрийте гілку, щоб побачити відповідь.",
-  "runCompletions.toastMany": "У одній гілці завершено {count} запусків агента.",
-  "runCompletions.listItemOne": "Запуск агента завершено — відповідь готова",
-  "runCompletions.listItemMany": "Завершено {count} запусків — відповіді готові",
   "notifications.unread": "Непрочитане",
   "notifications.markAllRead": "Позначити все як прочитане",
   "notifications.resolved": "Вирішено",
@@ -86,6 +82,11 @@ registerPack("uk", {
   "notifications.approval.title": "Потрібне підтвердження",
   "notifications.approval.detail": "Потребує вашого підтвердження",
   "notifications.approval.untitled": "Гілка без назви",
+  // Run completions
+  "runCompletions.toastOne": "Запуск агента завершено. Відкрийте гілку, щоб побачити відповідь.",
+  "runCompletions.toastMany": "У одній гілці завершено {count} запусків агента.",
+  "runCompletions.listItemOne": "Запуск агента завершено — відповідь готова",
+  "runCompletions.listItemMany": "Завершено {count} запусків — відповіді готові",
 
   // Status
   "status.online": "онлайн",

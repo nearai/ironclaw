@@ -919,7 +919,7 @@ thread, and have finalized replies at or below the supplied sequence.
 The bounded unread/rebase view uses `ProductSurface::query` with view ID:
 
 ```text
-webui.run-completions.unread.v1
+webui.run_completion.unread.v1
 ```
 
 ### 7.9 Typed outbound completion part
