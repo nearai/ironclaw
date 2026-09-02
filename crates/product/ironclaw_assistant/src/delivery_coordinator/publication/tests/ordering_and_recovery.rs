@@ -1278,3 +1278,60 @@ async fn the_sink_timeout_is_bounded_by_the_remaining_lease_not_the_full_ttl() {
     );
     coordinator.shutdown_reply_publication().await;
 }
+
+/// The stored ingress context is snapshotted at registration and persisted
+/// on the descriptor for resumes. What is persisted is the SEAM-BOUNDED
+/// value the worker publishes with — an oversized stored context is dropped
+/// once, at registration, not stored raw and re-validated on every read.
+#[tokio::test]
+async fn the_descriptor_persists_the_validated_reply_context_not_the_raw_bytes() {
+    let base = harness("bounded-context", ReplyTransport::Stream, None);
+    let oversized = vec![b'x'; ironclaw_extension_contracts::reply::REPLY_CONTEXT_MAX_BYTES + 1];
+    let sink = Arc::new(RecordingReplySink::new("bounded-context"));
+    let coordinator = Arc::new(DeliveryCoordinator::new(
+        Arc::clone(&base.store),
+        Arc::new(AnySinkResolver {
+            sink: Arc::clone(&sink) as Arc<dyn ironclaw_extension_contracts::reply::ReplySink>,
+            transport: ReplyTransport::Stream,
+        }),
+        Arc::new(FixedReplyContext(Some(oversized))),
+        Arc::new(NoDeliveryRegistrations),
+        DeliveryRetryPolicy {
+            max_attempts: 1,
+            backoff: Duration::ZERO,
+        },
+    ));
+    assert!(coordinator.start_reply_publication(ReplyPublicationWiring {
+        projection: Arc::clone(&base.projection),
+        turn_coordinator: Arc::clone(&base.kernel) as Arc<dyn TurnCoordinator>,
+        thread_service: Arc::clone(&base.threads) as Arc<dyn SessionThreadService>,
+        approval_context: None,
+        blocked_auth_prompts: None,
+        project_filesystem: Arc::new(crate::NoProjectFilesystem),
+        session_channel: None,
+        settings: settings(),
+    }));
+    coordinator
+        .register_reply_target(base.registration(ReplyAudience::Private))
+        .await
+        .unwrap();
+
+    let record = base
+        .store
+        .list_reply_publications(base.scope.clone(), base.run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("the registration opened a row");
+    assert_eq!(
+        record
+            .publication
+            .descriptor
+            .expect("descriptor")
+            .reply_context,
+        None,
+        "an over-bound context is dropped at registration, never persisted raw"
+    );
+    coordinator.shutdown_reply_publication().await;
+}

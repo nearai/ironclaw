@@ -69,7 +69,7 @@ impl DeliveryCoordinator {
             .await
             .map_err(|error| {
                 tracing::debug!(
-                    target: "ironclaw::reborn::delivery",
+                    target: super::publication::LOG_TARGET,
                     extension_id = %channel.extension_id,
                     %error,
                     "reply publication: reply-context read failed"

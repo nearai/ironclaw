@@ -906,7 +906,7 @@ fn strip_control(value: &str) -> String {
         .collect()
 }
 
-fn display_text(value: &str) -> Option<ReplyDisplayText> {
+pub(crate) fn display_text(value: &str) -> Option<ReplyDisplayText> {
     let stripped = strip_control(value);
     ReplyDisplayText::new(char_boundary_prefix(
         &stripped,
@@ -915,7 +915,7 @@ fn display_text(value: &str) -> Option<ReplyDisplayText> {
     .ok()
 }
 
-fn display_preview(value: &str) -> Option<ReplyDisplayPreview> {
+pub(crate) fn display_preview(value: &str) -> Option<ReplyDisplayPreview> {
     let stripped = strip_control(value);
     ReplyDisplayPreview::new(char_boundary_prefix(
         &stripped,

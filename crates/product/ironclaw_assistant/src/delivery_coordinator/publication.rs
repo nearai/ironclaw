@@ -47,7 +47,7 @@ use ironclaw_extension_contracts::channel::ReplyTransport;
 use ironclaw_extension_contracts::external::ExternalConversationRef;
 use ironclaw_extension_contracts::reply::{ReplyAudience, ReplyContextBytes, ReplyThreadAnchor};
 use ironclaw_host_api::ids::ExtensionId;
-use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_host_api::turn::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use ironclaw_outbound::{
     OutboundDeliveryId, PublisherId, ReplyPublicationRecord, ReplyPublicationSettlement,
     ReplyPublicationTargetDescriptor, ReplyPublicationTargetKey,
@@ -65,6 +65,8 @@ use tokio::task::JoinHandle;
 use super::{CoordinatedDeliveryError, DeliveryCoordinator, OpenReplyPublication};
 use crate::ProjectFilesystemReader;
 use crate::projection::reply::{ReplyProjection, ReplyProjectionEvent, ReplyProjectionObserver};
+
+pub(crate) const LOG_TARGET: &str = "ironclaw::reborn::reply_publication";
 
 mod kernel_ports;
 mod worker;
@@ -287,7 +289,7 @@ impl DeliveryCoordinator {
                     // If the grammar ever tightens, refuse to start rather
                     // than panic inside composition wiring.
                     tracing::error!(
-                        target: "ironclaw::reborn::reply_publication",
+                        target: LOG_TARGET,
                         %error,
                         "reply publication publisher id was rejected; publication not started"
                     );
@@ -350,7 +352,7 @@ impl DeliveryCoordinator {
         let key = RunKey::new(scope, run_id);
         if let Err(error) = publication.recover_run(&key).await {
             tracing::debug!(
-                target: "ironclaw::reborn::reply_publication",
+                target: LOG_TARGET,
                 %run_id,
                 %error,
                 "reply publication recovery failed; the next terminal signal retries"
@@ -388,7 +390,7 @@ impl DeliveryCoordinator {
                     Ok(_) => {}
                     Err(error) => {
                         tracing::debug!(
-                            target: "ironclaw::reborn::reply_publication",
+                            target: LOG_TARGET,
                             %run_id,
                             %error,
                             "could not read the run's publications while waiting for settlement"
@@ -443,7 +445,7 @@ impl DeliveryCoordinator {
                 }
                 Err(error) => {
                     tracing::debug!(
-                        target: "ironclaw::reborn::reply_publication",
+                        target: LOG_TARGET,
                         %run_id,
                         %error,
                         "could not read the target publication while waiting for the current revision"
@@ -497,8 +499,13 @@ impl DeliveryCoordinator {
             .flat_map(|(_, targets)| targets)
             .collect();
         for target in targets {
-            if let Some(task) = target.task.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let task = target.task.lock().unwrap_or_else(|p| p.into_inner()).take();
+            if let Some(task) = task {
+                // Abort, then wait for the worker to actually stop before the
+                // lease is handed back: a worker mid-write must not land a
+                // guarded advance after another publisher has claimed the row.
                 task.abort();
+                let _ = task.await; // silent-ok: an aborted join is Cancelled.
             }
             let scope = target.registration.scope.clone();
             let held = match self
@@ -517,7 +524,7 @@ impl DeliveryCoordinator {
                 Ok(_) => None,
                 Err(error) => {
                     tracing::debug!(
-                        target: "ironclaw::reborn::reply_publication",
+                        target: LOG_TARGET,
                         delivery_id = %target.delivery_id,
                         %error,
                         "could not read a publication during shutdown; its lease will lapse"
@@ -531,7 +538,7 @@ impl DeliveryCoordinator {
                     .await
             {
                 tracing::debug!(
-                    target: "ironclaw::reborn::reply_publication",
+                    target: LOG_TARGET,
                     delivery_id = %target.delivery_id,
                     %error,
                     "could not release a publication lease during shutdown; it will lapse"
@@ -679,7 +686,7 @@ impl ReplyPublication {
                 .unwrap_or_else(|p| p.into_inner())
                 .remove(key);
             tracing::debug!(
-                target: "ironclaw::reborn::reply_publication",
+                target: LOG_TARGET,
                 run_id = %key.run_id,
                 "run has no actor yet; the session channel target registration is retried on the next revision"
             );
@@ -693,10 +700,14 @@ impl ReplyPublication {
             Ok(reply_target) => reply_target,
             Err(error) => {
                 tracing::debug!(
-                    target: "ironclaw::reborn::reply_publication",
+                    target: LOG_TARGET,
                     %error,
                     "session channel reply target ref is invalid"
                 );
+                self.session_registrations
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(key);
                 return;
             }
         };
@@ -715,7 +726,7 @@ impl ReplyPublication {
         tokio::spawn(async move {
             if let Err(error) = publication.register_target(registration).await {
                 tracing::debug!(
-                    target: "ironclaw::reborn::reply_publication",
+                    target: LOG_TARGET,
                     run_id = %key.run_id,
                     %error,
                     "session channel target registration failed"
@@ -764,7 +775,7 @@ impl ReplyPublication {
         let reply_context_bytes = coordinator
             .reply_context_for_publication(&channel, registration.conversation.as_ref())
             .await?;
-        let reply_context = validate_reply_context(reply_context_bytes.clone());
+        let reply_context = validate_reply_context(reply_context_bytes);
         let record = coordinator
             .open_reply_publication(OpenReplyPublication {
                 scope: registration.scope.clone(),
@@ -779,7 +790,11 @@ impl ReplyPublication {
                     thread_anchor: registration.thread_anchor.clone(),
                     audience: registration.audience,
                     transport,
-                    reply_context: reply_context_bytes,
+                    // The seam-bounded value the worker publishes with; an
+                    // over-bound stored context was dropped once, just above.
+                    reply_context: reply_context
+                        .as_ref()
+                        .map(|context| context.as_bytes().to_vec()),
                 },
             })
             .await?;
@@ -899,7 +914,7 @@ impl ReplyPublication {
             }
             let Some(descriptor) = record.publication.descriptor.clone() else {
                 tracing::debug!(
-                    target: "ironclaw::reborn::reply_publication",
+                    target: LOG_TARGET,
                     run_id = %key.run_id,
                     delivery_id = %record.attempt.delivery_id,
                     "open reply publication carries no target descriptor; settling Unknown"
@@ -954,7 +969,7 @@ impl ReplyPublication {
             .remove(key);
         if let Err(error) = outcome {
             tracing::debug!(
-                target: "ironclaw::reborn::reply_publication",
+                target: LOG_TARGET,
                 run_id = %key.run_id,
                 %error,
                 "terminal reply facts could not be applied; the next terminal signal retries"
@@ -1013,7 +1028,7 @@ impl ReplyPublication {
                 key.run_id,
             )
             .await?;
-            if is_terminal(facts.status) {
+            if facts.status.is_terminal() {
                 self.terminal_attachments
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
@@ -1039,23 +1054,13 @@ fn validate_reply_context(bytes: Option<Vec<u8>>) -> Option<ReplyContextBytes> {
         Ok(context) => Some(context),
         Err(error) => {
             tracing::debug!(
-                target: "ironclaw::reborn::reply_publication",
+                target: LOG_TARGET,
                 %error,
                 "stored reply context exceeds the seam bound; publishing without it"
             );
             None
         }
     })
-}
-
-fn is_terminal(status: TurnStatus) -> bool {
-    matches!(
-        status,
-        TurnStatus::Completed
-            | TurnStatus::Failed
-            | TurnStatus::Cancelled
-            | TurnStatus::RecoveryRequired
-    )
 }
 
 async fn settle_unaddressable(
@@ -1073,7 +1078,7 @@ async fn settle_unaddressable(
         .await
     {
         tracing::debug!(
-            target: "ironclaw::reborn::reply_publication",
+            target: LOG_TARGET,
             delivery_id = %record.attempt.delivery_id,
             %error,
             "could not settle an unaddressable reply publication"

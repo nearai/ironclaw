@@ -8,8 +8,7 @@
 use std::sync::Arc;
 
 use ironclaw_extension_contracts::reply::{
-    REPLY_DISPLAY_PREVIEW_MAX_BYTES, REPLY_DISPLAY_TEXT_MAX_BYTES, ReplyAttentionKind,
-    ReplyAudience, ReplyDisplayPreview, ReplyDisplayText, ReplyDocument, ReplyTarget,
+    ReplyAttentionKind, ReplyAudience, ReplyDocument, ReplyTarget,
 };
 use ironclaw_host_api::turn::{TurnActor, TurnGateRef, TurnRunId, TurnScope, TurnStatus};
 use ironclaw_product_contracts::prompt_source::{
@@ -19,11 +18,11 @@ use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadServi
 use ironclaw_turns::{CancelRunRequest, GetRunStateRequest, TurnCoordinator, TurnExecutionOutcome};
 
 use super::ReplyPublicationError;
-use crate::projection::reply::TerminalReplyFacts;
+use crate::projection::reply::{TerminalReplyFacts, display_preview, display_text};
 use crate::projection::runtime_failure_summary_for_category;
 use crate::run_delivery::prompts;
 
-const LOG_TARGET: &str = "ironclaw::reborn::reply_publication";
+use super::LOG_TARGET;
 
 /// Terminal facts from the two durable owners: the run's committed state
 /// (turn kernel) and its finalized transcript row (thread service).
@@ -248,28 +247,4 @@ pub(super) async fn enrich_attention(
         }
         ReplyAttentionKind::Resource => {}
     }
-}
-
-fn display_text(value: &str) -> Option<ReplyDisplayText> {
-    let stripped: String = value
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect();
-    let mut end = stripped.len().min(REPLY_DISPLAY_TEXT_MAX_BYTES);
-    while end > 0 && !stripped.is_char_boundary(end) {
-        end -= 1;
-    }
-    ReplyDisplayText::new(&stripped[..end]).ok() // safety: `end` walked back to a char boundary above.
-}
-
-fn display_preview(value: &str) -> Option<ReplyDisplayPreview> {
-    let stripped: String = value
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect();
-    let mut end = stripped.len().min(REPLY_DISPLAY_PREVIEW_MAX_BYTES);
-    while end > 0 && !stripped.is_char_boundary(end) {
-        end -= 1;
-    }
-    ReplyDisplayPreview::new(&stripped[..end]).ok() // safety: `end` walked back to a char boundary above.
 }

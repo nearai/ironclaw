@@ -45,7 +45,7 @@ use crate::delivery_coordinator::{
 };
 use crate::projection::reply::{ReplySnapshot, disclose_for_audience};
 
-const LOG_TARGET: &str = "ironclaw::reborn::reply_publication";
+use super::LOG_TARGET;
 
 /// What the last successful reconcile looked like, to tell a control-critical
 /// transition from ordinary progress.
