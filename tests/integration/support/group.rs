@@ -1649,8 +1649,6 @@ type ThreadModelProviderParts = (
 );
 
 impl<'g> RebornThreadBuilder<'g> {
-    /// Set the scripted model replies for this thread (consumed in order at the
-    /// raw-provider seam, one per model turn).
     /// Make the scripted model advertise a total context window, so the run's
     /// prompt context budget is derived from it instead of the compiled-in
     /// default. Unset — the default — advertises nothing.
@@ -1659,6 +1657,8 @@ impl<'g> RebornThreadBuilder<'g> {
         self
     }
 
+    /// Set the scripted model replies for this thread (consumed in order at the
+    /// raw-provider seam, one per model turn).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
         self.replies = replies.into_iter().collect();
         self

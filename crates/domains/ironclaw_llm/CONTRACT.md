@@ -236,6 +236,7 @@ Key notes:
 - `cost_per_token()` returns `(Decimal, Decimal)` using `rust_decimal`. Look up via `costs::model_cost()` in your constructor; fall back to `costs::default_cost()` for unknowns.
 - `RigAdapter` forwards per-request model overrides through rig-core's typed request model field. Do not put `model` in flattened `additional_params`, which would serialize a duplicate top-level JSON key.
 - `complete_with_tools()` is never cached (tool calls can have side effects) — `CachedProvider` always passes them through.
+- `model_metadata().context_length` is now consumed at runtime: `ironclaw_loop_host`'s `LlmProviderModelGateway::advertised_context_window_tokens` reads it — only when the returned `ModelMetadata::id` matches the model the request will actually be served by — to derive the per-run prompt context budget. A provider that populates `context_length` therefore changes prompt sizing and compaction thresholds for runs served by that model; a provider that leaves it `None` keeps the compiled-in default.
 
 To add a new provider:
 1. Create `crates/domains/ironclaw_llm/src/myprovider.rs` implementing `LlmProvider` <!-- check-guidance: path-ok --> (prescriptive: the file you are about to add, not one that exists)

@@ -433,7 +433,7 @@ where
         // Advisory only: a provider that cannot report a window for the model
         // this run will actually be served must leave the run on the
         // compiled-in budget, never fail the run.
-        let metadata = self.provider.model_metadata().await.ok()?;
+        let metadata = self.provider.model_metadata().await.ok()?; // silent-ok: advisory context-window probe, run proceeds on compiled-in budget
         // `model_metadata()` takes no model argument -- it describes whatever
         // model the provider was configured with. The served model is resolved
         // per request (a route override wins, and providers that honor
