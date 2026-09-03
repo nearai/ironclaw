@@ -294,6 +294,7 @@ where
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
+            thread_id: Some(self.run_context.thread_id.clone()),
             tool_choice: None,
             response_format,
         };

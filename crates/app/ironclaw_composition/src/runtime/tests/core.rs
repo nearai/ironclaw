@@ -2025,6 +2025,7 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
         fallback_index: 0,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        thread_id: None,
         tool_choice: None,
         response_format: None,
     }
@@ -2117,7 +2118,7 @@ async fn swappable_gateway_uses_current_active_model_for_requests() {
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = provider.clone();
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
-    let bundle = super::wrap_swappable_gateway(raw, session, None).expect("gateway bundle");
+    let bundle = super::wrap_swappable_gateway(raw, session, None, None).expect("gateway bundle");
 
     bundle
         .gateway
@@ -2287,7 +2288,7 @@ async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
     let built = ironclaw_llm::build_static_provider_chain(&config, Arc::clone(&session))
         .await
         .expect("provider chain builds from config");
-    let bundle = super::wrap_swappable_gateway(built, session, None).expect("gateway builds");
+    let bundle = super::wrap_swappable_gateway(built, session, None, None).expect("gateway builds");
     let response = bundle
         .gateway
         .stream_model(nearai_gateway_test_request())
@@ -2755,6 +2756,7 @@ async fn wrap_swappable_gateway_applies_provider_factory() {
         built,
         session,
         Some(Arc::new(move |_built| Arc::clone(&factory_mock))),
+        None,
     )
     .expect("gateway builds with the provider factory");
 
@@ -2878,7 +2880,7 @@ async fn provider_factory_survives_live_reload() {
     let built = ironclaw_llm::build_static_provider_chain(&config, Arc::clone(&session))
         .await
         .expect("provider chain builds from config");
-    let bundle = super::wrap_swappable_gateway(built, session, Some(factory))
+    let bundle = super::wrap_swappable_gateway(built, session, Some(factory), None)
         .expect("gateway builds with the provider factory");
 
     // First model call routes through the instrumentation wrapper. The dead

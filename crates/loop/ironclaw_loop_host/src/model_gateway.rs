@@ -372,6 +372,14 @@ where
     policy: LlmModelProfilePolicy,
     provider_turn_sequence: Arc<AtomicU64>,
     prompt_cache_activity: Arc<PromptCacheActivityLog>,
+    /// Subkey the gateway HMAC-keys [`derive_prompt_cache_key`] under.
+    /// `None` (the default from both constructors) means no deployment
+    /// master key was available when this gateway was assembled — the
+    /// gateway then omits `prompt_cache_key` from provider requests
+    /// entirely rather than falling back to an unkeyed digest (fail closed,
+    /// see [`add_request_metadata`]). Composition installs a real subkey via
+    /// [`Self::with_prompt_cache_subkey`].
+    prompt_cache_subkey: Option<[u8; 32]>,
 }
 
 impl<P> LlmProviderModelGateway<P>
@@ -394,7 +402,18 @@ where
             policy,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
             prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
+            prompt_cache_subkey: None,
         }
+    }
+
+    /// Install the subkey used to HMAC-key the provider-visible
+    /// `prompt_cache_key` hint. Composition derives this from
+    /// `ironclaw_secrets::SecretsCrypto::derive_subkey` under the deployment
+    /// master key and calls this after construction; without it, the
+    /// gateway never emits `prompt_cache_key` at all.
+    pub fn with_prompt_cache_subkey(mut self, subkey: [u8; 32]) -> Self {
+        self.prompt_cache_subkey = Some(subkey);
+        self
     }
 
     fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
@@ -449,6 +468,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.as_ref();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -458,7 +478,14 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id,
+            self.prompt_cache_subkey.as_ref(),
+        );
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
         let result = complete_model_request(
@@ -500,6 +527,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.as_ref();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -509,7 +537,14 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id,
+            self.prompt_cache_subkey.as_ref(),
+        );
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
         let result = complete_model_request(
@@ -551,6 +586,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.as_ref();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -560,7 +596,14 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id,
+            self.prompt_cache_subkey.as_ref(),
+        );
 
         let provider_turn_scope = format!(
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
@@ -607,6 +650,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.as_ref();
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
                 self.provider.as_ref(),
@@ -616,7 +660,14 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id,
+            self.prompt_cache_subkey.as_ref(),
+        );
 
         let provider_turn_scope = format!(
             "run={run_id}\nturn={turn_id}\nmodel_call={}",
@@ -747,6 +798,10 @@ where
     route_resolver: Arc<dyn ModelRouteResolver>,
     provider_turn_sequence: Arc<AtomicU64>,
     prompt_cache_activity: Arc<PromptCacheActivityLog>,
+    /// Mirrors `LlmProviderModelGateway`'s field of the same name: `None`
+    /// omits `prompt_cache_key` entirely rather than falling back to an
+    /// unkeyed digest.
+    prompt_cache_subkey: Option<[u8; 32]>,
 }
 
 impl<P> RoutedLlmProviderModelGateway<P>
@@ -759,7 +814,14 @@ where
             route_resolver,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
             prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
+            prompt_cache_subkey: None,
         }
+    }
+
+    /// See [`LlmProviderModelGateway::with_prompt_cache_subkey`].
+    pub fn with_prompt_cache_subkey(mut self, subkey: [u8; 32]) -> Self {
+        self.prompt_cache_subkey = Some(subkey);
+        self
     }
 
     fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
@@ -787,6 +849,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.as_ref();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -797,7 +860,14 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id,
+            self.prompt_cache_subkey.as_ref(),
+        );
         add_route_metadata(&mut completion, &snapshot);
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -831,6 +901,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.as_ref();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -841,7 +912,14 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id,
+            self.prompt_cache_subkey.as_ref(),
+        );
         add_route_metadata(&mut completion, &snapshot);
 
         let diagnostic_effective_model = replay_identity.provider_model_id.clone();
@@ -875,6 +953,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.as_ref();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -885,7 +964,14 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id,
+            self.prompt_cache_subkey.as_ref(),
+        );
         add_route_metadata(&mut completion, &snapshot);
 
         let provider_turn_scope = format!(
@@ -924,6 +1010,7 @@ where
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
+        let thread_id = request.thread_id.as_ref();
         validate_provider_model_binding_matches_route(snapshot.route(), provider.as_ref())?;
         let (mut completion, replay_identity, effective_fallback_index, next_fallback_index) =
             prepare_fallback_completion(
@@ -934,7 +1021,14 @@ where
                 request.messages,
             )?;
         completion.response_format = request.response_format.clone();
-        add_request_metadata(&mut completion, &model_profile_id, run_id, turn_id);
+        add_request_metadata(
+            &mut completion,
+            &model_profile_id,
+            run_id,
+            turn_id,
+            thread_id,
+            self.prompt_cache_subkey.as_ref(),
+        );
         add_route_metadata(&mut completion, &snapshot);
 
         let provider_turn_scope = format!(
@@ -977,11 +1071,73 @@ where
     }
 }
 
+/// Domain separator mixed into the HMAC input for
+/// [`derive_prompt_cache_key`], so the tag can never be confused with a
+/// digest of the same bytes computed for an unrelated purpose elsewhere.
+const PROMPT_CACHE_KEY_DOMAIN_SEPARATOR: &str = "ironclaw.prompt-cache-key.v1:";
+
+type PromptCacheKeyHmac = hmac::Hmac<sha2::Sha256>;
+
+/// Derive the value sent to the provider under
+/// [`ironclaw_llm::PROMPT_CACHE_KEY_METADATA`]: a domain-separated
+/// HMAC-SHA-256 of the thread id under `subkey`, hex-encoded and truncated
+/// to 32 characters (the wire shape is unchanged from the digest this
+/// replaced).
+///
+/// `subkey` must come from `ironclaw_secrets::SecretsCrypto::derive_subkey`
+/// under the deployment master key — that is what makes this a
+/// confirmation-*resistant* pseudonym instead of the unkeyed SHA-256 this
+/// replaced (CWE-359): `ThreadId` is caller-authoritative free text (emails,
+/// usernames — low entropy), so anyone who knows the (public) hash formula
+/// could brute-force candidate ids against an unkeyed digest and confirm a
+/// match. Keying under a secret the provider never sees closes that
+/// oracle. This is still pseudonymization for an external cache-routing
+/// hint, not an authenticity guarantee.
+///
+/// No tenant/user scope is mixed in: a cache hit still requires an
+/// identical prompt prefix, which is already per-user, so plumbing tenant
+/// scope through every call site would buy nothing. Stable across turns by
+/// construction — no salt, run id, or timestamp in the input — which is the
+/// whole point of a per-conversation routing key: changing the subkey (i.e.
+/// the deployment master key) changes every derived cache key at once, by
+/// design.
+///
+/// Returns `None` if the MAC cannot be keyed. HMAC accepts a key of any
+/// length (RFC 2104), so a fixed 32-byte subkey cannot trip this in
+/// practice — but the caller omits the field rather than panicking, which
+/// keeps the fail-closed rule total: every path that cannot produce a keyed
+/// value sends no value at all.
+fn derive_prompt_cache_key(
+    subkey: &[u8; 32],
+    thread_id: &ironclaw_host_api::ids::ThreadId,
+) -> Option<String> {
+    use hmac::{KeyInit as _, Mac as _};
+
+    let mut mac = PromptCacheKeyHmac::new_from_slice(subkey).ok()?;
+    mac.update(PROMPT_CACHE_KEY_DOMAIN_SEPARATOR.as_bytes());
+    mac.update(thread_id.as_str().as_bytes());
+    let tag = mac.finalize().into_bytes();
+    Some(to_lower_hex(&tag).chars().take(32).collect())
+}
+
+fn to_lower_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        // `write!` into a `String` never fails.
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 fn add_request_metadata(
     completion: &mut CompletionRequest,
     model_profile_id: &ModelProfileId,
     run_id: TurnRunId,
     turn_id: TurnId,
+    thread_id: Option<&ironclaw_host_api::ids::ThreadId>,
+    prompt_cache_subkey: Option<&[u8; 32]>,
 ) {
     completion.metadata.insert(
         "model_profile_id".to_string(),
@@ -993,6 +1149,25 @@ fn add_request_metadata(
     completion
         .metadata
         .insert("run_id".to_string(), run_id.to_string());
+    // Carried forward into `ToolCompletionRequest` by
+    // `ToolCompletionRequest::from_completion_request`, so this single
+    // insertion covers both the plain-completion and tool-completion paths.
+    // Absent (legacy replay wire shapes with no `thread_id`) rather than
+    // falling back to `run_id` — a per-run key would fragment the OpenAI
+    // prompt cache across a conversation's turns instead of reusing it.
+    //
+    // Also absent whenever no subkey is configured (no deployment master
+    // key available to this gateway instance) — fail closed. There is no
+    // fallback to an unkeyed digest: losing the cache-routing optimization
+    // is acceptable, sending a guessable pseudonym to the provider is not.
+    if let (Some(thread_id), Some(subkey)) = (thread_id, prompt_cache_subkey)
+        && let Some(cache_key) = derive_prompt_cache_key(subkey, thread_id)
+    {
+        completion.metadata.insert(
+            ironclaw_llm::PROMPT_CACHE_KEY_METADATA.to_string(),
+            cache_key,
+        );
+    }
 }
 
 fn with_model_diagnostic_evidence(
@@ -2959,6 +3134,58 @@ fn is_legacy_credit_exhaustion_error(error: &LlmError) -> bool {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn derive_prompt_cache_key_is_stable_and_never_leaks_the_raw_thread_id() {
+        let thread_id = ironclaw_host_api::ids::ThreadId::new("user@example.com").unwrap();
+        let other_thread_id = ironclaw_host_api::ids::ThreadId::new("thread-other").unwrap();
+        let subkey = [7u8; 32];
+        let other_subkey = [9u8; 32];
+
+        let key_a = derive_prompt_cache_key(&subkey, &thread_id)
+            .expect("a 32-byte subkey always keys HMAC-SHA-256");
+        let key_b = derive_prompt_cache_key(&subkey, &thread_id)
+            .expect("a 32-byte subkey always keys HMAC-SHA-256");
+        let key_other_thread = derive_prompt_cache_key(&subkey, &other_thread_id)
+            .expect("a 32-byte subkey always keys HMAC-SHA-256");
+        let key_other_subkey = derive_prompt_cache_key(&other_subkey, &thread_id)
+            .expect("a 32-byte subkey always keys HMAC-SHA-256");
+
+        assert_eq!(
+            key_a, key_b,
+            "same subkey + same thread id must derive an identical key"
+        );
+        assert_ne!(
+            key_a, key_other_thread,
+            "different thread ids must derive different keys"
+        );
+        assert_ne!(
+            key_a, key_other_subkey,
+            "different subkeys must derive different keys for the same thread id"
+        );
+        assert_eq!(key_a.len(), 32);
+        assert!(key_a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            !key_a.contains("user@example.com"),
+            "the derived key must never contain the raw thread id"
+        );
+
+        // Proves the derivation is actually *keyed*: it must not collapse to
+        // the unkeyed SHA-256 digest this replaced, which anyone could
+        // recompute from the (public) domain separator and a guessed thread
+        // id — the confirmation oracle this fix closes (CWE-359).
+        let unkeyed_digest = sha256_digest_token(
+            format!("{PROMPT_CACHE_KEY_DOMAIN_SEPARATOR}{thread_id}").as_bytes(),
+        );
+        let unkeyed_hex = unkeyed_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(unkeyed_digest.as_str());
+        let unkeyed_truncated: String = unkeyed_hex.chars().take(32).collect();
+        assert_ne!(
+            key_a, unkeyed_truncated,
+            "the keyed derivation must not match the unkeyed digest it replaced"
+        );
+    }
 
     #[derive(Default)]
     struct StopSequenceRecordingProvider {

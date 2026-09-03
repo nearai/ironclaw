@@ -23,8 +23,14 @@ base64 = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 futures = "0.3"
+# Keys the provider-visible prompt-cache-key hint (`derive_prompt_cache_key`
+# in `model_gateway.rs`) with HMAC-SHA-256 under a subkey of the deployment
+# master key, replacing an unkeyed SHA-256 confirmation oracle over
+# caller-authoritative thread ids.
+hmac = "0.13"
 jsonschema = { version = "0.49", default-features = false }
 parking_lot = "0.12"
+sha2 = "0.11"
 tracing = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 ironclaw_capabilities = { path = "../../kernel/ironclaw_capabilities", version = "0.1.0" }

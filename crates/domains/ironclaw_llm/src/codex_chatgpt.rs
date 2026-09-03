@@ -33,7 +33,7 @@ use crate::error::LlmError;
 use super::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition,
+    ToolDefinition, apply_prompt_cache_key,
 };
 
 /// Sanitize a tool name to match the Responses API pattern `^[a-zA-Z0-9_-]+$`.
@@ -365,6 +365,7 @@ impl CodexChatGptProvider {
         tools: &[ToolDefinition],
         tool_choice: Option<&str>,
         response_format: Option<&crate::provider::CompletionResponseFormat>,
+        metadata: &std::collections::HashMap<String, String>,
     ) -> Value {
         // Extract system instructions
         let instructions: String = messages
@@ -418,6 +419,13 @@ impl CodexChatGptProvider {
                 }),
             };
         }
+
+        // Stable per-conversation routing key for OpenAI's prompt cache: an
+        // opaque, already-hashed per-conversation routing key derived from
+        // the thread id (see `PROMPT_CACHE_KEY_METADATA`), not the raw thread
+        // id itself. A per-run key would fragment the cache across a
+        // conversation's turns instead of reusing it.
+        apply_prompt_cache_key(&mut body, metadata);
 
         body
     }
@@ -1187,6 +1195,7 @@ impl CodexChatGptProvider {
             &[],
             None,
             request.response_format.as_ref(),
+            &request.metadata,
         );
         let result = self.send_request_with_sink(body, sink).await?;
 
@@ -1220,6 +1229,7 @@ impl CodexChatGptProvider {
             &request.tools,
             request.tool_choice.as_deref(),
             request.response_format.as_ref(),
+            &request.metadata,
         );
         let result = self.send_request_with_sink(body, sink).await?;
 
@@ -1607,12 +1617,194 @@ mod tests {
             ChatMessage::system("You are helpful."),
             ChatMessage::user("hello"),
         ];
-        let body = provider.build_request_body("gpt-4o", &messages, &[], None, None);
+        let body = provider.build_request_body(
+            "gpt-4o",
+            &messages,
+            &[],
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(body["instructions"], "You are helpful.");
         // input should only contain the user message, not the system message
         assert_eq!(body["input"].as_array().unwrap().len(), 1);
         // store must be false for ChatGPT backend
         assert_eq!(body["store"], false);
+        // No thread_id in metadata -> no prompt_cache_key on the wire.
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn test_build_request_includes_prompt_cache_key_from_thread_id_metadata() {
+        let provider = CodexChatGptProvider::new("https://example.com", "key", "gpt-4o");
+        let messages = vec![ChatMessage::user("hello")];
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "thread-xyz-456".to_string(),
+        );
+
+        let body = provider.build_request_body("gpt-4o", &messages, &[], None, None, &metadata);
+
+        assert_eq!(body["prompt_cache_key"], "thread-xyz-456");
+    }
+
+    /// Loopback server for the ChatGPT-backend flow: `resolve_model` always
+    /// probes `/models` before the actual completion request, so this
+    /// answers that probe with an empty list (falls back to the configured
+    /// model) and then captures the request body of the request that
+    /// follows — the real `/responses` completion call — exactly like
+    /// `anthropic_oauth::tests::capture_one_request`.
+    async fn capture_completion_request() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            // First connection: the /models probe from `resolve_model`.
+            let (mut probe_socket, _) = listener.accept().await.expect("accept models probe");
+            let mut probe_request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = probe_socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("read models probe");
+                probe_request.extend_from_slice(&buffer[..read]);
+                if probe_request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let probe_body = r#"{"models":[]}"#;
+            // `connection: close` tells reqwest's pool not to keep this
+            // socket alive for reuse — without it, the completion request
+            // below can be sent on the reused probe connection instead of a
+            // fresh one, and the `accept()` for the second connection blocks
+            // forever.
+            let probe_response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{probe_body}",
+                probe_body.len()
+            );
+            probe_socket
+                .write_all(probe_response.as_bytes())
+                .await
+                .expect("write models probe response");
+            // Belt and braces: explicitly drop the probe socket rather than
+            // letting it be shadowed, so it cannot be reused for the second
+            // request even if the header above were ever missed.
+            drop(probe_socket);
+
+            // Second connection: the actual completion request, whose body
+            // this test captures.
+            let (mut socket, _) = listener.accept().await.expect("accept completion request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("read completion request");
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers =
+                    std::str::from_utf8(&request[..header_end]).expect("request headers are UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .expect("content length header")
+                    .parse::<usize>()
+                    .expect("content length is numeric");
+                let body_start = header_end + 4;
+                if request.len() < body_start + content_length {
+                    continue;
+                }
+                tx.send(
+                    String::from_utf8(request[body_start..body_start + content_length].to_vec())
+                        .expect("request body is UTF-8"),
+                )
+                .expect("test receives captured request");
+                socket
+                    .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .expect("write test response");
+                return;
+            }
+        });
+        (base_url, rx)
+    }
+
+    async fn captured_completion_json(
+        rx: tokio::sync::oneshot::Receiver<String>,
+    ) -> serde_json::Value {
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("request capture timed out")
+            .expect("captured request body");
+        serde_json::from_str(&body).expect("captured body is JSON")
+    }
+
+    /// Wire-level pin: the public `complete()` path must carry the
+    /// `prompt_cache_key` metadata all the way onto the wire, not just
+    /// through `build_request_body` called directly.
+    #[tokio::test]
+    async fn complete_public_path_sends_prompt_cache_key_metadata_on_the_wire() {
+        let (base_url, captured) = capture_completion_request().await;
+        let provider = CodexChatGptProvider::new(&base_url, "key", "gpt-4o");
+
+        let mut request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-abc".to_string(),
+        );
+
+        let _ = provider.complete(request).await;
+        let body = captured_completion_json(captured).await;
+
+        assert_eq!(body["prompt_cache_key"], "hashed-cache-key-abc");
+    }
+
+    /// Same wire-level pin for the tool-use entry point: `complete_with_tools`
+    /// builds its request body through a different call site than `complete`,
+    /// so it needs its own coverage.
+    #[tokio::test]
+    async fn complete_with_tools_public_path_sends_prompt_cache_key_metadata_on_the_wire() {
+        let (base_url, captured) = capture_completion_request().await;
+        let provider = CodexChatGptProvider::new(&base_url, "key", "gpt-4o");
+
+        let mut request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("search for x")],
+            vec![ToolDefinition {
+                name: "search".to_string(),
+                description: "Search for things".to_string(),
+                parameters: json!({"type": "object"}),
+            }],
+        );
+        request.metadata.insert(
+            crate::provider::PROMPT_CACHE_KEY_METADATA.to_string(),
+            "hashed-cache-key-xyz".to_string(),
+        );
+
+        let _ = provider.complete_with_tools(request).await;
+        let body = captured_completion_json(captured).await;
+
+        assert_eq!(body["prompt_cache_key"], "hashed-cache-key-xyz");
     }
 
     #[test]
@@ -1629,6 +1821,7 @@ mod tests {
             &[],
             None,
             Some(&format),
+            &std::collections::HashMap::new(),
         );
         assert_eq!(
             body["text"]["format"],
@@ -1650,7 +1843,14 @@ mod tests {
             description: "Echo input".to_string(),
             parameters: json!({"type": "object"}),
         }];
-        let body = provider.build_request_body("gpt-4o", &messages, &tools, None, None);
+        let body = provider.build_request_body(
+            "gpt-4o",
+            &messages,
+            &tools,
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(body["tools"][0]["name"], "builtin_echo");
     }
 
@@ -1663,7 +1863,14 @@ mod tests {
             description: "Apply a patch".to_string(),
             parameters: json!({"$ref": "schemas/builtin/apply-patch.input.v1.json"}),
         }];
-        let body = provider.build_request_body("gpt-4o", &messages, &tools, None, None);
+        let body = provider.build_request_body(
+            "gpt-4o",
+            &messages,
+            &tools,
+            None,
+            None,
+            &std::collections::HashMap::new(),
+        );
         assert_eq!(body["tools"][0]["parameters"]["type"], "object");
         assert!(body["tools"][0]["parameters"].get("properties").is_some());
     }

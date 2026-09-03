@@ -1828,6 +1828,7 @@ where
             resolved_model_route: self.run_context.resolved_model_route.clone(),
             run_id: self.run_context.run_id,
             turn_id: self.run_context.turn_id,
+            thread_id: Some(self.run_context.thread_id.clone()),
             tool_choice: request.tool_choice.clone(),
             response_format: None,
         };
@@ -2677,6 +2678,15 @@ pub struct HostManagedModelRequest {
     pub resolved_model_route: Option<HostManagedModelRouteSnapshot>,
     pub run_id: TurnRunId,
     pub turn_id: TurnId,
+    /// Durable thread identity, when known. Hashed (never sent raw) before
+    /// it leaves the process — the gateway derives a domain-separated
+    /// SHA-256 of this value and carries that through to the provider as
+    /// request metadata (see `ironclaw_llm::PROMPT_CACHE_KEY_METADATA`) so
+    /// OpenAI Responses-API providers can set a stable `prompt_cache_key`
+    /// that survives across a conversation's turns. `#[serde(default)]` so
+    /// wire shapes recorded before this field existed keep deserializing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ironclaw_host_api::ids::ThreadId>,
     /// Loop-strategy tool-choice constraint carried through to the provider.
     /// Only valid on tool-capable calls whose visible surface contains the
     /// forced capability; the gateway rejects anything else as caller misuse.

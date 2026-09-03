@@ -72,7 +72,7 @@ owner, and a deleted one fails until its entry goes.
 | `model-catalog` | Facts about **models**: what an endpoint lists, and which models see images, generate images, or think natively | Provider identity or routing | `models.rs`, `reasoning_models.rs`, `vision_models.rs`, `image_models.rs` |
 | `recording` | Trace capture and replay, and binding recorded tool arguments to earlier results | Live provider behavior | `recording.rs`, `trace_binding.rs` |
 | `transcription` | The `TranscriptionProvider` trait and its implementations — a **different trait** from `LlmProvider`, sharing only transports | Anything implementing `LlmProvider` | `transcription/mod.rs`, `transcription/chat_completions.rs`, `transcription/openai.rs` |
-| `test-support` | Fixtures and fault injection, including the published `test-support` feature downstream harnesses consume | Production behavior | `testing/mod.rs`, `testing/fault_injection.rs`, `codex_test_helpers.rs`, `rig_adapter/tests/finish_reason_tests.rs`, `anthropic_oauth/tests.rs` |
+| `test-support` | Fixtures and fault injection, including the published `test-support` feature downstream harnesses consume | Production behavior | `testing/mod.rs`, `testing/fault_injection.rs`, `codex_test_helpers.rs`, `rig_adapter/tests/finish_reason_tests.rs`, `anthropic_oauth/tests.rs`, `anthropic_oauth/tests/prompt_cache_tests.rs` |
 
 Four placement calls worth stating, because each is a file whose *shape*
 suggests one owner and whose *purpose* is another:
@@ -361,9 +361,28 @@ Both Anthropic transports emit explicit `cache_control` breakpoints when
   1h automatic marker is an API error (TTL conflict on the last block).
 
 All markers within a request share one TTL, satisfying Anthropic's
-longer-TTL-first ordering rule. Models without cache support (claude-2 era)
-downgrade to `none` via `supports_prompt_cache`. Wire shape is pinned by
+longer-TTL-first ordering rule. `supports_prompt_cache` is a **denylist**:
+every Claude model supports caching except the documented-unsupported
+`claude-2*` and `claude-instant*` families, so a new model family (e.g.
+`claude-fable-5-1`) caches by default without needing an allowlist update.
+Downgrade-to-`none` decisions and their `tracing::warn!` go through the
+single `effective_cache_retention` chokepoint, shared by `with_cache_retention`
+and both transports' construction paths. Wire shape is pinned by
 capture-server tests in both files.
+
+**OpenAI Responses `prompt_cache_key`**: `openai_codex_provider.rs` and
+`codex_chatgpt.rs` set `prompt_cache_key` on the wire to whatever value
+`ToolCompletionRequest`/`CompletionRequest.metadata` carries under
+`ironclaw_llm::PROMPT_CACHE_KEY_METADATA` — a stable per-conversation key
+raises OpenAI's cache hit rate. The loop-host gateway
+(`ironclaw_loop_host::model_gateway::add_request_metadata`) is the one seam
+that inserts it, and it is **never the raw thread id**: `ThreadId` is
+caller-authoritative free text, so the gateway derives a domain-separated
+SHA-256 of `HostManagedModelRequest.thread_id`, hex-encoded and truncated to
+32 characters (`derive_prompt_cache_key`), before it ever reaches an
+outbound request. The field is omitted, never backfilled from `run_id`, when
+no thread id is known (a per-run key would fragment the cache across a
+conversation's turns).
 
 ## rig_adapter.rs Details
 

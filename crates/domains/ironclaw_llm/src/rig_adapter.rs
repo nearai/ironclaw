@@ -337,15 +337,7 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// If the configured model does not support caching (e.g. claude-2),
     /// a warning is logged once at construction and caching is disabled.
     pub fn with_cache_retention(mut self, retention: CacheRetention) -> Self {
-        if retention != CacheRetention::None && !supports_prompt_cache(&self.model_name) {
-            tracing::warn!(
-                model = %self.model_name,
-                "Prompt caching requested but model does not support it; disabling"
-            );
-            self.cache_retention = CacheRetention::None;
-        } else {
-            self.cache_retention = retention;
-        }
+        self.cache_retention = effective_cache_retention(retention, &self.model_name);
         self
     }
 
@@ -996,12 +988,18 @@ fn saturate_u32(val: u64) -> u32 {
 /// Downgrade a requested cache retention to `None` for models without
 /// prompt-cache support. Shared by both Anthropic transports so the
 /// construction-time decision (rig `prompt_caching` flag, OAuth breakpoint
-/// application) always agrees with `with_cache_retention`'s validation.
+/// application) always agrees with `with_cache_retention`'s validation. This
+/// is the single chokepoint for the downgrade decision and its logging —
+/// `with_cache_retention` delegates here instead of duplicating the check.
 pub(crate) fn effective_cache_retention(
     retention: CacheRetention,
     model_name: &str,
 ) -> CacheRetention {
     if retention != CacheRetention::None && !supports_prompt_cache(model_name) {
+        tracing::warn!(
+            model = %model_name,
+            "Prompt caching requested but model does not support it; disabling"
+        );
         CacheRetention::None
     } else {
         retention
@@ -1010,18 +1008,20 @@ pub(crate) fn effective_cache_retention(
 
 /// Returns `true` if the model supports Anthropic prompt caching.
 ///
-/// Per Anthropic docs, only Claude 3+ models support prompt caching.
-/// Unsupported: claude-2, claude-2.1, claude-instant-*.
+/// Denylist, not allowlist: Anthropic documents only the `claude-2*` and
+/// `claude-instant*` families as lacking prompt-cache support. Every other
+/// Claude model family — including ones released after this code was
+/// written — supports caching by default, so new families never need to be
+/// added here to keep caching working.
 fn supports_prompt_cache(name: &str) -> bool {
     let lower = name.to_lowercase();
     // Strip optional provider prefix (e.g. "anthropic/claude-...")
     let model = lower.strip_prefix("anthropic/").unwrap_or(&lower);
-    // Only Claude 3+ families support prompt caching
-    model.starts_with("claude-3")
-        || model.starts_with("claude-4")
-        || model.starts_with("claude-sonnet")
-        || model.starts_with("claude-opus")
-        || model.starts_with("claude-haiku")
+    // Must be a Claude model at all, and not one of the documented
+    // unsupported legacy families.
+    model.starts_with("claude")
+        && !model.starts_with("claude-2")
+        && !model.starts_with("claude-instant")
 }
 
 /// Serialize the raw provider response to JSON **once** per completion.
@@ -4310,6 +4310,10 @@ mod tests {
             effective_cache_retention(CacheRetention::None, "claude-opus-4-6"),
             CacheRetention::None
         );
+        assert_eq!(
+            effective_cache_retention(CacheRetention::Short, "claude-fable-5-1"),
+            CacheRetention::Short
+        );
     }
 
     #[test]
@@ -4521,6 +4525,54 @@ mod tests {
         );
     }
 
+    /// Regression for the allowlist->denylist gate change: a model family
+    /// released after this code was written (not matching any hardcoded
+    /// "claude-3"/"claude-4"/"claude-sonnet"/... prefix) must still keep
+    /// `Short` retention and emit cache_control on the wire, instead of being
+    /// silently downgraded to `None`.
+    #[tokio::test]
+    async fn anthropic_new_model_family_keeps_short_retention_cache_control() {
+        use rig::client::CompletionClient;
+        use rig::providers::anthropic;
+
+        let (base_url, captured_body) = capture_one_http_request().await;
+        let client = anthropic::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("build Anthropic client");
+        let model = client.completion_model("claude-fable-5-1");
+        let adapter =
+            RigAdapter::new(model, "claude-fable-5-1").with_cache_retention(CacheRetention::Short);
+        assert_eq!(adapter.cache_retention, CacheRetention::Short);
+
+        // rig-core has no built-in `max_tokens` default for unknown model
+        // families (its hardcoded default table only covers named releases),
+        // so this new-family test must set it explicitly or the request
+        // fails client-side validation before reaching the wire.
+        let request = ToolCompletionRequest::new(
+            vec![
+                ChatMessage::system("You are helpful."),
+                ChatMessage::user("Question"),
+            ],
+            vec![IronToolDefinition {
+                name: "alpha".to_string(),
+                description: "First tool".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": { "a": { "type": "string" } }
+                }),
+            }],
+        )
+        .with_max_tokens(4096);
+        let _ = adapter.complete_with_tools(request).await;
+
+        let body: serde_json::Value =
+            serde_json::from_str(&captured_request_body(captured_body).await)
+                .expect("captured body is JSON");
+        assert_eq!(body["cache_control"]["type"], "ephemeral");
+    }
+
     /// Verify that the multiplier match arms in `RigAdapter::cache_write_multiplier`
     /// produce the expected values. We use a standalone helper because constructing
     /// a real `RigAdapter` requires a rig `Model` (which needs network/provider setup).
@@ -4578,6 +4630,36 @@ mod tests {
         // Non-Claude models
         assert!(!supports_prompt_cache("gpt-4o"));
         assert!(!supports_prompt_cache("llama3"));
+    }
+
+    /// Denylist regression: `supports_prompt_cache` must default new/unknown
+    /// Claude families to `true` rather than requiring each one be
+    /// allowlisted. Only the documented-unsupported `claude-2*` and
+    /// `claude-instant*` families are excluded.
+    #[test]
+    fn test_supports_prompt_cache_denylist_covers_new_model_families() {
+        let supported = [
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "anthropic/claude-fable-5-1",
+            "claude-opus-5",
+            "claude-sonnet-4-5",
+            "claude-3-5-haiku",
+        ];
+        for model in supported {
+            assert!(
+                supports_prompt_cache(model),
+                "expected {model} to support prompt caching"
+            );
+        }
+
+        let unsupported = ["claude-2.1", "claude-instant-1.2", "anthropic/claude-2"];
+        for model in unsupported {
+            assert!(
+                !supports_prompt_cache(model),
+                "expected {model} to NOT support prompt caching"
+            );
+        }
     }
 
     #[test]

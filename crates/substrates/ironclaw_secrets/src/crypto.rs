@@ -158,6 +158,42 @@ impl SecretsCrypto {
             .map_err(|_| SecretError::EncryptionFailed("HKDF expansion failed".to_string()))?;
         Ok(derived)
     }
+
+    /// Derive a deterministic 32-byte subkey from the master key for a
+    /// caller-supplied domain `info` string, via HKDF-Expand with **no
+    /// salt**.
+    ///
+    /// Determinism is the point, not a shortcut: [`Self::derive_key`] above
+    /// generates a fresh random salt per call (so ciphertexts don't repeat),
+    /// which makes it useless for callers that need the *same* subkey
+    /// derivable independently by every process, replica, and restart — a
+    /// keyed HMAC/HKDF subkey under the deployment master key needs to land
+    /// on the identical output every time to be useful (e.g. keying a
+    /// provider-visible cache-routing hint so it stays stable across a
+    /// fleet). HKDF's domain separation on `info` means distinct callers
+    /// passing distinct `info` strings get independent subkeys under the
+    /// same master key, so this is safe to reuse across purposes without
+    /// cross-purpose key reuse. Changing the master key changes every
+    /// subkey derived from it.
+    ///
+    /// [`Self::ephemeral`] seeds a random *per-process* master key, so a
+    /// subkey derived from an ephemeral crypto instance is stable only for
+    /// that process's lifetime, not across restarts or replicas. That is the
+    /// intended behavior for volatile/test deployments, not a defect to fix
+    /// here — callers relying on cross-restart stability must configure a
+    /// persistent master key.
+    pub fn derive_subkey(&self, info: &[u8]) -> [u8; KEY_SIZE] {
+        let hk = Hkdf::<Sha256>::new(None, self.master_key.expose_secret().as_bytes());
+        let mut derived = [0u8; KEY_SIZE];
+        // `expand` only errors when the requested output length exceeds
+        // HKDF-SHA256's max (255 * hash length = 8160 bytes); a fixed
+        // 32-byte output can never hit that ceiling, so this branch is
+        // unreachable by construction rather than a real fallible path.
+        match hk.expand(info, &mut derived) {
+            Ok(()) => derived,
+            Err(_) => unreachable!("HKDF-SHA256 expand of a fixed 32-byte output cannot fail"),
+        }
+    }
 }
 
 impl std::fmt::Debug for SecretsCrypto {
@@ -457,6 +493,40 @@ mod tests {
                 .decrypt(&ciphertext, &salt, &other_account_aad)
                 .is_err(),
             "credential ciphertext must not cross account id"
+        );
+    }
+
+    #[test]
+    fn derive_subkey_is_stable_for_same_master_key_and_info() {
+        let crypto = SecretsCrypto::new("0123456789abcdef0123456789abcdef".into()).unwrap();
+        let a = crypto.derive_subkey(b"ironclaw.prompt-cache-key.v1");
+        let b = crypto.derive_subkey(b"ironclaw.prompt-cache-key.v1");
+        assert_eq!(
+            a, b,
+            "same master key + same info must derive the same subkey"
+        );
+    }
+
+    #[test]
+    fn derive_subkey_differs_across_info_domains() {
+        let crypto = SecretsCrypto::new("0123456789abcdef0123456789abcdef".into()).unwrap();
+        let a = crypto.derive_subkey(b"ironclaw.prompt-cache-key.v1");
+        let b = crypto.derive_subkey(b"some-other-purpose.v1");
+        assert_ne!(
+            a, b,
+            "distinct info domains must derive independent subkeys"
+        );
+    }
+
+    #[test]
+    fn derive_subkey_differs_across_master_keys() {
+        let crypto_a = SecretsCrypto::new("0123456789abcdef0123456789abcdef".into()).unwrap();
+        let crypto_b = SecretsCrypto::new("fedcba9876543210fedcba9876543210".into()).unwrap();
+        let info = b"ironclaw.prompt-cache-key.v1";
+        assert_ne!(
+            crypto_a.derive_subkey(info),
+            crypto_b.derive_subkey(info),
+            "different master keys must derive different subkeys for the same info"
         );
     }
 }

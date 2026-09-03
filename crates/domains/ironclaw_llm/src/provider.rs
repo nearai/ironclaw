@@ -936,6 +936,28 @@ pub struct ModelMetadata {
 /// ordered provider fallback chain.
 pub(crate) const FALLBACK_INDEX_METADATA_KEY: &str = "ironclaw_fallback_index";
 
+/// Metadata key carrying the OpenAI prompt-cache routing key, when known.
+/// Set by the loop-host gateway seam (`add_request_metadata`) as a
+/// domain-separated SHA-256 hash of the thread id — pseudonymization for an
+/// external routing hint, never proof of authenticity. No tenant/user scope
+/// is mixed in: a cache hit still needs an identical prompt prefix, which is
+/// already per-user, so threading extra scope through eight call sites would
+/// buy nothing.
+pub const PROMPT_CACHE_KEY_METADATA: &str = "prompt_cache_key";
+
+/// Apply the prompt-cache routing key from `metadata` (if present) to a
+/// Responses API request body. Shared by the OpenAI Codex and ChatGPT
+/// Responses adapters so the mapping is defined once. Omits the field
+/// entirely when the metadata key is absent — never falls back to a run id.
+pub(crate) fn apply_prompt_cache_key(
+    body: &mut serde_json::Value,
+    metadata: &std::collections::HashMap<String, String>,
+) {
+    if let Some(key) = metadata.get(PROMPT_CACHE_KEY_METADATA) {
+        body["prompt_cache_key"] = serde_json::Value::String(key.clone());
+    }
+}
+
 /// Deterministic selection evidence for an ordered provider fallback chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelFallbackRoute {

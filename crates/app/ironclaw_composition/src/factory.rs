@@ -389,6 +389,17 @@ pub(crate) struct RebornRuntimeStores {
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
     pub(crate) secret_store: Arc<dyn SecretStorePort>,
+    /// Deterministic HKDF subkey of the deployment master key, keyed on the
+    /// `ironclaw.prompt-cache-key.v1` info string
+    /// (`ironclaw_secrets::SecretsCrypto::derive_subkey`). The model-gateway
+    /// build in `runtime.rs` installs this on the assembled gateway via
+    /// `LlmProviderModelGateway::with_prompt_cache_subkey` so the
+    /// provider-visible `prompt_cache_key` hint is HMAC-keyed instead of an
+    /// unkeyed digest of the caller-authoritative thread id (CWE-359
+    /// confirmation oracle). Always present here: this substrate never
+    /// completes without a resolved master key (see
+    /// `build_filesystem_secret_credential_stores`).
+    pub(crate) prompt_cache_subkey: [u8; 32],
     #[cfg(test)]
     pub(crate) standalone_wasm_runtime_credential_provider_captured: bool,
     /// Readiness of the background credential keepalive worker (B1). Carries the

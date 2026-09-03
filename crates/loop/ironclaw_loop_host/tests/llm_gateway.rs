@@ -114,6 +114,38 @@ fn non_production_safety_context() -> InstructionSafetyContext {
     InstructionSafetyContext::non_production_noop()
 }
 
+/// Mirrors the private `derive_prompt_cache_key` in
+/// `ironclaw_loop_host::model_gateway`: a domain-separated HMAC-SHA-256 of
+/// the thread id under `subkey`, hex-encoded and truncated to 32 characters.
+/// Duplicated here (rather than exposed from production) because this is an
+/// external integration-test crate; the domain separator string must stay in
+/// sync with the production constant of the same name.
+fn expected_prompt_cache_key(subkey: &[u8; 32], thread_id: &str) -> String {
+    use hmac::{KeyInit as _, Mac as _};
+
+    const PROMPT_CACHE_KEY_DOMAIN_SEPARATOR: &str = "ironclaw.prompt-cache-key.v1:";
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+    let mut mac =
+        HmacSha256::new_from_slice(subkey).expect("HMAC-SHA-256 accepts a 32-byte key in tests");
+    mac.update(PROMPT_CACHE_KEY_DOMAIN_SEPARATOR.as_bytes());
+    mac.update(thread_id.as_bytes());
+    let tag = mac.finalize().into_bytes();
+    tag.iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .chars()
+        .take(32)
+        .collect()
+}
+
+/// A fixed 32-byte test subkey standing in for
+/// `ironclaw_secrets::SecretsCrypto::derive_subkey` output — production
+/// composition derives the real subkey from the deployment master key; these
+/// integration tests only need *a* subkey to prove the gateway's keyed
+/// derivation and metadata plumbing.
+const TEST_PROMPT_CACHE_SUBKEY: [u8; 32] = [0x42; 32];
+
 #[tokio::test]
 async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
@@ -123,11 +155,19 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
         STATIC_PROVIDER_ID,
         provider.clone(),
         policy,
-    );
+    )
+    .with_prompt_cache_subkey(TEST_PROMPT_CACHE_SUBKEY);
 
     let request = model_request(interactive_model());
     let expected_run_id = request.run_id.to_string();
     let expected_turn_id = request.turn_id.to_string();
+    let raw_thread_id = request
+        .thread_id
+        .as_ref()
+        .expect("test fixture always sets thread_id")
+        .to_string();
+    let expected_prompt_cache_key =
+        expected_prompt_cache_key(&TEST_PROMPT_CACHE_SUBKEY, &raw_thread_id);
 
     let response = gateway.stream_model(request).await.unwrap();
 
@@ -160,9 +200,89 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
         requests[0].metadata.get("turn_id").map(String::as_str),
         Some(expected_turn_id.as_str())
     );
+    let prompt_cache_key = requests[0]
+        .metadata
+        .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
+        .map(String::as_str);
+    assert_eq!(
+        prompt_cache_key,
+        Some(expected_prompt_cache_key.as_str()),
+        "gateway must carry a derived prompt-cache key through as request \
+         metadata so OpenAI Responses-API providers can set a stable \
+         prompt_cache_key"
+    );
+    assert_ne!(
+        prompt_cache_key,
+        Some(raw_thread_id.as_str()),
+        "the raw thread id must never be sent to the provider"
+    );
     assert_eq!(requests[0].messages.len(), 2);
     assert_eq!(requests[0].messages[0].content, "system instructions");
     assert_eq!(requests[0].messages[1].content, "hello model");
+}
+
+/// A `HostManagedModelRequest` with no thread id (legacy replay wire shapes
+/// recorded before the field existed) must not carry any prompt-cache key
+/// metadata at all — no fallback to `run_id`, no stale entry left behind.
+#[tokio::test]
+async fn gateway_omits_thread_cache_key_when_thread_id_is_none() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    let policy = LlmModelProfilePolicy::new()
+        .allow_model_profile(interactive_model(), Some("host-selected-model".to_string()));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
+
+    let mut request = model_request(interactive_model());
+    request.thread_id = None;
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0]
+            .metadata
+            .contains_key(ironclaw_llm::PROMPT_CACHE_KEY_METADATA),
+        "no thread id means no prompt-cache key metadata at all"
+    );
+}
+
+/// A gateway assembled without `.with_prompt_cache_subkey(..)` (no
+/// deployment master key was available to derive one) must fail closed: it
+/// never falls back to an unkeyed digest of the thread id, it just omits
+/// `prompt_cache_key` entirely. Losing the cache-routing optimization is
+/// acceptable; leaking a guessable pseudonym to the provider is not.
+#[tokio::test]
+async fn gateway_omits_prompt_cache_key_when_no_subkey_is_configured() {
+    let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
+    let policy = LlmModelProfilePolicy::new()
+        .allow_model_profile(interactive_model(), Some("host-selected-model".to_string()));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
+
+    let request = model_request(interactive_model());
+    assert!(
+        request.thread_id.is_some(),
+        "test fixture always sets thread_id"
+    );
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0]
+            .metadata
+            .contains_key(ironclaw_llm::PROMPT_CACHE_KEY_METADATA),
+        "no subkey configured must omit prompt_cache_key even though a \
+         thread id is present — never fall back to an unkeyed digest"
+    );
 }
 
 #[tokio::test]
@@ -3267,12 +3387,15 @@ async fn gateway_does_not_register_capability_calls_for_unknown_finish_reason() 
 async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("production response"));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
-        STATIC_PROVIDER_ID,
-        provider.clone(),
-        LlmModelProfilePolicy::new()
-            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
-    ));
+    let provider_gateway = Arc::new(
+        LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
+            provider.clone(),
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        )
+        .with_prompt_cache_subkey(TEST_PROMPT_CACHE_SUBKEY),
+    );
     let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
@@ -3296,6 +3419,27 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_deref(), Some("host-selected-model"));
+    let prompt_cache_key = requests[0]
+        .metadata
+        .get(ironclaw_llm::PROMPT_CACHE_KEY_METADATA)
+        .map(String::as_str);
+    assert_eq!(
+        prompt_cache_key,
+        Some(
+            expected_prompt_cache_key(
+                &TEST_PROMPT_CACHE_SUBKEY,
+                fixture.run_context.thread_id.as_str()
+            )
+            .as_str()
+        ),
+        "the real ThreadBackedLoopModelPort::stream_model construction site \
+         must carry a derived prompt-cache key through as request metadata"
+    );
+    assert_ne!(
+        prompt_cache_key,
+        Some(fixture.run_context.thread_id.as_str()),
+        "the raw thread id must never be sent to the provider"
+    );
     assert!(requests[0].messages.iter().any(|message| {
         message
             .content
@@ -4960,6 +5104,7 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
         resolved_model_route: None,
         run_id: TurnRunId::new(),
         turn_id: TurnId::new(),
+        thread_id: Some(ThreadId::new("thread-gateway-test").unwrap()),
         tool_choice: None,
         response_format: None,
     }
