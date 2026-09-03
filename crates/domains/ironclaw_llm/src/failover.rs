@@ -579,9 +579,27 @@ impl LlmProvider for FailoverProvider {
     }
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        self.providers[self.last_used.load(Ordering::Relaxed)]
+        // Any member of the chain may serve a call after a failover, and the
+        // derived budget outlives the call that failed, so advertise the
+        // window that is safe for every member. `id` follows `last_used`,
+        // which is what `active_model_name()` reports and what the
+        // gateway's identity check compares against. Static by contract: no
+        // I/O in any member.
+        let current = self.providers[self.last_used.load(Ordering::Relaxed)]
             .model_metadata()
-            .await
+            .await?;
+        let mut context_length = current.context_length;
+        for provider in &self.providers {
+            let member = provider.model_metadata().await?;
+            context_length = match (context_length, member.context_length) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                _ => None,
+            };
+        }
+        Ok(ModelMetadata {
+            id: current.id,
+            context_length,
+        })
     }
 
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
@@ -871,6 +889,7 @@ mod tests {
         output_cost: Decimal,
         complete_result: Mutex<Option<Result<CompletionResponse, LlmError>>>,
         tool_complete_result: Mutex<Option<Result<ToolCompletionResponse, LlmError>>>,
+        context_length: Option<u32>,
     }
 
     impl MockProvider {
@@ -900,6 +919,7 @@ mod tests {
                     reasoning: None,
                     reasoning_details: None,
                 }))),
+                context_length: None,
             }
         }
 
@@ -916,6 +936,14 @@ mod tests {
             }
         }
 
+        /// Test-only builder: advertise a specific `context_length` from
+        /// `model_metadata()`. `None` means "unknown," matching the
+        /// production default.
+        fn with_context_length(mut self, context_length: Option<u32>) -> Self {
+            self.context_length = context_length;
+            self
+        }
+
         fn failing_retryable(name: &str) -> Self {
             Self {
                 name: name.to_string(),
@@ -930,6 +958,7 @@ mod tests {
                     provider: name.to_string(),
                     reason: "server error".to_string(),
                 }))),
+                context_length: None,
             }
         }
 
@@ -945,6 +974,7 @@ mod tests {
                 tool_complete_result: Mutex::new(Some(Err(LlmError::AuthFailed {
                     provider: name.to_string(),
                 }))),
+                context_length: None,
             }
         }
 
@@ -962,6 +992,7 @@ mod tests {
                     provider: name.to_string(),
                     retry_after: Some(Duration::from_secs(30)),
                 }))),
+                context_length: None,
             }
         }
     }
@@ -1009,6 +1040,13 @@ mod tests {
         fn set_model(&self, model: &str) -> Result<(), LlmError> {
             *self.active_model.write().unwrap() = model.to_string();
             Ok(())
+        }
+
+        async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+            Ok(ModelMetadata {
+                id: self.name.clone(),
+                context_length: self.context_length,
+            })
         }
     }
 
@@ -1129,6 +1167,63 @@ mod tests {
         let _ = failover.complete(make_request()).await.unwrap();
         assert_eq!(failover.model_name(), "fallback-model");
         assert_eq!(failover.cost_per_token(), (fallback_cost, fallback_cost));
+    }
+
+    // Test: model_metadata advertises the smallest context window across the
+    // whole chain, not just the currently `last_used` provider — the derived
+    // budget outlives the call that may later fail over to a smaller-window
+    // member.
+    #[tokio::test]
+    async fn model_metadata_advertises_the_smallest_window_across_the_chain() {
+        let primary = Arc::new(
+            MockProvider::succeeding("primary-model", "ok").with_context_length(Some(2_000_000)),
+        );
+        let fallback = Arc::new(
+            MockProvider::succeeding("fallback-model", "ok").with_context_length(Some(1_000_000)),
+        );
+
+        let failover = FailoverProvider::new(vec![primary, fallback]).unwrap();
+
+        let metadata = failover.model_metadata().await.unwrap();
+        assert_eq!(metadata.context_length, Some(1_000_000));
+        assert_eq!(metadata.id, "primary-model");
+    }
+
+    // Test: an unknown window on any chain member makes the whole chain's
+    // advertised window unknown — a guessed window is worse than none.
+    #[tokio::test]
+    async fn model_metadata_is_unknown_when_any_chain_member_is_unknown() {
+        let primary = Arc::new(
+            MockProvider::succeeding("primary-model", "ok").with_context_length(Some(2_000_000)),
+        );
+        let fallback =
+            Arc::new(MockProvider::succeeding("fallback-model", "ok").with_context_length(None));
+
+        let failover = FailoverProvider::new(vec![primary, fallback]).unwrap();
+
+        let metadata = failover.model_metadata().await.unwrap();
+        assert_eq!(metadata.context_length, None);
+    }
+
+    // Test: `id` tracks `last_used` (what `active_model_name()` reports and
+    // what the gateway's identity check compares against) even though the
+    // advertised window is the chain minimum.
+    #[tokio::test]
+    async fn model_metadata_id_tracks_last_used_after_failover() {
+        let primary = Arc::new(
+            MockProvider::failing_retryable("primary-model").with_context_length(Some(2_000_000)),
+        );
+        let fallback = Arc::new(
+            MockProvider::succeeding("fallback-model", "ok").with_context_length(Some(1_000_000)),
+        );
+
+        let failover = FailoverProvider::new(vec![primary, fallback]).unwrap();
+
+        let _ = failover.complete(make_request()).await.unwrap();
+
+        let metadata = failover.model_metadata().await.unwrap();
+        assert_eq!(metadata.id, "fallback-model");
+        assert_eq!(metadata.context_length, Some(1_000_000));
     }
 
     // Test: model reporting is request-scoped under concurrent requests.
