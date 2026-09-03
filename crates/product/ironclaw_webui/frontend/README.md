@@ -19,7 +19,8 @@ corepack pnpm build
 the TypeScript typecheck: modules under `src/` use `.ts`/`.tsx`, relative module
 imports are extensionless, and React markup does not use legacy `html\`...\``
 tagged templates. It also rejects `@ts-ignore` and limits `@ts-nocheck` to the
-shrinking legacy allowlist in `scripts/ts-nocheck-baseline.txt`; intentional
+legacy allowlist in `scripts/ts-nocheck-baseline.txt`; stale allowlist entries
+are ignored so concurrent suppression cleanup does not fail lint. Intentional
 `@ts-expect-error` assertions remain valid. Explicit filenames passed to file
 APIs such as `new URL(...)` and generated JavaScript asset names are outside
 the module-import rule.

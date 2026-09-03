@@ -182,7 +182,7 @@ test("recursively scans source trees and reports stable relative paths", () => {
   );
 });
 
-test("rejects stale nocheck baseline entries", () => {
+test("allows stale nocheck baseline entries after suppressions are removed", () => {
   const root = mkdtempSync(join(tmpdir(), "ironclaw-source-conventions-"));
   temporaryRoots.push(root);
   writeFileSync(
@@ -195,13 +195,7 @@ test("rejects stale nocheck baseline entries", () => {
     new Set(["cleaned-up.ts", "deleted.ts"]),
   );
 
-  assert.deepEqual(
-    violations.map(({ file, kind, line }) => ({ file, kind, line })),
-    [
-      { file: "cleaned-up.ts", kind: "stale-ts-nocheck-baseline", line: 1 },
-      { file: "deleted.ts", kind: "stale-ts-nocheck-baseline", line: 1 },
-    ],
-  );
+  assert.deepEqual(violations, []);
 });
 
 test("scans TypeScript project inputs outside src", () => {
