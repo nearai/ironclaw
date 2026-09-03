@@ -21,7 +21,7 @@ use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition,
+    ToolCompletionResponse, ToolDefinition, apply_prompt_cache_key,
 };
 
 /// OpenAI Codex Responses API provider.
@@ -192,12 +192,12 @@ impl OpenAiCodexProvider {
             body["parallel_tool_calls"] = serde_json::Value::Bool(true);
         }
 
-        // Stable per-conversation routing key for OpenAI's prompt cache. Only
-        // the thread id qualifies: a per-run key would fragment the cache
-        // across a conversation's turns instead of reusing it.
-        if let Some(thread_id) = metadata.get(crate::provider::PROMPT_CACHE_KEY_METADATA) {
-            body["prompt_cache_key"] = serde_json::Value::String(thread_id.clone());
-        }
+        // Stable per-conversation routing key for OpenAI's prompt cache: an
+        // opaque, already-hashed per-conversation routing key derived from
+        // the thread id (see `PROMPT_CACHE_KEY_METADATA`), not the raw thread
+        // id itself. A per-run key would fragment the cache across a
+        // conversation's turns instead of reusing it.
+        apply_prompt_cache_key(&mut body, metadata);
 
         body
     }
