@@ -584,21 +584,31 @@ impl LlmProvider for FailoverProvider {
         // window that is safe for every member. `id` follows `last_used`,
         // which is what `active_model_name()` reports and what the
         // gateway's identity check compares against. Static by contract: no
-        // I/O in any member.
-        let current = self.providers[self.last_used.load(Ordering::Relaxed)]
-            .model_metadata()
-            .await?;
-        let mut context_length = current.context_length;
-        for provider in &self.providers {
+        // I/O in any member. One call per provider; stop early once the
+        // aggregate has gone `None` and `last_used`'s id is captured.
+        let last_used = self.last_used.load(Ordering::Relaxed);
+        let mut id = None;
+        let mut context_length: Option<Option<u32>> = None; // outer None = no member seen yet
+        for (index, provider) in self.providers.iter().enumerate() {
             let member = provider.model_metadata().await?;
-            context_length = match (context_length, member.context_length) {
-                (Some(a), Some(b)) => Some(a.min(b)),
+            if index == last_used {
+                id = Some(member.id);
+            }
+            context_length = Some(match (context_length, member.context_length) {
+                (None, first) => first,
+                (Some(Some(a)), Some(b)) => Some(a.min(b)),
                 _ => None,
-            };
+            });
+            if context_length == Some(None) && id.is_some() {
+                break;
+            }
         }
         Ok(ModelMetadata {
-            id: current.id,
-            context_length,
+            id: id.ok_or_else(|| LlmError::RequestFailed {
+                provider: "failover".to_string(),
+                reason: "FailoverProvider has no providers".to_string(),
+            })?,
+            context_length: context_length.unwrap_or(None),
         })
     }
 
@@ -890,6 +900,7 @@ mod tests {
         complete_result: Mutex<Option<Result<CompletionResponse, LlmError>>>,
         tool_complete_result: Mutex<Option<Result<ToolCompletionResponse, LlmError>>>,
         context_length: Option<u32>,
+        model_metadata_calls: AtomicUsize,
     }
 
     impl MockProvider {
@@ -920,6 +931,7 @@ mod tests {
                     reasoning_details: None,
                 }))),
                 context_length: None,
+                model_metadata_calls: AtomicUsize::new(0),
             }
         }
 
@@ -944,6 +956,10 @@ mod tests {
             self
         }
 
+        fn model_metadata_calls(&self) -> usize {
+            self.model_metadata_calls.load(Ordering::Relaxed)
+        }
+
         fn failing_retryable(name: &str) -> Self {
             Self {
                 name: name.to_string(),
@@ -959,6 +975,7 @@ mod tests {
                     reason: "server error".to_string(),
                 }))),
                 context_length: None,
+                model_metadata_calls: AtomicUsize::new(0),
             }
         }
 
@@ -975,6 +992,7 @@ mod tests {
                     provider: name.to_string(),
                 }))),
                 context_length: None,
+                model_metadata_calls: AtomicUsize::new(0),
             }
         }
 
@@ -993,6 +1011,7 @@ mod tests {
                     retry_after: Some(Duration::from_secs(30)),
                 }))),
                 context_length: None,
+                model_metadata_calls: AtomicUsize::new(0),
             }
         }
     }
@@ -1043,6 +1062,7 @@ mod tests {
         }
 
         async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+            self.model_metadata_calls.fetch_add(1, Ordering::Relaxed);
             Ok(ModelMetadata {
                 id: self.name.clone(),
                 context_length: self.context_length,
@@ -1224,6 +1244,60 @@ mod tests {
         let metadata = failover.model_metadata().await.unwrap();
         assert_eq!(metadata.id, "fallback-model");
         assert_eq!(metadata.context_length, Some(1_000_000));
+    }
+
+    // Test: each chain member's `model_metadata()` is awaited exactly once
+    // per call, and the scan stops the moment the aggregate window has gone
+    // `None` and `last_used`'s id is already captured — a later member is
+    // never queried once it can no longer change the outcome.
+    #[tokio::test]
+    async fn model_metadata_queries_each_member_once_and_stops_after_an_unknown_window() {
+        let p0 = Arc::new(
+            MockProvider::succeeding("p0-model", "ok").with_context_length(Some(2_000_000)),
+        );
+        let p1 = Arc::new(MockProvider::succeeding("p1-model", "ok").with_context_length(None));
+        let p2 = Arc::new(
+            MockProvider::succeeding("p2-model", "ok").with_context_length(Some(1_000_000)),
+        );
+
+        let failover = FailoverProvider::new(vec![p0.clone(), p1.clone(), p2.clone()]).unwrap();
+
+        let metadata = failover.model_metadata().await.unwrap();
+
+        assert_eq!(metadata.id, "p0-model");
+        assert_eq!(metadata.context_length, None);
+        assert_eq!(p0.model_metadata_calls(), 1);
+        assert_eq!(p1.model_metadata_calls(), 1);
+        assert_eq!(
+            p2.model_metadata_calls(),
+            0,
+            "p2 must never be reached: the aggregate already went None and the id was known at p0"
+        );
+    }
+
+    // Test: when every member reports a known window, every member is still
+    // queried exactly once (no early exit is possible) and the aggregate is
+    // the chain minimum.
+    #[tokio::test]
+    async fn model_metadata_queries_every_member_once_when_all_windows_are_known() {
+        let p0 = Arc::new(
+            MockProvider::succeeding("p0-model", "ok").with_context_length(Some(3_000_000)),
+        );
+        let p1 = Arc::new(
+            MockProvider::succeeding("p1-model", "ok").with_context_length(Some(2_000_000)),
+        );
+        let p2 = Arc::new(
+            MockProvider::succeeding("p2-model", "ok").with_context_length(Some(1_000_000)),
+        );
+
+        let failover = FailoverProvider::new(vec![p0.clone(), p1.clone(), p2.clone()]).unwrap();
+
+        let metadata = failover.model_metadata().await.unwrap();
+
+        assert_eq!(metadata.context_length, Some(1_000_000));
+        assert_eq!(p0.model_metadata_calls(), 1);
+        assert_eq!(p1.model_metadata_calls(), 1);
+        assert_eq!(p2.model_metadata_calls(), 1);
     }
 
     // Test: model reporting is request-scoped under concurrent requests.
