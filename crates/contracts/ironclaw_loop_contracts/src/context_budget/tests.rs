@@ -67,6 +67,38 @@ fn small_advertised_window_clamps_the_reserve_and_keeps_budget_usable() {
 }
 
 #[test]
+fn smallest_positive_window_is_treated_as_unknown() {
+    // Some(1) survives the `> 0` filter but derives a zero visible
+    // transcript, which must fall back to the default exactly like
+    // None and Some(0).
+    assert_eq!(
+        PromptContextTokenBudget::from_advertised_window(Some(1)),
+        PromptContextTokenBudget::default()
+    );
+}
+
+#[test]
+fn smallest_usable_window_keeps_a_nonzero_visible_transcript() {
+    // Find the smallest advertised window whose derivation does NOT
+    // fall back to the default, and prove it still leaves visible
+    // transcript room rather than trusting the arithmetic.
+    let smallest_non_default = (1..=16)
+        .find(|&candidate| {
+            PromptContextTokenBudget::from_advertised_window(Some(candidate))
+                != PromptContextTokenBudget::default()
+        })
+        .expect("some small window must derive a non-default budget");
+
+    let budget = PromptContextTokenBudget::from_advertised_window(Some(smallest_non_default));
+
+    assert_ne!(budget, PromptContextTokenBudget::default());
+    assert!(
+        budget.visible_transcript_tokens() > 0,
+        "the smallest non-default derived budget must still leave visible transcript room"
+    );
+}
+
+#[test]
 fn advertised_window_matching_todays_constant_is_reduced_by_the_margin() {
     // 128k advertised is NOT the same as the 128k fallback: the fallback
     // is a guess, an advertised value gets the estimate-error margin.

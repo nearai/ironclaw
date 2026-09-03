@@ -45,7 +45,9 @@ impl PromptContextTokenBudget {
     /// `None` (or a nonsense zero) reproduces the compiled-in default
     /// exactly, so a provider that advertises nothing behaves as it always
     /// has. Never guess a window for an unknown model: guessing high
-    /// produces the provider rejection this mechanism exists to avoid.
+    /// produces the provider rejection this mechanism exists to avoid. A
+    /// window too small to leave any visible transcript after the reserve
+    /// (today: below 2 tokens) is treated as unknown, like `None` and `0`.
     pub fn from_advertised_window(advertised_tokens: Option<u64>) -> Self {
         let Some(advertised) = advertised_tokens.filter(|tokens| *tokens > 0) else {
             return Self::default();
@@ -55,11 +57,15 @@ impl PromptContextTokenBudget {
         // A small-window model would otherwise have its whole budget consumed
         // by the flat response reserve, leaving zero visible transcript.
         let reserve_tokens = Self::DEFAULT_RESERVE_TOKENS.min(context_limit_tokens / 4);
-        Self {
+        let candidate = Self {
             context_limit_tokens,
             reserve_tokens,
             main_loop_max_output_tokens: Self::DEFAULT_MAIN_LOOP_MAX_OUTPUT_TOKENS,
+        };
+        if candidate.visible_transcript_tokens() == 0 {
+            return Self::default();
         }
+        candidate
     }
 }
 
