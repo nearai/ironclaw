@@ -115,7 +115,7 @@ test("submitDeviceLinkInput preserves a zero revision", () => {
 });
 
 test("device-link flow routes reject malformed successful responses", async () => {
-  apiFetch.mockResolvedValueOnce({ flow_id: "flow-1", status: "surprise" });
+  apiFetchMock.mockResolvedValueOnce({ flow_id: "flow-1", status: "surprise" });
 
   await assert.rejects(
     startDeviceLink({ provider: "telegram", extensionName: "telegram" }),
