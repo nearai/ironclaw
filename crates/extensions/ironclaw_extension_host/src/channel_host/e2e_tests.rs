@@ -4750,6 +4750,15 @@ const TOP_LEVEL_MENTION_EVENT: &str = r#"{
 
 /// U999 has no identity binding anywhere in the harness; used by
 /// `slack_unpaired_mention_gets_an_ephemeral_pairing_notice`.
+/// An unpaired sender's bare `/start` in a DM (#7956).
+const UNPAIRED_DM_START: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-unpaired-dm-start",
+  "event":{"type":"message","channel_type":"im","user":"U999","channel":"D999","text":"/start","ts":"1710000005.000010"}
+}"#;
+
 const UNPAIRED_MENTION_EVENT: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
@@ -6103,6 +6112,38 @@ async fn unknown_dm_slash_command_returns_inventory_help_without_a_turn() {
     assert!(!text.contains("/extension_configure"));
     assert!(!text.contains("/skill_remove"));
     assert_eq!(feedback[0]["channel"], CHANNEL);
+    assert!(harness.command_executions.invokes().is_empty());
+    assert_eq!(harness.coordinator.submitted_turn_count(), 0);
+}
+
+/// #7956: an unpaired sender's first contact is usually a slash command — a
+/// bare `/start` is what Telegram sends when the user taps Start. That must
+/// render the channel's `connect_required` notice, never the command
+/// inventory: admission cannot run before the sender is paired.
+#[tokio::test]
+async fn unpaired_dm_slash_command_gets_the_connect_notice_not_the_command_inventory() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "never produced".to_string(),
+    })
+    .await;
+
+    let response = harness.post_event(UNPAIRED_DM_START).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = wait_for_post_messages_matching(&harness.egress, "connect notice", |payload| {
+        payload["channel"] == "D999"
+    })
+    .await;
+    assert_eq!(messages.len(), 1, "exactly one reply: {messages:?}");
+    let text = messages[0]["text"].as_str().expect("reply text");
+    assert_eq!(
+        text,
+        slack_manifest_connect_required_notice(),
+        "first contact from an unpaired sender is the connect notice"
+    );
+    assert!(!text.contains("Available commands"));
+    assert!(harness.slack_ephemeral_messages().is_empty());
     assert!(harness.command_executions.invokes().is_empty());
     assert_eq!(harness.coordinator.submitted_turn_count(), 0);
 }

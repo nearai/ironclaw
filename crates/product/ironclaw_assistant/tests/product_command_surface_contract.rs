@@ -5,7 +5,9 @@ use ironclaw_extension_contracts::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId,
 };
 use ironclaw_host_api::product_adapter::auth::{AuthRequirement, ProtocolAuthEvidence};
-use ironclaw_host_api::product_adapter::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_host_api::product_adapter::{
+    AdapterInstallationId, ProductAdapterError, ProductAdapterId, ProductSurfaceRejectionKind,
+};
 use ironclaw_product_contracts::binding::{ResetBindingOutcome, ResetBindingRequest};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -299,6 +301,103 @@ impl ProductBindingResolver for ResetRecordingBindingService {
             binding,
         })
     }
+}
+
+/// A sender the installation's actor policy cannot bind: every actor
+/// pre-check reports `BindingRequired`, exactly like production does for an
+/// unpaired Telegram user.
+struct UnboundActorBindingService {
+    inner: FakeConversationBindingService,
+    ensure_count: AtomicUsize,
+}
+
+impl UnboundActorBindingService {
+    fn new() -> Self {
+        Self {
+            inner: FakeConversationBindingService::new(),
+            ensure_count: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ProductBindingResolver for UnboundActorBindingService {
+    async fn resolve_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        self.inner.resolve_binding(request).await
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductOperationFailure> {
+        self.inner.lookup_binding(request).await
+    }
+
+    async fn ensure_actor_bound(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<(), ProductOperationFailure> {
+        self.ensure_count.fetch_add(1, Ordering::SeqCst);
+        Err(ProductOperationFailure::BindingRequired {
+            reason: "external actor is not bound for this adapter installation".to_string(),
+        })
+    }
+}
+
+/// An unpaired sender's slash command — a bare `/start`, an unknown command,
+/// or a declared one — is `BindingRequired` BEFORE command admission runs,
+/// so first contact never renders the command inventory (#7956). Like an
+/// unpaired user message, it reaches the adapter as `ScopeNotFound`, which
+/// the run-delivery observer answers with the connect notice.
+#[tokio::test]
+async fn unbound_actor_command_is_binding_required_before_admission() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(UnboundActorBindingService::new());
+    let admission_service = Arc::new(RecordingProductCommandAdmissionService::allowing());
+    let command_surface = Arc::new(RecordingCommandSurface::output(serde_json::json!({
+        "title": "Status"
+    })));
+    let workflow = DefaultProductSurface::new(inbound.clone(), ledger, binding.clone())
+        .with_product_command_admission_service(admission_service.clone())
+        .with_product_command_surface(command_surface.clone());
+
+    for (suffix, command) in [
+        ("unbound-start", "start"),
+        ("unbound-unknown", "notacommand"),
+        ("unbound-status", "status"),
+    ] {
+        let error = workflow
+            .submit_inbound(sample_command_envelope_with_trigger(
+                suffix,
+                command,
+                "",
+                ProductTriggerReason::DirectChat,
+            ))
+            .await
+            .expect_err("an unbound sender's command is rejected before admission");
+        assert!(
+            matches!(
+                error,
+                ProductAdapterError::SurfaceRejected {
+                    kind: ProductSurfaceRejectionKind::ScopeNotFound,
+                    ..
+                }
+            ),
+            "/{command} from an unbound sender must be BindingRequired (ScopeNotFound), got {error:?}"
+        );
+    }
+
+    assert_eq!(binding.ensure_count.load(Ordering::SeqCst), 3);
+    assert!(
+        admission_service.records().is_empty(),
+        "admission must not run (and must not render the command inventory) for an unbound sender"
+    );
+    assert!(command_surface.invokes().is_empty());
+    assert_eq!(inbound.accepted_count(), 0);
 }
 
 #[tokio::test]

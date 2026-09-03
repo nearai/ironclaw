@@ -598,6 +598,18 @@ impl ProductBindingResolver for ProductConversationBindingService {
         resolved_binding_from_resolution(resolution)
     }
 
+    async fn ensure_actor_bound(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<(), ProductOperationFailure> {
+        let installation_scope = self
+            .installations
+            .resolve(&request.adapter_id, &request.installation_id)?;
+        resolve_actor_user(&installation_scope, &request)
+            .await
+            .map(|_| ())
+    }
+
     async fn reset_binding(
         &self,
         request: ResetBindingRequest,

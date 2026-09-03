@@ -1871,11 +1871,17 @@ fn is_accepted_auth_denial(envelope: &ProductInboundEnvelope, ack: &ProductInbou
 /// originating user message as `DirectChat`. This is the same signal that
 /// gates OAuth setup-link privacy.
 pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool {
-    matches!(
-        envelope.payload(),
-        ProductInboundPayload::UserMessage(payload)
-            if payload.trigger == ProductTriggerReason::DirectChat
-    )
+    envelope_trigger(envelope) == Some(ProductTriggerReason::DirectChat)
+}
+
+/// Why the adapter forwarded this envelope — for the payload kinds a human
+/// sender authors directly (a message or a slash command).
+fn envelope_trigger(envelope: &ProductInboundEnvelope) -> Option<ProductTriggerReason> {
+    match envelope.payload() {
+        ProductInboundPayload::UserMessage(payload) => Some(payload.trigger),
+        ProductInboundPayload::Command(payload) => Some(payload.trigger),
+        _ => None,
+    }
 }
 
 /// Does this message ADDRESS the bot — a DM, a mention, or a slash command —
@@ -1890,14 +1896,12 @@ pub(crate) fn envelope_is_direct_chat(envelope: &ProductInboundEnvelope) -> bool
 /// paired" case on every surface.
 fn envelope_addresses_the_bot(envelope: &ProductInboundEnvelope) -> bool {
     matches!(
-        envelope.payload(),
-        ProductInboundPayload::UserMessage(payload)
-            if matches!(
-                payload.trigger,
-                ProductTriggerReason::DirectChat
-                    | ProductTriggerReason::BotMention
-                    | ProductTriggerReason::BotCommand
-            )
+        envelope_trigger(envelope),
+        Some(
+            ProductTriggerReason::DirectChat
+                | ProductTriggerReason::BotMention
+                | ProductTriggerReason::BotCommand
+        )
     )
 }
 

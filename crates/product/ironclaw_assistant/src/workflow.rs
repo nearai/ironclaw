@@ -1186,6 +1186,13 @@ async fn dispatch_payload(
             }
         }
         ProductInboundPayload::Command(cmd) => {
+            // Pairing before admission: an unpaired sender's first contact
+            // (Telegram's Start button sends a bare `/start`) gets the connect
+            // notice, not the command inventory (#7956).
+            ports
+                .binding_service
+                .ensure_actor_bound(resolve_binding_request(envelope)?)
+                .await?;
             let context =
                 ProductCommandContext::from_envelope(envelope, action_id, action_fingerprint)
                     .map_err(product_surface_failure)?;

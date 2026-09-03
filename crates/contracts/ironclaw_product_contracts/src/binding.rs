@@ -195,6 +195,17 @@ pub trait ProductBindingResolver: Send + Sync {
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductOperationFailure>;
 
+    /// Read-only check that the sending actor is paired for this
+    /// installation; `Err(BindingRequired)` means unpaired. Creates no
+    /// conversation state. Default is a no-op (`resolve_binding` still gates
+    /// dispatch); resolvers with a per-actor identity policy override it.
+    async fn ensure_actor_bound(
+        &self,
+        _request: ResolveBindingRequest,
+    ) -> Result<(), ProductOperationFailure> {
+        Ok(())
+    }
+
     /// Reset is fail-closed by default so test doubles and custom hosts cannot
     /// silently claim a route was rotated without durable binding support.
     async fn reset_binding(
@@ -224,6 +235,13 @@ where
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductOperationFailure> {
         self.as_ref().lookup_binding(request).await
+    }
+
+    async fn ensure_actor_bound(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<(), ProductOperationFailure> {
+        self.as_ref().ensure_actor_bound(request).await
     }
 
     async fn reset_binding(
